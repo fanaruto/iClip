@@ -87,9 +87,9 @@ https://github.com/fanaruto/iClip
 
 ```zsh
 git clone https://github.com/fanaruto/iClip
-cd QingJian
+cd iClip
 ./build_app.sh
-open dist/轻剪.app
+open dist/iClip.app
 ```
 
 **开源地址**：https://github.com/fanaruto/iClip

@@ -85,7 +85,7 @@ open dist/iClip.app
 ## 项目结构
 
 ```text
-QingJian/
+iClip/
 ├── Sources/QingJian/
 │   ├── Models/ClipItem.swift              # 剪贴记录数据模型与分类
 │   ├── Services/ClipboardStore.swift      # 监听、去重、缓存、持久化与自动粘贴
