@@ -208,18 +208,27 @@ struct ClipCardView: View {
                 .shadow(color: Color(nsColor: .controlAccentColor).opacity(0.28), radius: 6, y: 2)
         } else {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Color(nsColor: .controlBackgroundColor).opacity(isHovered ? 0.72 : 0.48))
+                .fill(
+                    store.surfaceStyle == .frosted
+                        ? Color(nsColor: .controlBackgroundColor).opacity(isHovered ? 0.68 : 0.42)
+                        : Color.primary.opacity(isHovered ? 0.095 : 0.048)
+                )
         }
     }
 
+    @ViewBuilder
     private var cardBorder: some View {
-        RoundedRectangle(cornerRadius: 14, style: .continuous)
-            .strokeBorder(
-                isSelected
-                    ? Color.white.opacity(0.28)
-                    : Color.primary.opacity(isHovered ? 0.12 : 0.06),
-                lineWidth: 0.75
-            )
+        if store.borderlessPanel {
+            EmptyView()
+        } else {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(
+                    isSelected
+                        ? Color.white.opacity(0.28)
+                        : Color.primary.opacity(isHovered ? 0.12 : 0.06),
+                    lineWidth: 0.75
+                )
+        }
     }
 
     // MARK: - 右键菜单

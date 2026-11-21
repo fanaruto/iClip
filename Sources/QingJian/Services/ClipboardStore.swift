@@ -4,6 +4,23 @@ import ImageIO
 import CryptoKit
 import ApplicationServices
 
+/// 面板官方材质样式
+enum PanelSurfaceStyle: String, CaseIterable, Identifiable {
+    case liquidGlass
+    case clearGlass
+    case frosted
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .liquidGlass: return "液态玻璃"
+        case .clearGlass: return "通透液态"
+        case .frosted: return "毛玻璃"
+        }
+    }
+}
+
 /// 剪贴板核心管理与持久化服务
 @MainActor
 final class ClipboardStore: ObservableObject {
@@ -12,6 +29,12 @@ final class ClipboardStore: ObservableObject {
     @Published private(set) var items: [ClipItem] = []
     @Published private(set) var isAccessibilityGranted: Bool = false
     @Published var isPaused: Bool = false
+    @Published var surfaceStyle: PanelSurfaceStyle {
+        didSet { UserDefaults.standard.set(surfaceStyle.rawValue, forKey: "panelSurfaceStyle") }
+    }
+    @Published var borderlessPanel: Bool {
+        didSet { UserDefaults.standard.set(borderlessPanel, forKey: "borderlessPanel") }
+    }
     @Published var autoPasteEnabled: Bool {
         didSet { UserDefaults.standard.set(autoPasteEnabled, forKey: "autoPasteEnabled") }
     }
@@ -43,6 +66,9 @@ final class ClipboardStore: ObservableObject {
         self.imagesDirectoryURL = appSupportURL.appendingPathComponent("images", isDirectory: true)
 
         self.autoPasteEnabled = UserDefaults.standard.object(forKey: "autoPasteEnabled") as? Bool ?? true
+        let savedStyle = UserDefaults.standard.string(forKey: "panelSurfaceStyle") ?? PanelSurfaceStyle.liquidGlass.rawValue
+        self.surfaceStyle = PanelSurfaceStyle(rawValue: savedStyle) ?? .liquidGlass
+        self.borderlessPanel = UserDefaults.standard.object(forKey: "borderlessPanel") as? Bool ?? true
         let savedMax = UserDefaults.standard.integer(forKey: "maxHistoryCount")
         self.maxHistoryCount = savedMax > 0 ? savedMax : 200
         self.lastChangeCount = pasteboard.changeCount

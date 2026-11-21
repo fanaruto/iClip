@@ -113,14 +113,18 @@ struct ClipboardPopoverView: View {
                         .padding(.horizontal, 14)
                         .padding(.bottom, 10)
 
-                    Divider()
-                        .opacity(0.35)
+                    if !store.borderlessPanel {
+                        Divider()
+                            .opacity(0.28)
+                    }
 
                     contentList
                         .transition(.opacity)
 
-                    Divider()
-                        .opacity(0.35)
+                    if !store.borderlessPanel {
+                        Divider()
+                            .opacity(0.28)
+                    }
 
                     footerBar
                         .padding(.horizontal, 14)
@@ -136,26 +140,30 @@ struct ClipboardPopoverView: View {
             }
         }
         .frame(width: 420, height: 560)
-        .background(VisualEffectBlur(material: .hudWindow, blendingMode: .behindWindow))
-        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .strokeBorder(
-                    LinearGradient(
-                        colors: [
-                            Color.white.opacity(nav.isPresented ? 0.42 : 0.05),
-                            Color.white.opacity(0.14),
-                            Color.white.opacity(0.06)
-                        ],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    ),
-                    lineWidth: 1
-                )
-        )
+        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .background {
+            OfficialPanelSurface(style: store.surfaceStyle, cornerRadius: 22)
+        }
+        .overlay {
+            if !store.borderlessPanel {
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .strokeBorder(
+                        LinearGradient(
+                            colors: [
+                                Color.white.opacity(nav.isPresented ? 0.36 : 0.04),
+                                Color.white.opacity(0.12),
+                                Color.white.opacity(0.05)
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        ),
+                        lineWidth: 0.85
+                    )
+            }
+        }
         .shadow(
-            color: Color.black.opacity(nav.isPresented ? 0.28 : 0.0),
-            radius: nav.isPresented ? 22 : 4,
+            color: Color.black.opacity(nav.isPresented ? (store.surfaceStyle == .frosted ? 0.24 : 0.16) : 0.0),
+            radius: nav.isPresented ? 24 : 4,
             y: nav.isPresented ? 12 : 0
         )
         // 纯净原图放大预览浮层：置于外层裁切之外，柔和投影与连续圆角自然舒展不被截断
@@ -278,10 +286,12 @@ struct ClipboardPopoverView: View {
                     Capsule()
                         .fill(Color.primary.opacity(0.07))
                 )
-                .overlay(
-                    Capsule()
-                        .strokeBorder(Color.primary.opacity(0.06), lineWidth: 0.75)
-                )
+                .overlay {
+                    if !store.borderlessPanel {
+                        Capsule()
+                            .strokeBorder(Color.primary.opacity(0.06), lineWidth: 0.75)
+                    }
+                }
 
                 // 暂停/恢复监听按钮
                 Button {
@@ -570,6 +580,38 @@ struct ClipboardPopoverView: View {
     private var settingsView: some View {
         ScrollView(.vertical, showsIndicators: false) {
             VStack(spacing: 14) {
+                // 外观材质分组（苹果官方液态玻璃 / 毛玻璃 / 纯净无边框）
+                settingsGroup(title: "外观与边缘材质") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("窗口材质（采用苹果官方原生渲染）")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                        Picker("", selection: $store.surfaceStyle) {
+                            ForEach(PanelSurfaceStyle.allCases) { style in
+                                Text(style.title).tag(style)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                    }
+
+                    Divider().opacity(0.35)
+
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("纯净无边框")
+                                .font(.system(size: 13.5, weight: .medium, design: .rounded))
+                            Text("去除外框与卡片描边，只保留纯粹玻璃质感")
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Toggle("", isOn: $store.borderlessPanel)
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+                    }
+                }
+
                 // 行为分组
                 settingsGroup(title: "粘贴行为") {
                     HStack {
@@ -709,12 +751,18 @@ struct ClipboardPopoverView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(Color(nsColor: .controlBackgroundColor).opacity(0.55))
+                    .fill(
+                        store.surfaceStyle == .frosted
+                            ? Color(nsColor: .controlBackgroundColor).opacity(0.55)
+                            : Color.primary.opacity(0.055)
+                    )
             )
-            .overlay(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.06), lineWidth: 0.75)
-            )
+            .overlay {
+                if !store.borderlessPanel {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .strokeBorder(Color.primary.opacity(0.06), lineWidth: 0.75)
+                }
+            }
         }
     }
 
@@ -1019,10 +1067,57 @@ private extension View {
     }
 }
 
+/// 苹果官方原生材质背景（macOS 26+ 使用原装 NSGlassEffectView 液态玻璃，支持毛玻璃切换）
+struct OfficialPanelSurface: View {
+    let style: PanelSurfaceStyle
+    let cornerRadius: CGFloat
+
+    var body: some View {
+        switch style {
+        case .liquidGlass:
+            if #available(macOS 26.0, *) {
+                NativeLiquidGlassView(style: .regular, cornerRadius: cornerRadius)
+            } else {
+                VisualEffectBlur(material: .popover, blendingMode: .behindWindow, cornerRadius: cornerRadius)
+            }
+        case .clearGlass:
+            if #available(macOS 26.0, *) {
+                NativeLiquidGlassView(style: .clear, cornerRadius: cornerRadius)
+            } else {
+                VisualEffectBlur(material: .underWindowBackground, blendingMode: .behindWindow, cornerRadius: cornerRadius)
+            }
+        case .frosted:
+            VisualEffectBlur(material: .popover, blendingMode: .behindWindow, cornerRadius: cornerRadius)
+        }
+    }
+}
+
+/// 苹果 macOS 26+ 原装 NSGlassEffectView 封装
+@available(macOS 26.0, *)
+struct NativeLiquidGlassView: NSViewRepresentable {
+    let style: NSGlassEffectView.Style
+    let cornerRadius: CGFloat
+
+    func makeNSView(context: Context) -> NSGlassEffectView {
+        let view = NSGlassEffectView()
+        view.style = style
+        view.cornerRadius = cornerRadius
+        view.tintColor = nil
+        return view
+    }
+
+    func updateNSView(_ nsView: NSGlassEffectView, context: Context) {
+        nsView.style = style
+        nsView.cornerRadius = cornerRadius
+        nsView.tintColor = nil
+    }
+}
+
 /// 系统级原生毛玻璃背景封装
 struct VisualEffectBlur: NSViewRepresentable {
     let material: NSVisualEffectView.Material
     let blendingMode: NSVisualEffectView.BlendingMode
+    var cornerRadius: CGFloat = 22
 
     func makeNSView(context: Context) -> NSVisualEffectView {
         let view = NSVisualEffectView()
@@ -1030,11 +1125,16 @@ struct VisualEffectBlur: NSViewRepresentable {
         view.blendingMode = blendingMode
         view.state = .active
         view.wantsLayer = true
+        view.layer?.cornerRadius = cornerRadius
+        view.layer?.cornerCurve = .continuous
+        view.layer?.masksToBounds = true
         return view
     }
 
     func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
         nsView.material = material
         nsView.blendingMode = blendingMode
+        nsView.layer?.cornerRadius = cornerRadius
+        nsView.layer?.cornerCurve = .continuous
     }
 }
