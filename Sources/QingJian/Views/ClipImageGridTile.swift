@@ -1,6 +1,11 @@
 import SwiftUI
 import AppKit
 
+/// 非状态矩形容器：记录当前图片格坐标，滚动时绝不触发 SwiftUI @State 重绘
+private final class TileFrameBox {
+    var rect: CGRect = .zero
+}
+
 /// iOS 相册风格的图片网格卡片（3 列一行排列，悬停克制微抬并弹出纯净原图预览）
 struct ClipImageGridTile: View {
     let item: ClipItem
@@ -14,15 +19,15 @@ struct ClipImageGridTile: View {
     let onHoverChange: (Bool, CGRect) -> Void
 
     @State private var isHovered: Bool = false
-    @State private var tileFrame: CGRect = .zero
-    @ObservedObject private var store = ClipboardStore.shared
+    @State private var asyncThumbnail: NSImage? = nil
+    @State private var frameBox = TileFrameBox()
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            // 缩略图主体（用 Color.clear + overlay 保持稳定网格布局，避免 GeometryReader 干扰）
+            // 缩略图主体（纯内存零 I/O 读取 + 后台异步解码，滚动满帧不卡顿）
             Color.clear
                 .overlay {
-                    if let nsImage = store.thumbnailImage(for: item) {
+                    if let nsImage = ClipboardStore.shared.cachedThumbnail(for: item) ?? asyncThumbnail {
                         Image(nsImage: nsImage)
                             .resizable()
                             .interpolation(.high)
@@ -37,6 +42,14 @@ struct ClipImageGridTile: View {
                     }
                 }
                 .clipped()
+                .task(id: item.id) {
+                    if ClipboardStore.shared.cachedThumbnail(for: item) != nil {
+                        return
+                    }
+                    if let loaded = await ClipboardStore.shared.loadThumbnail(for: item), !Task.isCancelled {
+                        asyncThumbnail = loaded
+                    }
+                }
 
             // 底部渐变信息条（像素尺寸 / 时间）
             LinearGradient(
@@ -136,10 +149,10 @@ struct ClipImageGridTile: View {
                 let frame = geo.frame(in: .named("panelRoot"))
                 Color.clear
                     .onAppear {
-                        tileFrame = frame
+                        frameBox.rect = frame
                     }
                     .onChange(of: frame) { _, newFrame in
-                        tileFrame = newFrame
+                        frameBox.rect = newFrame
                         if isHovered {
                             onHoverChange(true, newFrame)
                         }
@@ -151,7 +164,7 @@ struct ClipImageGridTile: View {
             if hovering {
                 onSelect()
             }
-            onHoverChange(hovering, tileFrame)
+            onHoverChange(hovering, frameBox.rect)
         }
         .onTapGesture(count: 2) {
             onPaste()
@@ -185,7 +198,6 @@ struct ImageHoverPreviewLayer: View {
     let isVisible: Bool
     let panelSize: CGSize
 
-    @ObservedObject private var store = ClipboardStore.shared
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var asyncLoadedImage: NSImage? = nil
     @State private var asyncLoadedItemID: UUID? = nil
@@ -241,10 +253,10 @@ struct ImageHoverPreviewLayer: View {
         .allowsHitTesting(false)
         .task(id: item?.id) {
             guard let item else { return }
-            if store.cachedPreviewImage(for: item) != nil {
+            if ClipboardStore.shared.cachedPreviewImage(for: item) != nil {
                 return
             }
-            if let loaded = await store.loadPreviewImage(for: item), !Task.isCancelled {
+            if let loaded = await ClipboardStore.shared.loadPreviewImage(for: item), !Task.isCancelled {
                 asyncLoadedItemID = item.id
                 asyncLoadedImage = loaded
             }
@@ -252,13 +264,13 @@ struct ImageHoverPreviewLayer: View {
     }
 
     private func resolvedImage(for item: ClipItem) -> NSImage? {
-        if let cached = store.cachedPreviewImage(for: item) {
+        if let cached = ClipboardStore.shared.cachedPreviewImage(for: item) {
             return cached
         }
         if asyncLoadedItemID == item.id, let loaded = asyncLoadedImage {
             return loaded
         }
-        return store.thumbnailImage(for: item)
+        return ClipboardStore.shared.cachedThumbnail(for: item)
     }
 
     private func computeLayout(for item: ClipItem, image: NSImage) -> PreviewLayout {

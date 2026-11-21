@@ -21,7 +21,7 @@ enum PanelSurfaceStyle: String, CaseIterable, Identifiable {
     }
 }
 
-/// 剪贴板核心管理与持久化服务
+/// 剪贴板核心管理与持久化服务（低功耗轮询 + 后台异步图片编码 + 严格内存上限缓存）
 @MainActor
 final class ClipboardStore: ObservableObject {
     static let shared = ClipboardStore()
@@ -50,14 +50,25 @@ final class ClipboardStore: ObservableObject {
     private var lastChangeCount: Int
     private var timer: Timer?
     private var ignoreNextChangeCount: Int?
+
+    // 精确内存上限的图像与图标缓存，杜绝长期运行内存膨胀
     private let thumbnailCache = NSCache<NSString, NSImage>()
     private let previewCache = NSCache<NSString, NSImage>()
-    private var inFlightPreviews: Set<String> = []
+    private let fileIconCache = NSCache<NSString, NSImage>()
+    private var inFlightThumbnails = Set<String>()
+    private var inFlightPreviews = Set<String>()
+
     private var toastWorkItem: DispatchWorkItem?
+    private var saveWorkItem: DispatchWorkItem?
+    private var cacheTrimWorkItem: DispatchWorkItem?
+    private let diskQueue = DispatchQueue(label: "com.qingjian.clipboard.disk", qos: .utility)
 
     private let appSupportURL: URL
     private let historyFileURL: URL
     private let imagesDirectoryURL: URL
+
+    private static let concealedType = NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")
+    private static let transientType = NSPasteboard.PasteboardType("org.nspasteboard.TransientType")
 
     private init() {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -74,8 +85,12 @@ final class ClipboardStore: ObservableObject {
         self.lastChangeCount = pasteboard.changeCount
         self.isAccessibilityGranted = AXIsProcessTrusted()
 
-        thumbnailCache.countLimit = 120
-        previewCache.countLimit = 36
+        // 缩略图上限 24 MB / 80 张；高清预览上限 36 MB / 12 张；文件图标上限 128 个
+        thumbnailCache.countLimit = 80
+        thumbnailCache.totalCostLimit = 24 * 1024 * 1024
+        previewCache.countLimit = 12
+        previewCache.totalCostLimit = 36 * 1024 * 1024
+        fileIconCache.countLimit = 128
 
         NotificationCenter.default.addObserver(
             forName: NSApplication.didBecomeActiveNotification,
@@ -92,7 +107,7 @@ final class ClipboardStore: ObservableObject {
         startMonitoring()
     }
 
-    // MARK: - 目录与持久化
+    // MARK: - 目录与防抖串行持久化
 
     private func ensureDirectories() {
         let fm = FileManager.default
@@ -106,19 +121,30 @@ final class ClipboardStore: ObservableObject {
             let data = try Data(contentsOf: historyFileURL)
             let decoded = try JSONDecoder().decode([ClipItem].self, from: data)
             self.items = sortItems(decoded)
-            prewarmPreviewImages(for: self.items)
         } catch {
             self.items = []
         }
     }
 
-    private func saveHistory() {
+    /// 0.25s 防抖合并 + 串行后台队列落盘，避免连续操作重复编码 JSON 与并发写盘
+    private func saveHistory(immediate: Bool = false) {
+        saveWorkItem?.cancel()
         let snapshot = self.items
         let targetURL = self.historyFileURL
-        DispatchQueue.global(qos: .utility).async {
-            if let data = try? JSONEncoder().encode(snapshot) {
-                try? data.write(to: targetURL, options: .atomic)
+
+        let work = DispatchWorkItem { [diskQueue] in
+            diskQueue.async {
+                if let data = try? JSONEncoder().encode(snapshot) {
+                    try? data.write(to: targetURL, options: .atomic)
+                }
             }
+        }
+
+        if immediate {
+            work.perform()
+        } else {
+            saveWorkItem = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
         }
     }
 
@@ -131,15 +157,17 @@ final class ClipboardStore: ObservableObject {
         }
     }
 
-    // MARK: - 剪贴板监听
+    // MARK: - 低功耗剪贴板监听
 
     func startMonitoring() {
         timer?.invalidate()
-        let t = Timer(timeInterval: 0.45, repeats: true) { [weak self] _ in
+        // 0.6s 周期 + 0.25s 容差，允许 macOS 内核自动合并 CPU 唤醒，待机近乎 0 功耗
+        let t = Timer(timeInterval: 0.6, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.checkPasteboard()
             }
         }
+        t.tolerance = 0.25
         RunLoop.main.add(t, forMode: .common)
         timer = t
     }
@@ -147,11 +175,29 @@ final class ClipboardStore: ObservableObject {
     func stopMonitoring() {
         timer?.invalidate()
         timer = nil
+        saveHistory(immediate: true)
+    }
+
+    /// 面板打开时取消缓存回收，后台预热首屏缩略图与少量高清图
+    func onPanelShown(visibleItems: [ClipItem]) {
+        cacheTrimWorkItem?.cancel()
+        cacheTrimWorkItem = nil
+        refreshAccessibilityStatus()
+        prewarmThumbnails(for: visibleItems, limit: 18)
+        prewarmPreviewImages(for: visibleItems, limit: 6)
+    }
+
+    /// 面板隐藏 8 秒后释放高占用的高清预览图缓存，让后台常驻内存保持在极低水平
+    func onPanelHidden() {
+        cacheTrimWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.previewCache.removeAllObjects()
+        }
+        cacheTrimWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8.0, execute: work)
     }
 
     private func checkPasteboard() {
-        refreshAccessibilityStatus()
-
         guard !isPaused else {
             lastChangeCount = pasteboard.changeCount
             return
@@ -168,20 +214,19 @@ final class ClipboardStore: ObservableObject {
 
         // 跳过常见的密码管理器临时敏感内容标记
         let types = pasteboard.types ?? []
-        let concealedType = NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")
-        let transientType = NSPasteboard.PasteboardType("org.nspasteboard.TransientType")
-        if types.contains(concealedType) || types.contains(transientType) {
+        if types.contains(Self.concealedType) || types.contains(Self.transientType) {
             return
         }
 
         let sourceApp = NSWorkspace.shared.frontmostApplication?.localizedName
 
         // 1. 优先检测文件 URL（避免将访达复制的文件误判为文件名文本或图标图片）
-        if let fileURLs = pasteboard.readObjects(forClasses: [NSURL.self], options: [
-            .urlReadingFileURLsOnly: true
-        ]) as? [URL], !fileURLs.isEmpty {
+        if types.contains(.fileURL),
+           let fileURLs = pasteboard.readObjects(forClasses: [NSURL.self], options: [
+               .urlReadingFileURLsOnly: true
+           ]) as? [URL], !fileURLs.isEmpty {
             let paths = fileURLs.map { $0.path }
-            let hash = sha256(paths.joined(separator: "\n"))
+            let hash = Self.sha256(paths.joined(separator: "\n"))
             let item = ClipItem(
                 type: .file,
                 filePaths: paths,
@@ -192,39 +237,70 @@ final class ClipboardStore: ObservableObject {
             return
         }
 
-        // 2. 检测图片（PNG / TIFF）
-        if let image = readImageFromPasteboard() {
-            if let pngData = pngData(from: image) {
-                let hash = sha256(pngData)
-                let contentHash = "img:\(hash)"
-                if let existingIndex = items.firstIndex(where: { $0.contentHash == contentHash }) {
-                    var existing = items.remove(at: existingIndex)
-                    existing.createdAt = Date()
-                    existing.sourceAppName = sourceApp ?? existing.sourceAppName
-                    items.insert(existing, at: 0)
-                    items = sortItems(items)
-                    saveHistory()
-                    return
-                }
+        // 2. 检测图片：主线程只取原始字节，转码、哈希、落盘与缩略图解码全部放后台，彻底告别主线程掉帧
+        if types.contains(.png) || types.contains(.tiff) {
+            let rawPNG = pasteboard.data(forType: .png)
+            let rawTIFF = (rawPNG == nil) ? pasteboard.data(forType: .tiff) : nil
+            if rawPNG != nil || rawTIFF != nil {
+                let imagesDir = self.imagesDirectoryURL
+                Task.detached(priority: .utility) { [weak self] in
+                    let finalPNG: Data?
+                    if let rawPNG {
+                        finalPNG = rawPNG
+                    } else if let rawTIFF, let bitmap = NSBitmapImageRep(data: rawTIFF) {
+                        finalPNG = bitmap.representation(using: .png, properties: [:])
+                    } else {
+                        finalPNG = nil
+                    }
+                    guard let pngData = finalPNG else { return }
 
-                let fileName = "\(UUID().uuidString).png"
-                let fileURL = imagesDirectoryURL.appendingPathComponent(fileName)
-                do {
-                    try pngData.write(to: fileURL, options: .atomic)
-                    let pixelSize = pixelDimensions(of: image)
-                    let item = ClipItem(
-                        type: .image,
-                        imageFileName: fileName,
-                        imageWidth: pixelSize.width,
-                        imageHeight: pixelSize.height,
-                        contentHash: contentHash,
-                        sourceAppName: sourceApp
-                    )
-                    insertOrPromote(item)
-                    return
-                } catch {
-                    return
+                    let hash = Self.sha256(pngData)
+                    let contentHash = "img:\(hash)"
+                    let dims = Self.pixelDimensions(from: pngData)
+
+                    let alreadyExists = await MainActor.run { [weak self] () -> Bool in
+                        guard let self else { return true }
+                        if let existingIndex = self.items.firstIndex(where: { $0.contentHash == contentHash }) {
+                            var existing = self.items.remove(at: existingIndex)
+                            existing.createdAt = Date()
+                            existing.sourceAppName = sourceApp ?? existing.sourceAppName
+                            self.items.insert(existing, at: 0)
+                            self.items = self.sortItems(self.items)
+                            self.saveHistory()
+                            return true
+                        }
+                        return false
+                    }
+                    if alreadyExists { return }
+
+                    let fileName = "\(UUID().uuidString).png"
+                    let fileURL = imagesDir.appendingPathComponent(fileName)
+                    do {
+                        try pngData.write(to: fileURL, options: .atomic)
+                    } catch {
+                        return
+                    }
+
+                    // 后台顺手预生成一张小缩略图，待会儿打开面板直接内存秒出
+                    let thumb = Self.decodeImage(at: fileURL, maxPixelSize: 360)
+
+                    await MainActor.run { [weak self] in
+                        guard let self else { return }
+                        if let thumb {
+                            self.thumbnailCache.setObject(thumb, forKey: fileName as NSString, cost: Self.estimatedCost(of: thumb))
+                        }
+                        let item = ClipItem(
+                            type: .image,
+                            imageFileName: fileName,
+                            imageWidth: dims.width,
+                            imageHeight: dims.height,
+                            contentHash: contentHash,
+                            sourceAppName: sourceApp
+                        )
+                        self.insertOrPromote(item)
+                    }
                 }
+                return
             }
         }
 
@@ -234,7 +310,7 @@ final class ClipboardStore: ObservableObject {
             guard !trimmed.isEmpty else { return }
 
             let isLink = isValidWebURL(trimmed)
-            let hash = sha256(text)
+            let hash = Self.sha256(text)
             let item = ClipItem(
                 type: isLink ? .link : .text,
                 text: text,
@@ -278,7 +354,7 @@ final class ClipboardStore: ObservableObject {
 
     // MARK: - 用户操作
 
-    /// 复制记录到系统剪贴板，并在允许时自动粘贴
+    /// 复制记录到系统剪贴板，并在允许时极速键入光标处
     func copyAndOptionallyPaste(
         _ item: ClipItem,
         plainTextOnly: Bool = false,
@@ -287,7 +363,6 @@ final class ClipboardStore: ObservableObject {
     ) {
         writeToPasteboard(item, plainTextOnly: plainTextOnly)
 
-        // 更新记录时间戳并置前
         if let idx = items.firstIndex(where: { $0.id == item.id }) {
             items[idx].createdAt = Date()
             items = sortItems(items)
@@ -313,8 +388,9 @@ final class ClipboardStore: ObservableObject {
                 pasteboard.setString(text, forType: .string)
             }
         case .image:
-            if let url = imageURL(for: item), let image = NSImage(contentsOf: url) {
-                pasteboard.writeObjects([image])
+            // 直接写入原始 PNG Data，避免 NSImage 解码成巨型未压缩 TIFF 造成粘贴卡顿
+            if let url = imageURL(for: item), let pngData = try? Data(contentsOf: url) {
+                pasteboard.setData(pngData, forType: .png)
             }
         case .file:
             if let paths = item.filePaths, !paths.isEmpty {
@@ -367,26 +443,74 @@ final class ClipboardStore: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.6, execute: work)
     }
 
-    // MARK: - 图片与文件辅助
+    // MARK: - 零阻塞图片与文件图标缓存
 
     func imageURL(for item: ClipItem) -> URL? {
         guard let name = item.imageFileName else { return nil }
         return imagesDirectoryURL.appendingPathComponent(name)
     }
 
-    func thumbnailImage(for item: ClipItem) -> NSImage? {
+    /// 零 I/O 读取内存缩略图缓存（供 SwiftUI body 直接渲染，绝不阻塞滚动）
+    func cachedThumbnail(for item: ClipItem) -> NSImage? {
         guard let name = item.imageFileName else { return nil }
+        return thumbnailCache.object(forKey: name as NSString)
+    }
+
+    /// 后台异步解码缩略图并写入带内存上限的缓存
+    func loadThumbnail(for item: ClipItem) async -> NSImage? {
+        guard let name = item.imageFileName, let url = imageURL(for: item) else { return nil }
         let cacheKey = name as NSString
         if let cached = thumbnailCache.object(forKey: cacheKey) {
             return cached
         }
-        guard let url = imageURL(for: item),
-              let thumb = Self.decodeImage(at: url, maxPixelSize: 400) else {
-            return nil
+        let decoded = await Task.detached(priority: .userInitiated) {
+            Self.decodeImage(at: url, maxPixelSize: 360)
+        }.value
+        if let decoded {
+            thumbnailCache.setObject(decoded, forKey: cacheKey, cost: Self.estimatedCost(of: decoded))
+        }
+        return decoded
+    }
+
+    /// 后台预热首屏缩略图，打开面板即刻满帧呈现
+    func prewarmThumbnails(for items: [ClipItem], limit: Int = 18) {
+        let targets: [(String, URL)] = items
+            .lazy
+            .filter { $0.type == .image }
+            .prefix(limit)
+            .compactMap { item in
+                guard let name = item.imageFileName,
+                      thumbnailCache.object(forKey: name as NSString) == nil,
+                      !inFlightThumbnails.contains(name),
+                      let url = imageURL(for: item) else {
+                    return nil
+                }
+                return (name, url)
+            }
+
+        guard !targets.isEmpty else { return }
+        for (name, _) in targets {
+            inFlightThumbnails.insert(name)
         }
 
-        thumbnailCache.setObject(thumb, forKey: cacheKey)
-        return thumb
+        Task.detached(priority: .utility) { [weak self] in
+            var results: [(String, NSImage)] = []
+            for (name, url) in targets {
+                if let img = Self.decodeImage(at: url, maxPixelSize: 360) {
+                    results.append((name, img))
+                }
+            }
+            let decodedResults = results
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                for (name, _) in targets {
+                    self.inFlightThumbnails.remove(name)
+                }
+                for (name, img) in decodedResults {
+                    self.thumbnailCache.setObject(img, forKey: name as NSString, cost: Self.estimatedCost(of: img))
+                }
+            }
+        }
     }
 
     /// 零 I/O 读取已预解码的高清预览图缓存，保证悬停首帧 120Hz 不掉帧
@@ -403,16 +527,16 @@ final class ClipboardStore: ObservableObject {
             return cached
         }
         let decoded = await Task.detached(priority: .userInitiated) {
-            Self.decodeImage(at: url, maxPixelSize: 1280)
+            Self.decodeImage(at: url, maxPixelSize: 1080)
         }.value
         if let decoded {
-            previewCache.setObject(decoded, forKey: cacheKey)
+            previewCache.setObject(decoded, forKey: cacheKey, cost: Self.estimatedCost(of: decoded))
         }
         return decoded
     }
 
     /// 面板打开时在后台预热前排图片的高清缓存，悬停即可瞬时满帧放大
-    func prewarmPreviewImages(for items: [ClipItem], limit: Int = 12) {
+    func prewarmPreviewImages(for items: [ClipItem], limit: Int = 6) {
         let targets: [(String, URL)] = items
             .lazy
             .filter { $0.type == .image }
@@ -435,7 +559,7 @@ final class ClipboardStore: ObservableObject {
         Task.detached(priority: .utility) { [weak self] in
             var results: [(String, NSImage)] = []
             for (name, url) in targets {
-                if let img = Self.decodeImage(at: url, maxPixelSize: 1280) {
+                if let img = Self.decodeImage(at: url, maxPixelSize: 1080) {
                     results.append((name, img))
                 }
             }
@@ -446,28 +570,15 @@ final class ClipboardStore: ObservableObject {
                     self.inFlightPreviews.remove(name)
                 }
                 for (name, img) in decodedResults {
-                    self.previewCache.setObject(img, forKey: name as NSString)
+                    self.previewCache.setObject(img, forKey: name as NSString, cost: Self.estimatedCost(of: img))
                 }
             }
         }
     }
 
-    func previewImage(for item: ClipItem) -> NSImage? {
-        if let cached = cachedPreviewImage(for: item) {
-            return cached
-        }
-        guard let name = item.imageFileName,
-              let url = imageURL(for: item),
-              let preview = Self.decodeImage(at: url, maxPixelSize: 1280) else {
-            return nil
-        }
-        previewCache.setObject(preview, forKey: name as NSString)
-        return preview
-    }
-
     nonisolated static func decodeImage(at url: URL, maxPixelSize: Int) -> NSImage? {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else {
-            return NSImage(contentsOf: url)
+            return nil
         }
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
@@ -478,14 +589,37 @@ final class ClipboardStore: ObservableObject {
         if let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) {
             return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
         }
-        return NSImage(contentsOf: url)
+        return nil
     }
 
-    func fileIcon(for item: ClipItem) -> NSImage {
-        if let first = item.filePaths?.first {
-            return NSWorkspace.shared.icon(forFile: first)
+    /// 零解码直接读取图片像素尺寸元数据
+    nonisolated private static func pixelDimensions(from data: Data) -> (width: Int?, height: Int?) {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else {
+            return (nil, nil)
         }
-        return NSWorkspace.shared.icon(for: .data)
+        let w = props[kCGImagePropertyPixelWidth] as? Int
+        let h = props[kCGImagePropertyPixelHeight] as? Int
+        return (w, h)
+    }
+
+    nonisolated private static func estimatedCost(of image: NSImage) -> Int {
+        let pixels = max(1, Int(image.size.width) * Int(image.size.height))
+        return pixels * 4
+    }
+
+    /// 带缓存的本地文件图标查询，消除滚动时的重复 LaunchServices IPC
+    func fileIcon(for item: ClipItem) -> NSImage {
+        guard let first = item.filePaths?.first else {
+            return NSWorkspace.shared.icon(for: .data)
+        }
+        let cacheKey = first as NSString
+        if let cached = fileIconCache.object(forKey: cacheKey) {
+            return cached
+        }
+        let icon = NSWorkspace.shared.icon(forFile: first)
+        fileIconCache.setObject(icon, forKey: cacheKey)
+        return icon
     }
 
     private func deleteImageFileIfNeeded(for item: ClipItem) {
@@ -493,33 +627,10 @@ final class ClipboardStore: ObservableObject {
             thumbnailCache.removeObject(forKey: name as NSString)
             previewCache.removeObject(forKey: name as NSString)
             let url = imagesDirectoryURL.appendingPathComponent(name)
-            try? FileManager.default.removeItem(at: url)
+            diskQueue.async {
+                try? FileManager.default.removeItem(at: url)
+            }
         }
-    }
-
-    private func readImageFromPasteboard() -> NSImage? {
-        if let data = pasteboard.data(forType: .png), let img = NSImage(data: data) {
-            return img
-        }
-        if let data = pasteboard.data(forType: .tiff), let img = NSImage(data: data) {
-            return img
-        }
-        return nil
-    }
-
-    private func pngData(from image: NSImage) -> Data? {
-        guard let tiffData = image.tiffRepresentation,
-              let bitmap = NSBitmapImageRep(data: tiffData) else {
-            return nil
-        }
-        return bitmap.representation(using: .png, properties: [:])
-    }
-
-    private func pixelDimensions(of image: NSImage) -> (width: Int, height: Int) {
-        if let rep = image.representations.first, rep.pixelsWide > 0, rep.pixelsHigh > 0 {
-            return (rep.pixelsWide, rep.pixelsHigh)
-        }
-        return (Int(image.size.width), Int(image.size.height))
     }
 
     private func isValidWebURL(_ string: String) -> Bool {
@@ -533,16 +644,16 @@ final class ClipboardStore: ObservableObject {
         return true
     }
 
-    private func sha256(_ string: String) -> String {
+    nonisolated private static func sha256(_ string: String) -> String {
         sha256(Data(string.utf8))
     }
 
-    private func sha256(_ data: Data) -> String {
+    nonisolated private static func sha256(_ data: Data) -> String {
         let digest = SHA256.hash(data: data)
         return digest.map { String(format: "%02x", $0) }.joined()
     }
 
-    // MARK: - 辅助功能与自动粘贴
+    // MARK: - 辅助功能与极速自动粘贴
 
     func hasAccessibilityPermission() -> Bool {
         AXIsProcessTrusted()

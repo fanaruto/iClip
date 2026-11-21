@@ -6,6 +6,8 @@ struct ClipCardView: View {
     let item: ClipItem
     let index: Int
     let isSelected: Bool
+    let surfaceStyle: PanelSurfaceStyle
+    let borderlessPanel: Bool
     let onSelect: () -> Void
     let onPaste: (Bool) -> Void
     let onCopyOnly: (Bool) -> Void
@@ -13,7 +15,7 @@ struct ClipCardView: View {
     let onDelete: () -> Void
 
     @State private var isHovered: Bool = false
-    @ObservedObject private var store = ClipboardStore.shared
+    @State private var asyncThumbnail: NSImage? = nil
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
@@ -93,7 +95,7 @@ struct ClipCardView: View {
     private var leadingThumbnail: some View {
         switch item.type {
         case .image:
-            if let nsImage = store.thumbnailImage(for: item) {
+            if let nsImage = ClipboardStore.shared.cachedThumbnail(for: item) ?? asyncThumbnail {
                 Image(nsImage: nsImage)
                     .resizable()
                     .scaledToFill()
@@ -106,11 +108,16 @@ struct ClipCardView: View {
                     .shadow(color: Color.black.opacity(0.08), radius: 3, y: 1)
             } else {
                 iconBadge(symbol: "photo", tint: .purple)
+                    .task(id: item.id) {
+                        if let img = await ClipboardStore.shared.loadThumbnail(for: item), !Task.isCancelled {
+                            asyncThumbnail = img
+                        }
+                    }
             }
 
         case .file:
             ZStack(alignment: .bottomTrailing) {
-                Image(nsImage: store.fileIcon(for: item))
+                Image(nsImage: ClipboardStore.shared.fileIcon(for: item))
                     .resizable()
                     .scaledToFit()
                     .frame(width: 42, height: 42)
@@ -209,7 +216,7 @@ struct ClipCardView: View {
         } else {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(
-                    store.surfaceStyle == .frosted
+                    surfaceStyle == .frosted
                         ? Color(nsColor: .controlBackgroundColor).opacity(isHovered ? 0.68 : 0.42)
                         : Color.primary.opacity(isHovered ? 0.095 : 0.048)
                 )
@@ -218,7 +225,7 @@ struct ClipCardView: View {
 
     @ViewBuilder
     private var cardBorder: some View {
-        if store.borderlessPanel {
+        if borderlessPanel {
             EmptyView()
         } else {
             RoundedRectangle(cornerRadius: 14, style: .continuous)

@@ -150,6 +150,12 @@ struct ClipItem: Identifiable, Codable, Equatable {
         }
     }
 
+    private static let monthDayFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MM月dd日"
+        return formatter
+    }()
+
     /// 中文相对时间描述
     var relativeTimeText: String {
         let interval = Int(Date().timeIntervalSince(createdAt))
@@ -161,9 +167,7 @@ struct ClipItem: Identifiable, Codable, Equatable {
         if hours < 24 { return "\(hours) 小时前" }
         let days = hours / 24
         if days < 7 { return "\(days) 天前" }
-        let formatter = DateFormatter()
-        formatter.dateFormat = "MM月dd日"
-        return formatter.string(from: createdAt)
+        return Self.monthDayFormatter.string(from: createdAt)
     }
 
     /// 搜索匹配判断

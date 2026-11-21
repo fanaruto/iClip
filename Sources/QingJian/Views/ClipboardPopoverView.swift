@@ -1,7 +1,23 @@
 import SwiftUI
 import AppKit
+import Combine
 
-/// 键盘导航与出场动效控制桥接器
+/// 列表行模型：连续图片自动聚合成 3 列网格，非图片保持单行精致卡片
+enum ClipDisplayRow: Identifiable {
+    case standard(index: Int, item: ClipItem)
+    case imageGrid(entries: [(index: Int, item: ClipItem)])
+
+    var id: String {
+        switch self {
+        case .standard(_, let item):
+            return "row-\(item.id.uuidString)"
+        case .imageGrid(let entries):
+            return "grid-\(entries.first?.item.id.uuidString ?? "empty")"
+        }
+    }
+}
+
+/// 键盘导航、筛选缓存与出场动效控制桥接器（仅在数据/搜索/分类变动时重算列表，悬停与方向键零开销）
 @MainActor
 final class PanelNavigationModel: ObservableObject {
     @Published var searchText: String = ""
@@ -11,10 +27,59 @@ final class PanelNavigationModel: ObservableObject {
     @Published var showSettings: Bool = false
     @Published var isPresented: Bool = false
     @Published var presentationEpoch: Int = 0
-    @Published var appearAnchor: UnitPoint = .topLeading
-    @Published var appearOffsetX: CGFloat = -16
-    @Published var appearOffsetY: CGFloat = -14
     @Published var scrollRequestEpoch: Int = 0
+
+    private(set) var cachedFilteredItems: [ClipItem] = []
+    private(set) var cachedDisplayRows: [ClipDisplayRow] = []
+    private var cancellables = Set<AnyCancellable>()
+
+    init(store: ClipboardStore? = nil) {
+        let resolvedStore = store ?? .shared
+        rebuildCache(items: resolvedStore.items, tab: selectedTab, query: searchText)
+
+        Publishers.CombineLatest3(resolvedStore.$items, $selectedTab, $searchText)
+            .sink { [weak self] items, tab, query in
+                self?.rebuildCache(items: items, tab: tab, query: query)
+            }
+            .store(in: &cancellables)
+    }
+
+    private func rebuildCache(items: [ClipItem], tab: ClipFilterTab, query: String) {
+        let filtered = items.filter { item in
+            let tabMatches: Bool
+            switch tab {
+            case .all: tabMatches = true
+            case .pinned: tabMatches = item.isPinned
+            case .text: tabMatches = item.type == .text
+            case .link: tabMatches = item.type == .link
+            case .image: tabMatches = item.type == .image
+            case .file: tabMatches = item.type == .file
+            }
+            return tabMatches && item.matches(query: query)
+        }
+
+        var rows: [ClipDisplayRow] = []
+        rows.reserveCapacity(filtered.count)
+        var imageBuffer: [(index: Int, item: ClipItem)] = []
+
+        for (index, item) in filtered.enumerated() {
+            if item.type == .image {
+                imageBuffer.append((index: index, item: item))
+            } else {
+                if !imageBuffer.isEmpty {
+                    rows.append(.imageGrid(entries: imageBuffer))
+                    imageBuffer.removeAll(keepingCapacity: true)
+                }
+                rows.append(.standard(index: index, item: item))
+            }
+        }
+        if !imageBuffer.isEmpty {
+            rows.append(.imageGrid(entries: imageBuffer))
+        }
+
+        self.cachedFilteredItems = filtered
+        self.cachedDisplayRows = rows
+    }
 
     func resetOnOpen() {
         searchText = ""
@@ -25,7 +90,7 @@ final class PanelNavigationModel: ObservableObject {
     }
 }
 
-/// 主面板视图（iOS 风格毛玻璃卡片容器）
+/// 主面板视图（苹果原生毛玻璃 / 液态玻璃内容层）
 struct ClipboardPopoverView: View {
     @ObservedObject var store: ClipboardStore
     @ObservedObject var nav: PanelNavigationModel
@@ -41,57 +106,12 @@ struct ClipboardPopoverView: View {
     @State private var hoveredTileItemID: UUID? = nil
     @State private var previewHideWorkItem: DispatchWorkItem? = nil
 
-    /// 列表行模型：连续图片自动聚合成 3 列网格，非图片保持单行精致卡片
-    private enum DisplayRow: Identifiable {
-        case standard(index: Int, item: ClipItem)
-        case imageGrid(entries: [(index: Int, item: ClipItem)])
-
-        var id: String {
-            switch self {
-            case .standard(_, let item):
-                return "row-\(item.id.uuidString)"
-            case .imageGrid(let entries):
-                return "grid-\(entries.first?.item.id.uuidString ?? "empty")"
-            }
-        }
-    }
-
     var filteredItems: [ClipItem] {
-        store.items.filter { item in
-            let tabMatches: Bool
-            switch nav.selectedTab {
-            case .all: tabMatches = true
-            case .pinned: tabMatches = item.isPinned
-            case .text: tabMatches = item.type == .text
-            case .link: tabMatches = item.type == .link
-            case .image: tabMatches = item.type == .image
-            case .file: tabMatches = item.type == .file
-            }
-            return tabMatches && item.matches(query: nav.searchText)
-        }
+        nav.cachedFilteredItems
     }
 
-    private var displayRows: [DisplayRow] {
-        var rows: [DisplayRow] = []
-        var imageBuffer: [(index: Int, item: ClipItem)] = []
-
-        for (index, item) in filteredItems.enumerated() {
-            if item.type == .image {
-                imageBuffer.append((index: index, item: item))
-            } else {
-                if !imageBuffer.isEmpty {
-                    rows.append(.imageGrid(entries: imageBuffer))
-                    imageBuffer.removeAll()
-                }
-                rows.append(.standard(index: index, item: item))
-            }
-        }
-
-        if !imageBuffer.isEmpty {
-            rows.append(.imageGrid(entries: imageBuffer))
-        }
-
-        return rows
+    private var displayRows: [ClipDisplayRow] {
+        nav.cachedDisplayRows
     }
 
     var body: some View {
@@ -160,9 +180,10 @@ struct ClipboardPopoverView: View {
         .animation(.spring(response: 0.25, dampingFraction: 0.85), value: store.toastMessage)
         .onChange(of: nav.isPresented) { _, presented in
             if presented {
-                store.prewarmPreviewImages(for: filteredItems)
+                store.onPanelShown(visibleItems: filteredItems)
             } else {
                 dismissImagePreview(clearItem: true)
+                store.onPanelHidden()
             }
         }
         .onChange(of: nav.focusTrigger) { _, _ in
@@ -349,6 +370,8 @@ struct ClipboardPopoverView: View {
                                         item: item,
                                         index: index,
                                         isSelected: index == nav.selectedIndex,
+                                        surfaceStyle: store.surfaceStyle,
+                                        borderlessPanel: store.borderlessPanel,
                                         onSelect: {
                                             nav.selectedIndex = index
                                         },
