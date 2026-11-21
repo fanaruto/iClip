@@ -15,9 +15,10 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     private var panel: KeyableFloatingPanel!
     private var hostingView: NSHostingView<ClipboardPopoverView>!
     private weak var activeGlassView: AnyObject?
-    private let nav = PanelNavigationModel()
+    let nav = PanelNavigationModel()
     private let store = ClipboardStore.shared
     private var rootView: ClipboardPopoverView!
+    private var demoRunner: DemoShowcaseRunner?
     private var keyMonitor: Any?
     private var previousApp: NSRunningApplication?
     private var hideWorkItem: DispatchWorkItem?
@@ -78,67 +79,49 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         self.panel = p
         applyNativeSurface(style: store.surfaceStyle)
         if ProcessInfo.processInfo.arguments.contains("--demo") {
-            startDemoShowcase()
+            let runner = DemoShowcaseRunner(panelController: self, store: store, nav: nav)
+            self.demoRunner = runner
+            runner.start()
         }
     }
 
-    /// 仅在传 --demo 启动参数时运行的实机功能演示编排（零外部权限依赖）
-    private func startDemoShowcase() {
-        nav.suppressAutoHide = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
-            guard let self else { return }
-            self.showCenteredForDemo()
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { [weak self] in
-            self?.nav.demoPreviewIndex = 1
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.2) { [weak self] in
-            self?.nav.demoPreviewIndex = 2
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 4.6) { [weak self] in
-            self?.nav.demoPreviewIndex = 3
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5.8) { [weak self] in
-            self?.nav.demoPreviewIndex = nil
-            self?.nav.showSettings = true
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 6.9) { [weak self] in
-            self?.store.liquidGlassAppearance = .clear
-            self?.store.liquidGlassMaskOpacity = 0.12
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 7.9) { [weak self] in
-            self?.store.liquidGlassAppearance = .tinted
-            self?.store.liquidGlassMaskOpacity = 0.35
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 9.0) { [weak self] in
-            self?.nav.showSettings = false
-            self?.nav.selectedIndex = 0
-        }
-    }
-
-    private func showCenteredForDemo() {
+    /// 供实机演示编排调用：在指定屏幕位置带丝滑动画弹出真实面板
+    func showForDemo(origin: NSPoint, entryDelta: NSPoint) {
         nav.isPresented = false
         nav.resetOnOpen()
         nav.suppressAutoHide = true
-        let screen = NSScreen.main ?? NSScreen.screens[0]
-        let visible = screen.visibleFrame
-        let finalOrigin = NSPoint(
-            x: visible.midX - panelSize.width / 2,
-            y: visible.midY - panelSize.height / 2
-        )
-        panel.setFrameOrigin(NSPoint(x: finalOrigin.x, y: finalOrigin.y + 10))
+
+        let startOrigin = NSPoint(x: origin.x + entryDelta.x, y: origin.y + entryDelta.y)
+        panel.setFrameOrigin(startOrigin)
         panel.alphaValue = 0
+
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         panel.invalidateShadow()
+
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.22
             ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
             panel.animator().alphaValue = 1
-            panel.animator().setFrameOrigin(finalOrigin)
+            panel.animator().setFrameOrigin(origin)
         }
+
         DispatchQueue.main.async { [weak self] in
             self?.nav.isPresented = true
+        }
+    }
+
+    /// 供实机演示编排调用：丝滑淡出收起真实面板
+    func hideForDemo() {
+        nav.isPresented = false
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.16
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            panel.animator().alphaValue = 0
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) { [weak self] in
+            self?.panel.orderOut(nil)
+            self?.panel.alphaValue = 1
         }
     }
 

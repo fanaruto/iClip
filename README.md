@@ -5,7 +5,7 @@
 按下 **`⌥V`**（支持自定义快捷键），苹果原生液态玻璃面板在你的**鼠标光标旁**直觉出现；**双击任意记录**（或按回车）直接键入光标所在区域，让每天高频发生的复制粘贴顺手又丝滑。
 
 <p align="center">
-  <img src="assets/demo.gif" alt="iClip 实机运行演示：苹果原生液态玻璃、图片 3 列网格悬停放大与设置页" width="420" />
+  <img src="assets/demo.gif" alt="iClip 实机运行演示：鼠标旁唤醒、苹果原生液态玻璃蒙版调节、图片 3 列悬停放大与双击键入" width="760" />
 </p>
 
 > 📥 **开箱即用**：可直接前往 [GitHub Releases](https://github.com/fanaruto/iClip/releases/latest) 下载预编译 `iClip-macOS.zip` 解压运行，后续更新支持应用内一键 GitHub OTA 自动升级。
