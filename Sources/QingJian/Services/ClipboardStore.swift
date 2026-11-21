@@ -4,10 +4,9 @@ import ImageIO
 import CryptoKit
 import ApplicationServices
 
-/// 面板官方材质样式
+/// 面板官方材质样式（精简为液态玻璃与毛玻璃两种）
 enum PanelSurfaceStyle: String, CaseIterable, Identifiable {
     case liquidGlass
-    case clearGlass
     case frosted
 
     var id: String { rawValue }
@@ -15,8 +14,22 @@ enum PanelSurfaceStyle: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .liquidGlass: return "液态玻璃"
-        case .clearGlass: return "通透液态"
         case .frosted: return "毛玻璃"
+        }
+    }
+}
+
+/// 苹果官方 Liquid Glass 蒙版风格（对应系统外观中的透明 / 着色两档）
+enum LiquidGlassAppearance: String, CaseIterable, Identifiable {
+    case clear
+    case tinted
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .clear: return "透明"
+        case .tinted: return "着色"
         }
     }
 }
@@ -31,6 +44,13 @@ final class ClipboardStore: ObservableObject {
     @Published var isPaused: Bool = false
     @Published var surfaceStyle: PanelSurfaceStyle {
         didSet { UserDefaults.standard.set(surfaceStyle.rawValue, forKey: "panelSurfaceStyle") }
+    }
+    @Published var liquidGlassAppearance: LiquidGlassAppearance {
+        didSet { UserDefaults.standard.set(liquidGlassAppearance.rawValue, forKey: "liquidGlassAppearance") }
+    }
+    /// 液态玻璃原生蒙版浓度（0.0 ~ 1.0），拖动时防抖落盘零 I/O 卡顿
+    @Published var liquidGlassMaskOpacity: Double {
+        didSet { scheduleSaveAppearanceDefaults() }
     }
     @Published var borderlessPanel: Bool {
         didSet { UserDefaults.standard.set(borderlessPanel, forKey: "borderlessPanel") }
@@ -60,6 +80,7 @@ final class ClipboardStore: ObservableObject {
 
     private var toastWorkItem: DispatchWorkItem?
     private var saveWorkItem: DispatchWorkItem?
+    private var appearanceSaveWorkItem: DispatchWorkItem?
     private var cacheTrimWorkItem: DispatchWorkItem?
     private let diskQueue = DispatchQueue(label: "com.qingjian.clipboard.disk", qos: .utility)
 
@@ -78,7 +99,17 @@ final class ClipboardStore: ObservableObject {
 
         self.autoPasteEnabled = UserDefaults.standard.object(forKey: "autoPasteEnabled") as? Bool ?? true
         let savedStyle = UserDefaults.standard.string(forKey: "panelSurfaceStyle") ?? PanelSurfaceStyle.liquidGlass.rawValue
-        self.surfaceStyle = PanelSurfaceStyle(rawValue: savedStyle) ?? .liquidGlass
+        if savedStyle == "clearGlass" {
+            // 兼容旧版通透液态配置：无缝迁移到液态玻璃 + 透明档位
+            self.surfaceStyle = .liquidGlass
+            self.liquidGlassAppearance = .clear
+        } else {
+            self.surfaceStyle = PanelSurfaceStyle(rawValue: savedStyle) ?? .liquidGlass
+            let savedGlassMode = UserDefaults.standard.string(forKey: "liquidGlassAppearance") ?? LiquidGlassAppearance.tinted.rawValue
+            self.liquidGlassAppearance = LiquidGlassAppearance(rawValue: savedGlassMode) ?? .tinted
+        }
+        let savedMask = UserDefaults.standard.object(forKey: "liquidGlassMaskOpacity") as? Double
+        self.liquidGlassMaskOpacity = min(max(savedMask ?? 0.25, 0.0), 1.0)
         self.borderlessPanel = UserDefaults.standard.object(forKey: "borderlessPanel") as? Bool ?? true
         let savedMax = UserDefaults.standard.integer(forKey: "maxHistoryCount")
         self.maxHistoryCount = savedMax > 0 ? savedMax : 200
@@ -124,6 +155,17 @@ final class ClipboardStore: ObservableObject {
         } catch {
             self.items = []
         }
+    }
+
+    /// 防抖持久化滑块值，保证 120Hz 拖动液态蒙版零磁盘阻塞
+    private func scheduleSaveAppearanceDefaults() {
+        appearanceSaveWorkItem?.cancel()
+        let value = liquidGlassMaskOpacity
+        let work = DispatchWorkItem {
+            UserDefaults.standard.set(value, forKey: "liquidGlassMaskOpacity")
+        }
+        appearanceSaveWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: work)
     }
 
     /// 0.25s 防抖合并 + 串行后台队列落盘，避免连续操作重复编码 JSON 与并发写盘

@@ -14,6 +14,7 @@ final class KeyableFloatingPanel: NSPanel {
 final class FloatingPanelController: NSObject, NSWindowDelegate {
     private var panel: KeyableFloatingPanel!
     private var hostingView: NSHostingView<ClipboardPopoverView>!
+    private weak var activeGlassView: AnyObject?
     private let nav = PanelNavigationModel()
     private let store = ClipboardStore.shared
     private var rootView: ClipboardPopoverView!
@@ -81,9 +82,19 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     private func observeSurfaceStyle() {
         store.$surfaceStyle
             .dropFirst()
+            .removeDuplicates()
             .receive(on: RunLoop.main)
             .sink { [weak self] newStyle in
                 self?.applyNativeSurface(style: newStyle)
+            }
+            .store(in: &cancellables)
+
+        // 液态蒙版风格与浓度变化时，仅原地更新 NSGlassEffectView 属性，零视图重建、零性能抖动
+        Publishers.CombineLatest(store.$liquidGlassAppearance, store.$liquidGlassMaskOpacity)
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] appearance, opacity in
+                self?.updateLiquidGlassInPlace(appearance: appearance, maskOpacity: opacity)
             }
             .store(in: &cancellables)
     }
@@ -96,23 +107,45 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         hostingView.autoresizingMask = [.width, .height]
 
         switch style {
-        case .liquidGlass, .clearGlass:
+        case .liquidGlass:
             if #available(macOS 26.0, *) {
                 let glassView = NSGlassEffectView(frame: bounds)
                 glassView.autoresizingMask = [.width, .height]
-                glassView.style = (style == .clearGlass) ? .clear : .regular
                 glassView.cornerRadius = cornerRadius
-                glassView.tintColor = nil
+                applyGlassParameters(to: glassView, appearance: store.liquidGlassAppearance, maskOpacity: store.liquidGlassMaskOpacity)
                 glassView.contentView = hostingView
+                activeGlassView = glassView
                 panel.contentView = glassView
                 panel.invalidateShadow()
                 return
             }
-            // macOS 26 以下优雅降级为系统毛玻璃
-            installVisualEffectSurface(material: style == .clearGlass ? .underWindowBackground : .popover, bounds: bounds)
+            activeGlassView = nil
+            installVisualEffectSurface(material: .popover, bounds: bounds)
 
         case .frosted:
+            activeGlassView = nil
             installVisualEffectSurface(material: .popover, bounds: bounds)
+        }
+    }
+
+    /// 零重建原地热更新苹果官方 NSGlassEffectView 蒙版风格与浓度
+    private func updateLiquidGlassInPlace(appearance: LiquidGlassAppearance, maskOpacity: Double) {
+        guard store.surfaceStyle == .liquidGlass else { return }
+        if #available(macOS 26.0, *), let glassView = activeGlassView as? NSGlassEffectView {
+            applyGlassParameters(to: glassView, appearance: appearance, maskOpacity: maskOpacity)
+        }
+    }
+
+    @available(macOS 26.0, *)
+    private func applyGlassParameters(to glassView: NSGlassEffectView, appearance: LiquidGlassAppearance, maskOpacity: Double) {
+        glassView.style = (appearance == .clear) ? .clear : .regular
+        let clamped = min(max(maskOpacity, 0.0), 1.0)
+        if clamped <= 0.01 {
+            glassView.tintColor = nil
+        } else {
+            // 自适应系统浅/深外观的原生着色蒙版，由 WindowServer 硬件单遍合成
+            let alpha = CGFloat(clamped * 0.72)
+            glassView.tintColor = NSColor.windowBackgroundColor.withAlphaComponent(alpha)
         }
     }
 

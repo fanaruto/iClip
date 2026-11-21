@@ -561,12 +561,12 @@ struct ClipboardPopoverView: View {
     private var settingsView: some View {
         ScrollView(.vertical, showsIndicators: false) {
             VStack(spacing: 14) {
-                // 外观材质分组（苹果官方液态玻璃 / 毛玻璃 / 纯净无边框）
+                // 外观材质分组（苹果官方液态玻璃 / 毛玻璃，支持官方透明/着色档位与蒙版浓度无级调节）
                 settingsGroup(title: "外观与边缘材质") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("窗口材质（采用苹果官方原生渲染）")
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
+                    HStack {
+                        Text("窗口材质")
+                            .font(.system(size: 13.5, weight: .medium))
+                        Spacer()
                         Picker("", selection: $store.surfaceStyle) {
                             ForEach(PanelSurfaceStyle.allCases) { style in
                                 Text(style.title).tag(style)
@@ -574,6 +574,44 @@ struct ClipboardPopoverView: View {
                         }
                         .pickerStyle(.segmented)
                         .labelsHidden()
+                        .frame(width: 176)
+                    }
+
+                    if store.surfaceStyle == .liquidGlass {
+                        Divider().opacity(0.35)
+
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("液态风格")
+                                    .font(.system(size: 13.5, weight: .medium))
+                                Text("对应系统 Liquid Glass 透明 / 着色官方样式")
+                                    .font(.system(size: 11.5))
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Picker("", selection: $store.liquidGlassAppearance) {
+                                ForEach(LiquidGlassAppearance.allCases) { mode in
+                                    Text(mode.title).tag(mode)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            .labelsHidden()
+                            .frame(width: 128)
+                        }
+
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Text("液态蒙版浓度")
+                                    .font(.system(size: 13, weight: .medium))
+                                Spacer()
+                                Text("\(Int(round(store.liquidGlassMaskOpacity * 100)))%")
+                                    .font(.system(size: 12, weight: .medium))
+                                    .monospacedDigit()
+                                    .foregroundStyle(.secondary)
+                            }
+                            Slider(value: $store.liquidGlassMaskOpacity, in: 0.0...1.0)
+                                .controlSize(.small)
+                        }
                     }
 
                     Divider().opacity(0.35)
