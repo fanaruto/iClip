@@ -103,7 +103,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         installKeyMonitor()
     }
 
-    /// 隐藏面板（向上微仰收起）
+    /// 隐藏面板（向上微仰收起，并立即交还焦点给原应用以加速粘贴）
     func hide(restoreFocus: Bool) {
         guard panel.isVisible else { return }
         removeKeyMonitor()
@@ -112,13 +112,15 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         let appToRestore = restoreFocus ? previousApp : nil
         nav.isPresented = false
 
+        // 立刻交还焦点，让收起动画与自动粘贴并行，消除体感延迟
+        if let app = appToRestore {
+            app.activate()
+        }
+
         let work = DispatchWorkItem { [weak self] in
             Task { @MainActor [weak self] in
                 guard let self = self, !self.nav.isPresented else { return }
                 self.panel.orderOut(nil)
-                if let app = appToRestore {
-                    app.activate()
-                }
             }
         }
         hideWorkItem = work

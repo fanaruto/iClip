@@ -9,6 +9,7 @@ final class ClipboardStore: ObservableObject {
     static let shared = ClipboardStore()
 
     @Published private(set) var items: [ClipItem] = []
+    @Published private(set) var isAccessibilityGranted: Bool = false
     @Published var isPaused: Bool = false
     @Published var autoPasteEnabled: Bool {
         didSet { UserDefaults.standard.set(autoPasteEnabled, forKey: "autoPasteEnabled") }
@@ -43,9 +44,20 @@ final class ClipboardStore: ObservableObject {
         let savedMax = UserDefaults.standard.integer(forKey: "maxHistoryCount")
         self.maxHistoryCount = savedMax > 0 ? savedMax : 200
         self.lastChangeCount = pasteboard.changeCount
+        self.isAccessibilityGranted = AXIsProcessTrusted()
 
         thumbnailCache.countLimit = 120
         previewCache.countLimit = 24
+
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.refreshAccessibilityStatus()
+            }
+        }
 
         ensureDirectories()
         loadHistory()
@@ -109,6 +121,8 @@ final class ClipboardStore: ObservableObject {
     }
 
     private func checkPasteboard() {
+        refreshAccessibilityStatus()
+
         guard !isPaused else {
             lastChangeCount = pasteboard.changeCount
             return
@@ -253,10 +267,9 @@ final class ClipboardStore: ObservableObject {
 
         onBeforePaste?()
 
-        if shouldAutoPaste && autoPasteEnabled && hasAccessibilityPermission() {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
-                Self.simulateCommandV()
-            }
+        refreshAccessibilityStatus()
+        if shouldAutoPaste && autoPasteEnabled && isAccessibilityGranted {
+            Self.schedulePasteWhenTargetReady()
         } else {
             showToast(plainTextOnly ? "已复制纯文本" : "已复制到剪贴板")
         }
@@ -442,6 +455,32 @@ final class ClipboardStore: ObservableObject {
 
     func hasAccessibilityPermission() -> Bool {
         AXIsProcessTrusted()
+    }
+
+    func refreshAccessibilityStatus() {
+        let trusted = AXIsProcessTrusted()
+        if trusted != isAccessibilityGranted {
+            isAccessibilityGranted = trusted
+        }
+    }
+
+    /// 面板收起后尽快检测原应用恢复前台焦点，立即触发 ⌘V，消除固定长延迟
+    private static func schedulePasteWhenTargetReady(attempt: Int = 0) {
+        let ownPID = ProcessInfo.processInfo.processIdentifier
+        let frontPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        if frontPID != nil && frontPID != ownPID {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
+                simulateCommandV()
+            }
+            return
+        }
+        if attempt >= 10 {
+            simulateCommandV()
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.025) {
+            schedulePasteWhenTargetReady(attempt: attempt + 1)
+        }
     }
 
     func requestAccessibilityPermission() {

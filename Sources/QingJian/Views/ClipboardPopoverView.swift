@@ -25,6 +25,7 @@ final class PanelNavigationModel: ObservableObject {
 struct ClipboardPopoverView: View {
     @ObservedObject var store: ClipboardStore
     @ObservedObject var nav: PanelNavigationModel
+    @ObservedObject private var updater = UpdateManager.shared
     let onDismiss: () -> Void
     let onQuit: () -> Void
 
@@ -185,8 +186,11 @@ struct ClipboardPopoverView: View {
             nav.selectedIndex = 0
             hoveredImageItem = nil
         }
-        .onChange(of: nav.showSettings) { _, _ in
+        .onChange(of: nav.showSettings) { _, showing in
             hoveredImageItem = nil
+            if showing {
+                store.refreshAccessibilityStatus()
+            }
         }
     }
 
@@ -266,18 +270,29 @@ struct ClipboardPopoverView: View {
                 .buttonStyle(.plain)
                 .help(store.isPaused ? "点击恢复记录" : "暂停记录剪贴板")
 
-                // 设置按钮
+                // 设置按钮（有 GitHub 新版本时右上角展示蓝点提示）
                 Button {
+                    store.refreshAccessibilityStatus()
                     nav.showSettings = true
                 } label: {
-                    Image(systemName: "gearshape")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 32, height: 32)
-                        .background(Circle().fill(Color.primary.opacity(0.06)))
+                    ZStack(alignment: .topTrailing) {
+                        Image(systemName: "gearshape")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 32, height: 32)
+                            .background(Circle().fill(Color.primary.opacity(0.06)))
+
+                        if updater.hasUpdateAvailable {
+                            Circle()
+                                .fill(Color.accentColor)
+                                .frame(width: 8, height: 8)
+                                .overlay(Circle().stroke(Color.white, lineWidth: 1.2))
+                                .offset(x: -1, y: 1)
+                        }
+                    }
                 }
                 .buttonStyle(.plain)
-                .help("偏好设置")
+                .help(updater.hasUpdateAvailable ? "发现新版本，点击进入设置更新" : "偏好设置")
             }
         }
     }
@@ -551,20 +566,37 @@ struct ClipboardPopoverView: View {
 
                     Divider().opacity(0.4)
 
-                    HStack {
+                    HStack(spacing: 8) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("辅助功能权限")
                                 .font(.system(size: 13.5, weight: .medium, design: .rounded))
-                            Text(store.hasAccessibilityPermission() ? "已授权，支持一键直接粘贴" : "未授权，当前仅复制到剪贴板")
+                            Text(store.isAccessibilityGranted ? "已授权，支持一键直接粘贴" : "未授权，当前仅复制到剪贴板")
                                 .font(.system(size: 11.5))
-                                .foregroundStyle(store.hasAccessibilityPermission() ? .green : .orange)
+                                .foregroundStyle(store.isAccessibilityGranted ? .green : .orange)
                         }
                         Spacer()
-                        if store.hasAccessibilityPermission() {
+                        if store.isAccessibilityGranted {
                             Image(systemName: "checkmark.circle.fill")
                                 .foregroundStyle(.green)
                                 .font(.system(size: 17))
                         } else {
+                            Button {
+                                store.refreshAccessibilityStatus()
+                                if store.isAccessibilityGranted {
+                                    store.showToast("已检测到辅助功能授权")
+                                } else {
+                                    store.showToast("仍未生效：若已勾选旧版，请减号移除后重勾")
+                                }
+                            } label: {
+                                Image(systemName: "arrow.clockwise")
+                                    .font(.system(size: 11.5, weight: .semibold))
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 24, height: 24)
+                                    .background(Circle().fill(Color.primary.opacity(0.07)))
+                            }
+                            .buttonStyle(.plain)
+                            .help("立即重新检测权限状态")
+
                             Button("前往开启") {
                                 store.requestAccessibilityPermission()
                                 store.openAccessibilitySettings()
@@ -573,6 +605,11 @@ struct ClipboardPopoverView: View {
                             .controlSize(.small)
                         }
                     }
+                }
+
+                // 软件更新分组（GitHub Releases OTA）
+                settingsGroup(title: "软件更新（GitHub OTA）") {
+                    updateSectionContent
                 }
 
                 // 存储分组
@@ -671,6 +708,141 @@ struct ClipboardPopoverView: View {
                 .padding(.vertical, 3)
                 .background(Capsule().fill(Color.primary.opacity(0.07)))
         }
+    }
+
+    @ViewBuilder
+    private var updateSectionContent: some View {
+        switch updater.state {
+        case .idle:
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("当前版本 v\(updater.currentVersion)")
+                        .font(.system(size: 13.5, weight: .medium, design: .rounded))
+                    Text("直接从 GitHub Releases 下载新包并自动重启更新")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("检查更新") {
+                    updater.checkForUpdates(silent: false)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+
+        case .checking:
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("正在从 GitHub 检查新版本...")
+                    .font(.system(size: 12.5, design: .rounded))
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+
+        case .upToDate(let latest):
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("已是最新版本（v\(updater.currentVersion)）")
+                        .font(.system(size: 13.5, weight: .medium, design: .rounded))
+                    Text("GitHub 最新版本 v\(latest)")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.green)
+                }
+                Spacer()
+                Button("重新检查") {
+                    updater.checkForUpdates(silent: false)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+
+        case .available(let info):
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("发现新版本 v\(info.version)")
+                            .font(.system(size: 13.5, weight: .semibold, design: .rounded))
+                            .foregroundStyle(Color.accentColor)
+                        Text("当前 v\(updater.currentVersion) · 包体约 \(Self.formatBytes(info.assetSize))")
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("立即 OTA 更新") {
+                        updater.startOTAUpdate()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                }
+                if !info.notes.isEmpty {
+                    Text(info.notes)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(3)
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.primary.opacity(0.05)))
+                }
+            }
+
+        case .downloading(let progress, let info):
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("正在下载 v\(info.version)...")
+                        .font(.system(size: 12.5, weight: .medium, design: .rounded))
+                    Spacer()
+                    Text("\(Int(progress * 100))%")
+                        .font(.system(size: 11.5, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                    Button("取消") {
+                        updater.cancelDownload()
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.red)
+                }
+                ProgressView(value: progress)
+                    .progressViewStyle(.linear)
+            }
+
+        case .installing(let info):
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("正在安装 v\(info.version) 并自动重启...")
+                    .font(.system(size: 12.5, weight: .medium, design: .rounded))
+                    .foregroundStyle(Color.accentColor)
+                Spacer()
+            }
+
+        case .failed(let message):
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("更新检查未完成")
+                        .font(.system(size: 13, weight: .medium, design: .rounded))
+                    Text(message)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.orange)
+                        .lineLimit(2)
+                }
+                Spacer()
+                Button("重试") {
+                    updater.checkForUpdates(silent: false)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+        }
+    }
+
+    private static func formatBytes(_ bytes: Int64) -> String {
+        let mb = Double(bytes) / (1024.0 * 1024.0)
+        if mb >= 1.0 {
+            return String(format: "%.1f MB", mb)
+        }
+        return "\(max(1, bytes / 1024)) KB"
     }
 
     // MARK: - 轻提示胶囊

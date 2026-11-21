@@ -21,6 +21,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
             self?.showFromStatusItem()
         }
+
+        // 后台静默检查一次 GitHub Releases 更新
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+            UpdateManager.shared.checkForUpdates(silent: true)
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -93,6 +98,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         clearItem.target = self
         menu.addItem(clearItem)
 
+        let updateItem = NSMenuItem(title: "检查 GitHub 更新...", action: #selector(menuCheckUpdate), keyEquivalent: "")
+        updateItem.target = self
+        menu.addItem(updateItem)
+
         menu.addItem(.separator())
 
         let quitItem = NSMenuItem(title: "退出轻剪", action: #selector(menuQuit), keyEquivalent: "q")
@@ -114,6 +123,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func menuClearHistory() {
         ClipboardStore.shared.clearUnpinned()
+    }
+
+    @objc private func menuCheckUpdate() {
+        showFromStatusItem()
+        UpdateManager.shared.checkForUpdates(silent: false)
     }
 
     @objc private func menuQuit() {
