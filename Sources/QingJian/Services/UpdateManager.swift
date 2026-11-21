@@ -29,8 +29,8 @@ final class UpdateManager: NSObject, ObservableObject {
     @Published private(set) var state: State = .idle
 
     private let repoOwner = "fanaruto"
-    private let repoName = "qingjian"
-    private let expectedAssetName = "QingJian-macOS.zip"
+    private let repoName = "iClip"
+    private let expectedAssetName = "iClip-macOS.zip"
 
     private var activeDownloadTask: URLSessionDownloadTask?
     private var activeSession: URLSession?
@@ -187,7 +187,8 @@ final class UpdateManager: NSObject, ObservableObject {
                 let extractedApps = (try? fm.contentsOfDirectory(at: extractDir, includingPropertiesForKeys: nil))?
                     .filter { $0.pathExtension == "app" } ?? []
                 guard let newAppURL = extractedApps.first,
-                      fm.isExecutableFile(atPath: newAppURL.appendingPathComponent("Contents/MacOS/QingJian").path) else {
+                      (fm.isExecutableFile(atPath: newAppURL.appendingPathComponent("Contents/MacOS/QingJian").path)
+                       || fm.isExecutableFile(atPath: newAppURL.appendingPathComponent("Contents/MacOS/iClip").path)) else {
                     throw OTAError.invalidAppBundle
                 }
 

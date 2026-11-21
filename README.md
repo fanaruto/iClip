@@ -1,4 +1,4 @@
-# iClip（轻剪）
+# iClip
 
 > 只有 **1.2 MB**、零第三方依赖、采用苹果 macOS 原生液态玻璃（Liquid Glass）打造的轻量菜单栏剪贴板。
 
@@ -8,7 +8,7 @@
   <img src="assets/demo.gif" alt="iClip 实机运行演示：苹果原生液态玻璃、图片 3 列网格悬停放大与设置页" width="420" />
 </p>
 
-> 📥 **开箱即用**：可直接前往 [GitHub Releases](https://github.com/fanaruto/qingjian/releases/latest) 下载预编译 `QingJian-macOS.zip` 解压运行，后续更新支持应用内一键 GitHub OTA 自动升级。
+> 📥 **开箱即用**：可直接前往 [GitHub Releases](https://github.com/fanaruto/iClip/releases/latest) 下载预编译 `iClip-macOS.zip` 解压运行，后续更新支持应用内一键 GitHub OTA 自动升级。
 
 ---
 
@@ -60,17 +60,17 @@
 
 ```zsh
 # 1. 克隆仓库
-git clone https://github.com/fanaruto/qingjian
-cd QingJian
+git clone https://github.com/fanaruto/iClip.git
+cd iClip
 
 # 2. 一键编译并打包成应用（产物仅约 1.2 MB）
 ./build_app.sh
 
 # 3. 启动体验
-open dist/轻剪.app
+open dist/iClip.app
 ```
 
-- **长期使用**：将 `dist/轻剪.app` 拖入「应用程序」文件夹即可。
+- **长期使用**：将 `dist/iClip.app` 拖入「应用程序」文件夹即可。
 - **开启自动粘贴**：首次使用点击条目会写入系统剪贴板；如需选中后自动发送 `⌘V` 直接粘贴，在面板右上角 **齿轮设置 → 辅助功能权限 → 前往开启** 即可。
 
 ---

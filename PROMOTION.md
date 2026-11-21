@@ -1,6 +1,6 @@
 # 「轻剪」开源发布与传播文案
 
-> 使用提示：将文案中的 `https://github.com/fanaruto/qingjian` 替换为你的开源地址；配一条 **8～12 秒竖屏/居中录屏**（展示：连续截 3 张图 → 按 `⌥V` 顶部 3D 瀑布滑落 → 鼠标扫过图片网格自动避让放大预览 → 单击秒贴），转化率最高。
+> 使用提示：将文案中的 `https://github.com/fanaruto/iClip` 替换为你的开源地址；配一条 **8～12 秒竖屏/居中录屏**（展示：连续截 3 张图 → 按 `⌥V` 顶部 3D 瀑布滑落 → 鼠标扫过图片网格自动避让放大预览 → 单击秒贴），转化率最高。
 
 ---
 
@@ -16,7 +16,7 @@
 - 文本、链接、图片、文件全支持，自动避开密码管理器，完全离线无联网
 
 已完全开源，欢迎来玩，顺手给个星标👇
-https://github.com/fanaruto/qingjian
+https://github.com/fanaruto/iClip
 
 #独立开发 #开源 #效率工具 #设计审美
 
@@ -41,7 +41,7 @@ https://github.com/fanaruto/qingjian
 项目完全离线运行，不联网、不收集任何数据，源码不到一千行，克隆下来一行脚本就能打包成原生应用直接用。
 
 仓库地址放这里，欢迎大家试用提建议，喜欢的话点个星标支持一下：
-https://github.com/fanaruto/qingjian
+https://github.com/fanaruto/iClip
 
 ---
 
@@ -86,12 +86,12 @@ https://github.com/fanaruto/qingjian
 项目已基于 **MIT 协议** 开源，克隆后运行一行打包脚本即可生成原生应用：
 
 ```zsh
-git clone https://github.com/fanaruto/qingjian
+git clone https://github.com/fanaruto/iClip
 cd QingJian
 ./build_app.sh
 open dist/轻剪.app
 ```
 
-**开源地址**：https://github.com/fanaruto/qingjian
+**开源地址**：https://github.com/fanaruto/iClip
 
 如果你也是效率工具控、或者同样对原生交互手感有执念，欢迎下载体验！目前版本刚刚成型，**你最希望剪贴板增加哪个小功能？** 欢迎在评论区留言，合适的话我会直接迭代进去。
