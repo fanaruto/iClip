@@ -140,33 +140,13 @@ struct ClipboardPopoverView: View {
             }
         }
         .frame(width: 420, height: 560)
-        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .background {
-            OfficialPanelSurface(style: store.surfaceStyle, cornerRadius: 22)
-        }
         .overlay {
             if !store.borderlessPanel {
                 RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .strokeBorder(
-                        LinearGradient(
-                            colors: [
-                                Color.white.opacity(nav.isPresented ? 0.36 : 0.04),
-                                Color.white.opacity(0.12),
-                                Color.white.opacity(0.05)
-                            ],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        ),
-                        lineWidth: 0.85
-                    )
+                    .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5)
             }
         }
-        .shadow(
-            color: Color.black.opacity(nav.isPresented ? (store.surfaceStyle == .frosted ? 0.24 : 0.16) : 0.0),
-            radius: nav.isPresented ? 24 : 4,
-            y: nav.isPresented ? 12 : 0
-        )
-        // 纯净原图放大预览浮层：置于外层裁切之外，柔和投影与连续圆角自然舒展不被截断
+        // 纯净原图放大预览浮层
         .overlay {
             ImageHoverPreviewLayer(
                 item: previewItem,
@@ -176,28 +156,6 @@ struct ClipboardPopoverView: View {
             )
         }
         .coordinateSpace(name: "panelRoot")
-        // 从鼠标光标旁带 3D 透视与方向感弹性展开
-        .scaleEffect(nav.isPresented ? 1.0 : 0.9, anchor: nav.appearAnchor)
-        .rotation3DEffect(
-            .degrees(nav.isPresented ? 0 : -9),
-            axis: (x: 1, y: 0, z: 0),
-            anchor: nav.appearAnchor,
-            perspective: 0.6
-        )
-        .offset(
-            x: nav.isPresented ? 0 : nav.appearOffsetX,
-            y: nav.isPresented ? 0 : nav.appearOffsetY
-        )
-        .opacity(nav.isPresented ? 1 : 0)
-        .blur(radius: nav.isPresented ? 0 : 3.0)
-        .padding(24)
-        .frame(width: 468, height: 608)
-        .animation(
-            nav.isPresented
-                ? .spring(response: 0.42, dampingFraction: 0.78)
-                : .spring(response: 0.2, dampingFraction: 0.92),
-            value: nav.isPresented
-        )
         .animation(.spring(response: 0.28, dampingFraction: 0.86), value: nav.showSettings)
         .animation(.spring(response: 0.25, dampingFraction: 0.85), value: store.toastMessage)
         .onChange(of: nav.isPresented) { _, presented in
@@ -237,27 +195,27 @@ struct ClipboardPopoverView: View {
                 Button {
                     nav.showSettings = false
                 } label: {
-                    HStack(spacing: 4) {
+                    HStack(spacing: 3) {
                         Image(systemName: "chevron.left")
                             .font(.system(size: 13, weight: .semibold))
                         Text("返回")
-                            .font(.system(size: 13.5, weight: .medium, design: .rounded))
+                            .font(.system(size: 13.5, weight: .medium))
                     }
                     .foregroundStyle(Color.accentColor)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 7)
-                    .background(Capsule().fill(Color.accentColor.opacity(0.12)))
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 6)
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
 
                 Spacer()
 
                 Text("iClip 设置")
-                    .font(.system(size: 14.5, weight: .semibold, design: .rounded))
+                    .font(.system(size: 14, weight: .semibold))
 
                 Spacer()
 
-                Color.clear.frame(width: 60, height: 1)
+                Color.clear.frame(width: 48, height: 1)
             } else {
                 HStack(spacing: 7) {
                     Image(systemName: "magnifyingglass")
@@ -266,7 +224,7 @@ struct ClipboardPopoverView: View {
 
                     TextField("搜索剪贴历史...", text: $nav.searchText)
                         .textFieldStyle(.plain)
-                        .font(.system(size: 13.5, design: .rounded))
+                        .font(.system(size: 13.5))
                         .focused($isSearchFocused)
 
                     if !nav.searchText.isEmpty {
@@ -346,7 +304,7 @@ struct ClipboardPopoverView: View {
                     }
                 } label: {
                     Text(tab.title)
-                        .font(.system(size: 12, weight: isSelected ? .semibold : .medium, design: .rounded))
+                        .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
                         .foregroundStyle(isSelected ? Color.primary : Color.secondary)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 5.5)
@@ -511,7 +469,7 @@ struct ClipboardPopoverView: View {
                     .foregroundStyle(.secondary)
             }
             Text(nav.searchText.isEmpty ? "暂无剪贴记录" : "未找到匹配的内容")
-                .font(.system(size: 14, weight: .medium, design: .rounded))
+                .font(.system(size: 14, weight: .medium))
                 .foregroundStyle(.primary.opacity(0.8))
             Text(nav.searchText.isEmpty ? "复制文本、链接、图片或文件后将自动出现在这里" : "试试更换关键词或切换上方分类")
                 .font(.system(size: 12))
@@ -531,7 +489,7 @@ struct ClipboardPopoverView: View {
                     .fill(store.isPaused ? Color.orange : Color.green)
                     .frame(width: 6.5, height: 6.5)
                 Text("\(filteredItems.count) 条记录")
-                    .font(.system(size: 11.5, weight: .medium, design: .rounded))
+                    .font(.system(size: 11.5, weight: .medium))
                     .foregroundStyle(.secondary)
             }
 
@@ -565,7 +523,7 @@ struct ClipboardPopoverView: View {
     private func keyHint(_ key: String, _ label: String) -> some View {
         HStack(spacing: 3) {
             Text(key)
-                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                .font(.system(size: 10, weight: .semibold))
                 .padding(.horizontal, 5)
                 .padding(.vertical, 1.5)
                 .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(Color.primary.opacity(0.08)))
@@ -600,7 +558,7 @@ struct ClipboardPopoverView: View {
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("纯净无边框")
-                                .font(.system(size: 13.5, weight: .medium, design: .rounded))
+                                .font(.system(size: 13.5, weight: .medium))
                             Text("去除外框与卡片描边，只保留纯粹玻璃质感")
                                 .font(.system(size: 11.5))
                                 .foregroundStyle(.secondary)
@@ -617,7 +575,7 @@ struct ClipboardPopoverView: View {
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("双击直接键入光标处")
-                                .font(.system(size: 13.5, weight: .medium, design: .rounded))
+                                .font(.system(size: 13.5, weight: .medium))
                             Text("双击卡片或按回车后自动键入当前应用光标所在位置")
                                 .font(.system(size: 11.5))
                                 .foregroundStyle(.secondary)
@@ -633,7 +591,7 @@ struct ClipboardPopoverView: View {
                     HStack(spacing: 8) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("辅助功能权限")
-                                .font(.system(size: 13.5, weight: .medium, design: .rounded))
+                                .font(.system(size: 13.5, weight: .medium))
                             Text(store.isAccessibilityGranted ? "已授权，支持一键直接粘贴" : "未授权，当前仅复制到剪贴板")
                                 .font(.system(size: 11.5))
                                 .foregroundStyle(store.isAccessibilityGranted ? .green : .orange)
@@ -711,11 +669,11 @@ struct ClipboardPopoverView: View {
                         nav.showSettings = false
                     } label: {
                         Text("清空未固定历史")
-                            .font(.system(size: 13, weight: .medium, design: .rounded))
+                            .font(.system(size: 13, weight: .medium))
                             .frame(maxWidth: .infinity)
-                            .padding(.vertical, 9)
-                            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.orange.opacity(0.14)))
-                            .foregroundStyle(.orange)
+                            .padding(.vertical, 8)
+                            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.primary.opacity(0.06)))
+                            .foregroundStyle(.primary.opacity(0.85))
                     }
                     .buttonStyle(.plain)
 
@@ -723,16 +681,18 @@ struct ClipboardPopoverView: View {
                         onQuit()
                     } label: {
                         Text("退出 iClip")
-                            .font(.system(size: 13, weight: .medium, design: .rounded))
+                            .font(.system(size: 13, weight: .medium))
                             .frame(maxWidth: .infinity)
-                            .padding(.vertical, 9)
-                            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.red.opacity(0.14)))
+                            .padding(.vertical, 8)
+                            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.red.opacity(0.10)))
                             .foregroundStyle(.red)
                     }
                     .buttonStyle(.plain)
                 }
             }
-            .padding(14)
+            .padding(.horizontal, 14)
+            .padding(.top, 4)
+            .padding(.bottom, 16)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -740,9 +700,9 @@ struct ClipboardPopoverView: View {
     private func settingsGroup<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title)
-                .font(.system(size: 11.5, weight: .semibold, design: .rounded))
+                .font(.system(size: 11.5, weight: .medium))
                 .foregroundStyle(.secondary)
-                .padding(.leading, 6)
+                .padding(.leading, 8)
 
             VStack(alignment: .leading, spacing: 10) {
                 content()
@@ -750,29 +710,19 @@ struct ClipboardPopoverView: View {
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(
-                        store.surfaceStyle == .frosted
-                            ? Color(nsColor: .controlBackgroundColor).opacity(0.55)
-                            : Color.primary.opacity(0.055)
-                    )
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color.primary.opacity(0.045))
             )
-            .overlay {
-                if !store.borderlessPanel {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .strokeBorder(Color.primary.opacity(0.06), lineWidth: 0.75)
-                }
-            }
         }
     }
 
     private func shortcutRow(_ title: String, _ shortcut: String) -> some View {
         HStack {
             Text(title)
-                .font(.system(size: 13, design: .rounded))
+                .font(.system(size: 13))
             Spacer()
             Text(shortcut)
-                .font(.system(size: 11.5, weight: .semibold, design: .rounded))
+                .font(.system(size: 11.5, weight: .semibold))
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 3)
@@ -787,7 +737,7 @@ struct ClipboardPopoverView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("当前版本 v\(updater.currentVersion)")
-                        .font(.system(size: 13.5, weight: .medium, design: .rounded))
+                        .font(.system(size: 13.5, weight: .medium))
                     Text("直接从 GitHub Releases 下载新包并自动重启更新")
                         .font(.system(size: 11.5))
                         .foregroundStyle(.secondary)
@@ -805,7 +755,7 @@ struct ClipboardPopoverView: View {
                 ProgressView()
                     .controlSize(.small)
                 Text("正在从 GitHub 检查新版本...")
-                    .font(.system(size: 12.5, design: .rounded))
+                    .font(.system(size: 12.5))
                     .foregroundStyle(.secondary)
                 Spacer()
             }
@@ -814,7 +764,7 @@ struct ClipboardPopoverView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("已是最新版本（v\(updater.currentVersion)）")
-                        .font(.system(size: 13.5, weight: .medium, design: .rounded))
+                        .font(.system(size: 13.5, weight: .medium))
                     Text("GitHub 最新版本 v\(latest)")
                         .font(.system(size: 11.5))
                         .foregroundStyle(.green)
@@ -832,7 +782,7 @@ struct ClipboardPopoverView: View {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("发现新版本 v\(info.version)")
-                            .font(.system(size: 13.5, weight: .semibold, design: .rounded))
+                            .font(.system(size: 13.5, weight: .semibold))
                             .foregroundStyle(Color.accentColor)
                         Text("当前 v\(updater.currentVersion) · 包体约 \(Self.formatBytes(info.assetSize))")
                             .font(.system(size: 11.5))
@@ -860,10 +810,10 @@ struct ClipboardPopoverView: View {
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
                     Text("正在下载 v\(info.version)...")
-                        .font(.system(size: 12.5, weight: .medium, design: .rounded))
+                        .font(.system(size: 12.5, weight: .medium))
                     Spacer()
                     Text("\(Int(progress * 100))%")
-                        .font(.system(size: 11.5, weight: .semibold, design: .rounded))
+                        .font(.system(size: 11.5, weight: .semibold))
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                     Button("取消") {
@@ -882,7 +832,7 @@ struct ClipboardPopoverView: View {
                 ProgressView()
                     .controlSize(.small)
                 Text("正在安装 v\(info.version) 并自动重启...")
-                    .font(.system(size: 12.5, weight: .medium, design: .rounded))
+                    .font(.system(size: 12.5, weight: .medium))
                     .foregroundStyle(Color.accentColor)
                 Spacer()
             }
@@ -891,7 +841,7 @@ struct ClipboardPopoverView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("更新检查未完成")
-                        .font(.system(size: 13, weight: .medium, design: .rounded))
+                        .font(.system(size: 13, weight: .medium))
                     Text(message)
                         .font(.system(size: 11.5))
                         .foregroundStyle(.orange)
@@ -919,7 +869,7 @@ struct ClipboardPopoverView: View {
 
     private func toastPill(_ message: String) -> some View {
         Text(message)
-            .font(.system(size: 12.5, weight: .medium, design: .rounded))
+            .font(.system(size: 12.5, weight: .medium))
             .foregroundStyle(.white)
             .padding(.horizontal, 14)
             .padding(.vertical, 7)
@@ -1064,77 +1014,5 @@ private struct CascadeAppearModifier: ViewModifier {
 private extension View {
     func cascadeAppear(isPresented: Bool, delay: Double) -> some View {
         modifier(CascadeAppearModifier(isPresented: isPresented, delay: delay))
-    }
-}
-
-/// 苹果官方原生材质背景（macOS 26+ 使用原装 NSGlassEffectView 液态玻璃，支持毛玻璃切换）
-struct OfficialPanelSurface: View {
-    let style: PanelSurfaceStyle
-    let cornerRadius: CGFloat
-
-    var body: some View {
-        switch style {
-        case .liquidGlass:
-            if #available(macOS 26.0, *) {
-                NativeLiquidGlassView(style: .regular, cornerRadius: cornerRadius)
-            } else {
-                VisualEffectBlur(material: .popover, blendingMode: .behindWindow, cornerRadius: cornerRadius)
-            }
-        case .clearGlass:
-            if #available(macOS 26.0, *) {
-                NativeLiquidGlassView(style: .clear, cornerRadius: cornerRadius)
-            } else {
-                VisualEffectBlur(material: .underWindowBackground, blendingMode: .behindWindow, cornerRadius: cornerRadius)
-            }
-        case .frosted:
-            VisualEffectBlur(material: .popover, blendingMode: .behindWindow, cornerRadius: cornerRadius)
-        }
-    }
-}
-
-/// 苹果 macOS 26+ 原装 NSGlassEffectView 封装
-@available(macOS 26.0, *)
-struct NativeLiquidGlassView: NSViewRepresentable {
-    let style: NSGlassEffectView.Style
-    let cornerRadius: CGFloat
-
-    func makeNSView(context: Context) -> NSGlassEffectView {
-        let view = NSGlassEffectView()
-        view.style = style
-        view.cornerRadius = cornerRadius
-        view.tintColor = nil
-        return view
-    }
-
-    func updateNSView(_ nsView: NSGlassEffectView, context: Context) {
-        nsView.style = style
-        nsView.cornerRadius = cornerRadius
-        nsView.tintColor = nil
-    }
-}
-
-/// 系统级原生毛玻璃背景封装
-struct VisualEffectBlur: NSViewRepresentable {
-    let material: NSVisualEffectView.Material
-    let blendingMode: NSVisualEffectView.BlendingMode
-    var cornerRadius: CGFloat = 22
-
-    func makeNSView(context: Context) -> NSVisualEffectView {
-        let view = NSVisualEffectView()
-        view.material = material
-        view.blendingMode = blendingMode
-        view.state = .active
-        view.wantsLayer = true
-        view.layer?.cornerRadius = cornerRadius
-        view.layer?.cornerCurve = .continuous
-        view.layer?.masksToBounds = true
-        return view
-    }
-
-    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
-        nsView.material = material
-        nsView.blendingMode = blendingMode
-        nsView.layer?.cornerRadius = cornerRadius
-        nsView.layer?.cornerCurve = .continuous
     }
 }

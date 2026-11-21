@@ -22,7 +22,7 @@ struct ClipCardView: View {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .top, spacing: 6) {
                     Text(item.primaryTitle)
-                        .font(.system(size: 13.5, weight: .medium, design: .rounded))
+                        .font(.system(size: 13.5, weight: .medium))
                         .foregroundStyle(isSelected ? Color.white : Color.primary)
                         .lineLimit(2)
                         .multilineTextAlignment(.leading)
@@ -116,7 +116,7 @@ struct ClipCardView: View {
                     .frame(width: 42, height: 42)
                 if let count = item.filePaths?.count, count > 1 {
                     Text("\(count)")
-                        .font(.system(size: 9.5, weight: .bold, design: .rounded))
+                        .font(.system(size: 9.5, weight: .bold))
                         .foregroundStyle(.white)
                         .padding(.horizontal, 5)
                         .padding(.vertical, 1.5)
@@ -149,7 +149,7 @@ struct ClipCardView: View {
 
     private var shortcutBadge: some View {
         Text("⌘\(index + 1)")
-            .font(.system(size: 10, weight: .semibold, design: .rounded))
+            .font(.system(size: 10, weight: .semibold))
             .foregroundStyle(isSelected ? Color.white.opacity(0.9) : Color.secondary.opacity(0.75))
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
