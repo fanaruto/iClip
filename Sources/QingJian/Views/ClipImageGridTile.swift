@@ -1,30 +1,31 @@
 import SwiftUI
 import AppKit
 
-/// iOS 相册风格的图片网格卡片（3 列一行排列，悬停弹性放大）
+/// iOS 相册风格的图片网格卡片（3 列一行排列，悬停克制微抬并弹出纯净原图预览）
 struct ClipImageGridTile: View {
     let item: ClipItem
     let index: Int
     let isSelected: Bool
     let onSelect: () -> Void
-    let onCopy: () -> Void
+    let onPaste: () -> Void
+    let onCopyOnly: () -> Void
     let onTogglePin: () -> Void
     let onDelete: () -> Void
-    let onHoverChange: (Bool, CGFloat) -> Void
+    let onHoverChange: (Bool, CGRect) -> Void
 
     @State private var isHovered: Bool = false
+    @State private var tileFrame: CGRect = .zero
     @ObservedObject private var store = ClipboardStore.shared
 
     var body: some View {
-        GeometryReader { geo in
-            let midY = geo.frame(in: .named("clipListArea")).midY
-
-            ZStack(alignment: .bottom) {
-                // 缩略图主体
-                Group {
+        ZStack(alignment: .bottom) {
+            // 缩略图主体（用 Color.clear + overlay 保持稳定网格布局，避免 GeometryReader 干扰）
+            Color.clear
+                .overlay {
                     if let nsImage = store.thumbnailImage(for: item) {
                         Image(nsImage: nsImage)
                             .resizable()
+                            .interpolation(.high)
                             .scaledToFill()
                     } else {
                         ZStack {
@@ -35,188 +36,290 @@ struct ClipImageGridTile: View {
                         }
                     }
                 }
-                .frame(width: geo.size.width, height: geo.size.height)
                 .clipped()
 
-                // 底部渐变信息条（像素尺寸 / 时间）
-                LinearGradient(
-                    colors: [Color.clear, Color.black.opacity(0.58)],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-                .frame(height: 34)
-                .allowsHitTesting(false)
-
-                HStack(spacing: 4) {
-                    if item.isPinned {
-                        Image(systemName: "pin.fill")
-                            .font(.system(size: 8.5, weight: .bold))
-                            .foregroundStyle(Color.orange)
-                    }
-                    if let w = item.imageWidth, let h = item.imageHeight {
-                        Text("\(w)×\(h)")
-                            .font(.system(size: 9.5, weight: .medium, design: .rounded))
-                            .monospacedDigit()
-                            .lineLimit(1)
-                    } else {
-                        Text(item.relativeTimeText)
-                            .font(.system(size: 9.5, weight: .medium, design: .rounded))
-                    }
-                    Spacer(minLength: 0)
-                }
-                .foregroundStyle(Color.white.opacity(0.92))
-                .padding(.horizontal, 7)
-                .padding(.bottom, 5)
-                .allowsHitTesting(false)
-            }
-            .overlay(alignment: .topLeading) {
-                if index < 9 {
-                    Text("⌘\(index + 1)")
-                        .font(.system(size: 9.5, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 5.5)
-                        .padding(.vertical, 2)
-                        .background(
-                            Capsule()
-                                .fill(isSelected ? Color(nsColor: .controlAccentColor) : Color.black.opacity(0.52))
-                        )
-                        .padding(6)
-                        .allowsHitTesting(false)
-                }
-            }
-            .overlay(alignment: .topTrailing) {
-                if isHovered {
-                    HStack(spacing: 4) {
-                        Button(action: onTogglePin) {
-                            Image(systemName: item.isPinned ? "pin.slash.fill" : "pin.fill")
-                                .font(.system(size: 9.5, weight: .semibold))
-                                .foregroundStyle(item.isPinned ? Color.orange : Color.white)
-                                .frame(width: 21, height: 21)
-                                .background(Circle().fill(Color.black.opacity(0.58)))
-                        }
-                        .buttonStyle(.plain)
-                        .help(item.isPinned ? "取消固定" : "固定到顶部")
-
-                        Button(action: onDelete) {
-                            Image(systemName: "trash.fill")
-                                .font(.system(size: 9.5, weight: .semibold))
-                                .foregroundStyle(Color.white)
-                                .frame(width: 21, height: 21)
-                                .background(Circle().fill(Color.red.opacity(0.82)))
-                        }
-                        .buttonStyle(.plain)
-                        .help("删除图片")
-                    }
-                    .padding(5)
-                    .transition(.opacity.combined(with: .scale(scale: 0.85)))
-                }
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 13, style: .continuous)
-                    .strokeBorder(
-                        isSelected
-                            ? Color(nsColor: .controlAccentColor)
-                            : (isHovered ? Color.white.opacity(0.65) : Color.primary.opacity(0.1)),
-                        lineWidth: isSelected ? 2.2 : (isHovered ? 1.2 : 0.75)
-                    )
+            // 底部渐变信息条（像素尺寸 / 时间）
+            LinearGradient(
+                colors: [Color.clear, Color.black.opacity(0.56)],
+                startPoint: .top,
+                endPoint: .bottom
             )
-            .shadow(
-                color: Color.black.opacity(isHovered ? 0.24 : (isSelected ? 0.16 : 0.06)),
-                radius: isHovered ? 12 : 4,
-                y: isHovered ? 5 : 2
-            )
-            .scaleEffect(isHovered ? 1.09 : 1.0)
-            .animation(.spring(response: 0.24, dampingFraction: 0.76), value: isHovered)
-            .animation(.spring(response: 0.2, dampingFraction: 0.82), value: isSelected)
-            .contentShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
-            .onHover { hovering in
-                isHovered = hovering
-                if hovering {
-                    onSelect()
+            .frame(height: 32)
+            .allowsHitTesting(false)
+
+            HStack(spacing: 4) {
+                if item.isPinned {
+                    Image(systemName: "pin.fill")
+                        .font(.system(size: 8.5, weight: .bold))
+                        .foregroundStyle(Color.orange)
                 }
-                onHoverChange(hovering, midY)
+                if let w = item.imageWidth, let h = item.imageHeight {
+                    Text("\(w)×\(h)")
+                        .font(.system(size: 9.5, weight: .medium, design: .rounded))
+                        .monospacedDigit()
+                        .lineLimit(1)
+                } else {
+                    Text(item.relativeTimeText)
+                        .font(.system(size: 9.5, weight: .medium, design: .rounded))
+                }
+                Spacer(minLength: 0)
             }
-            .onTapGesture {
-                onCopy()
-            }
-            .contextMenu {
-                Button("复制并粘贴") {
-                    onCopy()
-                }
-                Button(item.isPinned ? "取消固定" : "固定到顶部") {
-                    onTogglePin()
-                }
-                Divider()
-                Button("删除", role: .destructive) {
-                    onDelete()
-                }
-            }
+            .foregroundStyle(Color.white.opacity(0.92))
+            .padding(.horizontal, 7)
+            .padding(.bottom, 5)
+            .allowsHitTesting(false)
         }
         .frame(height: 98)
+        .overlay(alignment: .topLeading) {
+            if index < 9 {
+                Text("⌘\(index + 1)")
+                    .font(.system(size: 9.5, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 5.5)
+                    .padding(.vertical, 2)
+                    .background(
+                        Capsule()
+                            .fill(isSelected ? Color(nsColor: .controlAccentColor) : Color.black.opacity(0.52))
+                    )
+                    .padding(6)
+                    .allowsHitTesting(false)
+            }
+        }
+        .overlay(alignment: .topTrailing) {
+            if isHovered {
+                HStack(spacing: 4) {
+                    Button(action: onTogglePin) {
+                        Image(systemName: item.isPinned ? "pin.slash.fill" : "pin.fill")
+                            .font(.system(size: 9.5, weight: .semibold))
+                            .foregroundStyle(item.isPinned ? Color.orange : Color.white)
+                            .frame(width: 21, height: 21)
+                            .background(Circle().fill(Color.black.opacity(0.58)))
+                    }
+                    .buttonStyle(.plain)
+                    .help(item.isPinned ? "取消固定" : "固定到顶部")
+
+                    Button(action: onDelete) {
+                        Image(systemName: "trash.fill")
+                            .font(.system(size: 9.5, weight: .semibold))
+                            .foregroundStyle(Color.white)
+                            .frame(width: 21, height: 21)
+                            .background(Circle().fill(Color.red.opacity(0.82)))
+                    }
+                    .buttonStyle(.plain)
+                    .help("删除图片")
+                }
+                .padding(5)
+                .transition(.opacity.combined(with: .scale(scale: 0.88)))
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .strokeBorder(
+                    isSelected
+                        ? Color(nsColor: .controlAccentColor)
+                        : (isHovered ? Color.white.opacity(0.6) : Color.primary.opacity(0.1)),
+                    lineWidth: isSelected ? 2.0 : (isHovered ? 1.1 : 0.75)
+                )
+        )
+        .shadow(
+            color: Color.black.opacity(isHovered ? 0.18 : (isSelected ? 0.14 : 0.05)),
+            radius: isHovered ? 9 : 4,
+            y: isHovered ? 4 : 2
+        )
+        .scaleEffect(isHovered ? 1.03 : 1.0)
+        .animation(.spring(response: 0.22, dampingFraction: 0.9), value: isHovered)
+        .animation(.spring(response: 0.2, dampingFraction: 0.88), value: isSelected)
+        .contentShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+        .background {
+            GeometryReader { geo in
+                let frame = geo.frame(in: .named("panelRoot"))
+                Color.clear
+                    .onAppear {
+                        tileFrame = frame
+                    }
+                    .onChange(of: frame) { _, newFrame in
+                        tileFrame = newFrame
+                        if isHovered {
+                            onHoverChange(true, newFrame)
+                        }
+                    }
+            }
+        }
+        .onHover { hovering in
+            isHovered = hovering
+            if hovering {
+                onSelect()
+            }
+            onHoverChange(hovering, tileFrame)
+        }
+        .onTapGesture(count: 2) {
+            onPaste()
+        }
+        .onTapGesture(count: 1) {
+            onSelect()
+        }
+        .contextMenu {
+            Button("键入光标处（双击）") {
+                onPaste()
+            }
+            Button("仅复制到剪贴板") {
+                onCopyOnly()
+            }
+            Button(item.isPinned ? "取消固定" : "固定到顶部") {
+                onTogglePin()
+            }
+            Divider()
+            Button("删除", role: .destructive) {
+                onDelete()
+            }
+        }
         .zIndex(isHovered ? 20 : (isSelected ? 5 : 0))
     }
 }
 
-/// 悬停在图片网格时弹出的高清原比例放大预览浮层（不阻挡点击）
-struct ImageHoverPreviewOverlay: View {
-    let item: ClipItem
+/// 苹果风纯净原图放大预览浮层：无灰底卡片、无冗余底部栏，紧贴原图自然宽高比从缩略图方向顺滑绽放
+struct ImageHoverPreviewLayer: View {
+    let item: ClipItem?
+    let tileRect: CGRect
+    let isVisible: Bool
+    let panelSize: CGSize
+
     @ObservedObject private var store = ClipboardStore.shared
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var asyncLoadedImage: NSImage? = nil
+    @State private var asyncLoadedItemID: UUID? = nil
+
+    private struct PreviewLayout {
+        let size: CGSize
+        let center: CGPoint
+        let anchor: UnitPoint
+        let placeBelow: Bool
+    }
 
     var body: some View {
-        VStack(spacing: 8) {
-            if let img = store.previewImage(for: item) {
+        ZStack {
+            if let item, let img = resolvedImage(for: item) {
+                let layout = computeLayout(for: item, image: img)
+
                 Image(nsImage: img)
                     .resizable()
-                    .scaledToFit()
-                    .frame(maxWidth: 368, maxHeight: 210)
-                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .interpolation(.high)
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: layout.size.width, height: layout.size.height)
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .strokeBorder(Color.white.opacity(0.22), lineWidth: 0.8)
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .strokeBorder(
+                                LinearGradient(
+                                    colors: [
+                                        Color.white.opacity(0.48),
+                                        Color.white.opacity(0.14),
+                                        Color.black.opacity(0.08)
+                                    ],
+                                    startPoint: .top,
+                                    endPoint: .bottom
+                                ),
+                                lineWidth: 0.75
+                            )
                     )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .stroke(Color.black.opacity(0.10), lineWidth: 0.5)
+                    )
+                    .compositingGroup()
+                    .shadow(color: Color.black.opacity(isVisible ? 0.14 : 0.0), radius: 6, y: 3)
+                    .shadow(color: Color.black.opacity(isVisible ? 0.28 : 0.0), radius: 26, y: 14)
+                    .scaleEffect(isVisible || reduceMotion ? 1.0 : 0.88, anchor: layout.anchor)
+                    .offset(y: isVisible || reduceMotion ? 0 : (layout.placeBelow ? -8 : 8))
+                    .opacity(isVisible ? 1.0 : 0.0)
+                    .position(layout.center)
+                    .id("pure-image-preview")
             }
-
-            HStack(spacing: 8) {
-                Image(systemName: "photo.fill")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Color.accentColor)
-
-                if let w = item.imageWidth, let h = item.imageHeight {
-                    Text("\(w) × \(h)")
-                        .monospacedDigit()
-                }
-
-                if let app = item.sourceAppName, !app.isEmpty {
-                    Text("·")
-                    Text(app)
-                        .lineLimit(1)
-                }
-
-                Text("·")
-                Text(item.relativeTimeText)
-
-                Spacer()
-
-                Text("点击粘贴")
-                    .font(.system(size: 10.5, weight: .semibold, design: .rounded))
-                    .foregroundStyle(Color.accentColor)
-            }
-            .font(.system(size: 11.5, weight: .medium, design: .rounded))
-            .foregroundStyle(.primary.opacity(0.85))
-            .padding(.horizontal, 4)
         }
-        .padding(10)
-        .frame(maxWidth: 388)
-        .background(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(.regularMaterial)
-                .shadow(color: Color.black.opacity(0.26), radius: 20, y: 8)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.32), lineWidth: 1)
-        )
+        .frame(width: panelSize.width, height: panelSize.height)
         .allowsHitTesting(false)
+        .task(id: item?.id) {
+            guard let item else { return }
+            if store.cachedPreviewImage(for: item) != nil {
+                return
+            }
+            if let loaded = await store.loadPreviewImage(for: item), !Task.isCancelled {
+                asyncLoadedItemID = item.id
+                asyncLoadedImage = loaded
+            }
+        }
+    }
+
+    private func resolvedImage(for item: ClipItem) -> NSImage? {
+        if let cached = store.cachedPreviewImage(for: item) {
+            return cached
+        }
+        if asyncLoadedItemID == item.id, let loaded = asyncLoadedImage {
+            return loaded
+        }
+        return store.thumbnailImage(for: item)
+    }
+
+    private func computeLayout(for item: ClipItem, image: NSImage) -> PreviewLayout {
+        let rawW: CGFloat = {
+            if image.size.width > 0, image.size.height > 0 { return image.size.width }
+            if let w = item.imageWidth, w > 0 { return CGFloat(w) }
+            return 1
+        }()
+        let rawH: CGFloat = {
+            if image.size.width > 0, image.size.height > 0 { return image.size.height }
+            if let h = item.imageHeight, h > 0 { return CGFloat(h) }
+            return 1
+        }()
+
+        let edgeInset: CGFloat = 14
+        let horizontalInset: CGFloat = 20
+        let tileGap: CGFloat = 10
+
+        let validTileRect = tileRect.width > 0 && tileRect.height > 0
+            ? tileRect
+            : CGRect(x: panelSize.width / 2 - 60, y: 120, width: 120, height: 98)
+
+        let clampedTileMinY = min(max(validTileRect.minY, edgeInset), panelSize.height - edgeInset)
+        let clampedTileMaxY = min(max(validTileRect.maxY, edgeInset), panelSize.height - edgeInset)
+
+        let spaceBelow = max(0, panelSize.height - edgeInset - (clampedTileMaxY + tileGap))
+        let spaceAbove = max(0, (clampedTileMinY - tileGap) - edgeInset)
+        let placeBelow = spaceBelow >= 230 || spaceBelow >= spaceAbove
+
+        let availableH = max(120, min(placeBelow ? spaceBelow : spaceAbove, 344))
+        let maxW = max(120, panelSize.width - horizontalInset * 2)
+
+        // 严格保持原图自然比例，防止极小图标过度放大失真
+        let fitScale = min(maxW / rawW, availableH / rawH, 1.5)
+        let width = max(1, round(rawW * fitScale))
+        let height = max(1, round(rawH * fitScale))
+
+        let minCenterX = horizontalInset + width / 2
+        let maxCenterX = panelSize.width - horizontalInset - width / 2
+        let centerX = minCenterX <= maxCenterX
+            ? min(max(validTileRect.midX, minCenterX), maxCenterX)
+            : panelSize.width / 2
+
+        let rawCenterY = placeBelow
+            ? (clampedTileMaxY + tileGap + height / 2)
+            : (clampedTileMinY - tileGap - height / 2)
+        let minCenterY = edgeInset + height / 2
+        let maxCenterY = panelSize.height - edgeInset - height / 2
+        let centerY = minCenterY <= maxCenterY
+            ? min(max(rawCenterY, minCenterY), maxCenterY)
+            : panelSize.height / 2
+
+        let leftEdge = centerX - width / 2
+        let anchorX = min(max((validTileRect.midX - leftEdge) / max(width, 1), 0.15), 0.85)
+        let anchor = UnitPoint(x: anchorX, y: placeBelow ? 0.0 : 1.0)
+
+        return PreviewLayout(
+            size: CGSize(width: width, height: height),
+            center: CGPoint(x: centerX, y: centerY),
+            anchor: anchor,
+            placeBelow: placeBelow
+        )
     }
 }

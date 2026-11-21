@@ -7,7 +7,8 @@ struct ClipCardView: View {
     let index: Int
     let isSelected: Bool
     let onSelect: () -> Void
-    let onCopy: (Bool) -> Void
+    let onPaste: (Bool) -> Void
+    let onCopyOnly: (Bool) -> Void
     let onTogglePin: () -> Void
     let onDelete: () -> Void
 
@@ -75,8 +76,11 @@ struct ClipCardView: View {
                 onSelect()
             }
         }
-        .onTapGesture {
-            onCopy(false)
+        .onTapGesture(count: 2) {
+            onPaste(false)
+        }
+        .onTapGesture(count: 1) {
+            onSelect()
         }
         .contextMenu {
             contextMenuItems
@@ -222,13 +226,17 @@ struct ClipCardView: View {
 
     @ViewBuilder
     private var contextMenuItems: some View {
-        Button("复制并粘贴") {
-            onCopy(false)
+        Button("键入光标处（双击）") {
+            onPaste(false)
+        }
+
+        Button("仅复制到剪贴板") {
+            onCopyOnly(false)
         }
 
         if item.type == .file {
-            Button("仅复制文件路径") {
-                onCopy(true)
+            Button("键入文件路径（纯文本）") {
+                onPaste(true)
             }
             if let first = item.filePaths?.first {
                 Button("在访达中显示") {

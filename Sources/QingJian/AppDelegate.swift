@@ -39,15 +39,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         guard let button = statusItem.button else { return }
 
-        if let image = NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: "轻剪") {
+        if let image = NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: "iClip") {
             let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
             button.image = image.withSymbolConfiguration(config)
             button.image?.isTemplate = true
         } else {
-            button.title = "剪"
+            button.title = "iClip"
         }
 
-        button.toolTip = "轻剪（⌥V 呼出）"
+        button.toolTip = "iClip（⌥V 鼠标旁呼出）"
         button.action = #selector(statusItemClicked(_:))
         button.target = self
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
@@ -82,7 +82,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func showContextMenu(for button: NSStatusBarButton) {
         let menu = NSMenu()
 
-        let openItem = NSMenuItem(title: "打开轻剪（⌥V）", action: #selector(menuOpenPanel), keyEquivalent: "")
+        let openItem = NSMenuItem(title: "打开 iClip（⌥V）", action: #selector(menuOpenPanel), keyEquivalent: "")
         openItem.target = self
         menu.addItem(openItem)
 
@@ -104,7 +104,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(.separator())
 
-        let quitItem = NSMenuItem(title: "退出轻剪", action: #selector(menuQuit), keyEquivalent: "q")
+        let quitItem = NSMenuItem(title: "退出 iClip", action: #selector(menuQuit), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
 

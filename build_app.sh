@@ -2,8 +2,8 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
-APP_NAME="轻剪"
-VERSION="${1:-$(cat "$PROJECT_DIR/VERSION" 2>/dev/null | tr -d '[:space:]' || echo "1.1.0")}"
+APP_NAME="iClip"
+VERSION="${1:-$(cat "$PROJECT_DIR/VERSION" 2>/dev/null | tr -d '[:space:]' || echo "1.2.0")}"
 BUILD_NUMBER="$(date +%Y%m%d%H%M)"
 BUNDLE_DIR="$PROJECT_DIR/dist/${APP_NAME}.app"
 ZIP_PATH="$PROJECT_DIR/dist/QingJian-macOS.zip"
@@ -29,9 +29,9 @@ cat > "$CONTENTS_DIR/Info.plist" << EOF
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>
-    <string>轻剪</string>
+    <string>iClip</string>
     <key>CFBundleDisplayName</key>
-    <string>轻剪</string>
+    <string>iClip</string>
     <key>CFBundleIdentifier</key>
     <string>com.qingjian.clipboard</string>
     <key>CFBundleVersion</key>

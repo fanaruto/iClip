@@ -127,31 +127,56 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.16, execute: work)
     }
 
-    // MARK: - 智能定位
+    // MARK: - 智能定位（菜单栏下方 / 鼠标光标旁直觉弹出）
 
     private func positionPanel(anchorRect: NSRect?) {
         let size = panel.frame.size
+        let cardWidth = size.width - outerPadding * 2
+        let cardHeight = size.height - outerPadding * 2
 
         if let anchor = anchorRect {
             let screen = NSScreen.screens.first(where: { $0.frame.contains(anchor.origin) }) ?? NSScreen.main ?? NSScreen.screens[0]
             let visible = screen.visibleFrame
-            var x = anchor.midX - size.width / 2
-            var y = anchor.minY - size.height + outerPadding - 6
+            var cardLeft = anchor.midX - cardWidth / 2
+            var cardBottom = anchor.minY - cardHeight - 6
 
-            x = max(visible.minX - outerPadding + 10, min(x, visible.maxX - size.width + outerPadding - 10))
-            y = max(visible.minY - outerPadding + 10, min(y, visible.maxY - size.height + outerPadding - 6))
+            cardLeft = max(visible.minX + 10, min(cardLeft, visible.maxX - cardWidth - 10))
+            cardBottom = max(visible.minY + 10, min(cardBottom, visible.maxY - cardHeight - 6))
 
-            panel.setFrameOrigin(NSPoint(x: x, y: y))
+            nav.appearAnchor = .top
+            nav.appearOffsetX = 0
+            nav.appearOffsetY = -24
+            panel.setFrameOrigin(NSPoint(x: cardLeft - outerPadding, y: cardBottom - outerPadding))
             return
         }
 
-        // 快捷键呼出时，贴合当前屏幕顶部居中下方，配合瀑布滑落视觉最佳
+        // 快捷键呼出：贴近当前鼠标光标旁直觉出现，自动避让屏幕边缘
         let mouse = NSEvent.mouseLocation
         let screen = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) ?? NSScreen.main ?? NSScreen.screens[0]
         let visible = screen.visibleFrame
-        let x = visible.midX - size.width / 2
-        let y = visible.maxY - size.height + outerPadding - 12
-        panel.setFrameOrigin(NSPoint(x: x, y: max(visible.minY, y)))
+        let gap: CGFloat = 14
+
+        // 优先出现在鼠标右侧，空间不足则自然翻转到鼠标左侧
+        let placeOnRight = (mouse.x + gap + cardWidth) <= (visible.maxX - 10)
+        var cardLeft = placeOnRight ? (mouse.x + gap) : (mouse.x - gap - cardWidth)
+        cardLeft = max(visible.minX + 10, min(cardLeft, visible.maxX - cardWidth - 10))
+
+        // 面板顶部略高于鼠标，使光标平齐列表前排卡片，手腕移动最短
+        var cardTop = mouse.y + 52
+        cardTop = min(cardTop, visible.maxY - 10)
+        var cardBottom = cardTop - cardHeight
+        if cardBottom < visible.minY + 10 {
+            cardBottom = visible.minY + 10
+            cardTop = cardBottom + cardHeight
+        }
+
+        // 根据鼠标在面板上的相对位置计算出场缩放锚点与微位移方向
+        let relY = max(0.08, min(0.92, (cardTop - mouse.y) / cardHeight))
+        nav.appearAnchor = UnitPoint(x: placeOnRight ? 0.04 : 0.96, y: relY)
+        nav.appearOffsetX = placeOnRight ? -16 : 16
+        nav.appearOffsetY = -14
+
+        panel.setFrameOrigin(NSPoint(x: cardLeft - outerPadding, y: cardBottom - outerPadding))
     }
 
     // MARK: - 失焦自动隐藏

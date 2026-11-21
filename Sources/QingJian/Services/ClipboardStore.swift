@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import ImageIO
 import CryptoKit
 import ApplicationServices
 
@@ -28,6 +29,7 @@ final class ClipboardStore: ObservableObject {
     private var ignoreNextChangeCount: Int?
     private let thumbnailCache = NSCache<NSString, NSImage>()
     private let previewCache = NSCache<NSString, NSImage>()
+    private var inFlightPreviews: Set<String> = []
     private var toastWorkItem: DispatchWorkItem?
 
     private let appSupportURL: URL
@@ -47,7 +49,7 @@ final class ClipboardStore: ObservableObject {
         self.isAccessibilityGranted = AXIsProcessTrusted()
 
         thumbnailCache.countLimit = 120
-        previewCache.countLimit = 24
+        previewCache.countLimit = 36
 
         NotificationCenter.default.addObserver(
             forName: NSApplication.didBecomeActiveNotification,
@@ -78,6 +80,7 @@ final class ClipboardStore: ObservableObject {
             let data = try Data(contentsOf: historyFileURL)
             let decoded = try JSONDecoder().decode([ClipItem].self, from: data)
             self.items = sortItems(decoded)
+            prewarmPreviewImages(for: self.items)
         } catch {
             self.items = []
         }
@@ -352,29 +355,104 @@ final class ClipboardStore: ObservableObject {
             return cached
         }
         guard let url = imageURL(for: item),
-              let original = NSImage(contentsOf: url) else {
+              let thumb = Self.decodeImage(at: url, maxPixelSize: 400) else {
             return nil
         }
 
-        let thumb = downscale(image: original, maxSide: 360)
         thumbnailCache.setObject(thumb, forKey: cacheKey)
         return thumb
     }
 
-    func previewImage(for item: ClipItem) -> NSImage? {
+    /// 零 I/O 读取已预解码的高清预览图缓存，保证悬停首帧 120Hz 不掉帧
+    func cachedPreviewImage(for item: ClipItem) -> NSImage? {
         guard let name = item.imageFileName else { return nil }
+        return previewCache.object(forKey: name as NSString)
+    }
+
+    /// 后台线程预解码高清原比例预览图（ImageIO 硬件加速 + 立即解压缩）
+    func loadPreviewImage(for item: ClipItem) async -> NSImage? {
+        guard let name = item.imageFileName, let url = imageURL(for: item) else { return nil }
         let cacheKey = name as NSString
         if let cached = previewCache.object(forKey: cacheKey) {
             return cached
         }
-        guard let url = imageURL(for: item),
-              let original = NSImage(contentsOf: url) else {
-            return nil
+        let decoded = await Task.detached(priority: .userInitiated) {
+            Self.decodeImage(at: url, maxPixelSize: 1280)
+        }.value
+        if let decoded {
+            previewCache.setObject(decoded, forKey: cacheKey)
+        }
+        return decoded
+    }
+
+    /// 面板打开时在后台预热前排图片的高清缓存，悬停即可瞬时满帧放大
+    func prewarmPreviewImages(for items: [ClipItem], limit: Int = 12) {
+        let targets: [(String, URL)] = items
+            .lazy
+            .filter { $0.type == .image }
+            .prefix(limit)
+            .compactMap { item in
+                guard let name = item.imageFileName,
+                      previewCache.object(forKey: name as NSString) == nil,
+                      !inFlightPreviews.contains(name),
+                      let url = imageURL(for: item) else {
+                    return nil
+                }
+                return (name, url)
+            }
+
+        guard !targets.isEmpty else { return }
+        for (name, _) in targets {
+            inFlightPreviews.insert(name)
         }
 
-        let preview = downscale(image: original, maxSide: 760)
-        previewCache.setObject(preview, forKey: cacheKey)
+        Task.detached(priority: .utility) { [weak self] in
+            var results: [(String, NSImage)] = []
+            for (name, url) in targets {
+                if let img = Self.decodeImage(at: url, maxPixelSize: 1280) {
+                    results.append((name, img))
+                }
+            }
+            let decodedResults = results
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                for (name, _) in targets {
+                    self.inFlightPreviews.remove(name)
+                }
+                for (name, img) in decodedResults {
+                    self.previewCache.setObject(img, forKey: name as NSString)
+                }
+            }
+        }
+    }
+
+    func previewImage(for item: ClipItem) -> NSImage? {
+        if let cached = cachedPreviewImage(for: item) {
+            return cached
+        }
+        guard let name = item.imageFileName,
+              let url = imageURL(for: item),
+              let preview = Self.decodeImage(at: url, maxPixelSize: 1280) else {
+            return nil
+        }
+        previewCache.setObject(preview, forKey: name as NSString)
         return preview
+    }
+
+    nonisolated static func decodeImage(at url: URL, maxPixelSize: Int) -> NSImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+            return NSImage(contentsOf: url)
+        }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
+        ]
+        if let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) {
+            return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+        }
+        return NSImage(contentsOf: url)
     }
 
     func fileIcon(for item: ClipItem) -> NSImage {
@@ -418,19 +496,6 @@ final class ClipboardStore: ObservableObject {
         return (Int(image.size.width), Int(image.size.height))
     }
 
-    private func downscale(image: NSImage, maxSide: CGFloat) -> NSImage {
-        let size = image.size
-        guard size.width > 0, size.height > 0 else { return image }
-        let ratio = min(maxSide / size.width, maxSide / size.height, 1.0)
-        let targetSize = NSSize(width: max(1, size.width * ratio), height: max(1, size.height * ratio))
-        let result = NSImage(size: targetSize)
-        result.lockFocus()
-        NSGraphicsContext.current?.imageInterpolation = .high
-        image.draw(in: NSRect(origin: .zero, size: targetSize), from: .zero, operation: .copy, fraction: 1.0)
-        result.unlockFocus()
-        return result
-    }
-
     private func isValidWebURL(_ string: String) -> Bool {
         guard !string.contains("\n"), !string.contains(" ") else { return false }
         guard let url = URL(string: string),
@@ -469,7 +534,7 @@ final class ClipboardStore: ObservableObject {
         let ownPID = ProcessInfo.processInfo.processIdentifier
         let frontPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
         if frontPID != nil && frontPID != ownPID {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.045) {
                 simulateCommandV()
             }
             return

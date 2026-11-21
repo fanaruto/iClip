@@ -11,6 +11,10 @@ final class PanelNavigationModel: ObservableObject {
     @Published var showSettings: Bool = false
     @Published var isPresented: Bool = false
     @Published var presentationEpoch: Int = 0
+    @Published var appearAnchor: UnitPoint = .topLeading
+    @Published var appearOffsetX: CGFloat = -16
+    @Published var appearOffsetY: CGFloat = -14
+    @Published var scrollRequestEpoch: Int = 0
 
     func resetOnOpen() {
         searchText = ""
@@ -31,8 +35,11 @@ struct ClipboardPopoverView: View {
 
     @Namespace private var tabNamespace
     @FocusState private var isSearchFocused: Bool
-    @State private var hoveredImageItem: ClipItem? = nil
-    @State private var hoveredImageInUpperHalf: Bool = true
+    @State private var previewItem: ClipItem? = nil
+    @State private var previewTileRect: CGRect = .zero
+    @State private var isPreviewVisible: Bool = false
+    @State private var hoveredTileItemID: UUID? = nil
+    @State private var previewHideWorkItem: DispatchWorkItem? = nil
 
     /// 列表行模型：连续图片自动聚合成 3 列网格，非图片保持单行精致卡片
     private enum DisplayRow: Identifiable {
@@ -151,17 +158,30 @@ struct ClipboardPopoverView: View {
             radius: nav.isPresented ? 22 : 4,
             y: nav.isPresented ? 12 : 0
         )
-        // 顶部 3D 透视瀑布弹性滑落
-        .scaleEffect(nav.isPresented ? 1.0 : 0.92, anchor: .top)
+        // 纯净原图放大预览浮层：置于外层裁切之外，柔和投影与连续圆角自然舒展不被截断
+        .overlay {
+            ImageHoverPreviewLayer(
+                item: previewItem,
+                tileRect: previewTileRect,
+                isVisible: isPreviewVisible,
+                panelSize: CGSize(width: 420, height: 560)
+            )
+        }
+        .coordinateSpace(name: "panelRoot")
+        // 从鼠标光标旁带 3D 透视与方向感弹性展开
+        .scaleEffect(nav.isPresented ? 1.0 : 0.9, anchor: nav.appearAnchor)
         .rotation3DEffect(
-            .degrees(nav.isPresented ? 0 : -11),
+            .degrees(nav.isPresented ? 0 : -9),
             axis: (x: 1, y: 0, z: 0),
-            anchor: .top,
-            perspective: 0.55
+            anchor: nav.appearAnchor,
+            perspective: 0.6
         )
-        .offset(y: nav.isPresented ? 0 : -34)
+        .offset(
+            x: nav.isPresented ? 0 : nav.appearOffsetX,
+            y: nav.isPresented ? 0 : nav.appearOffsetY
+        )
         .opacity(nav.isPresented ? 1 : 0)
-        .blur(radius: nav.isPresented ? 0 : 3.5)
+        .blur(radius: nav.isPresented ? 0 : 3.0)
         .padding(24)
         .frame(width: 468, height: 608)
         .animation(
@@ -172,22 +192,29 @@ struct ClipboardPopoverView: View {
         )
         .animation(.spring(response: 0.28, dampingFraction: 0.86), value: nav.showSettings)
         .animation(.spring(response: 0.25, dampingFraction: 0.85), value: store.toastMessage)
+        .onChange(of: nav.isPresented) { _, presented in
+            if presented {
+                store.prewarmPreviewImages(for: filteredItems)
+            } else {
+                dismissImagePreview(clearItem: true)
+            }
+        }
         .onChange(of: nav.focusTrigger) { _, _ in
-            hoveredImageItem = nil
+            dismissImagePreview(clearItem: true)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                 isSearchFocused = true
             }
         }
         .onChange(of: nav.searchText) { _, _ in
             nav.selectedIndex = 0
-            hoveredImageItem = nil
+            dismissImagePreview(clearItem: true)
         }
         .onChange(of: nav.selectedTab) { _, _ in
             nav.selectedIndex = 0
-            hoveredImageItem = nil
+            dismissImagePreview(clearItem: true)
         }
         .onChange(of: nav.showSettings) { _, showing in
-            hoveredImageItem = nil
+            dismissImagePreview(clearItem: true)
             if showing {
                 store.refreshAccessibilityStatus()
             }
@@ -217,7 +244,7 @@ struct ClipboardPopoverView: View {
 
                 Spacer()
 
-                Text("轻剪设置")
+                Text("iClip 设置")
                     .font(.system(size: 14.5, weight: .semibold, design: .rounded))
 
                 Spacer()
@@ -340,130 +367,125 @@ struct ClipboardPopoverView: View {
     )
 
     private var contentList: some View {
-        GeometryReader { listGeo in
-            ZStack(alignment: hoveredImageInUpperHalf ? .bottom : .top) {
-                if filteredItems.isEmpty {
-                    emptyStateView
-                } else {
-                    ScrollViewReader { proxy in
-                        ScrollView(.vertical, showsIndicators: false) {
-                            LazyVStack(spacing: 10) {
-                                ForEach(Array(displayRows.enumerated()), id: \.element.id) { rowIndex, row in
-                                    switch row {
-                                    case .standard(let index, let item):
-                                        ClipCardView(
-                                            item: item,
-                                            index: index,
-                                            isSelected: index == nav.selectedIndex,
-                                            onSelect: {
-                                                nav.selectedIndex = index
-                                            },
-                                            onCopy: { plainTextOnly in
-                                                store.copyAndOptionallyPaste(
-                                                    item,
-                                                    plainTextOnly: plainTextOnly,
-                                                    shouldAutoPaste: true,
-                                                    onBeforePaste: onDismiss
-                                                )
-                                            },
-                                            onTogglePin: {
-                                                withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
-                                                    store.togglePin(item)
-                                                }
-                                            },
-                                            onDelete: {
-                                                withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
-                                                    store.delete(item)
-                                                    clampSelection()
-                                                }
+        Group {
+            if filteredItems.isEmpty {
+                emptyStateView
+            } else {
+                ScrollViewReader { proxy in
+                    ScrollView(.vertical, showsIndicators: false) {
+                        LazyVStack(spacing: 10) {
+                            ForEach(Array(displayRows.enumerated()), id: \.element.id) { rowIndex, row in
+                                switch row {
+                                case .standard(let index, let item):
+                                    ClipCardView(
+                                        item: item,
+                                        index: index,
+                                        isSelected: index == nav.selectedIndex,
+                                        onSelect: {
+                                            nav.selectedIndex = index
+                                        },
+                                        onPaste: { plainTextOnly in
+                                            store.copyAndOptionallyPaste(
+                                                item,
+                                                plainTextOnly: plainTextOnly,
+                                                shouldAutoPaste: true,
+                                                onBeforePaste: onDismiss
+                                            )
+                                        },
+                                        onCopyOnly: { plainTextOnly in
+                                            store.copyAndOptionallyPaste(
+                                                item,
+                                                plainTextOnly: plainTextOnly,
+                                                shouldAutoPaste: false,
+                                                onBeforePaste: nil
+                                            )
+                                        },
+                                        onTogglePin: {
+                                            withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
+                                                store.togglePin(item)
                                             }
-                                        )
-                                        .cascadeAppear(
-                                            isPresented: nav.isPresented,
-                                            delay: Double(min(rowIndex, 8)) * 0.028
-                                        )
-                                        .id(item.id)
-
-                                    case .imageGrid(let entries):
-                                        LazyVGrid(columns: imageGridColumns, spacing: 9) {
-                                            ForEach(Array(entries.enumerated()), id: \.element.item.id) { colIndex, entry in
-                                                ClipImageGridTile(
-                                                    item: entry.item,
-                                                    index: entry.index,
-                                                    isSelected: entry.index == nav.selectedIndex,
-                                                    onSelect: {
-                                                        nav.selectedIndex = entry.index
-                                                    },
-                                                    onCopy: {
-                                                        hoveredImageItem = nil
-                                                        store.copyAndOptionallyPaste(
-                                                            entry.item,
-                                                            plainTextOnly: false,
-                                                            shouldAutoPaste: true,
-                                                            onBeforePaste: onDismiss
-                                                        )
-                                                    },
-                                                    onTogglePin: {
-                                                        withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
-                                                            store.togglePin(entry.item)
-                                                        }
-                                                    },
-                                                    onDelete: {
-                                                        if hoveredImageItem?.id == entry.item.id {
-                                                            hoveredImageItem = nil
-                                                        }
-                                                        withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
-                                                            store.delete(entry.item)
-                                                            clampSelection()
-                                                        }
-                                                    },
-                                                    onHoverChange: { hovering, midY in
-                                                        if hovering {
-                                                            hoveredImageInUpperHalf = midY < (listGeo.size.height * 0.5)
-                                                            withAnimation(.spring(response: 0.22, dampingFraction: 0.84)) {
-                                                                hoveredImageItem = entry.item
-                                                            }
-                                                        } else if hoveredImageItem?.id == entry.item.id {
-                                                            withAnimation(.easeOut(duration: 0.14)) {
-                                                                hoveredImageItem = nil
-                                                            }
-                                                        }
-                                                    }
-                                                )
-                                                .cascadeAppear(
-                                                    isPresented: nav.isPresented,
-                                                    delay: Double(min(rowIndex, 7)) * 0.028 + Double(min(colIndex, 8)) * 0.02
-                                                )
-                                                .id(entry.item.id)
+                                        },
+                                        onDelete: {
+                                            withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
+                                                store.delete(item)
+                                                clampSelection()
                                             }
                                         }
-                                        .padding(.vertical, 2)
+                                    )
+                                    .cascadeAppear(
+                                        isPresented: nav.isPresented,
+                                        delay: Double(min(rowIndex, 8)) * 0.028
+                                    )
+                                    .id(item.id)
+
+                                case .imageGrid(let entries):
+                                    LazyVGrid(columns: imageGridColumns, spacing: 9) {
+                                        ForEach(Array(entries.enumerated()), id: \.element.item.id) { colIndex, entry in
+                                            ClipImageGridTile(
+                                                item: entry.item,
+                                                index: entry.index,
+                                                isSelected: entry.index == nav.selectedIndex,
+                                                onSelect: {
+                                                    nav.selectedIndex = entry.index
+                                                },
+                                                onPaste: {
+                                                    dismissImagePreview(clearItem: true)
+                                                    store.copyAndOptionallyPaste(
+                                                        entry.item,
+                                                        plainTextOnly: false,
+                                                        shouldAutoPaste: true,
+                                                        onBeforePaste: onDismiss
+                                                    )
+                                                },
+                                                onCopyOnly: {
+                                                    store.copyAndOptionallyPaste(
+                                                        entry.item,
+                                                        plainTextOnly: false,
+                                                        shouldAutoPaste: false,
+                                                        onBeforePaste: nil
+                                                    )
+                                                },
+                                                onTogglePin: {
+                                                    withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
+                                                        store.togglePin(entry.item)
+                                                    }
+                                                },
+                                                onDelete: {
+                                                    if previewItem?.id == entry.item.id {
+                                                        dismissImagePreview(clearItem: true)
+                                                    }
+                                                    withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
+                                                        store.delete(entry.item)
+                                                        clampSelection()
+                                                    }
+                                                },
+                                                onHoverChange: { hovering, tileRect in
+                                                    handleImageHover(item: entry.item, hovering: hovering, tileRect: tileRect)
+                                                }
+                                            )
+                                            .cascadeAppear(
+                                                isPresented: nav.isPresented,
+                                                delay: Double(min(rowIndex, 7)) * 0.028 + Double(min(colIndex, 8)) * 0.02
+                                            )
+                                            .id(entry.item.id)
+                                        }
                                     }
+                                    .padding(.vertical, 2)
                                 }
                             }
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 12)
                         }
-                        .onChange(of: nav.selectedIndex) { _, newIndex in
-                            guard newIndex >= 0, newIndex < filteredItems.count else { return }
-                            withAnimation(.easeOut(duration: 0.14)) {
-                                proxy.scrollTo(filteredItems[newIndex].id, anchor: .center)
-                            }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 12)
+                    }
+                    .onChange(of: nav.scrollRequestEpoch) { _, _ in
+                        let idx = nav.selectedIndex
+                        guard idx >= 0, idx < filteredItems.count else { return }
+                        withAnimation(.easeOut(duration: 0.14)) {
+                            proxy.scrollTo(filteredItems[idx].id, anchor: .center)
                         }
                     }
                 }
-
-                // 悬停图片时智能避让的高清大图预览浮层
-                if let previewItem = hoveredImageItem {
-                    ImageHoverPreviewOverlay(item: previewItem)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 10)
-                        .transition(.opacity.combined(with: .scale(scale: 0.94)))
-                        .zIndex(50)
-                }
             }
-            .coordinateSpace(name: "clipListArea")
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -506,7 +528,7 @@ struct ClipboardPopoverView: View {
             Spacer()
 
             HStack(spacing: 8) {
-                keyHint("↵", "粘贴")
+                keyHint("双击/↵", "键入")
                 keyHint("↑↓", "选择")
                 keyHint("ESC", "关闭")
             }
@@ -552,9 +574,9 @@ struct ClipboardPopoverView: View {
                 settingsGroup(title: "粘贴行为") {
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("选中后自动粘贴")
+                            Text("双击直接键入光标处")
                                 .font(.system(size: 13.5, weight: .medium, design: .rounded))
-                            Text("点击或按回车后自动向当前应用发送 ⌘V")
+                            Text("双击卡片或按回车后自动键入当前应用光标所在位置")
                                 .font(.system(size: 11.5))
                                 .foregroundStyle(.secondary)
                         }
@@ -630,12 +652,12 @@ struct ClipboardPopoverView: View {
                 }
 
                 // 快捷键说明
-                settingsGroup(title: "快捷键一览") {
-                    shortcutRow("全局呼出 / 隐藏", "⌥ V")
+                settingsGroup(title: "快捷键与交互") {
+                    shortcutRow("鼠标旁呼出 / 隐藏", "⌥ V")
                     Divider().opacity(0.35)
-                    shortcutRow("复制并粘贴选中项", "↵ 回车")
+                    shortcutRow("直接键入光标所在区域", "双击 / ↵")
                     Divider().opacity(0.35)
-                    shortcutRow("快速粘贴前 9 条", "⌘ 1 ~ 9")
+                    shortcutRow("快速键入前 9 条", "⌘ 1 ~ 9")
                     Divider().opacity(0.35)
                     shortcutRow("删除当前选中项", "⌘ ⌫")
                 }
@@ -658,7 +680,7 @@ struct ClipboardPopoverView: View {
                     Button {
                         onQuit()
                     } label: {
-                        Text("退出轻剪")
+                        Text("退出 iClip")
                             .font(.system(size: 13, weight: .medium, design: .rounded))
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 9)
@@ -860,12 +882,85 @@ struct ClipboardPopoverView: View {
             )
     }
 
+    // MARK: - 图片悬停纯净原图预览控制
+
+    private func handleImageHover(item: ClipItem, hovering: Bool, tileRect: CGRect) {
+        if hovering {
+            previewHideWorkItem?.cancel()
+            previewHideWorkItem = nil
+            hoveredTileItemID = item.id
+
+            let wasVisible = isPreviewVisible
+            let isSameItem = previewItem?.id == item.id
+
+            if !wasVisible {
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
+                    previewItem = item
+                    previewTileRect = tileRect
+                }
+                let targetID = item.id
+                // 下一帧再触发绽放动画，确保首次悬停也能完整演绎从缩略图边缘生长的弹簧动效
+                DispatchQueue.main.async {
+                    guard hoveredTileItemID == targetID else { return }
+                    withAnimation(.spring(response: 0.28, dampingFraction: 0.86, blendDuration: 0.08)) {
+                        isPreviewVisible = true
+                    }
+                }
+            } else if isSameItem {
+                // 列表滚动时实时贴合当前缩略图位置，不滞后
+                previewTileRect = tileRect
+            } else {
+                // 跨图片网格滑动时连续平移与形变，无闪退重绘
+                withAnimation(.spring(response: 0.28, dampingFraction: 0.88, blendDuration: 0.1)) {
+                    previewItem = item
+                    previewTileRect = tileRect
+                }
+            }
+        } else if hoveredTileItemID == item.id || previewItem?.id == item.id {
+            if hoveredTileItemID == item.id {
+                hoveredTileItemID = nil
+            }
+            previewHideWorkItem?.cancel()
+            let itemID = item.id
+            let work = DispatchWorkItem {
+                guard hoveredTileItemID == nil, previewItem?.id == itemID else { return }
+                withAnimation(.spring(response: 0.2, dampingFraction: 0.94)) {
+                    isPreviewVisible = false
+                }
+            }
+            previewHideWorkItem = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.07, execute: work)
+        }
+    }
+
+    private func dismissImagePreview(clearItem: Bool) {
+        previewHideWorkItem?.cancel()
+        previewHideWorkItem = nil
+        hoveredTileItemID = nil
+        if clearItem {
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                isPreviewVisible = false
+                previewItem = nil
+            }
+        } else {
+            withAnimation(.spring(response: 0.18, dampingFraction: 0.94)) {
+                isPreviewVisible = false
+            }
+        }
+    }
+
     // MARK: - 键盘控制辅助
 
     func moveSelection(delta: Int) {
         let count = filteredItems.count
         guard count > 0 else { return }
+        dismissImagePreview(clearItem: false)
         nav.selectedIndex = (nav.selectedIndex + delta + count) % count
+        nav.scrollRequestEpoch &+= 1
     }
 
     func pasteSelected() {

@@ -122,7 +122,7 @@ final class UpdateManager: NSObject, ObservableObject {
         guard case .available(let info) = state else { return }
 
         guard Bundle.main.bundleURL.pathExtension == "app" else {
-            state = .failed("当前为开发二进制运行，请通过 轻剪.app 进行 OTA 更新")
+            state = .failed("当前为开发二进制运行，请通过 iClip.app 进行 OTA 更新")
             return
         }
 
