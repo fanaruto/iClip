@@ -1,10 +1,12 @@
 import AppKit
+import Combine
 
 /// 应用生命周期与菜单栏管理
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var panelController: FloatingPanelController!
+    private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // 纯菜单栏常驻模式，不在程序坞显示图标
@@ -17,9 +19,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupStatusItem()
         setupGlobalHotKey()
 
-        // 首次启动后轻柔弹出一次面板，方便用户立刻上手
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
-            self?.showFromStatusItem()
+        // 首次启动后轻柔弹出一次面板，方便用户立刻上手（演示模式由面板自行编排）
+        if !ProcessInfo.processInfo.arguments.contains("--demo") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                self?.showFromStatusItem()
+            }
         }
 
         // 后台静默检查一次 GitHub Releases 更新
@@ -47,10 +51,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.title = "iClip"
         }
 
-        button.toolTip = "iClip（⌥V 鼠标旁呼出）"
+        button.toolTip = "iClip（\(ClipboardStore.shared.hotKeyShortcut.compactDisplayString) 鼠标旁呼出）"
         button.action = #selector(statusItemClicked(_:))
         button.target = self
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+
+        ClipboardStore.shared.$hotKeyShortcut
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] shortcut in
+                self?.statusItem.button?.toolTip = "iClip（\(shortcut.compactDisplayString) 鼠标旁呼出）"
+            }
+            .store(in: &cancellables)
     }
 
     @objc private func statusItemClicked(_ sender: NSStatusBarButton) {
@@ -82,7 +94,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func showContextMenu(for button: NSStatusBarButton) {
         let menu = NSMenu()
 
-        let openItem = NSMenuItem(title: "打开 iClip（⌥V）", action: #selector(menuOpenPanel), keyEquivalent: "")
+        let shortcutText = ClipboardStore.shared.hotKeyShortcut.compactDisplayString
+        let openItem = NSMenuItem(title: "打开 iClip（\(shortcutText)）", action: #selector(menuOpenPanel), keyEquivalent: "")
         openItem.target = self
         menu.addItem(openItem)
 
@@ -137,7 +150,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - 全局快捷键
 
     private func setupGlobalHotKey() {
-        HotKeyManager.shared.registerToggleHotKey { [weak self] in
+        HotKeyManager.shared.registerToggleHotKey(shortcut: ClipboardStore.shared.hotKeyShortcut) { [weak self] in
             Task { @MainActor [weak self] in
                 self?.panelController.toggle(anchorRect: nil)
             }

@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import Combine
+import UniformTypeIdentifiers
 
 /// 列表行模型：连续图片自动聚合成 3 列网格，非图片保持单行精致卡片
 enum ClipDisplayRow: Identifiable {
@@ -28,6 +29,9 @@ final class PanelNavigationModel: ObservableObject {
     @Published var isPresented: Bool = false
     @Published var presentationEpoch: Int = 0
     @Published var scrollRequestEpoch: Int = 0
+    @Published var isRecordingHotKey: Bool = false
+    @Published var demoPreviewIndex: Int? = nil
+    var suppressAutoHide: Bool = false
 
     private(set) var cachedFilteredItems: [ClipItem] = []
     private(set) var cachedDisplayRows: [ClipDisplayRow] = []
@@ -85,6 +89,8 @@ final class PanelNavigationModel: ObservableObject {
         searchText = ""
         selectedIndex = 0
         showSettings = false
+        isRecordingHotKey = false
+        suppressAutoHide = false
         presentationEpoch &+= 1
         focusTrigger = UUID()
     }
@@ -200,10 +206,25 @@ struct ClipboardPopoverView: View {
             nav.selectedIndex = 0
             dismissImagePreview(clearItem: true)
         }
+        .onChange(of: nav.demoPreviewIndex) { _, targetIdx in
+            if let idx = targetIdx, idx >= 0, idx < filteredItems.count {
+                let item = filteredItems[idx]
+                nav.selectedIndex = idx
+                // 估算第 1 行 3 列图片格在面板内的真实位置触发原生纯净原图放大浮层
+                let col = max(0, min(2, idx - 1))
+                let tileRect = CGRect(x: 14 + CGFloat(col) * 134, y: 196, width: 124, height: 98)
+                handleImageHover(item: item, hovering: true, tileRect: tileRect)
+            } else {
+                dismissImagePreview(clearItem: true)
+            }
+        }
         .onChange(of: nav.showSettings) { _, showing in
             dismissImagePreview(clearItem: true)
             if showing {
                 store.refreshAccessibilityStatus()
+            } else if nav.isRecordingHotKey {
+                nav.isRecordingHotKey = false
+                HotKeyManager.shared.resumeAfterRecording()
             }
         }
     }
@@ -631,6 +652,75 @@ struct ClipboardPopoverView: View {
                     }
                 }
 
+                // 通用与快捷键分组（开机自启 + 自定义全局快捷键）
+                settingsGroup(title: "通用与快捷键") {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("开机自动启动")
+                                .font(.system(size: 13.5, weight: .medium))
+                            Text("登录 macOS 后自动在菜单栏常驻运行")
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Toggle("", isOn: Binding(
+                            get: { store.launchAtLoginEnabled },
+                            set: { store.setLaunchAtLogin($0) }
+                        ))
+                        .toggleStyle(.switch)
+                        .labelsHidden()
+                    }
+
+                    Divider().opacity(0.35)
+
+                    HStack(spacing: 8) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("全局呼出快捷键")
+                                .font(.system(size: 13.5, weight: .medium))
+                            Text(nav.isRecordingHotKey ? "请直接按下新组合键，按 ESC 取消" : "点击右侧按键录制自定义组合键")
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(nav.isRecordingHotKey ? Color.accentColor : .secondary)
+                        }
+                        Spacer()
+
+                        Button {
+                            if nav.isRecordingHotKey {
+                                nav.isRecordingHotKey = false
+                                HotKeyManager.shared.resumeAfterRecording()
+                            } else {
+                                HotKeyManager.shared.suspendForRecording()
+                                nav.isRecordingHotKey = true
+                            }
+                        } label: {
+                            Text(nav.isRecordingHotKey ? "等待按键..." : store.hotKeyShortcut.displayString)
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(nav.isRecordingHotKey ? .white : .primary)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(
+                                    Capsule()
+                                        .fill(nav.isRecordingHotKey ? Color.accentColor : Color.primary.opacity(0.08))
+                                )
+                        }
+                        .buttonStyle(.plain)
+
+                        if store.hotKeyShortcut != .defaultShortcut && !nav.isRecordingHotKey {
+                            Button {
+                                store.hotKeyShortcut = .defaultShortcut
+                                store.showToast("已恢复默认快捷键 ⌥ V")
+                            } label: {
+                                Image(systemName: "arrow.uturn.backward")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 22, height: 22)
+                                    .background(Circle().fill(Color.primary.opacity(0.07)))
+                            }
+                            .buttonStyle(.plain)
+                            .help("恢复默认 ⌥ V")
+                        }
+                    }
+                }
+
                 // 行为分组
                 settingsGroup(title: "粘贴行为") {
                     HStack {
@@ -690,6 +780,90 @@ struct ClipboardPopoverView: View {
                     }
                 }
 
+                // 隐私忽略应用白名单分组
+                settingsGroup(title: "隐私忽略应用") {
+                    Text("来自以下应用的复制内容将被自动忽略，不会记录到历史")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+
+                    if store.ignoredApps.isEmpty {
+                        Text("暂未设置忽略应用")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary.opacity(0.8))
+                            .padding(.vertical, 4)
+                    } else {
+                        VStack(spacing: 6) {
+                            ForEach(store.ignoredApps) { app in
+                                HStack(spacing: 8) {
+                                    if let icon = store.appIcon(forBundleID: app.bundleIdentifier) {
+                                        Image(nsImage: icon)
+                                            .resizable()
+                                            .scaledToFit()
+                                            .frame(width: 18, height: 18)
+                                    } else {
+                                        Image(systemName: "app.dashed")
+                                            .font(.system(size: 13))
+                                            .foregroundStyle(.secondary)
+                                            .frame(width: 18, height: 18)
+                                    }
+
+                                    Text(app.displayName)
+                                        .font(.system(size: 12.5, weight: .medium))
+                                        .lineLimit(1)
+
+                                    Spacer()
+
+                                    Button {
+                                        withAnimation(.easeOut(duration: 0.16)) {
+                                            store.removeIgnoredApp(bundleIdentifier: app.bundleIdentifier)
+                                        }
+                                    } label: {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .font(.system(size: 13))
+                                            .foregroundStyle(.secondary.opacity(0.75))
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("移出忽略名单")
+                                }
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 5)
+                                .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.primary.opacity(0.045)))
+                            }
+                        }
+                    }
+
+                    HStack(spacing: 8) {
+                        Menu {
+                            let candidates = store.runningCandidateAppsForIgnore()
+                            if candidates.isEmpty {
+                                Text("暂无可添加的运行中应用")
+                            } else {
+                                ForEach(candidates) { candidate in
+                                    Button(candidate.displayName) {
+                                        store.addIgnoredApp(
+                                            bundleIdentifier: candidate.bundleIdentifier,
+                                            displayName: candidate.displayName
+                                        )
+                                    }
+                                }
+                            }
+                        } label: {
+                            Label("添加运行中应用", systemImage: "plus.circle")
+                                .font(.system(size: 12, weight: .medium))
+                        }
+                        .menuStyle(.borderlessButton)
+                        .fixedSize()
+
+                        Spacer()
+
+                        Button("选择应用...") {
+                            pickAppToIgnore()
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+                }
+
                 // 软件更新分组（GitHub Releases OTA）
                 settingsGroup(title: "软件更新（GitHub OTA）") {
                     updateSectionContent
@@ -714,7 +888,7 @@ struct ClipboardPopoverView: View {
 
                 // 快捷键说明
                 settingsGroup(title: "快捷键与交互") {
-                    shortcutRow("鼠标旁呼出 / 隐藏", "⌥ V")
+                    shortcutRow("鼠标旁呼出 / 隐藏", store.hotKeyShortcut.displayString)
                     Divider().opacity(0.35)
                     shortcutRow("直接键入光标所在区域", "双击 / ↵")
                     Divider().opacity(0.35)
@@ -1041,6 +1215,29 @@ struct ClipboardPopoverView: View {
             store.delete(item)
             clampSelection()
         }
+    }
+
+    private func pickAppToIgnore() {
+        nav.suppressAutoHide = true
+        let panel = NSOpenPanel()
+        panel.title = "选择要忽略剪贴记录的应用"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.application]
+        panel.directoryURL = URL(fileURLWithPath: "/Applications")
+
+        let response = panel.runModal()
+        nav.suppressAutoHide = false
+
+        guard response == .OK, let url = panel.url, let bundle = Bundle(url: url),
+              let bundleID = bundle.bundleIdentifier else {
+            return
+        }
+        let name = (bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
+            ?? (bundle.object(forInfoDictionaryKey: "CFBundleName") as? String)
+            ?? url.deletingPathExtension().lastPathComponent
+        store.addIgnoredApp(bundleIdentifier: bundleID, displayName: name)
     }
 
     private func clampSelection() {

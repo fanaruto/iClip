@@ -77,6 +77,69 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
 
         self.panel = p
         applyNativeSurface(style: store.surfaceStyle)
+        if ProcessInfo.processInfo.arguments.contains("--demo") {
+            startDemoShowcase()
+        }
+    }
+
+    /// 仅在传 --demo 启动参数时运行的实机功能演示编排（零外部权限依赖）
+    private func startDemoShowcase() {
+        nav.suppressAutoHide = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            guard let self else { return }
+            self.showCenteredForDemo()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { [weak self] in
+            self?.nav.demoPreviewIndex = 1
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.2) { [weak self] in
+            self?.nav.demoPreviewIndex = 2
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4.6) { [weak self] in
+            self?.nav.demoPreviewIndex = 3
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5.8) { [weak self] in
+            self?.nav.demoPreviewIndex = nil
+            self?.nav.showSettings = true
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6.9) { [weak self] in
+            self?.store.liquidGlassAppearance = .clear
+            self?.store.liquidGlassMaskOpacity = 0.12
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 7.9) { [weak self] in
+            self?.store.liquidGlassAppearance = .tinted
+            self?.store.liquidGlassMaskOpacity = 0.35
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 9.0) { [weak self] in
+            self?.nav.showSettings = false
+            self?.nav.selectedIndex = 0
+        }
+    }
+
+    private func showCenteredForDemo() {
+        nav.isPresented = false
+        nav.resetOnOpen()
+        nav.suppressAutoHide = true
+        let screen = NSScreen.main ?? NSScreen.screens[0]
+        let visible = screen.visibleFrame
+        let finalOrigin = NSPoint(
+            x: visible.midX - panelSize.width / 2,
+            y: visible.midY - panelSize.height / 2
+        )
+        panel.setFrameOrigin(NSPoint(x: finalOrigin.x, y: finalOrigin.y + 10))
+        panel.alphaValue = 0
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+        panel.invalidateShadow()
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.22
+            ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
+            panel.animator().alphaValue = 1
+            panel.animator().setFrameOrigin(finalOrigin)
+        }
+        DispatchQueue.main.async { [weak self] in
+            self?.nav.isPresented = true
+        }
     }
 
     private func observeSurfaceStyle() {
@@ -294,6 +357,9 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     // MARK: - 失焦自动隐藏
 
     func windowDidResignKey(_ notification: Notification) {
+        if nav.suppressAutoHide || nav.isRecordingHotKey {
+            return
+        }
         hide(restoreFocus: false)
     }
 
@@ -303,8 +369,39 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         removeKeyMonitor()
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self = self, self.isVisible else { return event }
+            if self.nav.isRecordingHotKey {
+                return self.handleHotKeyRecording(event)
+            }
             return self.handleKeyDown(event)
         }
+    }
+
+    /// 录制自定义全局快捷键（要求至少含一个修饰键 + 主键；按 ESC 取消）
+    private func handleHotKeyRecording(_ event: NSEvent) -> NSEvent? {
+        // ESC 取消录制并恢复原快捷键
+        if event.keyCode == 53 {
+            nav.isRecordingHotKey = false
+            HotKeyManager.shared.resumeAfterRecording()
+            return nil
+        }
+
+        // 忽略单独按下的修饰键
+        let modifierKeyCodes: Set<UInt16> = [54, 55, 56, 57, 58, 59, 60, 61, 62, 63]
+        if modifierKeyCodes.contains(event.keyCode) {
+            return nil
+        }
+
+        let carbonMods = HotKeyShortcut.carbonModifiers(from: event.modifierFlags)
+        guard carbonMods != 0 else {
+            store.showToast("请至少搭配一个修饰键（⌥ / ⌘ / ⌃ / ⇧）")
+            return nil
+        }
+
+        let newShortcut = HotKeyShortcut(keyCode: UInt32(event.keyCode), carbonModifiers: carbonMods)
+        nav.isRecordingHotKey = false
+        store.hotKeyShortcut = newShortcut
+        store.showToast("全局快捷键已更新为 \(newShortcut.displayString)")
+        return nil
     }
 
     private func removeKeyMonitor() {

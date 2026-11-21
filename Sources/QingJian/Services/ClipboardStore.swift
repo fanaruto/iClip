@@ -3,6 +3,21 @@ import AppKit
 import ImageIO
 import CryptoKit
 import ApplicationServices
+import ServiceManagement
+
+/// 隐私忽略来源应用条目
+struct IgnoredAppEntry: Identifiable, Codable, Equatable {
+    let bundleIdentifier: String
+    let displayName: String
+
+    var id: String { bundleIdentifier }
+
+    static let defaults: [IgnoredAppEntry] = [
+        IgnoredAppEntry(bundleIdentifier: "com.apple.keychainaccess", displayName: "钥匙串访问"),
+        IgnoredAppEntry(bundleIdentifier: "com.1password.1password", displayName: "1Password"),
+        IgnoredAppEntry(bundleIdentifier: "com.bitwarden.desktop", displayName: "Bitwarden")
+    ]
+}
 
 /// 面板官方材质样式（精简为液态玻璃与毛玻璃两种）
 enum PanelSurfaceStyle: String, CaseIterable, Identifiable {
@@ -58,6 +73,17 @@ final class ClipboardStore: ObservableObject {
     @Published var autoPasteEnabled: Bool {
         didSet { UserDefaults.standard.set(autoPasteEnabled, forKey: "autoPasteEnabled") }
     }
+    @Published private(set) var launchAtLoginEnabled: Bool = false
+    @Published var hotKeyShortcut: HotKeyShortcut {
+        didSet {
+            if let data = try? JSONEncoder().encode(hotKeyShortcut) {
+                UserDefaults.standard.set(data, forKey: "hotKeyShortcut")
+            }
+            _ = HotKeyManager.shared.updateShortcut(hotKeyShortcut)
+        }
+    }
+    @Published private(set) var ignoredApps: [IgnoredAppEntry] = []
+    private var ignoredBundleIDSet: Set<String> = []
     @Published var maxHistoryCount: Int {
         didSet {
             UserDefaults.standard.set(maxHistoryCount, forKey: "maxHistoryCount")
@@ -111,10 +137,25 @@ final class ClipboardStore: ObservableObject {
         let savedMask = UserDefaults.standard.object(forKey: "liquidGlassMaskOpacity") as? Double
         self.liquidGlassMaskOpacity = min(max(savedMask ?? 0.25, 0.0), 1.0)
         self.borderlessPanel = UserDefaults.standard.object(forKey: "borderlessPanel") as? Bool ?? true
+        if let shortcutData = UserDefaults.standard.data(forKey: "hotKeyShortcut"),
+           let decodedShortcut = try? JSONDecoder().decode(HotKeyShortcut.self, from: shortcutData) {
+            self.hotKeyShortcut = decodedShortcut
+        } else {
+            self.hotKeyShortcut = .defaultShortcut
+        }
         let savedMax = UserDefaults.standard.integer(forKey: "maxHistoryCount")
         self.maxHistoryCount = savedMax > 0 ? savedMax : 200
         self.lastChangeCount = pasteboard.changeCount
         self.isAccessibilityGranted = AXIsProcessTrusted()
+        self.launchAtLoginEnabled = (SMAppService.mainApp.status == .enabled)
+
+        if let ignoredData = UserDefaults.standard.data(forKey: "ignoredApps"),
+           let decodedIgnored = try? JSONDecoder().decode([IgnoredAppEntry].self, from: ignoredData) {
+            self.ignoredApps = decodedIgnored
+        } else {
+            self.ignoredApps = IgnoredAppEntry.defaults
+        }
+        self.ignoredBundleIDSet = Set(self.ignoredApps.map(\.bundleIdentifier))
 
         // 缩略图上限 24 MB / 80 张；高清预览上限 36 MB / 12 张；文件图标上限 128 个
         thumbnailCache.countLimit = 80
@@ -260,7 +301,11 @@ final class ClipboardStore: ObservableObject {
             return
         }
 
-        let sourceApp = NSWorkspace.shared.frontmostApplication?.localizedName
+        let frontApp = NSWorkspace.shared.frontmostApplication
+        if let bundleID = frontApp?.bundleIdentifier, ignoredBundleIDSet.contains(bundleID) {
+            return
+        }
+        let sourceApp = frontApp?.localizedName
 
         // 1. 优先检测文件 URL（避免将访达复制的文件误判为文件名文本或图标图片）
         if types.contains(.fileURL),
@@ -705,6 +750,88 @@ final class ClipboardStore: ObservableObject {
         let trusted = AXIsProcessTrusted()
         if trusted != isAccessibilityGranted {
             isAccessibilityGranted = trusted
+        }
+        let loginEnabled = (SMAppService.mainApp.status == .enabled)
+        if loginEnabled != launchAtLoginEnabled {
+            launchAtLoginEnabled = loginEnabled
+        }
+    }
+
+    // MARK: - 开机自启（SMAppService）
+
+    func setLaunchAtLogin(_ enabled: Bool) {
+        do {
+            if enabled {
+                try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
+            }
+            let actual = (SMAppService.mainApp.status == .enabled)
+            launchAtLoginEnabled = actual
+            if enabled && SMAppService.mainApp.status == .requiresApproval {
+                showToast("请在系统设置 → 登录项中允许 iClip")
+                SMAppService.openSystemSettingsLoginItems()
+            } else {
+                showToast(actual ? "已开启开机自启" : "已关闭开机自启")
+            }
+        } catch {
+            launchAtLoginEnabled = (SMAppService.mainApp.status == .enabled)
+            showToast("开机自启设置失败：请将 iClip 放入应用程序文件夹")
+        }
+    }
+
+    // MARK: - 隐私忽略来源应用白名单（O(1) 哈希过滤）
+
+    func addIgnoredApp(bundleIdentifier: String, displayName: String) {
+        let trimmedID = bundleIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedID.isEmpty, !ignoredBundleIDSet.contains(trimmedID) else { return }
+        let entry = IgnoredAppEntry(bundleIdentifier: trimmedID, displayName: displayName.isEmpty ? trimmedID : displayName)
+        ignoredApps.append(entry)
+        ignoredBundleIDSet.insert(trimmedID)
+        persistIgnoredApps()
+        showToast("已忽略来自「\(entry.displayName)」的剪贴内容")
+    }
+
+    func removeIgnoredApp(bundleIdentifier: String) {
+        ignoredApps.removeAll { $0.bundleIdentifier == bundleIdentifier }
+        ignoredBundleIDSet.remove(bundleIdentifier)
+        persistIgnoredApps()
+    }
+
+    func runningCandidateAppsForIgnore() -> [IgnoredAppEntry] {
+        let ownID = Bundle.main.bundleIdentifier
+        var seen = Set<String>()
+        var result: [IgnoredAppEntry] = []
+        for app in NSWorkspace.shared.runningApplications {
+            guard app.activationPolicy == .regular,
+                  let bid = app.bundleIdentifier,
+                  bid != ownID,
+                  !ignoredBundleIDSet.contains(bid),
+                  !seen.contains(bid) else {
+                continue
+            }
+            seen.insert(bid)
+            result.append(IgnoredAppEntry(bundleIdentifier: bid, displayName: app.localizedName ?? bid))
+        }
+        return result.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+    }
+
+    func appIcon(forBundleID bundleID: String) -> NSImage? {
+        let cacheKey = "app:\(bundleID)" as NSString
+        if let cached = fileIconCache.object(forKey: cacheKey) {
+            return cached
+        }
+        guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else {
+            return nil
+        }
+        let icon = NSWorkspace.shared.icon(forFile: appURL.path)
+        fileIconCache.setObject(icon, forKey: cacheKey)
+        return icon
+    }
+
+    private func persistIgnoredApps() {
+        if let data = try? JSONEncoder().encode(ignoredApps) {
+            UserDefaults.standard.set(data, forKey: "ignoredApps")
         }
     }
 
