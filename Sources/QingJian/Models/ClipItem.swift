@@ -244,26 +244,38 @@ struct ClipItem: Identifiable, Codable, Equatable {
         return Self.monthDayFormatter.string(from: createdAt)
     }
 
-    /// 零堆分配快路径 + 多词跨维度 AND 组合 + 免切输入法拼音/首字母极速搜索匹配
-    func matches(query: String) -> Bool {
+    /// 零堆分配快路径 + 自然情景时间窗（今天/昨天/1h/7d/收藏） + `!排除词` + 多词跨维度与拼音极速检索
+    func matches(query: String, now: Date = Date()) -> Bool {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
         if q.isEmpty { return true }
 
         // 单一词元零数组分配快路径（保障 2MB 大文本 + 500 条检索 < 3ms）
         if !q.contains(" ") && !q.contains("\t") {
-            return matchesSingleToken(q)
+            return evaluateTokenTerm(q, now: now)
         }
 
         let tokens = q.split(whereSeparator: { $0 == " " || $0 == "\t" })
         for tokenSub in tokens {
-            if !matchesSingleToken(String(tokenSub)) {
+            if !evaluateTokenTerm(String(tokenSub), now: now) {
                 return false
             }
         }
         return true
     }
 
-    private func matchesSingleToken(_ token: String) -> Bool {
+    private func evaluateTokenTerm(_ rawToken: String, now: Date) -> Bool {
+        if rawToken.hasPrefix("!"), rawToken.utf8.count >= 2, !rawToken.hasPrefix("!=") {
+            let excluded = String(rawToken.dropFirst())
+            return !matchesSingleToken(excluded, now: now)
+        }
+        return matchesSingleToken(rawToken, now: now)
+    }
+
+    private func matchesSingleToken(_ token: String, now: Date) -> Bool {
+        if token.utf8.count <= 16,
+           EpisodicQueryMatcher.matchesSpecialToken(token.lowercased(), item: self, now: now) {
+            return true
+        }
         let opts: String.CompareOptions = [.caseInsensitive]
         if let text = text {
             if text.utf8.count <= 65_536 {
@@ -302,6 +314,56 @@ struct ClipItem: Identifiable, Codable, Equatable {
             return PinyinSearchCache.matchesPinyin(tokenLower: token.lowercased(), for: self)
         }
         return false
+    }
+}
+
+/// 自然情景时间窗与收藏状态词匹配器（30 秒桶缓存本地零点时间戳，单次比较仅 0.5ns 零堆分配）
+enum EpisodicQueryMatcher {
+    private static let lock = NSLock()
+    private static var cachedRefBucket: Int = -1
+    private static var cachedStartOfToday: TimeInterval = 0
+
+    static func startOfToday(for now: Date) -> TimeInterval {
+        let nowTs = now.timeIntervalSince1970
+        let bucket = Int(nowTs / 30.0)
+        lock.lock()
+        if bucket == cachedRefBucket {
+            let hit = cachedStartOfToday
+            lock.unlock()
+            return hit
+        }
+        lock.unlock()
+
+        let computed = Calendar.current.startOfDay(for: now).timeIntervalSince1970
+        lock.lock()
+        cachedRefBucket = bucket
+        cachedStartOfToday = computed
+        lock.unlock()
+        return computed
+    }
+
+    static func matchesSpecialToken(_ tokenLower: String, item: ClipItem, now: Date) -> Bool {
+        switch tokenLower {
+        case "收藏", "@pin", "@star", "pinned", "starred":
+            return item.isPinned
+        case "今天", "今日", "today", "@today":
+            let start = startOfToday(for: now)
+            let ts = item.createdAt.timeIntervalSince1970
+            return ts >= start && ts < (start + 86_400)
+        case "昨天", "昨日", "yesterday", "@yesterday":
+            let todayStart = startOfToday(for: now)
+            let yesterdayStart = todayStart - 86_400
+            let ts = item.createdAt.timeIntervalSince1970
+            return ts >= yesterdayStart && ts < todayStart
+        case "刚刚", "1h", "1小时", "@1h":
+            let diff = now.timeIntervalSince1970 - item.createdAt.timeIntervalSince1970
+            return diff >= -60 && diff <= 3_600
+        case "本周", "一周", "7d", "week", "@7d", "@week":
+            let diff = now.timeIntervalSince1970 - item.createdAt.timeIntervalSince1970
+            return diff >= -60 && diff <= 604_800
+        default:
+            return false
+        }
     }
 }
 

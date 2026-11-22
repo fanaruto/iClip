@@ -19,6 +19,8 @@ struct ClipImageGridTile: View {
     let onToggleQueue: () -> Void
     let onExtractOCR: (Bool) -> Void
     let onTogglePin: () -> Void
+    var onEditAlias: (() -> Void)? = nil
+    var onOpenQuickLook: (() -> Void)? = nil
     let onDelete: () -> Void
     let onHoverChange: (Bool, CGRect) -> Void
 
@@ -76,6 +78,10 @@ struct ClipImageGridTile: View {
                     Text("✓ 已复制")
                         .font(.system(size: 9.5, weight: .bold))
                         .foregroundStyle(Color.green)
+                } else if let alias = item.customAlias?.trimmingCharacters(in: .whitespacesAndNewlines), !alias.isEmpty {
+                    Text(alias)
+                        .font(.system(size: 10, weight: .semibold))
+                        .lineLimit(1)
                 } else if let w = item.imageWidth, let h = item.imageHeight {
                     Text("\(w)×\(h)")
                         .font(.system(size: 9.5, weight: .medium, design: .rounded))
@@ -248,8 +254,16 @@ struct ClipImageGridTile: View {
             Button("键入光标处（双击）") {
                 onPaste()
             }
-            Button("仅复制到剪贴板") {
+            Button("仅复制到剪贴板（⌘C）") {
                 onCopyOnly()
+            }
+            if !ClipboardStore.shared.minimalModeEnabled, let onOpenQuickLook {
+                Button("速览高清原图（Space）") {
+                    onOpenQuickLook()
+                }
+            }
+            Button("在访达中显示（⌘O）") {
+                _ = ClipboardStore.shared.openItemExternally(item)
             }
             if !ClipboardStore.shared.minimalModeEnabled {
                 Divider()
@@ -273,6 +287,11 @@ struct ClipImageGridTile: View {
             }
             Button(item.isPinned ? "取消收藏" : "收藏") {
                 onTogglePin()
+            }
+            if !ClipboardStore.shared.minimalModeEnabled, let onEditAlias {
+                Button(item.customAlias != nil ? "修改备注标题（⌘R）..." : "设置备注标题（⌘R）...") {
+                    onEditAlias()
+                }
             }
             Divider()
             Button("删除", role: .destructive) {
@@ -466,6 +485,8 @@ struct ClipImageGridTile: View {
     let onPaste: () -> Void
     let onCopyOnly: () -> Void
     let onTogglePin: () -> Void
+    var onEditAlias: (() -> Void)? = nil
+    var onOpenQuickLook: (() -> Void)? = nil
     let onDelete: () -> Void
     let onHoverChange: (Bool, CGRect) -> Void
 
@@ -523,6 +544,10 @@ struct ClipImageGridTile: View {
                     Text("✓ 已复制")
                         .font(.system(size: 9.5, weight: .bold))
                         .foregroundStyle(Color.green)
+                } else if let alias = item.customAlias?.trimmingCharacters(in: .whitespacesAndNewlines), !alias.isEmpty {
+                    Text(alias)
+                        .font(.system(size: 10, weight: .semibold))
+                        .lineLimit(1)
                 } else if let w = item.imageWidth, let h = item.imageHeight {
                     Text("\(w)×\(h)")
                         .font(.system(size: 9.5, weight: .medium, design: .rounded))
@@ -669,8 +694,16 @@ struct ClipImageGridTile: View {
             Button("键入光标处（双击）") {
                 onPaste()
             }
-            Button("仅复制到剪贴板") {
+            Button("仅复制到剪贴板（⌘C）") {
                 onCopyOnly()
+            }
+            if !ClipboardStore.shared.minimalModeEnabled, let onOpenQuickLook {
+                Button("速览高清原图（Space）") {
+                    onOpenQuickLook()
+                }
+            }
+            Button("在访达中显示（⌘O）") {
+                _ = ClipboardStore.shared.openItemExternally(item)
             }
             if !ClipboardStore.shared.minimalModeEnabled {
                 Divider()
@@ -683,6 +716,11 @@ struct ClipImageGridTile: View {
             }
             Button(item.isPinned ? "取消收藏" : "收藏") {
                 onTogglePin()
+            }
+            if !ClipboardStore.shared.minimalModeEnabled, let onEditAlias {
+                Button(item.customAlias != nil ? "修改备注标题（⌘R）..." : "设置备注标题（⌘R）...") {
+                    onEditAlias()
+                }
             }
             Divider()
             Button("删除", role: .destructive) {

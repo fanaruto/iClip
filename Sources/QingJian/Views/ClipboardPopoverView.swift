@@ -936,6 +936,16 @@ struct ClipboardPopoverView: View {
                                                         store.togglePin(entry.item)
                                                     }
                                                 },
+                                                onEditAlias: {
+                                                    beginAliasEdit(for: entry.item)
+                                                },
+                                                onOpenQuickLook: {
+                                                    dismissImagePreview(clearItem: true)
+                                                    nav.selectedIndex = entry.index
+                                                    withAnimation(.spring(response: 0.24, dampingFraction: 0.88)) {
+                                                        nav.showQuickLook = true
+                                                    }
+                                                },
                                                 onDelete: {
                                                     if previewItem?.id == entry.item.id {
                                                         dismissImagePreview(clearItem: true)
@@ -3117,6 +3127,16 @@ struct ClipboardPopoverView: View {
                                                 onTogglePin: {
                                                     withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
                                                         store.togglePin(entry.item)
+                                                    }
+                                                },
+                                                onEditAlias: {
+                                                    beginAliasEdit(for: entry.item)
+                                                },
+                                                onOpenQuickLook: {
+                                                    dismissImagePreview(clearItem: true)
+                                                    nav.selectedIndex = entry.index
+                                                    withAnimation(.spring(response: 0.24, dampingFraction: 0.88)) {
+                                                        nav.showQuickLook = true
                                                     }
                                                 },
                                                 onDelete: {

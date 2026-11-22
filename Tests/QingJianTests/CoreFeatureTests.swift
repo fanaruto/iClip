@@ -896,4 +896,52 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertTrue(snap.actions.contains(where: { $0.id == "jwt-decode" }))
     }
     #endif
+
+    // MARK: - 25. 自然情景时间窗（今天/昨天/1h/7d/收藏）与 `!排除词` 零歧义组合检索测试
+
+    func testEpisodicTimeScopeAndNegationTokenSearch() {
+        let cal = Calendar.current
+        let todayNoon = cal.date(bySettingHour: 14, minute: 0, second: 0, of: Date())!
+        let thirtyMinsAgo = todayNoon.addingTimeInterval(-1_800)
+        let yesterdayAfternoon = todayNoon.addingTimeInterval(-86_400)
+        let tenDaysAgo = todayNoon.addingTimeInterval(-10 * 86_400)
+
+        let recentWeChatImg = ClipItem(
+            type: .image,
+            imageFileName: "qr.png",
+            contentHash: "img:qr",
+            sourceAppName: "微信",
+            createdAt: thirtyMinsAgo,
+            isPinned: true,
+            customAlias: "公司收款码"
+        )
+        let yesterdayCurl = ClipItem(
+            type: .text,
+            text: "curl -X POST https://api.example.com/v1?utm_source=test",
+            contentHash: "text:curl",
+            sourceAppName: "Terminal",
+            createdAt: yesterdayAfternoon
+        )
+        let oldNote = ClipItem(
+            type: .text,
+            text: "十天前的历史会议备忘",
+            contentHash: "text:old",
+            sourceAppName: "备忘录",
+            createdAt: tenDaysAgo
+        )
+
+        // 1. 情景时间窗 × 来源应用 × 类型自由组合检索
+        XCTAssertTrue(recentWeChatImg.matches(query: "今天 微信 图片", now: todayNoon))
+        XCTAssertTrue(recentWeChatImg.matches(query: "1h gsskm", now: todayNoon)) // 1小时内 + 公司收款码拼音首字母
+        XCTAssertTrue(recentWeChatImg.matches(query: "收藏 收款", now: todayNoon))
+        XCTAssertFalse(yesterdayCurl.matches(query: "今天", now: todayNoon))
+        XCTAssertTrue(yesterdayCurl.matches(query: "昨天 curl", now: todayNoon))
+        XCTAssertTrue(yesterdayCurl.matches(query: "本周 terminal", now: todayNoon))
+        XCTAssertFalse(oldNote.matches(query: "本周", now: todayNoon))
+
+        // 2. `!排除词` 精准反向过滤，且绝不误伤命令行 `-X` 参数检索
+        XCTAssertTrue(yesterdayCurl.matches(query: "curl -X", now: todayNoon))
+        XCTAssertFalse(yesterdayCurl.matches(query: "curl !utm_source", now: todayNoon))
+        XCTAssertTrue(recentWeChatImg.matches(query: "今天 !terminal", now: todayNoon))
+    }
 }
