@@ -78,6 +78,22 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         self.hostingView = hosting
 
         self.panel = p
+        surfaceHost.onDragTargetedChanged = { [weak self] targeted in
+            guard let self else { return }
+            withAnimation(.easeOut(duration: 0.14)) {
+                self.nav.isDragTargeted = targeted
+            }
+        }
+        surfaceHost.onPerformDrop = { [weak self] draggingPasteboard in
+            guard let self else { return false }
+            let ok = self.store.importAndCopy(from: draggingPasteboard, sourceLabel: "拖拽复制")
+            if ok {
+                self.nav.selectedIndex = 0
+                self.nav.preferredGridColumn = nil
+                self.nav.scrollRequestEpoch &+= 1
+            }
+            return ok
+        }
         applyNativeSurface(style: store.surfaceStyle)
         if ProcessInfo.processInfo.arguments.contains("--demo") {
             let runner = DemoShowcaseRunner(panelController: self, store: store, nav: nav)
@@ -543,6 +559,22 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         self.hostingView = hosting
 
         self.panel = p
+        surfaceHost.onDragTargetedChanged = { [weak self] targeted in
+            guard let self else { return }
+            withAnimation(.easeOut(duration: 0.14)) {
+                self.nav.isDragTargeted = targeted
+            }
+        }
+        surfaceHost.onPerformDrop = { [weak self] draggingPasteboard in
+            guard let self else { return false }
+            let ok = self.store.importAndCopy(from: draggingPasteboard, sourceLabel: "拖拽复制")
+            if ok {
+                self.nav.selectedIndex = 0
+                self.nav.preferredGridColumn = nil
+                self.nav.scrollRequestEpoch &+= 1
+            }
+            return ok
+        }
         applyNativeSurface(style: store.surfaceStyle)
         if ProcessInfo.processInfo.arguments.contains("--demo") {
             let runner = DemoShowcaseRunner(panelController: self, store: store, nav: nav)

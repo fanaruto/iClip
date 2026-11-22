@@ -543,4 +543,21 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertEqual(rightMove.index, 1)
         XCTAssertEqual(rightMove.preferredColumn, 1)
     }
+
+    // MARK: - 14. 拖拽内容到 iClip 复制类型校验测试
+
+    func testDragAndDropPasteboardTypeRecognition() {
+        let dragPB = NSPasteboard.withUniqueName()
+        defer { dragPB.releaseGlobally() }
+
+        XCTAssertFalse(ClipboardStore.canAcceptDrag(from: dragPB))
+
+        dragPB.clearContents()
+        dragPB.setString("拖拽测试文本", forType: .string)
+        XCTAssertTrue(ClipboardStore.canAcceptDrag(from: dragPB))
+
+        dragPB.clearContents()
+        dragPB.setString("https://github.com/fanaruto/iClip", forType: .URL)
+        XCTAssertTrue(ClipboardStore.canAcceptDrag(from: dragPB))
+    }
 }

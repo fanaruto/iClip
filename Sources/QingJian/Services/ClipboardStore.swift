@@ -629,6 +629,241 @@ final class ClipboardStore: ObservableObject {
         }
     }
 
+    // MARK: - 拖拽内容直达剪贴板复制与收录
+
+    /// 支持拖放到 iClip 面板或菜单栏图标的原生剪贴板类型
+    nonisolated static let supportedDragTypes: [NSPasteboard.PasteboardType] = [
+        .fileURL,
+        .png,
+        .tiff,
+        .URL,
+        .string
+    ]
+
+    private static let supportedImageExtensions: Set<String> = [
+        "png", "jpg", "jpeg", "webp", "heic", "heif", "tiff", "tif", "gif", "bmp"
+    ]
+
+    /// 判断拖放内容是否可被 iClip 接收并复制
+    nonisolated static func canAcceptDrag(from draggingPasteboard: NSPasteboard) -> Bool {
+        guard let types = draggingPasteboard.types else { return false }
+        return supportedDragTypes.contains(where: { types.contains($0) })
+    }
+
+    /// 接收拖拽到面板或菜单栏图标的内容：写入系统剪贴板（立即生效 ⌘V）并收录至历史列表
+    @discardableResult
+    func importAndCopy(from draggingPasteboard: NSPasteboard, sourceLabel: String = "拖拽复制") -> Bool {
+        let types = draggingPasteboard.types ?? []
+
+        // 1. 本地文件 URL（单张图片文件同时以图片与文件格式写入剪贴板；其余作为文件列表写入）
+        if types.contains(.fileURL),
+           let fileURLs = draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [
+               .urlReadingFileURLsOnly: true
+           ]) as? [URL], !fileURLs.isEmpty {
+            if fileURLs.count == 1,
+               let imageURL = fileURLs.first,
+               Self.supportedImageExtensions.contains(imageURL.pathExtension.lowercased()),
+               let rawFileData = try? Data(contentsOf: imageURL),
+               let nsImage = NSImage(data: rawFileData),
+               let tiffData = nsImage.tiffRepresentation {
+                pasteboard.clearContents()
+                pasteboard.setData(tiffData, forType: .tiff)
+                if imageURL.pathExtension.lowercased() == "png" {
+                    pasteboard.setData(rawFileData, forType: .png)
+                }
+                pasteboard.setString(imageURL.absoluteString, forType: .fileURL)
+                ignoreNextChangeCount = pasteboard.changeCount
+                lastChangeCount = pasteboard.changeCount
+
+                ingestDroppedImageData(
+                    rawPNG: imageURL.pathExtension.lowercased() == "png" ? rawFileData : nil,
+                    rawTIFF: tiffData,
+                    sourceApp: sourceLabel
+                )
+                showToast("已复制图片到剪贴板：\(imageURL.lastPathComponent)")
+                return true
+            }
+
+            let nsURLs = fileURLs.map { $0 as NSURL }
+            pasteboard.clearContents()
+            pasteboard.writeObjects(nsURLs)
+            ignoreNextChangeCount = pasteboard.changeCount
+            lastChangeCount = pasteboard.changeCount
+
+            let paths = fileURLs.map { $0.path }
+            let hash = Self.sha256(paths.joined(separator: "\n"))
+            let item = ClipItem(
+                type: .file,
+                filePaths: paths,
+                contentHash: "file:\(hash)",
+                sourceAppName: sourceLabel
+            )
+            insertOrPromote(item)
+            if fileURLs.count == 1 {
+                showToast("已复制到剪贴板：\(fileURLs[0].lastPathComponent)")
+            } else {
+                showToast("已复制 \(fileURLs.count) 个文件到剪贴板")
+            }
+            return true
+        }
+
+        // 2. 内存图片数据（网页图片 / 截图 / 设计稿直接拖入）
+        if types.contains(.png) || types.contains(.tiff) {
+            let rawPNG = draggingPasteboard.data(forType: .png)
+            let rawTIFF = (rawPNG == nil) ? draggingPasteboard.data(forType: .tiff) : nil
+            if rawPNG != nil || rawTIFF != nil {
+                pasteboard.clearContents()
+                if let rawPNG {
+                    pasteboard.setData(rawPNG, forType: .png)
+                    if let img = NSImage(data: rawPNG), let tiff = img.tiffRepresentation {
+                        pasteboard.setData(tiff, forType: .tiff)
+                    }
+                } else if let rawTIFF {
+                    pasteboard.setData(rawTIFF, forType: .tiff)
+                }
+                ignoreNextChangeCount = pasteboard.changeCount
+                lastChangeCount = pasteboard.changeCount
+
+                ingestDroppedImageData(rawPNG: rawPNG, rawTIFF: rawTIFF, sourceApp: sourceLabel)
+                showToast("已复制图片到剪贴板")
+                return true
+            }
+        }
+
+        // 3. 网页链接（浏览器地址栏 / 超链接直接拖入）
+        if types.contains(.URL),
+           let urlString = draggingPasteboard.string(forType: .URL)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !urlString.isEmpty {
+            var finalLink = urlString
+            #if !ICLIP_EDITION_FLOW
+            if !minimalModeEnabled && autoCleanTrackingURL, let cleaned = SemanticEngine.cleanTrackingURL(urlString) {
+                finalLink = cleaned
+            }
+            #endif
+            pasteboard.clearContents()
+            pasteboard.setString(finalLink, forType: .string)
+            pasteboard.setString(finalLink, forType: .URL)
+            ignoreNextChangeCount = pasteboard.changeCount
+            lastChangeCount = pasteboard.changeCount
+
+            let hash = Self.sha256(finalLink)
+            let item = ClipItem(
+                type: .link,
+                text: finalLink,
+                contentHash: "link:\(hash)",
+                sourceAppName: sourceLabel
+            )
+            insertOrPromote(item)
+            showToast("已复制链接到剪贴板")
+            return true
+        }
+
+        // 4. 文本与选中文字片段
+        if let rawText = draggingPasteboard.string(forType: .string) {
+            let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return false }
+
+            var finalText = rawText
+            let isLink = isValidWebURL(trimmed)
+            #if !ICLIP_EDITION_FLOW
+            if !minimalModeEnabled && isLink && autoCleanTrackingURL, let cleaned = SemanticEngine.cleanTrackingURL(trimmed) {
+                finalText = cleaned
+            }
+            #endif
+
+            pasteboard.clearContents()
+            pasteboard.setString(finalText, forType: .string)
+            if isLink {
+                pasteboard.setString(finalText, forType: .URL)
+            }
+            ignoreNextChangeCount = pasteboard.changeCount
+            lastChangeCount = pasteboard.changeCount
+
+            let hash = Self.sha256(finalText)
+            let item = ClipItem(
+                type: isLink ? .link : .text,
+                text: finalText,
+                contentHash: "\(isLink ? "link" : "text"):\(hash)",
+                sourceAppName: sourceLabel
+            )
+            insertOrPromote(item)
+            showToast(isLink ? "已复制链接到剪贴板" : "已复制文本到剪贴板")
+            return true
+        }
+
+        return false
+    }
+
+    private func ingestDroppedImageData(rawPNG: Data?, rawTIFF: Data?, sourceApp: String) {
+        let imagesDir = self.imagesDirectoryURL
+        Task.detached(priority: .utility) { [weak self] in
+            let finalPNG: Data?
+            if let rawPNG {
+                finalPNG = rawPNG
+            } else if let rawTIFF, let bitmap = NSBitmapImageRep(data: rawTIFF) {
+                finalPNG = bitmap.representation(using: .png, properties: [:])
+            } else {
+                finalPNG = nil
+            }
+            guard let pngData = finalPNG else { return }
+
+            let hash = Self.sha256(pngData)
+            let contentHash = "img:\(hash)"
+            let dims = Self.pixelDimensions(from: pngData)
+
+            let alreadyExists = await MainActor.run { [weak self] () -> Bool in
+                guard let self else { return true }
+                if let existingIndex = self.items.firstIndex(where: { $0.contentHash == contentHash }) {
+                    var existing = self.items.remove(at: existingIndex)
+                    existing.createdAt = Date()
+                    existing.sourceAppName = sourceApp
+                    #if ICLIP_EDITION_FLOW
+                    if !self.minimalModeEnabled && self.isQueueModeActive && !self.pasteQueueIDs.contains(existing.id) {
+                        self.pasteQueueIDs.append(existing.id)
+                    }
+                    #endif
+                    self.items.insert(existing, at: 0)
+                    self.items = self.sortItems(self.items)
+                    self.saveHistory()
+                    return true
+                }
+                return false
+            }
+            if alreadyExists { return }
+
+            let fileName = "\(UUID().uuidString).png"
+            let fileURL = imagesDir.appendingPathComponent(fileName)
+            do {
+                try pngData.write(to: fileURL, options: .atomic)
+            } catch {
+                return
+            }
+
+            let thumb = Self.decodeImage(at: fileURL, maxPixelSize: 360)
+
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                if let thumb {
+                    self.thumbnailCache.setObject(thumb, forKey: fileName as NSString, cost: Self.estimatedCost(of: thumb))
+                }
+                let item = ClipItem(
+                    type: .image,
+                    imageFileName: fileName,
+                    imageWidth: dims.width,
+                    imageHeight: dims.height,
+                    contentHash: contentHash,
+                    sourceAppName: sourceApp
+                )
+                self.insertOrPromote(item)
+                #if ICLIP_EDITION_FLOW
+                if !self.minimalModeEnabled {
+                    self.scheduleBackgroundOCR(forItemID: item.id, fileURL: fileURL)
+                }
+                #endif
+            }
+        }
+    }
+
     private func insertOrPromote(_ newItem: ClipItem) {
         let finalID: UUID
         if let existingIndex = items.firstIndex(where: { $0.contentHash == newItem.contentHash }) {

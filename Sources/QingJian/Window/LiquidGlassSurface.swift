@@ -20,6 +20,9 @@ final class LiquidGlassSurfaceHost {
     private var currentMaskOpacity: Double = 0.38
     private var cornerRadius: CGFloat = 22
 
+    var onDragTargetedChanged: ((Bool) -> Void)?
+    var onPerformDrop: ((NSPasteboard) -> Bool)?
+
     init() {
         accessibilityObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
@@ -113,6 +116,12 @@ final class LiquidGlassSurfaceHost {
         root.onAppearanceChanged = { [weak self] in
             self?.refreshInPlace()
         }
+        root.onDragTargetedChanged = { [weak self] targeted in
+            self?.onDragTargetedChanged?(targeted)
+        }
+        root.onPerformDrop = { [weak self] pasteboard in
+            self?.onPerformDrop?(pasteboard) ?? false
+        }
 
         // Layer 0：底层高斯柔焦隔断层，把背后深色 IDE / 网页锐利字符打散成柔和光晕
         let blurView = NSVisualEffectView(frame: bounds)
@@ -150,8 +159,18 @@ final class LiquidGlassSurfaceHost {
         bounds: NSRect,
         cornerRadius: CGFloat
     ) {
-        self.containerView = nil
         self.activeGlassView = nil
+
+        let root = LiquidGlassRootContainerView(frame: bounds)
+        root.autoresizingMask = [.width, .height]
+        root.wantsLayer = true
+        root.layer?.backgroundColor = NSColor.clear.cgColor
+        root.onDragTargetedChanged = { [weak self] targeted in
+            self?.onDragTargetedChanged?(targeted)
+        }
+        root.onPerformDrop = { [weak self] pasteboard in
+            self?.onPerformDrop?(pasteboard) ?? false
+        }
 
         let effectView = NSVisualEffectView(frame: bounds)
         effectView.autoresizingMask = [.width, .height]
@@ -160,9 +179,11 @@ final class LiquidGlassSurfaceHost {
         effectView.state = .active
         effectView.maskImage = Self.roundedMaskImage(size: bounds.size, radius: cornerRadius)
         effectView.addSubview(hostingView)
+        root.addSubview(effectView)
 
+        self.containerView = root
         self.backdropBlurView = effectView
-        panel.contentView = effectView
+        panel.contentView = root
         panel.invalidateShadow()
     }
 
@@ -228,13 +249,53 @@ final class LiquidGlassSurfaceHost {
     }
 }
 
-/// 监听系统深/浅外观实时变更的轻量根视图
+/// 监听系统深/浅外观实时变更并接收外部内容拖放复制的轻量根视图
 private final class LiquidGlassRootContainerView: NSView {
     var onAppearanceChanged: (() -> Void)?
+    var onDragTargetedChanged: ((Bool) -> Void)?
+    var onPerformDrop: ((NSPasteboard) -> Bool)?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        registerForDraggedTypes(ClipboardStore.supportedDragTypes)
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        registerForDraggedTypes(ClipboardStore.supportedDragTypes)
+    }
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         onAppearanceChanged?()
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard ClipboardStore.canAcceptDrag(from: sender.draggingPasteboard) else { return [] }
+        onDragTargetedChanged?(true)
+        return .copy
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard ClipboardStore.canAcceptDrag(from: sender.draggingPasteboard) else { return [] }
+        return .copy
+    }
+
+    override func draggingExited(_ sender: NSDraggingInfo?) {
+        onDragTargetedChanged?(false)
+    }
+
+    override func draggingEnded(_ sender: NSDraggingInfo) {
+        onDragTargetedChanged?(false)
+    }
+
+    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        ClipboardStore.canAcceptDrag(from: sender.draggingPasteboard)
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        onDragTargetedChanged?(false)
+        return onPerformDrop?(sender.draggingPasteboard) ?? false
     }
 }
 

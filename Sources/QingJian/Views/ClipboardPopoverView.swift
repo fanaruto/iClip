@@ -35,6 +35,7 @@ final class PanelNavigationModel: ObservableObject {
     @Published var isRecordingQueueHotKey: Bool = false
     @Published var isEditingAlias: Bool = false
     @Published var demoPreviewIndex: Int? = nil
+    @Published var isDragTargeted: Bool = false
     var suppressAutoHide: Bool = false
 
     private(set) var cachedFilteredItems: [ClipItem] = []
@@ -107,6 +108,7 @@ final class PanelNavigationModel: ObservableObject {
         isRecordingHotKey = false
         isRecordingQueueHotKey = false
         suppressAutoHide = false
+        isDragTargeted = false
         presentationEpoch &+= 1
         focusTrigger = UUID()
     }
@@ -253,6 +255,13 @@ struct ClipboardPopoverView: View {
                 isVisible: isPreviewVisible,
                 panelSize: CGSize(width: 420, height: 560)
             )
+        }
+        // 外部内容拖放复制高亮反馈浮层
+        .overlay {
+            if nav.isDragTargeted {
+                dragDropOverlay
+                    .transition(.opacity.combined(with: .scale(scale: 0.97)))
+            }
         }
         .coordinateSpace(name: "panelRoot")
         .animation(.spring(response: 0.28, dampingFraction: 0.86), value: nav.showSettings)
@@ -1502,6 +1511,46 @@ struct ClipboardPopoverView: View {
         }
     }
 
+    // MARK: - 拖拽复制接收浮层
+
+    private var dragDropOverlay: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .fill(Color.accentColor.opacity(colorScheme == .dark ? 0.16 : 0.10))
+
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(
+                    Color.accentColor.opacity(0.85),
+                    style: StrokeStyle(lineWidth: 2, dash: [7, 5])
+                )
+                .padding(10)
+
+            VStack(spacing: 8) {
+                Image(systemName: "arrow.down.doc.fill")
+                    .font(.system(size: 28, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                Text("松手即复制到剪贴板")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.primary)
+                Text("支持文字、链接、图片与文件")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 22)
+            .padding(.vertical, 16)
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(.regularMaterial)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .strokeBorder(glassPalette.groupStroke, lineWidth: 0.8)
+                    )
+                    .shadow(color: Color.black.opacity(0.16), radius: 14, y: 6)
+            )
+        }
+        .allowsHitTesting(false)
+    }
+
     // MARK: - 轻提示胶囊
 
     private func toastPill(_ message: String) -> some View {
@@ -1860,6 +1909,7 @@ final class PanelNavigationModel: ObservableObject {
     @Published var quickLookTabIndex: Int = 0
     @Published var isCreatingTemplate: Bool = false
     @Published var demoPreviewIndex: Int? = nil
+    @Published var isDragTargeted: Bool = false
     var suppressAutoHide: Bool = false
 
     private(set) var cachedFilteredItems: [ClipItem] = []
@@ -1948,6 +1998,7 @@ final class PanelNavigationModel: ObservableObject {
         isCreatingTemplate = false
         isRecordingHotKey = false
         suppressAutoHide = false
+        isDragTargeted = false
         presentationEpoch &+= 1
         focusTrigger = UUID()
     }
@@ -2077,6 +2128,13 @@ struct ClipboardPopoverView: View {
                 isVisible: isPreviewVisible,
                 panelSize: CGSize(width: 420, height: 560)
             )
+        }
+        // 外部内容拖放复制高亮反馈浮层
+        .overlay {
+            if nav.isDragTargeted {
+                dragDropOverlay
+                    .transition(.opacity.combined(with: .scale(scale: 0.97)))
+            }
         }
         // QuickLook 语义原文与变换结果实时对照浮层（⌘Y / Space）
         .overlay {
@@ -3141,6 +3199,46 @@ struct ClipboardPopoverView: View {
                 .padding(.vertical, 3)
                 .background(Capsule().fill(Color.primary.opacity(0.07)))
         }
+    }
+
+    // MARK: - 拖拽复制接收浮层
+
+    private var dragDropOverlay: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .fill(Color.accentColor.opacity(colorScheme == .dark ? 0.16 : 0.10))
+
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(
+                    Color.accentColor.opacity(0.85),
+                    style: StrokeStyle(lineWidth: 2, dash: [7, 5])
+                )
+                .padding(10)
+
+            VStack(spacing: 8) {
+                Image(systemName: "arrow.down.doc.fill")
+                    .font(.system(size: 28, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                Text("松手即复制到剪贴板")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.primary)
+                Text("支持文字、链接、图片与文件")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 22)
+            .padding(.vertical, 16)
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(.regularMaterial)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .strokeBorder(glassPalette.groupStroke, lineWidth: 0.8)
+                    )
+                    .shadow(color: Color.black.opacity(0.16), radius: 14, y: 6)
+            )
+        }
+        .allowsHitTesting(false)
     }
 
     // MARK: - 轻提示胶囊

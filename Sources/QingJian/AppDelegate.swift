@@ -6,6 +6,8 @@ import Combine
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var panelController: FloatingPanelController!
+    private var statusDropView: StatusItemDropTargetView?
+    private var statusFeedbackWorkItem: DispatchWorkItem?
     private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -59,6 +61,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         button.action = #selector(statusItemClicked(_:))
         button.target = self
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        installStatusItemDropTarget(on: button)
 
         #if ICLIP_EDITION_FLOW
         Publishers.CombineLatest(ClipboardStore.shared.$pasteQueueIDs, ClipboardStore.shared.$minimalModeEnabled)
@@ -158,7 +161,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(.separator())
 
-        let clearItem = NSMenuItem(title: "清空未固定历史", action: #selector(menuClearHistory), keyEquivalent: "")
+        let clearItem = NSMenuItem(title: "清空未收藏历史", action: #selector(menuClearHistory), keyEquivalent: "")
         clearItem.target = self
         menu.addItem(clearItem)
 
@@ -218,5 +221,114 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         #endif
+    }
+
+    // MARK: - 菜单栏图标拖放复制
+
+    private func installStatusItemDropTarget(on button: NSStatusBarButton) {
+        let dropView = StatusItemDropTargetView(frame: button.bounds)
+        dropView.autoresizingMask = [.width, .height]
+        dropView.onHighlightChanged = { [weak button] highlighted in
+            button?.highlight(highlighted)
+        }
+        dropView.onPerformDrop = { [weak self] pasteboard in
+            guard let self else { return false }
+            let ok = ClipboardStore.shared.importAndCopy(from: pasteboard, sourceLabel: "菜单栏拖拽")
+            if ok {
+                self.flashStatusItemCopiedFeedback()
+            }
+            return ok
+        }
+        dropView.onLeftClick = { [weak self] in
+            self?.toggleFromStatusItem()
+        }
+        dropView.onRightClick = { [weak self, weak button] in
+            guard let self, let button else { return }
+            self.showContextMenu(for: button)
+        }
+        button.addSubview(dropView)
+        self.statusDropView = dropView
+    }
+
+    private func flashStatusItemCopiedFeedback() {
+        guard let button = statusItem.button else { return }
+        statusFeedbackWorkItem?.cancel()
+
+        let normalSymbol = AppRoleEdition.installed == .developer ? "doc.on.clipboard" : "list.clipboard"
+        let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
+        if let checkImage = NSImage(systemSymbolName: "checkmark.circle.fill", accessibilityDescription: "已复制到剪贴板") {
+            button.image = checkImage.withSymbolConfiguration(config)
+            button.image?.isTemplate = true
+        }
+
+        let work = DispatchWorkItem { [weak button] in
+            Task { @MainActor [weak button] in
+                guard let button else { return }
+                if let icon = NSImage(systemSymbolName: normalSymbol, accessibilityDescription: "iClip") {
+                    button.image = icon.withSymbolConfiguration(config)
+                    button.image?.isTemplate = true
+                }
+            }
+        }
+        statusFeedbackWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.1, execute: work)
+    }
+}
+
+/// 覆盖在菜单栏图标上的轻量拖放接收视图：支持直接拖拽文字/图片/链接/文件到菜单栏图标复制，同时无损转发左右键点击
+private final class StatusItemDropTargetView: NSView {
+    var onHighlightChanged: ((Bool) -> Void)?
+    var onPerformDrop: ((NSPasteboard) -> Bool)?
+    var onLeftClick: (() -> Void)?
+    var onRightClick: (() -> Void)?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        registerForDraggedTypes(ClipboardStore.supportedDragTypes)
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        registerForDraggedTypes(ClipboardStore.supportedDragTypes)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if event.modifierFlags.contains(.control) {
+            onRightClick?()
+        } else {
+            onLeftClick?()
+        }
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        onRightClick?()
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard ClipboardStore.canAcceptDrag(from: sender.draggingPasteboard) else { return [] }
+        onHighlightChanged?(true)
+        return .copy
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard ClipboardStore.canAcceptDrag(from: sender.draggingPasteboard) else { return [] }
+        return .copy
+    }
+
+    override func draggingExited(_ sender: NSDraggingInfo?) {
+        onHighlightChanged?(false)
+    }
+
+    override func draggingEnded(_ sender: NSDraggingInfo) {
+        onHighlightChanged?(false)
+    }
+
+    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        ClipboardStore.canAcceptDrag(from: sender.draggingPasteboard)
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        onHighlightChanged?(false)
+        return onPerformDrop?(sender.draggingPasteboard) ?? false
     }
 }
