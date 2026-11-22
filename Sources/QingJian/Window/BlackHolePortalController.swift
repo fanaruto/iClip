@@ -265,6 +265,14 @@ private struct SiriLiquidOrbView: View {
     private let siriCoral = Color(red: 1.00, green: 0.56, blue: 0.24)
 
     var body: some View {
+        if phase == .hidden {
+            Color.clear.frame(width: 132, height: 132)
+        } else {
+            activeOrbTimeline
+        }
+    }
+
+    private var activeOrbTimeline: some View {
         TimelineView(.animation) { timeline in
             let t = timeline.date.timeIntervalSinceReferenceDate
             let speed = isEngaged ? 2.4 : 1.15

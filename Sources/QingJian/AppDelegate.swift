@@ -315,6 +315,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         guard !ClipboardStore.shared.isInternalDragActive else { return }
 
+        // 零开销坐标门控：仅当鼠标进入屏幕顶部 170pt 引力带或黑洞已显示时，才查询拖拽剪贴板与精确距离
+        let mouse = NSEvent.mouseLocation
+        let screenMaxY = NSScreen.screens.first(where: { $0.frame.contains(mouse) })?.frame.maxY
+            ?? NSScreen.main?.frame.maxY ?? 1080
+        if (screenMaxY - mouse.y) > 170, BlackHolePortalController.shared.phase == .hidden {
+            return
+        }
+
         let dragPB = NSPasteboard(name: .drag)
         let currentCount = dragPB.changeCount
         if currentCount != lastObservedDragChangeCount {
@@ -323,7 +331,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         guard isCurrentDragSessionEligible, let anchor = statusItemScreenRect() else { return }
 
-        let mouse = NSEvent.mouseLocation
         let center = NSPoint(x: anchor.midX, y: anchor.midY)
         let distance = hypot(mouse.x - center.x, mouse.y - center.y)
 

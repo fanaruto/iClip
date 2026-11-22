@@ -122,7 +122,6 @@ struct ClipboardPopoverView: View {
     let onDismiss: () -> Void
     let onQuit: () -> Void
 
-    @Namespace private var tabNamespace
     @Environment(\.colorScheme) private var colorScheme
     @FocusState private var isSearchFocused: Bool
 
@@ -137,7 +136,6 @@ struct ClipboardPopoverView: View {
     @State private var previewTileRect: CGRect = .zero
     @State private var isPreviewVisible: Bool = false
     @State private var hoveredTileItemID: UUID? = nil
-    @State private var hoveredTab: ClipFilterTab? = nil
     @State private var previewHideWorkItem: DispatchWorkItem? = nil
     @State private var aliasEditingItem: ClipItem? = nil
     @State private var aliasDraftText: String = ""
@@ -490,56 +488,59 @@ struct ClipboardPopoverView: View {
         }
     }
 
-    // MARK: - iOS 滑动胶囊分类条
+    // MARK: - iOS 滑动胶囊分类条（独立隔离渲染 + 常驻 GPU 硬件偏移滑块，120Hz 满帧零列表重绘干扰）
 
     private var filterBar: some View {
-        HStack(spacing: 2) {
-            ForEach(ClipFilterTab.allCases) { tab in
-                let isSelected = nav.selectedTab == tab
-                let isHovered = hoveredTab == tab
-                Button {
-                    withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
-                        nav.selectedTab = tab
-                    }
-                } label: {
-                    Text(tab.title)
-                        .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
-                        .foregroundStyle(isSelected ? Color.primary : (isHovered ? Color.primary.opacity(0.85) : Color.secondary))
-                        .frame(maxWidth: .infinity, minHeight: 28)
-                        .background {
-                            if isSelected {
-                                Capsule()
-                                    .fill(glassPalette.activeSegmentFill)
-                                    .overlay(
-                                        Capsule()
-                                            .strokeBorder(glassPalette.controlCapsuleStroke, lineWidth: 0.6)
-                                    )
-                                    .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.24 : 0.08), radius: 2.5, y: 1)
-                                    .matchedGeometryEffect(id: "activeTabPill", in: tabNamespace)
-                            } else if isHovered {
-                                Capsule()
-                                    .fill(glassPalette.hoverSegmentFill)
-                            }
+        let tabs = ClipFilterTab.allCases
+        let selectedIdx = tabs.firstIndex(of: nav.selectedTab) ?? 0
+
+        return GeometryReader { geo in
+            let inset: CGFloat = 3
+            let innerWidth = max(0, geo.size.width - inset * 2)
+            let pillWidth = innerWidth / CGFloat(max(1, tabs.count))
+
+            ZStack(alignment: .leading) {
+                // 常驻单一选中胶囊滑块：仅做 GPU 水平位移，永不销毁重建、永不被列表 diff 打断
+                Capsule()
+                    .fill(glassPalette.activeSegmentFill)
+                    .overlay(
+                        Capsule()
+                            .strokeBorder(glassPalette.controlCapsuleStroke, lineWidth: 0.6)
+                    )
+                    .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.24 : 0.08), radius: 2.5, y: 1)
+                    .frame(width: pillWidth, height: 28)
+                    .offset(x: inset + CGFloat(selectedIdx) * pillWidth)
+                    .animation(.spring(response: 0.22, dampingFraction: 0.84), value: nav.selectedTab)
+
+                HStack(spacing: 0) {
+                    ForEach(tabs) { tab in
+                        let isSelected = nav.selectedTab == tab
+                        Button {
+                            guard nav.selectedTab != tab else { return }
+                            nav.selectedTab = tab
+                        } label: {
+                            Text(tab.title)
+                                .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
+                                .foregroundStyle(isSelected ? Color.primary : Color.secondary)
+                                .frame(width: pillWidth, height: 28)
+                                .contentShape(Rectangle())
                         }
-                        .contentShape(Capsule())
-                }
-                .buttonStyle(.plain)
-                .onHover { hovering in
-                    withAnimation(.easeOut(duration: 0.14)) {
-                        hoveredTab = hovering ? tab : (hoveredTab == tab ? nil : hoveredTab)
+                        .buttonStyle(.plain)
                     }
                 }
+                .padding(.horizontal, inset)
             }
+            .frame(width: geo.size.width, height: 34)
+            .background(
+                Capsule()
+                    .fill(glassPalette.controlCapsuleFill)
+            )
+            .overlay(
+                Capsule()
+                    .strokeBorder(glassPalette.controlCapsuleStroke.opacity(0.75), lineWidth: 0.6)
+            )
         }
-        .padding(3)
-        .background(
-            Capsule()
-                .fill(glassPalette.controlCapsuleFill)
-        )
-        .overlay(
-            Capsule()
-                .strokeBorder(glassPalette.controlCapsuleStroke.opacity(0.75), lineWidth: 0.6)
-        )
+        .frame(height: 34)
     }
 
     private var pinCategoryBar: some View {
@@ -1679,12 +1680,9 @@ struct ClipboardPopoverView: View {
         guard let currentIdx = tabs.firstIndex(of: nav.selectedTab) else { return }
         let nextIdx = (currentIdx + delta + tabs.count) % tabs.count
         dismissImagePreview(clearItem: true)
-        withAnimation(.spring(response: 0.26, dampingFraction: 0.84)) {
-            nav.selectedTab = tabs[nextIdx]
-        }
         nav.selectedIndex = 0
         nav.preferredGridColumn = nil
-        nav.scrollRequestEpoch &+= 1
+        nav.selectedTab = tabs[nextIdx]
     }
 
     func moveSelection(direction: PanelNavigationDirection, extendMergeSelection: Bool = false) {
@@ -2040,7 +2038,6 @@ struct ClipboardPopoverView: View {
     let onDismiss: () -> Void
     let onQuit: () -> Void
 
-    @Namespace private var tabNamespace
     @Environment(\.colorScheme) private var colorScheme
     @FocusState private var isSearchFocused: Bool
 
@@ -2055,7 +2052,6 @@ struct ClipboardPopoverView: View {
     @State private var previewTileRect: CGRect = .zero
     @State private var isPreviewVisible: Bool = false
     @State private var hoveredTileItemID: UUID? = nil
-    @State private var hoveredTab: ClipFilterTab? = nil
     @State private var previewHideWorkItem: DispatchWorkItem? = nil
     @State private var templateDraftText: String = "请帮我审查以下代码并指出潜在问题：\n\n{{clip_redacted}}"
 
@@ -2381,56 +2377,59 @@ struct ClipboardPopoverView: View {
         }
     }
 
-    // MARK: - iOS 滑动胶囊分类条
+    // MARK: - iOS 滑动胶囊分类条（独立隔离渲染 + 常驻 GPU 硬件偏移滑块，120Hz 满帧零列表重绘干扰）
 
     private var filterBar: some View {
-        HStack(spacing: 2) {
-            ForEach(ClipFilterTab.allCases) { tab in
-                let isSelected = nav.selectedTab == tab
-                let isHovered = hoveredTab == tab
-                Button {
-                    withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
-                        nav.selectedTab = tab
-                    }
-                } label: {
-                    Text(tab.title)
-                        .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
-                        .foregroundStyle(isSelected ? Color.primary : (isHovered ? Color.primary.opacity(0.85) : Color.secondary))
-                        .frame(maxWidth: .infinity, minHeight: 28)
-                        .background {
-                            if isSelected {
-                                Capsule()
-                                    .fill(glassPalette.activeSegmentFill)
-                                    .overlay(
-                                        Capsule()
-                                            .strokeBorder(glassPalette.controlCapsuleStroke, lineWidth: 0.6)
-                                    )
-                                    .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.24 : 0.08), radius: 2.5, y: 1)
-                                    .matchedGeometryEffect(id: "activeTabPill", in: tabNamespace)
-                            } else if isHovered {
-                                Capsule()
-                                    .fill(glassPalette.hoverSegmentFill)
-                            }
+        let tabs = ClipFilterTab.allCases
+        let selectedIdx = tabs.firstIndex(of: nav.selectedTab) ?? 0
+
+        return GeometryReader { geo in
+            let inset: CGFloat = 3
+            let innerWidth = max(0, geo.size.width - inset * 2)
+            let pillWidth = innerWidth / CGFloat(max(1, tabs.count))
+
+            ZStack(alignment: .leading) {
+                // 常驻单一选中胶囊滑块：仅做 GPU 水平位移，永不销毁重建、永不被列表 diff 打断
+                Capsule()
+                    .fill(glassPalette.activeSegmentFill)
+                    .overlay(
+                        Capsule()
+                            .strokeBorder(glassPalette.controlCapsuleStroke, lineWidth: 0.6)
+                    )
+                    .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.24 : 0.08), radius: 2.5, y: 1)
+                    .frame(width: pillWidth, height: 28)
+                    .offset(x: inset + CGFloat(selectedIdx) * pillWidth)
+                    .animation(.spring(response: 0.22, dampingFraction: 0.84), value: nav.selectedTab)
+
+                HStack(spacing: 0) {
+                    ForEach(tabs) { tab in
+                        let isSelected = nav.selectedTab == tab
+                        Button {
+                            guard nav.selectedTab != tab else { return }
+                            nav.selectedTab = tab
+                        } label: {
+                            Text(tab.title)
+                                .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
+                                .foregroundStyle(isSelected ? Color.primary : Color.secondary)
+                                .frame(width: pillWidth, height: 28)
+                                .contentShape(Rectangle())
                         }
-                        .contentShape(Capsule())
-                }
-                .buttonStyle(.plain)
-                .onHover { hovering in
-                    withAnimation(.easeOut(duration: 0.14)) {
-                        hoveredTab = hovering ? tab : (hoveredTab == tab ? nil : hoveredTab)
+                        .buttonStyle(.plain)
                     }
                 }
+                .padding(.horizontal, inset)
             }
+            .frame(width: geo.size.width, height: 34)
+            .background(
+                Capsule()
+                    .fill(glassPalette.controlCapsuleFill)
+            )
+            .overlay(
+                Capsule()
+                    .strokeBorder(glassPalette.controlCapsuleStroke.opacity(0.75), lineWidth: 0.6)
+            )
         }
-        .padding(3)
-        .background(
-            Capsule()
-                .fill(glassPalette.controlCapsuleFill)
-        )
-        .overlay(
-            Capsule()
-                .strokeBorder(glassPalette.controlCapsuleStroke.opacity(0.75), lineWidth: 0.6)
-        )
+        .frame(height: 34)
     }
 
     private var semanticTokenHintBar: some View {
@@ -3400,12 +3399,9 @@ struct ClipboardPopoverView: View {
         if nav.showQuickLook {
             nav.showQuickLook = false
         }
-        withAnimation(.spring(response: 0.26, dampingFraction: 0.84)) {
-            nav.selectedTab = tabs[nextIdx]
-        }
         nav.selectedIndex = 0
         nav.preferredGridColumn = nil
-        nav.scrollRequestEpoch &+= 1
+        nav.selectedTab = tabs[nextIdx]
     }
 
     func moveSelection(direction: PanelNavigationDirection) {
