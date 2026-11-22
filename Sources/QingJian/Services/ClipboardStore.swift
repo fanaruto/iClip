@@ -645,7 +645,6 @@ final class ClipboardStore: ObservableObject {
     /// 将 iClip 面板内的条目（文本 / 链接 / 图片 / 文件）包装为原生 NSItemProvider，支持直接拖出至任意外部应用
     func makeDragItemProvider(for item: ClipItem) -> NSItemProvider {
         lastInternalDragUptime = ProcessInfo.processInfo.systemUptime
-        InteractivePlaygroundController.shared.recordDragAction()
 
         switch item.type {
         case .image:
@@ -731,9 +730,6 @@ final class ClipboardStore: ObservableObject {
     /// 接收拖拽到面板或菜单栏图标的内容：写入系统剪贴板（立即生效 ⌘V）并收录至历史列表
     @discardableResult
     func importAndCopy(from draggingPasteboard: NSPasteboard, sourceLabel: String = "拖拽复制") -> Bool {
-        if !sourceLabel.hasPrefix("游乐场示例") {
-            InteractivePlaygroundController.shared.recordDragAction()
-        }
         lastImportedDragPreviewCGImage = nil
         let types = draggingPasteboard.types ?? []
 

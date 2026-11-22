@@ -56,6 +56,8 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         p.hasShadow = true
         p.isMovableByWindowBackground = true
         p.hidesOnDeactivate = false
+        p.minSize = panelSize
+        p.maxSize = panelSize
         p.delegate = self
 
         let view = ClipboardPopoverView(
@@ -71,6 +73,8 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         self.rootView = view
 
         let hosting = NSHostingView(rootView: view)
+        // 锁死 NSHostingView 尺寸反推：彻底禁止任何内部子视图状态切换反向拉宽或撑高 NSPanel 外框
+        hosting.sizingOptions = []
         hosting.frame = contentRect
         hosting.autoresizingMask = [.width, .height]
         hosting.wantsLayer = true
@@ -379,6 +383,13 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             return event
         }
 
+        if InteractivePlaygroundController.shared.isActive, !nav.showSettings {
+            if event.keyCode == 53 || event.keyCode == 36 || event.keyCode == 76 {
+                InteractivePlaygroundController.shared.dismiss(in: store)
+                return nil
+            }
+        }
+
         if event.keyCode == 53 {
             if nav.showSettings {
                 nav.showSettings = false
@@ -537,6 +548,8 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         p.hasShadow = true
         p.isMovableByWindowBackground = true
         p.hidesOnDeactivate = false
+        p.minSize = panelSize
+        p.maxSize = panelSize
         p.delegate = self
 
         let view = ClipboardPopoverView(
@@ -552,6 +565,8 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         self.rootView = view
 
         let hosting = NSHostingView(rootView: view)
+        // 锁死 NSHostingView 尺寸反推：彻底禁止任何内部子视图状态切换反向拉宽或撑高 NSPanel 外框
+        hosting.sizingOptions = []
         hosting.frame = contentRect
         hosting.autoresizingMask = [.width, .height]
         hosting.wantsLayer = true
@@ -842,6 +857,13 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
 
     private func handleKeyDown(_ event: NSEvent) -> NSEvent? {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+
+        if InteractivePlaygroundController.shared.isActive, !nav.showSettings {
+            if event.keyCode == 53 || event.keyCode == 36 || event.keyCode == 76 {
+                InteractivePlaygroundController.shared.dismiss(in: store)
+                return nil
+            }
+        }
 
         if event.keyCode == 53 {
             if nav.showQuickLook {

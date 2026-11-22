@@ -176,17 +176,6 @@ struct ClipboardPopoverView: View {
                         .transition(.move(edge: .top).combined(with: .opacity))
                     }
 
-                    if playground.isActive {
-                        InteractivePlaygroundBanner(
-                            playground: playground,
-                            store: store,
-                            glassPalette: glassPalette
-                        )
-                        .padding(.horizontal, 14)
-                        .padding(.bottom, 8)
-                        .transition(.move(edge: .top).combined(with: .opacity))
-                    }
-
                     filterBar
                         .padding(.horizontal, 14)
                         .padding(.bottom, 8)
@@ -249,6 +238,7 @@ struct ClipboardPopoverView: View {
                         .padding(.bottom, 9)
                 }
             }
+            .frame(width: 420, height: 560)
 
             // iOS 灵动胶囊轻提示
             if let message = store.toastMessage {
@@ -258,6 +248,7 @@ struct ClipboardPopoverView: View {
             }
         }
         .frame(width: 420, height: 560)
+        .clipped()
         .overlay {
             if store.surfaceStyle != .liquidGlass && !store.borderlessPanel {
                 RoundedRectangle(cornerRadius: 26, style: .continuous)
@@ -281,12 +272,23 @@ struct ClipboardPopoverView: View {
                     .transition(.opacity.combined(with: .scale(scale: 0.97)))
             }
         }
+        // 首次启动苹果风极简重点功能速览浮层
+        .overlay {
+            if playground.isActive && !nav.showSettings {
+                CoreHighlightsOverlay(
+                    controller: playground,
+                    store: store,
+                    glassPalette: glassPalette
+                )
+                .transition(.opacity.combined(with: .scale(scale: 0.96)))
+            }
+        }
         .coordinateSpace(name: "panelRoot")
         .animation(.spring(response: 0.28, dampingFraction: 0.86), value: nav.showSettings)
         .animation(.spring(response: 0.25, dampingFraction: 0.85), value: store.toastMessage)
         .onChange(of: nav.isPresented) { _, presented in
             if presented {
-                playground.ensureSeededOnFirstLaunch(in: store)
+                playground.cleanupLegacySamplesIfAny(in: store)
                 store.onPanelShown(visibleItems: filteredItems)
             } else {
                 dismissImagePreview(clearItem: true)
@@ -304,7 +306,6 @@ struct ClipboardPopoverView: View {
             dismissImagePreview(clearItem: true)
         }
         .onChange(of: nav.selectedTab) { _, _ in
-            playground.recordTabOrArrowNavigation()
             nav.selectedIndex = 0
             dismissImagePreview(clearItem: true)
         }
@@ -977,29 +978,28 @@ struct ClipboardPopoverView: View {
     // MARK: - 底部状态栏
 
     private var footerBar: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             HStack(spacing: 6) {
                 Circle()
                     .fill(store.isPaused ? Color.orange : Color.green)
                     .frame(width: 6.5, height: 6.5)
                 Text("\(filteredItems.count) 条")
                     .font(.system(size: 11.5, weight: .medium))
+                    .monospacedDigit()
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
             }
 
-            Spacer()
+            Spacer(minLength: 6)
 
-            HStack(spacing: 8) {
+            // 恒定提示项：禁止在图片与文字 hover 切换时动态增删变长，保证底部胶囊零抖动
+            HStack(spacing: 7) {
                 keyHint("↵", "键入")
                 if !store.minimalModeEnabled {
-                    keyHint("⇥", store.pasteQueueIDs.isEmpty ? "切类目" : "出队")
-                    keyHint(canMoveHorizontallyInGrid ? "↑↓←→" : "⇧↵", canMoveHorizontallyInGrid ? "选图" : "识字/大写")
-                } else {
-                    keyHint("⇥", "切类目")
-                    keyHint(canMoveHorizontallyInGrid ? "↑↓←→" : "↑↓", "选择")
+                    keyHint("⇧↵", "转换")
                 }
+                keyHint("⇥", store.pasteQueueIDs.isEmpty ? "类目" : "出队")
                 keyHint("ESC", "关闭")
             }
 
@@ -1048,22 +1048,22 @@ struct ClipboardPopoverView: View {
                     RoleAndOTASettingsSection(store: store, updater: updater)
                 }
 
-                // 30 秒互动游乐场重玩入口
-                settingsGroup(title: "30 秒互动游乐场（新手破冰）") {
+                // 核心功能重点速览入口
+                settingsGroup(title: "核心功能速览") {
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("亲手体验 3 大核心魔法")
+                            Text("查看 3 大核心功能亮点")
                                 .font(.system(size: 13.5, weight: .medium))
-                            Text("注入 3 张可实操演练卡片，30 秒掌握 Tab 冲浪、⇧↵ 智变与 Siri 虹吸球")
+                            Text("双向自由拖拽、顶部 Siri 虹吸球与全键盘瞬时流转")
                                 .font(.system(size: 11.5))
                                 .foregroundStyle(.secondary)
                         }
                         Spacer()
-                        Button(playground.isActive ? "正在进行中" : "开启游乐场") {
-                            playground.startOrReplay(in: store)
+                        Button("查看重点") {
                             nav.showSettings = false
+                            playground.showHighlights()
                         }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.bordered)
                         .controlSize(.small)
                     }
                 }
@@ -1762,7 +1762,6 @@ struct ClipboardPopoverView: View {
     }
 
     func pasteSecondaryActionForSelected() {
-        InteractivePlaygroundController.shared.recordMagicOrCopyAction()
         guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return }
         let item = filteredItems[nav.selectedIndex]
         if !store.minimalModeEnabled && item.type == .image {
@@ -2125,17 +2124,6 @@ struct ClipboardPopoverView: View {
                         .transition(.move(edge: .top).combined(with: .opacity))
                     }
 
-                    if playground.isActive {
-                        InteractivePlaygroundBanner(
-                            playground: playground,
-                            store: store,
-                            glassPalette: glassPalette
-                        )
-                        .padding(.horizontal, 14)
-                        .padding(.bottom, 8)
-                        .transition(.move(edge: .top).combined(with: .opacity))
-                    }
-
                     filterBar
                         .padding(.horizontal, 14)
                         .padding(.bottom, nav.searchText.trimmingCharacters(in: .whitespaces).hasPrefix("@") ? 6 : 10)
@@ -2183,6 +2171,7 @@ struct ClipboardPopoverView: View {
                         .padding(.bottom, 9)
                 }
             }
+            .frame(width: 420, height: 560)
 
             // iOS 灵动胶囊轻提示
             if let message = store.toastMessage {
@@ -2192,6 +2181,7 @@ struct ClipboardPopoverView: View {
             }
         }
         .frame(width: 420, height: 560)
+        .clipped()
         .overlay {
             if store.surfaceStyle != .liquidGlass && !store.borderlessPanel {
                 RoundedRectangle(cornerRadius: 26, style: .continuous)
@@ -2213,6 +2203,17 @@ struct ClipboardPopoverView: View {
             if nav.isDragTargeted {
                 dragDropOverlay
                     .transition(.opacity.combined(with: .scale(scale: 0.97)))
+            }
+        }
+        // 首次启动苹果风极简重点功能速览浮层
+        .overlay {
+            if playground.isActive && !nav.showSettings {
+                CoreHighlightsOverlay(
+                    controller: playground,
+                    store: store,
+                    glassPalette: glassPalette
+                )
+                .transition(.opacity.combined(with: .scale(scale: 0.96)))
             }
         }
         // QuickLook 语义原文与变换结果实时对照浮层（⌘Y / Space）
@@ -2243,7 +2244,7 @@ struct ClipboardPopoverView: View {
         .animation(.spring(response: 0.25, dampingFraction: 0.85), value: store.toastMessage)
         .onChange(of: nav.isPresented) { _, presented in
             if presented {
-                playground.ensureSeededOnFirstLaunch(in: store)
+                playground.cleanupLegacySamplesIfAny(in: store)
                 store.onPanelShown(visibleItems: filteredItems)
             } else {
                 dismissImagePreview(clearItem: true)
@@ -2261,7 +2262,6 @@ struct ClipboardPopoverView: View {
             dismissImagePreview(clearItem: true)
         }
         .onChange(of: nav.selectedTab) { _, _ in
-            playground.recordTabOrArrowNavigation()
             nav.selectedIndex = 0
             dismissImagePreview(clearItem: true)
         }
@@ -2765,27 +2765,28 @@ struct ClipboardPopoverView: View {
     // MARK: - 底部状态栏
 
     private var footerBar: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             HStack(spacing: 6) {
                 Circle()
                     .fill(store.isPaused ? Color.orange : Color.green)
                     .frame(width: 6.5, height: 6.5)
                 Text("\(filteredItems.count) 条")
                     .font(.system(size: 11.5, weight: .medium))
+                    .monospacedDigit()
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
             }
 
-            Spacer()
+            Spacer(minLength: 6)
 
-            HStack(spacing: 6) {
+            // 恒定提示项：禁止在图片与文字 hover 切换时动态增删胶囊，确保外框与底栏零抖动
+            HStack(spacing: 7) {
                 keyHint("↵", "键入")
-                if !store.minimalModeEnabled && !canMoveHorizontallyInGrid {
+                if !store.minimalModeEnabled {
                     keyHint("⇧↵", "智变")
                 }
                 keyHint("⇥", "类目")
-                keyHint(canMoveHorizontallyInGrid ? "↑↓←→" : "↑↓", "选择")
                 keyHint("ESC", "关闭")
             }
 
@@ -2834,22 +2835,22 @@ struct ClipboardPopoverView: View {
                     RoleAndOTASettingsSection(store: store, updater: updater)
                 }
 
-                // 30 秒互动游乐场重玩入口
-                settingsGroup(title: "30 秒互动游乐场（新手破冰）") {
+                // 核心功能重点速览入口
+                settingsGroup(title: "核心功能速览") {
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("亲手体验 3 大核心魔法")
+                            Text("查看 3 大核心功能亮点")
                                 .font(.system(size: 13.5, weight: .medium))
-                            Text("注入 3 张可实操演练卡片，30 秒掌握 Tab 冲浪、⇧↵ 智变与 Siri 虹吸球")
+                            Text("双向自由拖拽、顶部 Siri 虹吸球与全键盘瞬时流转")
                                 .font(.system(size: 11.5))
                                 .foregroundStyle(.secondary)
                         }
                         Spacer()
-                        Button(playground.isActive ? "正在进行中" : "开启游乐场") {
-                            playground.startOrReplay(in: store)
+                        Button("查看重点") {
                             nav.showSettings = false
+                            playground.showHighlights()
                         }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.bordered)
                         .controlSize(.small)
                     }
                 }
@@ -3529,7 +3530,6 @@ struct ClipboardPopoverView: View {
     }
 
     func pasteSmartTransformedSelected() {
-        InteractivePlaygroundController.shared.recordMagicOrCopyAction()
         guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return }
         let item = filteredItems[nav.selectedIndex]
         let snapshot = store.semanticSnapshot(for: item)
