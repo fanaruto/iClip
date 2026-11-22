@@ -1385,4 +1385,32 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertEqual(QuickLookTabBuilder.defaultTabIndex(for: plainItem, tabs: mockTabs, preferDiff: false), 0)
         XCTAssertEqual(QuickLookTabBuilder.defaultTabIndex(for: plainItem, tabs: mockTabs, preferDiff: true), 1)
     }
+
+    // MARK: - 33. 剪贴板金额免重敲续算（`* 13%` / `/ (1 + 6%)`）与百分号/取模消歧及手机号防误伤测试
+
+    func testContextualClipboardMathPercentageAndPhoneNumberGuard() throws {
+        // 1. 刚复制带货币符/千分位金额后，直接敲 `* 13%` 免重敲算出税额与会计大写
+        let vat = try XCTUnwrap(InstantMathEvaluator.evaluate("* 13%", latestClipboardText: "¥12,800.00"))
+        XCTAssertEqual(vat.plainValue, "1664")
+        XCTAssertEqual(vat.formattedThousands, "1,664")
+        XCTAssertEqual(vat.rmbUppercase, "壹仟陆佰陆拾肆元整")
+        XCTAssertTrue(vat.isExplicitOrContextual)
+
+        // 2. 括号内百分比与二元取模智能消歧：`1060 / (1 + 6%) = 1000`，同时 `17 % 5 = 2` 严格保留
+        let taxExcl = try XCTUnwrap(InstantMathEvaluator.evaluate("/ (1 + 6%)", latestClipboardText: "1060元"))
+        XCTAssertEqual(taxExcl.plainValue, "1000")
+
+        let modulo = try XCTUnwrap(InstantMathEvaluator.evaluate("17 % 5"))
+        XCTAssertEqual(modulo.plainValue, "2")
+
+        // 3. 中文「万 / 亿」与货币符号直算
+        let annual = try XCTUnwrap(InstantMathEvaluator.evaluate("3.5万 * 12"))
+        XCTAssertEqual(annual.plainValue, "420000")
+        XCTAssertEqual(annual.formattedThousands, "420,000")
+
+        // 4. 防误伤门控：首条剪贴是 11 位手机号时绝不误当金额续算；本地路径 `/Users/...` 与 `+86...` 绝不误触发算式
+        XCTAssertNil(InstantMathEvaluator.evaluate("* 2", latestClipboardText: "13800138000"))
+        XCTAssertNil(InstantMathEvaluator.evaluate("/Users/fanaruto/Desktop", latestClipboardText: "12800"))
+        XCTAssertNil(InstantMathEvaluator.evaluate("+8613800138000", latestClipboardText: "500"))
+    }
 }

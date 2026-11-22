@@ -28,7 +28,7 @@ build_edition() {
   echo "=========================================="
   echo "正在编译 [${edition_label}] 角色版本 (v${VERSION}, flag=${swift_flag})..."
   cd "$PROJECT_DIR"
-  swift build -c release --scratch-path "$scratch_dir" -Xswiftc "$swift_flag" -Xswiftc -O -Xlinker -dead_strip
+  swift build -c release --scratch-path "$scratch_dir" -Xswiftc "$swift_flag" -Xswiftc -Osize -Xlinker -dead_strip
 
   local bin_path="$scratch_dir/release/QingJian"
   rm -rf "$stage_dir" "$named_app" "$zip_out"

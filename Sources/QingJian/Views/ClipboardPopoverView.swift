@@ -284,7 +284,7 @@ struct ClipboardPopoverView: View {
                         .padding(.horizontal, 14)
                         .padding(.bottom, 8)
                         .transition(.opacity.combined(with: .move(edge: .top)))
-                    } else if let math = InstantMathEvaluator.evaluate(nav.searchText) {
+                    } else if let math = InstantMathEvaluator.evaluate(nav.searchText, latestClipboardText: store.items.first?.text) {
                         InstantMathCardView(
                             math: math,
                             onCommitPlain: {
@@ -2059,8 +2059,8 @@ struct ClipboardPopoverView: View {
             nav.searchText = ""
             return
         }
-        if (filteredItems.isEmpty || nav.searchText.trimmingCharacters(in: .whitespaces).hasPrefix("=")),
-           let math = InstantMathEvaluator.evaluate(nav.searchText) {
+        if let math = InstantMathEvaluator.evaluate(nav.searchText, latestClipboardText: store.items.first?.text),
+           (filteredItems.isEmpty || math.isExplicitOrContextual) {
             nav.searchText = ""
             store.pasteInstantValue(math.plainValue, toast: "已键入计算结果 \(math.plainValue)", shouldAutoPaste: true, onBeforePaste: onDismiss)
             return
@@ -2229,8 +2229,8 @@ struct ClipboardPopoverView: View {
             nav.searchText = ""
             return
         }
-        if (filteredItems.isEmpty || nav.searchText.trimmingCharacters(in: .whitespaces).hasPrefix("=")),
-           let math = InstantMathEvaluator.evaluate(nav.searchText),
+        if let math = InstantMathEvaluator.evaluate(nav.searchText, latestClipboardText: store.items.first?.text),
+           (filteredItems.isEmpty || math.isExplicitOrContextual),
            let rmb = math.rmbUppercase {
             nav.searchText = ""
             store.pasteInstantValue(rmb, toast: "已键入大写金额", shouldAutoPaste: true, onBeforePaste: onDismiss)
@@ -2713,7 +2713,7 @@ struct ClipboardPopoverView: View {
                         .padding(.horizontal, 14)
                         .padding(.bottom, 8)
                         .transition(.opacity.combined(with: .move(edge: .top)))
-                    } else if let math = InstantMathEvaluator.evaluate(nav.searchText) {
+                    } else if let math = InstantMathEvaluator.evaluate(nav.searchText, latestClipboardText: store.items.first?.text) {
                         InstantMathCardView(
                             math: math,
                             onCommitPlain: {
@@ -4317,8 +4317,8 @@ struct ClipboardPopoverView: View {
             nav.searchText = ""
             return
         }
-        if (filteredItems.isEmpty || nav.searchText.trimmingCharacters(in: .whitespaces).hasPrefix("=")),
-           let math = InstantMathEvaluator.evaluate(nav.searchText) {
+        if let math = InstantMathEvaluator.evaluate(nav.searchText, latestClipboardText: store.items.first?.text),
+           (filteredItems.isEmpty || math.isExplicitOrContextual) {
             nav.searchText = ""
             store.pasteInstantValue(math.plainValue, toast: "已键入计算结果 \(math.plainValue)", shouldAutoPaste: true, onBeforePaste: onDismiss)
             return
@@ -4506,8 +4506,8 @@ struct ClipboardPopoverView: View {
             nav.searchText = ""
             return
         }
-        if (filteredItems.isEmpty || nav.searchText.trimmingCharacters(in: .whitespaces).hasPrefix("=")),
-           let math = InstantMathEvaluator.evaluate(nav.searchText),
+        if let math = InstantMathEvaluator.evaluate(nav.searchText, latestClipboardText: store.items.first?.text),
+           (filteredItems.isEmpty || math.isExplicitOrContextual),
            let rmb = math.rmbUppercase {
             nav.searchText = ""
             store.pasteInstantValue(rmb, toast: "已键入大写金额", shouldAutoPaste: true, onBeforePaste: onDismiss)
