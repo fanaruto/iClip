@@ -47,7 +47,7 @@ enum DocumentTypographyEngine {
                 actions.append(FinanceQuickAction(
                     id: "doc-pdf-heal",
                     title: "缝合 PDF 断行",
-                    symbolName: "doc.text.Below.ecg",
+                    symbolName: "doc.text.below.ecg",
                     resultText: healed,
                     toastText: "已智能缝合 PDF 跨行断句并保留真实分段"
                 ))
@@ -62,7 +62,7 @@ enum DocumentTypographyEngine {
                 actions.append(FinanceQuickAction(
                     id: "doc-pangu-space",
                     title: actions.isEmpty ? "中英空格美化" : "缝合+中英美化",
-                    symbolName: "text.Justify",
+                    symbolName: "text.justify",
                     resultText: spaced,
                     toastText: "已完成中英数字间距排版美化"
                 ))

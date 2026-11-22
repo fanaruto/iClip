@@ -185,7 +185,7 @@ enum MeetingAndEphemeralEngine {
     }
 
     static func cleanMeetingTranscript(_ rawText: String) -> CleanedTranscriptResult? {
-        guard rawText.utf16.count <= 65_536 else { return nil }
+        guard rawText.utf16.count <= 65_536, rawText.contains(":") else { return nil }
 
         // 排除服务器/开发运行日志
         let fullRange = NSRange(rawText.startIndex..<rawText.endIndex, in: rawText)

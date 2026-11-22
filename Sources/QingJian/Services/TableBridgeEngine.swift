@@ -10,7 +10,9 @@ enum TableBridgeEngine {
     // MARK: - 主分析入口
 
     static func analyze(_ rawText: String) -> [FinanceQuickAction] {
-        guard rawText.contains("\n"), rawText.utf16.count <= 65_536 else { return [] }
+        guard rawText.utf16.count <= 65_536,
+              rawText.contains("\n"),
+              (rawText.contains("|") || rawText.contains("\t")) else { return [] }
 
         // 1. Markdown 表格 -> Excel 直粘 (TSV + HTML Table) / CSV
         if let grid = parseMarkdownTable(rawText) {

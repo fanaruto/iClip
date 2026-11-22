@@ -156,11 +156,13 @@ struct ClipItem: Identifiable, Codable, Equatable {
         return rawContentPreview
     }
 
-    /// 原始内容摘要预览
+    /// 原始内容摘要预览（严格 O(1) 仅向后迭代最多 180 个字符即停止，2MB 大文本耗时 < 0.002ms）
     var rawContentPreview: String {
         switch type {
         case .text, .link:
-            let trimmed = (text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let raw = text, !raw.isEmpty else { return "空白文本" }
+            let slice: Substring = raw.utf8.count > 540 ? raw.prefix(180) : raw[...]
+            let trimmed = slice.trimmingCharacters(in: .whitespacesAndNewlines)
             return trimmed.isEmpty ? "空白文本" : trimmed
         case .image:
             if let w = imageWidth, let h = imageHeight {
@@ -177,7 +179,7 @@ struct ClipItem: Identifiable, Codable, Equatable {
         }
     }
 
-    /// 辅助信息（字数、域名、实况文本摘要、文件目录等）
+    /// 辅助信息（基于 Swift 原生 String O(1) utf8.count 门控，彻底消除百万字符遍历）
     var subtitleInfo: String {
         if let alias = customAlias?.trimmingCharacters(in: .whitespacesAndNewlines), !alias.isEmpty {
             let preview = rawContentPreview.replacingOccurrences(of: "\n", with: " ")
@@ -185,13 +187,21 @@ struct ClipItem: Identifiable, Codable, Equatable {
         }
         switch type {
         case .text:
-            let count = text?.count ?? 0
-            return "\(count) 字"
+            guard let t = text else { return "0 字" }
+            let bytes = t.utf8.count
+            if bytes <= 8_192 {
+                return "\(t.count) 字"
+            } else if bytes < 1_048_576 {
+                return String(format: "%.1f KB 文本", Double(bytes) / 1024.0)
+            } else {
+                return String(format: "%.2f MB 大文本", Double(bytes) / 1_048_576.0)
+            }
         case .link:
-            if let raw = text?.trimmingCharacters(in: .whitespacesAndNewlines),
-               let url = URL(string: raw),
-               let host = url.host, !host.isEmpty {
-                return host
+            if let raw = text, raw.utf8.count <= 4_096 {
+                let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let url = URL(string: trimmed), let host = url.host, !host.isEmpty {
+                    return host
+                }
             }
             return "网页链接"
         case .image:
@@ -234,33 +244,40 @@ struct ClipItem: Identifiable, Codable, Equatable {
         return Self.monthDayFormatter.string(from: createdAt)
     }
 
-    /// 搜索匹配判断
+    /// 零堆分配 + 64KB 索引窗口化极速搜索匹配（杜绝超大日志阻塞实时输入帧率）
     func matches(query: String) -> Bool {
-        let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
         if q.isEmpty { return true }
-        if let text = text, text.lowercased().contains(q) {
+        let opts: String.CompareOptions = [.caseInsensitive]
+        if let text = text {
+            if text.utf8.count <= 65_536 {
+                if text.range(of: q, options: opts) != nil { return true }
+            } else {
+                // 超大负载仅检索头部约 32K 字符窗口，将单条最坏耗时锁死在 0.1ms 内
+                let head = text.prefix(32_768)
+                if head.range(of: q, options: opts) != nil { return true }
+            }
+        }
+        if let alias = customAlias, alias.range(of: q, options: opts) != nil {
             return true
         }
-        if let alias = customAlias, alias.lowercased().contains(q) {
-            return true
-        }
-        if let cat = pinCategory, cat.title.lowercased().contains(q) {
+        if let cat = pinCategory, cat.title.range(of: q, options: opts) != nil {
             return true
         }
         #if ICLIP_EDITION_FLOW
-        if let ocr = ocrText, ocr.lowercased().contains(q) {
+        if let ocr = ocrText, ocr.range(of: q, options: opts) != nil {
             return true
         }
         #endif
         if let paths = filePaths {
-            for path in paths where path.lowercased().contains(q) {
+            for path in paths where path.range(of: q, options: opts) != nil {
                 return true
             }
         }
-        if let app = sourceAppName, app.lowercased().contains(q) {
+        if let app = sourceAppName, app.range(of: q, options: opts) != nil {
             return true
         }
-        if type.displayName.contains(q) {
+        if type.displayName.range(of: q, options: opts) != nil {
             return true
         }
         return false

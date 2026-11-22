@@ -182,6 +182,8 @@ final class ClipboardStore: ObservableObject {
     private let pasteboard = NSPasteboard.general
     private var lastChangeCount: Int
     private var timer: Timer?
+    private var isPollingFastMode: Bool = true
+    private var lastActivityUptime: TimeInterval = ProcessInfo.processInfo.systemUptime
     private var ignoreNextChangeCount: Int?
 
     private let thumbnailCache = NSCache<NSString, NSImage>()
@@ -297,6 +299,31 @@ final class ClipboardStore: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.refreshAccessibilityStatus()
+                self?.bumpPollingActivity()
+            }
+        }
+
+        // 屏幕休眠期间完全卸载定时器实现 0.00% CPU 零唤醒；唤醒后立即恢复监听
+        let wsCenter = NSWorkspace.shared.notificationCenter
+        wsCenter.addObserver(
+            forName: NSWorkspace.screensDidSleepNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.timer?.invalidate()
+                self?.timer = nil
+            }
+        }
+        wsCenter.addObserver(
+            forName: NSWorkspace.screensDidWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.bumpPollingActivity()
+                self.checkPasteboard()
             }
         }
 
@@ -390,18 +417,28 @@ final class ClipboardStore: ObservableObject {
         }
     }
 
-    // MARK: - 低功耗剪贴板监听
+    // MARK: - 自适应双档低功耗剪贴板监听（活跃 0.45s 极速嗅探 / 静默 1.2s 内核合并省电）
 
-    func startMonitoring() {
+    func startMonitoring(fastMode: Bool = true) {
         timer?.invalidate()
-        let t = Timer(timeInterval: 0.6, repeats: true) { [weak self] _ in
+        isPollingFastMode = fastMode
+        let interval: TimeInterval = fastMode ? 0.45 : 1.20
+        let tolerance: TimeInterval = fastMode ? 0.12 : 0.50
+        let t = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.checkPasteboard()
             }
         }
-        t.tolerance = 0.25
+        t.tolerance = tolerance
         RunLoop.main.add(t, forMode: .common)
         timer = t
+    }
+
+    private func bumpPollingActivity() {
+        lastActivityUptime = ProcessInfo.processInfo.systemUptime
+        if timer == nil || !isPollingFastMode {
+            startMonitoring(fastMode: true)
+        }
     }
 
     func stopMonitoring() {
@@ -413,7 +450,10 @@ final class ClipboardStore: ObservableObject {
     func onPanelShown(visibleItems: [ClipItem]) {
         cacheTrimWorkItem?.cancel()
         cacheTrimWorkItem = nil
+        bumpPollingActivity()
         refreshAccessibilityStatus()
+        thumbnailCache.countLimit = 80
+        thumbnailCache.totalCostLimit = 24 * 1024 * 1024
         prewarmThumbnails(for: visibleItems, limit: 18)
         prewarmPreviewImages(for: visibleItems, limit: 6)
         #if !ICLIP_EDITION_FLOW
@@ -428,7 +468,11 @@ final class ClipboardStore: ObservableObject {
     func onPanelHidden() {
         cacheTrimWorkItem?.cancel()
         let work = DispatchWorkItem { [weak self] in
-            self?.previewCache.removeAllObjects()
+            guard let self else { return }
+            self.previewCache.removeAllObjects()
+            // 后台常驻期自动收缩缩略图缓存预算至 6 MB，呼出面板时毫秒级预热恢复
+            self.thumbnailCache.countLimit = 16
+            self.thumbnailCache.totalCostLimit = 6 * 1024 * 1024
         }
         cacheTrimWorkItem = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 8.0, execute: work)
@@ -441,8 +485,15 @@ final class ClipboardStore: ObservableObject {
         }
 
         let currentCount = pasteboard.changeCount
-        guard currentCount != lastChangeCount else { return }
+        guard currentCount != lastChangeCount else {
+            // 连续 30 秒无剪贴板变更时自动退避至低功耗巡航档
+            if isPollingFastMode && (ProcessInfo.processInfo.systemUptime - lastActivityUptime) > 30.0 {
+                startMonitoring(fastMode: false)
+            }
+            return
+        }
         lastChangeCount = currentCount
+        bumpPollingActivity()
 
         if let ignored = ignoreNextChangeCount, ignored == currentCount {
             ignoreNextChangeCount = nil

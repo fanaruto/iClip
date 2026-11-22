@@ -90,6 +90,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     func showForDemo(origin: NSPoint, entryDelta: NSPoint) {
         nav.isPresented = false
         nav.resetOnOpen()
+        store.onPanelShown(visibleItems: nav.cachedFilteredItems)
         nav.suppressAutoHide = true
 
         let startOrigin = NSPoint(x: origin.x + entryDelta.x, y: origin.y + entryDelta.y)
@@ -242,6 +243,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
 
         nav.isPresented = false
         nav.resetOnOpen()
+        store.onPanelShown(visibleItems: nav.cachedFilteredItems)
 
         let (finalOrigin, entryDelta) = computePanelOrigin(anchorRect: anchorRect)
         let startOrigin = NSPoint(x: finalOrigin.x + entryDelta.x, y: finalOrigin.y + entryDelta.y)
@@ -275,6 +277,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
 
         let appToRestore = restoreFocus ? previousApp : nil
         nav.isPresented = false
+        store.onPanelHidden()
 
         if let app = appToRestore {
             app.activate()
@@ -587,6 +590,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     func showForDemo(origin: NSPoint, entryDelta: NSPoint) {
         nav.isPresented = false
         nav.resetOnOpen()
+        store.onPanelShown(visibleItems: nav.cachedFilteredItems)
         nav.suppressAutoHide = true
 
         let startOrigin = NSPoint(x: origin.x + entryDelta.x, y: origin.y + entryDelta.y)
@@ -739,6 +743,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
 
         nav.isPresented = false
         nav.resetOnOpen()
+        store.onPanelShown(visibleItems: nav.cachedFilteredItems)
 
         let (finalOrigin, entryDelta) = computePanelOrigin(anchorRect: anchorRect)
         let startOrigin = NSPoint(x: finalOrigin.x + entryDelta.x, y: finalOrigin.y + entryDelta.y)
@@ -772,6 +777,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
 
         let appToRestore = restoreFocus ? previousApp : nil
         nav.isPresented = false
+        store.onPanelHidden()
 
         if let app = appToRestore {
             app.activate()

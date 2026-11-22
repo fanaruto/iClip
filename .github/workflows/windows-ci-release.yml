@@ -1,0 +1,92 @@
+name: Windows Native Build & Zero-Bug Verification
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - 'windows/**'
+      - '.github/workflows/windows-ci-release.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-verify-windows:
+    name: Windows x64 Native MSVC Build & Self-Test
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry & build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "windows -> target"
+
+      - name: Run full unit & 2MB performance tests (Dev Edition, zero warnings)
+        shell: pwsh
+        env:
+          RUSTFLAGS: "-D warnings"
+        run: |
+          cargo test --manifest-path windows/Cargo.toml --no-default-features --features dev -- --nocapture
+
+      - name: Run full unit & 2MB performance tests (Flow Edition, zero warnings)
+        shell: pwsh
+        env:
+          RUSTFLAGS: "-D warnings"
+        run: |
+          cargo test --manifest-path windows/Cargo.toml --no-default-features --features flow -- --nocapture
+
+      - name: Build ultra-lightweight native Release binaries (Dev & Flow)
+        shell: pwsh
+        env:
+          RUSTFLAGS: "-D warnings"
+        run: |
+          New-Item -ItemType Directory -Force -Path dist-win | Out-Null
+
+          cargo build --manifest-path windows/Cargo.toml --release --no-default-features --features dev
+          Copy-Item windows/target/release/iClip.exe dist-win/iClip-Dev.exe
+
+          cargo build --manifest-path windows/Cargo.toml --release --no-default-features --features flow
+          Copy-Item windows/target/release/iClip.exe dist-win/iClip-Flow.exe
+
+      - name: Execute real Win32 GUI + DWM + CF_HTML Clipboard end-to-end self-test
+        shell: pwsh
+        run: |
+          ./dist-win/iClip-Dev.exe --self-test dist-win/selftest-dev.json
+          if ($LASTEXITCODE -ne 0) { throw "iClip-Dev.exe --self-test failed with code $LASTEXITCODE" }
+          Get-Content dist-win/selftest-dev.json
+
+          ./dist-win/iClip-Flow.exe --self-test dist-win/selftest-flow.json
+          if ($LASTEXITCODE -ne 0) { throw "iClip-Flow.exe --self-test failed with code $LASTEXITCODE" }
+          Get-Content dist-win/selftest-flow.json
+
+      - name: Package Windows release archives & compute SHA-256
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist-win/stage-dev, dist-win/stage-flow | Out-Null
+          Copy-Item dist-win/iClip-Dev.exe dist-win/stage-dev/iClip.exe
+          Copy-Item dist-win/iClip-Flow.exe dist-win/stage-flow/iClip.exe
+
+          Compress-Archive -Path dist-win/stage-dev/iClip.exe -DestinationPath dist-win/iClip-Dev-Windows-x64.zip -Force
+          Compress-Archive -Path dist-win/stage-flow/iClip.exe -DestinationPath dist-win/iClip-Flow-Windows-x64.zip -Force
+          Copy-Item dist-win/iClip-Dev-Windows-x64.zip dist-win/iClip-Windows-x64.zip
+
+          Get-ChildItem dist-win/*.exe, dist-win/*.zip | Select-Object Name, @{Name="KB";Expression={[math]::Round($_.Length / 1KB, 1)}}
+          Get-FileHash dist-win/*.zip -Algorithm SHA256 | Format-List
+
+      - name: Upload verified Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: iclip-windows-x64-bundles
+          path: |
+            dist-win/iClip-Dev-Windows-x64.zip
+            dist-win/iClip-Flow-Windows-x64.zip
+            dist-win/iClip-Windows-x64.zip
+            dist-win/selftest-dev.json
+            dist-win/selftest-flow.json
+          if-no-files-found: error

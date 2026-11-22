@@ -5,6 +5,8 @@
 .swiftpm/
 .worktrees/
 dist/
+dist-win/
+windows/target/
 *.xcodeproj
 *.xcworkspace
 xcuserdata/

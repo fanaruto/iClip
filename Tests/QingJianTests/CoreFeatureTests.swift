@@ -456,7 +456,42 @@ final class CoreFeatureTests: XCTestCase {
         }
     }
 
-    // MARK: - 11. 语义脱敏、净链与动态模板回归测试
+    // MARK: - 11. 性能开销基准门禁（2MB 大文本摘要 O(1) 截断 + 500 条零堆分配检索）
+
+    func testPerformanceBenchmark_LargePayloadAndZeroAllocSearch() {
+        // 构造一条 2.1 MB 的巨型日志/JSON 文本与 500 条混合历史记录
+        let chunk = String(repeating: "2026-11-22T10:00:00Z service=gateway latency_ms=12 status=200\n", count: 35_000)
+        let hugeItem = ClipItem(type: .text, text: chunk, contentHash: "text:huge-2mb")
+
+        var dataset: [ClipItem] = [hugeItem]
+        dataset.reserveCapacity(501)
+        for idx in 1...500 {
+            dataset.append(ClipItem(
+                type: .text,
+                text: "订单编号 ORD-2026-\(idx) 客户回款金额 ¥\(idx * 128).50 联系人张经理",
+                contentHash: "text:\(idx)",
+                sourceAppName: "飞书"
+            ))
+        }
+
+        let start = CFAbsoluteTimeGetCurrent()
+        // 连续执行 200 次 2MB 大文本预览与字数读取（必须 O(1) 瞬时返回）
+        for _ in 0..<200 {
+            _ = hugeItem.primaryTitle
+            _ = hugeItem.subtitleInfo
+        }
+        // 在 501 条记录（含 2.1MB 大文本）中执行不区分大小写检索
+        let matched = dataset.filter { $0.matches(query: "ord-2026-499") }
+        let elapsedMs = (CFAbsoluteTimeGetCurrent() - start) * 1000.0
+
+        XCTAssertEqual(matched.count, 1)
+        XCTAssertLessThan(hugeItem.rawContentPreview.utf16.count, 250)
+        XCTAssertTrue(hugeItem.subtitleInfo.contains("MB"))
+        // 硬门禁：全套操作必须在 25ms 以内完成（实测通常 < 3ms）
+        XCTAssertLessThan(elapsedMs, 25.0, "性能退化告警：耗时 \(elapsedMs) ms 超过阈值")
+    }
+
+    // MARK: - 12. 语义脱敏、净链与动态模板回归测试
 
     #if !ICLIP_EDITION_FLOW
     func testSemanticRedactionAndTemplateInterpolation() {

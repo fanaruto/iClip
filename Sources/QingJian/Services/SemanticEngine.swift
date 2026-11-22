@@ -243,13 +243,7 @@ enum SemanticEngine {
             return .empty
         }
 
-        let inspectSlice: String
-        if raw.utf16.count > maxInspectUTF16Count {
-            let idx = raw.utf16.index(raw.utf16.startIndex, offsetBy: maxInspectUTF16Count)
-            inspectSlice = String(raw[..<idx])
-        } else {
-            inspectSlice = raw
-        }
+        let inspectSlice: String = raw.utf8.count > 12_288 ? String(raw.prefix(6_000)) : raw
 
         let trimmed = inspectSlice.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return .empty }
@@ -265,7 +259,7 @@ enum SemanticEngine {
 
         // 0.5 一次性短信/邮件验证码（OTP）极速提取（排在首位，按 ⇧↵ 直接贴纯数字验证码）
         if primaryKind == nil,
-           raw.utf16.count <= 400,
+           raw.utf8.count <= 400,
            let otp = MeetingAndEphemeralEngine.extractVerificationCode(from: trimmed),
            otp != trimmed {
             primaryKind = .ephemeralOTP
@@ -282,7 +276,7 @@ enum SemanticEngine {
         // 1. 最高优：敏感凭据检测与一键 AI 脱敏（超大文本采用惰性求值，嗅探阶段 0 额外内存拷贝）
         let hasSecret = containsSensitiveSecret(in: inspectSlice)
         let hasPII = containsPIIOrPrivateIP(in: inspectSlice)
-        let isLargePayload = raw.utf16.count > 16_384
+        let isLargePayload = raw.utf8.count > 16_384
         if hasSecret {
             if primaryKind != .ephemeralOTP { primaryKind = .sensitiveSecret }
             if isLargePayload {
@@ -432,7 +426,7 @@ enum SemanticEngine {
         }
 
         // 4. JSON 检测与格式化 / 压缩（仅在尺寸适中时解析）
-        if raw.utf16.count <= 65_536,
+        if raw.utf8.count <= 65_536,
            ((trimmed.hasPrefix("{") && trimmed.hasSuffix("}")) || (trimmed.hasPrefix("[") && trimmed.hasSuffix("]"))),
            let data = trimmed.data(using: .utf8),
            let jsonObj = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) {
@@ -523,7 +517,7 @@ enum SemanticEngine {
         }
 
         // 5.3 会议逐字稿 / SRT 字幕时间轴剥离与发言人纪要合并
-        if primaryKind == nil && raw.utf16.count <= 65_536 && raw.contains("\n") {
+        if primaryKind == nil && raw.utf8.count <= 65_536 && raw.contains("\n") {
             let meetActions = MeetingAndEphemeralEngine.analyze(raw)
             if !meetActions.isEmpty {
                 primaryKind = .meetingTranscript
@@ -541,7 +535,7 @@ enum SemanticEngine {
         }
 
         // 5.5 二维数据表格协议破壁（Markdown 表格 ↔ Excel TSV / CSV / JSON 数组）
-        if primaryKind == nil && raw.utf16.count <= 65_536 && raw.contains("\n") {
+        if primaryKind == nil && raw.utf8.count <= 65_536 && raw.contains("\n") {
             let tblActions = TableBridgeEngine.analyze(raw)
             if !tblActions.isEmpty {
                 primaryKind = .dataTable
@@ -559,7 +553,7 @@ enum SemanticEngine {
         }
 
         // 6. 财务金额大写与多行明细账单自动求和（仅在未命中 Unix 时间戳时执行）
-        if primaryKind == nil && raw.utf16.count <= 16_384 {
+        if primaryKind == nil && raw.utf8.count <= 16_384 {
             let finActions = FinanceNumberEngine.analyze(raw)
             if !finActions.isEmpty {
                 primaryKind = .financeAmount
@@ -599,7 +593,7 @@ enum SemanticEngine {
         }
 
         // 8. PDF 跨行断句愈合与中英间距美化 vs 多行数据列转换（SQL IN / JSON 数组）
-        if raw.utf16.count <= 32_768 && primaryKind == nil {
+        if raw.utf8.count <= 32_768 && primaryKind == nil {
             let docActions = DocumentTypographyEngine.analyze(raw)
             if DocumentTypographyEngine.looksLikeBrokenPDFParagraphs(raw), !docActions.isEmpty {
                 primaryKind = .pdfTypography
@@ -616,7 +610,7 @@ enum SemanticEngine {
             }
         }
 
-        if raw.utf16.count <= 32_768 && trimmed.contains("\n") && primaryKind != .json && primaryKind != .curlCommand && primaryKind != .pdfTypography {
+        if raw.utf8.count <= 32_768 && trimmed.contains("\n") && primaryKind != .json && primaryKind != .curlCommand && primaryKind != .pdfTypography {
             let rawLines = raw.components(separatedBy: .newlines)
             let cleanItems = rawLines
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -714,7 +708,7 @@ enum SemanticEngine {
         }
 
         // 单行中英混排粘连排版美化兜底
-        if primaryKind == nil && !trimmed.contains("\n") && raw.utf16.count <= 8_192 {
+        if primaryKind == nil && !trimmed.contains("\n") && raw.utf8.count <= 8_192 {
             let docActions = DocumentTypographyEngine.analyze(raw)
             if !docActions.isEmpty {
                 primaryKind = .pdfTypography
