@@ -85,26 +85,14 @@ final class QueueHUDController {
         hosting.autoresizingMask = [.width, .height]
 
         if #available(macOS 26.0, *) {
-            let root = NSView(frame: rect)
-            root.autoresizingMask = [.width, .height]
-
-            let blur = NSVisualEffectView(frame: rect)
-            blur.autoresizingMask = [.width, .height]
-            blur.material = .popover
-            blur.blendingMode = .behindWindow
-            blur.state = .active
-            blur.alphaValue = 0.78
-            blur.maskImage = LiquidGlassSurfaceHost.roundedMaskImage(size: rect.size, radius: hudSize.height / 2)
-            root.addSubview(blur)
-
             let glass = NSGlassEffectView(frame: rect)
             glass.autoresizingMask = [.width, .height]
             glass.cornerRadius = hudSize.height / 2
             glass.style = .regular
+            glass.tintColor = nil
             glass.contentView = hosting
-            root.addSubview(glass)
-
-            p.contentView = root
+            p.hasShadow = false
+            p.contentView = glass
         } else {
             let effect = NSVisualEffectView(frame: rect)
             effect.autoresizingMask = [.width, .height]

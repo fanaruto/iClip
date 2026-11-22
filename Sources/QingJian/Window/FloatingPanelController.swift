@@ -26,7 +26,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     private var cancellables = Set<AnyCancellable>()
 
     private let panelSize = NSSize(width: 420, height: 560)
-    private let cornerRadius: CGFloat = 22
+    private let cornerRadius: CGFloat = 26
 
     var isVisible: Bool {
         (panel?.isVisible ?? false) && nav.isPresented
@@ -507,7 +507,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     private var cancellables = Set<AnyCancellable>()
 
     private let panelSize = NSSize(width: 420, height: 560)
-    private let cornerRadius: CGFloat = 22
+    private let cornerRadius: CGFloat = 26
 
     var isVisible: Bool {
         (panel?.isVisible ?? false) && nav.isPresented

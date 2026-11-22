@@ -137,6 +137,7 @@ struct ClipboardPopoverView: View {
     @State private var previewTileRect: CGRect = .zero
     @State private var isPreviewVisible: Bool = false
     @State private var hoveredTileItemID: UUID? = nil
+    @State private var hoveredTab: ClipFilterTab? = nil
     @State private var previewHideWorkItem: DispatchWorkItem? = nil
     @State private var aliasEditingItem: ClipItem? = nil
     @State private var aliasDraftText: String = ""
@@ -223,8 +224,19 @@ struct ClipboardPopoverView: View {
                     }
 
                     footerBar
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 9)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(
+                            Capsule()
+                                .fill(glassPalette.footerBackdrop)
+                        )
+                        .overlay(
+                            Capsule()
+                                .strokeBorder(glassPalette.controlCapsuleStroke.opacity(store.surfaceStyle == .liquidGlass ? 0.6 : 0), lineWidth: 0.6)
+                        )
+                        .padding(.horizontal, 12)
+                        .padding(.top, 5)
+                        .padding(.bottom, 9)
                 }
             }
 
@@ -237,12 +249,8 @@ struct ClipboardPopoverView: View {
         }
         .frame(width: 420, height: 560)
         .overlay {
-            if store.surfaceStyle == .liquidGlass {
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .strokeBorder(glassPalette.panelSpecularGradient, lineWidth: store.borderlessPanel ? 0.65 : 0.9)
-                    .allowsHitTesting(false)
-            } else if !store.borderlessPanel {
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
+            if store.surfaceStyle != .liquidGlass && !store.borderlessPanel {
+                RoundedRectangle(cornerRadius: 26, style: .continuous)
                     .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5)
                     .allowsHitTesting(false)
             }
@@ -428,7 +436,11 @@ struct ClipboardPopoverView: View {
                         .frame(width: 32, height: 32)
                         .background(
                             Circle()
-                                .fill(store.minimalModeEnabled ? Color.green : Color.primary.opacity(0.06))
+                                .fill(store.minimalModeEnabled ? Color.green : glassPalette.controlCapsuleFill)
+                        )
+                        .overlay(
+                            Circle()
+                                .strokeBorder(glassPalette.controlCapsuleStroke.opacity(store.minimalModeEnabled ? 0.3 : 0.85), lineWidth: 0.65)
                         )
                 }
                 .buttonStyle(.plain)
@@ -444,7 +456,8 @@ struct ClipboardPopoverView: View {
                         .font(.system(size: 15, weight: .medium))
                         .foregroundStyle(store.isPaused ? Color.orange : Color.secondary)
                         .frame(width: 32, height: 32)
-                        .background(Circle().fill(Color.primary.opacity(0.06)))
+                        .background(Circle().fill(glassPalette.controlCapsuleFill))
+                        .overlay(Circle().strokeBorder(glassPalette.controlCapsuleStroke.opacity(0.85), lineWidth: 0.65))
                 }
                 .buttonStyle(.plain)
                 .help(store.isPaused ? "点击恢复记录" : "暂停记录剪贴板")
@@ -459,7 +472,8 @@ struct ClipboardPopoverView: View {
                             .font(.system(size: 14, weight: .medium))
                             .foregroundStyle(.secondary)
                             .frame(width: 32, height: 32)
-                            .background(Circle().fill(Color.primary.opacity(0.06)))
+                            .background(Circle().fill(glassPalette.controlCapsuleFill))
+                            .overlay(Circle().strokeBorder(glassPalette.controlCapsuleStroke.opacity(0.85), lineWidth: 0.65))
 
                         if updater.hasUpdateAvailable {
                             Circle()
@@ -479,9 +493,10 @@ struct ClipboardPopoverView: View {
     // MARK: - iOS 滑动胶囊分类条
 
     private var filterBar: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 2) {
             ForEach(ClipFilterTab.allCases) { tab in
                 let isSelected = nav.selectedTab == tab
+                let isHovered = hoveredTab == tab
                 Button {
                     withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
                         nav.selectedTab = tab
@@ -489,9 +504,8 @@ struct ClipboardPopoverView: View {
                 } label: {
                     Text(tab.title)
                         .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
-                        .foregroundStyle(isSelected ? Color.primary : Color.secondary)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 5.5)
+                        .foregroundStyle(isSelected ? Color.primary : (isHovered ? Color.primary.opacity(0.85) : Color.secondary))
+                        .frame(maxWidth: .infinity, minHeight: 28)
                         .background {
                             if isSelected {
                                 Capsule()
@@ -502,10 +516,19 @@ struct ClipboardPopoverView: View {
                                     )
                                     .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.24 : 0.08), radius: 2.5, y: 1)
                                     .matchedGeometryEffect(id: "activeTabPill", in: tabNamespace)
+                            } else if isHovered {
+                                Capsule()
+                                    .fill(glassPalette.hoverSegmentFill)
                             }
                         }
+                        .contentShape(Capsule())
                 }
                 .buttonStyle(.plain)
+                .onHover { hovering in
+                    withAnimation(.easeOut(duration: 0.14)) {
+                        hoveredTab = hovering ? tab : (hoveredTab == tab ? nil : hoveredTab)
+                    }
+                }
             }
         }
         .padding(3)
@@ -944,9 +967,11 @@ struct ClipboardPopoverView: View {
                 Circle()
                     .fill(store.isPaused ? Color.orange : Color.green)
                     .frame(width: 6.5, height: 6.5)
-                Text("\(filteredItems.count) 条记录")
+                Text("\(filteredItems.count) 条")
                     .font(.system(size: 11.5, weight: .medium))
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
             }
 
             Spacer()
@@ -986,12 +1011,15 @@ struct ClipboardPopoverView: View {
         HStack(spacing: 3) {
             Text(key)
                 .font(.system(size: 10, weight: .semibold))
-                .padding(.horizontal, 5)
+                .lineLimit(1)
+                .padding(.horizontal, 4.5)
                 .padding(.vertical, 1.5)
                 .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(Color.primary.opacity(0.08)))
             Text(label)
-                .font(.system(size: 11))
+                .font(.system(size: 10.5))
+                .lineLimit(1)
         }
+        .fixedSize(horizontal: true, vertical: false)
         .foregroundStyle(.secondary)
     }
 
@@ -1028,7 +1056,7 @@ struct ClipboardPopoverView: View {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("液态风格")
                                     .font(.system(size: 13.5, weight: .medium))
-                                Text("双层光学柔焦 + 原生 Liquid Glass 折射（通透 / 高可读着色）")
+                                Text("原生 Liquid Glass（透明 .clear / 标准 .regular），浓度 0% 为纯原味")
                                     .font(.system(size: 11.5))
                                     .foregroundStyle(.secondary)
                             }
@@ -1515,10 +1543,10 @@ struct ClipboardPopoverView: View {
 
     private var dragDropOverlay: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
+            RoundedRectangle(cornerRadius: 26, style: .continuous)
                 .fill(Color.accentColor.opacity(colorScheme == .dark ? 0.16 : 0.10))
 
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .strokeBorder(
                     Color.accentColor.opacity(0.85),
                     style: StrokeStyle(lineWidth: 2, dash: [7, 5])
@@ -2027,6 +2055,7 @@ struct ClipboardPopoverView: View {
     @State private var previewTileRect: CGRect = .zero
     @State private var isPreviewVisible: Bool = false
     @State private var hoveredTileItemID: UUID? = nil
+    @State private var hoveredTab: ClipFilterTab? = nil
     @State private var previewHideWorkItem: DispatchWorkItem? = nil
     @State private var templateDraftText: String = "请帮我审查以下代码并指出潜在问题：\n\n{{clip_redacted}}"
 
@@ -2096,8 +2125,19 @@ struct ClipboardPopoverView: View {
                     }
 
                     footerBar
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 9)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(
+                            Capsule()
+                                .fill(glassPalette.footerBackdrop)
+                        )
+                        .overlay(
+                            Capsule()
+                                .strokeBorder(glassPalette.controlCapsuleStroke.opacity(store.surfaceStyle == .liquidGlass ? 0.6 : 0), lineWidth: 0.6)
+                        )
+                        .padding(.horizontal, 12)
+                        .padding(.top, 5)
+                        .padding(.bottom, 9)
                 }
             }
 
@@ -2110,12 +2150,8 @@ struct ClipboardPopoverView: View {
         }
         .frame(width: 420, height: 560)
         .overlay {
-            if store.surfaceStyle == .liquidGlass {
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .strokeBorder(glassPalette.panelSpecularGradient, lineWidth: store.borderlessPanel ? 0.65 : 0.9)
-                    .allowsHitTesting(false)
-            } else if !store.borderlessPanel {
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
+            if store.surfaceStyle != .liquidGlass && !store.borderlessPanel {
+                RoundedRectangle(cornerRadius: 26, style: .continuous)
                     .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5)
                     .allowsHitTesting(false)
             }
@@ -2289,7 +2325,11 @@ struct ClipboardPopoverView: View {
                         .frame(width: 32, height: 32)
                         .background(
                             Circle()
-                                .fill(store.minimalModeEnabled ? Color.green : Color.primary.opacity(0.06))
+                                .fill(store.minimalModeEnabled ? Color.green : glassPalette.controlCapsuleFill)
+                        )
+                        .overlay(
+                            Circle()
+                                .strokeBorder(glassPalette.controlCapsuleStroke.opacity(store.minimalModeEnabled ? 0.3 : 0.85), lineWidth: 0.65)
                         )
                 }
                 .buttonStyle(.plain)
@@ -2305,7 +2345,8 @@ struct ClipboardPopoverView: View {
                         .font(.system(size: 15, weight: .medium))
                         .foregroundStyle(store.isPaused ? Color.orange : Color.secondary)
                         .frame(width: 32, height: 32)
-                        .background(Circle().fill(Color.primary.opacity(0.06)))
+                        .background(Circle().fill(glassPalette.controlCapsuleFill))
+                        .overlay(Circle().strokeBorder(glassPalette.controlCapsuleStroke.opacity(0.85), lineWidth: 0.65))
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(store.isPaused ? "恢复记录剪贴板" : "暂停记录剪贴板")
@@ -2321,7 +2362,8 @@ struct ClipboardPopoverView: View {
                             .font(.system(size: 14, weight: .medium))
                             .foregroundStyle(.secondary)
                             .frame(width: 32, height: 32)
-                            .background(Circle().fill(Color.primary.opacity(0.06)))
+                            .background(Circle().fill(glassPalette.controlCapsuleFill))
+                            .overlay(Circle().strokeBorder(glassPalette.controlCapsuleStroke.opacity(0.85), lineWidth: 0.65))
 
                         if updater.hasUpdateAvailable {
                             Circle()
@@ -2342,9 +2384,10 @@ struct ClipboardPopoverView: View {
     // MARK: - iOS 滑动胶囊分类条
 
     private var filterBar: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 2) {
             ForEach(ClipFilterTab.allCases) { tab in
                 let isSelected = nav.selectedTab == tab
+                let isHovered = hoveredTab == tab
                 Button {
                     withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
                         nav.selectedTab = tab
@@ -2352,9 +2395,8 @@ struct ClipboardPopoverView: View {
                 } label: {
                     Text(tab.title)
                         .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
-                        .foregroundStyle(isSelected ? Color.primary : Color.secondary)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 5.5)
+                        .foregroundStyle(isSelected ? Color.primary : (isHovered ? Color.primary.opacity(0.85) : Color.secondary))
+                        .frame(maxWidth: .infinity, minHeight: 28)
                         .background {
                             if isSelected {
                                 Capsule()
@@ -2365,10 +2407,19 @@ struct ClipboardPopoverView: View {
                                     )
                                     .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.24 : 0.08), radius: 2.5, y: 1)
                                     .matchedGeometryEffect(id: "activeTabPill", in: tabNamespace)
+                            } else if isHovered {
+                                Capsule()
+                                    .fill(glassPalette.hoverSegmentFill)
                             }
                         }
+                        .contentShape(Capsule())
                 }
                 .buttonStyle(.plain)
+                .onHover { hovering in
+                    withAnimation(.easeOut(duration: 0.14)) {
+                        hoveredTab = hovering ? tab : (hoveredTab == tab ? nil : hoveredTab)
+                    }
+                }
             }
         }
         .padding(3)
@@ -2671,19 +2722,21 @@ struct ClipboardPopoverView: View {
                 Circle()
                     .fill(store.isPaused ? Color.orange : Color.green)
                     .frame(width: 6.5, height: 6.5)
-                Text("\(filteredItems.count) 条记录")
+                Text("\(filteredItems.count) 条")
                     .font(.system(size: 11.5, weight: .medium))
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
             }
 
             Spacer()
 
-            HStack(spacing: 8) {
+            HStack(spacing: 6) {
                 keyHint("↵", "键入")
                 if !store.minimalModeEnabled && !canMoveHorizontallyInGrid {
                     keyHint("⇧↵", "智变")
                 }
-                keyHint("⇥", "切类目")
+                keyHint("⇥", "类目")
                 keyHint(canMoveHorizontallyInGrid ? "↑↓←→" : "↑↓", "选择")
                 keyHint("ESC", "关闭")
             }
@@ -2711,12 +2764,15 @@ struct ClipboardPopoverView: View {
         HStack(spacing: 3) {
             Text(key)
                 .font(.system(size: 10, weight: .semibold))
-                .padding(.horizontal, 5)
+                .lineLimit(1)
+                .padding(.horizontal, 4.5)
                 .padding(.vertical, 1.5)
                 .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(Color.primary.opacity(0.08)))
             Text(label)
-                .font(.system(size: 11))
+                .font(.system(size: 10.5))
+                .lineLimit(1)
         }
+        .fixedSize(horizontal: true, vertical: false)
         .foregroundStyle(.secondary)
     }
 
@@ -2753,7 +2809,7 @@ struct ClipboardPopoverView: View {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("液态风格")
                                     .font(.system(size: 13.5, weight: .medium))
-                                Text("双层光学柔焦 + 原生 Liquid Glass 折射（通透 / 高可读着色）")
+                                Text("原生 Liquid Glass（透明 .clear / 标准 .regular），浓度 0% 为纯原味")
                                     .font(.system(size: 11.5))
                                     .foregroundStyle(.secondary)
                             }
@@ -3205,10 +3261,10 @@ struct ClipboardPopoverView: View {
 
     private var dragDropOverlay: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
+            RoundedRectangle(cornerRadius: 26, style: .continuous)
                 .fill(Color.accentColor.opacity(colorScheme == .dark ? 0.16 : 0.10))
 
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .strokeBorder(
                     Color.accentColor.opacity(0.85),
                     style: StrokeStyle(lineWidth: 2, dash: [7, 5])

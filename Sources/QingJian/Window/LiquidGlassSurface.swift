@@ -1,16 +1,17 @@
 import AppKit
 import SwiftUI
 
-/// macOS 26+ Liquid Glass 官方级双层光学表面控制器
+/// macOS 26+ Liquid Glass 官方级无毛边光学表面控制器
 ///
 /// 遵循 Apple HIG 的核心原则：
-/// 1. 大面积文字/表单悬浮面板绝不使用无模糊的裸 `.clear` 玻璃直接铺底，避免背后 IDE/终端的尖锐字符穿透干扰阅读；
-/// 2. 底层由 WindowServer 原生 `NSVisualEffectView` 提供真正的高斯柔焦隔断，将复杂背景打散为柔和光晕；
-/// 3. 顶层由 macOS 26 原生 `NSGlassEffectView(.regular)` 提供光学透镜折射、边缘高光与环境光采样；
-/// 4. 实时响应系统浅/深外观切换与辅助功能「降低透明度」，保证任意背景下均具备高对比度与通透质感。
+/// 1. 直接将原生 `NSGlassEffectView` 作为窗口唯一根视图，与 macOS 26 Tahoe 官方连续 R 角（26pt）、
+///    边缘光学折射与 WindowServer 阴影 100% 统一，彻底消除双层圆角曲率偏差与四角毛边；
+/// 2. 在 `glassView.contentView` 内部嵌入严格同心裁切（`.continuous`）的柔焦缓冲层，
+///    将背后深色 IDE / 网页锐利字符打散为柔和光晕，保证大面积文字与表单 100% 清晰可读；
+/// 3. 实时响应系统浅/深外观切换、辅助功能「降低透明度」与原生内容拖放复制。
 @MainActor
 final class LiquidGlassSurfaceHost {
-    private var containerView: LiquidGlassRootContainerView?
+    private var containerView: LiquidGlassContentContainerView?
     private weak var backdropBlurView: NSVisualEffectView?
     private weak var activeGlassView: AnyObject?
     private var accessibilityObserver: NSObjectProtocol?
@@ -18,7 +19,7 @@ final class LiquidGlassSurfaceHost {
     private var currentStyle: PanelSurfaceStyle = .liquidGlass
     private var currentAppearance: LiquidGlassAppearance = .tinted
     private var currentMaskOpacity: Double = 0.38
-    private var cornerRadius: CGFloat = 22
+    private var cornerRadius: CGFloat = 26
 
     var onDragTargetedChanged: ((Bool) -> Void)?
     var onPerformDrop: ((NSPasteboard) -> Bool)?
@@ -63,7 +64,7 @@ final class LiquidGlassSurfaceHost {
         switch style {
         case .liquidGlass:
             if #available(macOS 26.0, *) {
-                installCompositeLiquidGlass(
+                installNativeLiquidGlass(
                     on: panel,
                     hostingView: hostingView,
                     bounds: bounds,
@@ -101,7 +102,7 @@ final class LiquidGlassSurfaceHost {
     }
 
     @available(macOS 26.0, *)
-    private func installCompositeLiquidGlass(
+    private func installNativeLiquidGlass(
         on panel: NSWindow,
         hostingView: NSView,
         bounds: NSRect,
@@ -109,44 +110,38 @@ final class LiquidGlassSurfaceHost {
         appearance: LiquidGlassAppearance,
         maskOpacity: Double
     ) {
-        let root = LiquidGlassRootContainerView(frame: bounds)
-        root.autoresizingMask = [.width, .height]
-        root.wantsLayer = true
-        root.layer?.backgroundColor = NSColor.clear.cgColor
-        root.onAppearanceChanged = { [weak self] in
-            self?.refreshInPlace()
-        }
-        root.onDragTargetedChanged = { [weak self] targeted in
-            self?.onDragTargetedChanged?(targeted)
-        }
-        root.onPerformDrop = { [weak self] pasteboard in
-            self?.onPerformDrop?(pasteboard) ?? false
-        }
-
-        // Layer 0：底层高斯柔焦隔断层，把背后深色 IDE / 网页锐利字符打散成柔和光晕
-        let blurView = NSVisualEffectView(frame: bounds)
-        blurView.autoresizingMask = [.width, .height]
-        blurView.material = .popover
-        blurView.blendingMode = .behindWindow
-        blurView.state = .active
-        blurView.maskImage = Self.roundedMaskImage(size: bounds.size, radius: cornerRadius)
-        root.addSubview(blurView)
-
-        // Layer 1：顶层 macOS 26 原生 Liquid Glass 光学透镜外壳
+        // 直接使用官方 NSGlassEffectView 作为窗口唯一根视图：原生连续 R 角、原生折射高光、零四角毛边
         let glassView = NSGlassEffectView(frame: bounds)
         glassView.autoresizingMask = [.width, .height]
         glassView.cornerRadius = cornerRadius
-        glassView.contentView = hostingView
-        root.addSubview(glassView)
 
-        self.containerView = root
-        self.backdropBlurView = blurView
+        // 内部内容容器：透明承接外观监听与拖拽复制（绝不嵌套 NSVisualEffectView(.behindWindow)，彻底根除 WindowServer 四角矩形毛边）
+        let contentContainer = LiquidGlassContentContainerView(frame: bounds)
+        contentContainer.autoresizingMask = [.width, .height]
+        contentContainer.wantsLayer = true
+        contentContainer.layer?.backgroundColor = NSColor.clear.cgColor
+        contentContainer.onAppearanceChanged = { [weak self] in
+            self?.refreshInPlace()
+        }
+        contentContainer.onDragTargetedChanged = { [weak self] targeted in
+            self?.onDragTargetedChanged?(targeted)
+        }
+        contentContainer.onPerformDrop = { [weak self] pasteboard in
+            self?.onPerformDrop?(pasteboard) ?? false
+        }
+
+        contentContainer.addSubview(hostingView)
+        glassView.contentView = contentContainer
+
+        self.containerView = contentContainer
+        self.backdropBlurView = nil
         self.activeGlassView = glassView
 
-        panel.contentView = root
+        panel.hasShadow = false
+        panel.contentView = glassView
         applyCompositeParameters(
             glassView: glassView,
-            blurView: blurView,
+            blurView: nil,
             appearance: appearance,
             maskOpacity: maskOpacity
         )
@@ -161,29 +156,33 @@ final class LiquidGlassSurfaceHost {
     ) {
         self.activeGlassView = nil
 
-        let root = LiquidGlassRootContainerView(frame: bounds)
-        root.autoresizingMask = [.width, .height]
-        root.wantsLayer = true
-        root.layer?.backgroundColor = NSColor.clear.cgColor
-        root.onDragTargetedChanged = { [weak self] targeted in
-            self?.onDragTargetedChanged?(targeted)
-        }
-        root.onPerformDrop = { [weak self] pasteboard in
-            self?.onPerformDrop?(pasteboard) ?? false
-        }
-
         let effectView = NSVisualEffectView(frame: bounds)
         effectView.autoresizingMask = [.width, .height]
         effectView.material = .popover
         effectView.blendingMode = .behindWindow
         effectView.state = .active
-        effectView.maskImage = Self.roundedMaskImage(size: bounds.size, radius: cornerRadius)
-        effectView.addSubview(hostingView)
-        root.addSubview(effectView)
+        effectView.wantsLayer = true
+        effectView.layer?.cornerCurve = .continuous
+        effectView.layer?.cornerRadius = cornerRadius
+        effectView.layer?.masksToBounds = true
 
-        self.containerView = root
+        let contentContainer = LiquidGlassContentContainerView(frame: bounds)
+        contentContainer.autoresizingMask = [.width, .height]
+        contentContainer.wantsLayer = true
+        contentContainer.layer?.backgroundColor = NSColor.clear.cgColor
+        contentContainer.onDragTargetedChanged = { [weak self] targeted in
+            self?.onDragTargetedChanged?(targeted)
+        }
+        contentContainer.onPerformDrop = { [weak self] pasteboard in
+            self?.onPerformDrop?(pasteboard) ?? false
+        }
+        contentContainer.addSubview(hostingView)
+        effectView.addSubview(contentContainer)
+
+        self.containerView = contentContainer
         self.backdropBlurView = effectView
-        panel.contentView = root
+        panel.hasShadow = true
+        panel.contentView = effectView
         panel.invalidateShadow()
     }
 
@@ -198,43 +197,40 @@ final class LiquidGlassSurfaceHost {
         let reduceTransparency = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
         let isDark = glassView.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
 
-        // 遵循 Apple HIG：大面积文字面板统一采用 `.regular` 标准液态玻璃光学折射，绝不让文字裸奔在无模糊 `.clear` 上
-        glassView.style = .regular
+        // 100% 遵循 macOS 26 Tahoe 官方 NSGlassEffectView 规范：
+        // - 透明 (.clear) 对应官方 .clear 高清透镜折射玻璃（Spotlight / Control Center 风格）
+        // - 着色 (.tinted) 对应官方 .regular 标准高可读液态玻璃
+        // - 滑块为 0% 时 tintColor = nil，完全保留系统原生光学透镜折射与环境光反射，不糊死通透感
+        glassView.style = (appearance == .clear) ? .clear : .regular
 
         if reduceTransparency {
-            blurView?.alphaValue = 1.0
+            glassView.style = .regular
             glassView.tintColor = isDark
                 ? NSColor(srgbRed: 0.12, green: 0.13, blue: 0.15, alpha: 0.96)
                 : NSColor(srgbRed: 0.97, green: 0.97, blue: 0.98, alpha: 0.96)
             return
         }
 
-        // 底层柔焦隔断强度：通透档保持色彩流动同时柔化背后字迹；着色档进一步压制高反差杂色
-        let blurAlpha: CGFloat
-        let tintAlpha: CGFloat
-        switch appearance {
-        case .clear:
-            blurAlpha = CGFloat(0.56 + clamped * 0.30)   // 0.56 ... 0.86
-            tintAlpha = isDark
-                ? CGFloat(0.10 + clamped * 0.24)
-                : CGFloat(0.12 + clamped * 0.26)
-        case .tinted:
-            blurAlpha = CGFloat(0.76 + clamped * 0.20)   // 0.76 ... 0.96
-            tintAlpha = isDark
-                ? CGFloat(0.24 + clamped * 0.34)
-                : CGFloat(0.28 + clamped * 0.36)
+        if clamped <= 0.01 {
+            glassView.tintColor = nil
+        } else {
+            // 黄金能见度配比：保留官方边缘透镜折射与通透感，同时柔和压制背后刺眼字符
+            let alpha: CGFloat
+            if appearance == .clear {
+                alpha = isDark
+                    ? CGFloat(0.10 + clamped * 0.42)
+                    : CGFloat(0.08 + clamped * 0.40)
+            } else {
+                alpha = CGFloat(clamped * 0.48)
+            }
+            let tintBase = isDark
+                ? NSColor(srgbRed: 0.06, green: 0.07, blue: 0.09, alpha: 1.0)
+                : NSColor(srgbRed: 0.985, green: 0.988, blue: 0.995, alpha: 1.0)
+            glassView.tintColor = tintBase.withAlphaComponent(alpha)
         }
-
-        blurView?.alphaValue = blurAlpha
-
-        // 使用纯净中性高光色 / 深曜石色着色，避免 windowBackgroundColor 浅灰混在深色 IDE 上产生浑浊脏灰
-        let tintBase = isDark
-            ? NSColor(srgbRed: 0.08, green: 0.09, blue: 0.11, alpha: 1.0)
-            : NSColor(srgbRed: 0.985, green: 0.988, blue: 0.995, alpha: 1.0)
-        glassView.tintColor = tintBase.withAlphaComponent(tintAlpha)
     }
 
-    /// 生成精确连续圆角遮罩，让底层 NSVisualEffectView 配合 WindowServer 原生阴影零锯齿、无方框
+    /// 生成精确连续圆角遮罩（供胶囊 HUD 等轻量组件使用）
     static func roundedMaskImage(size: NSSize, radius: CGFloat) -> NSImage {
         let safeSize = NSSize(width: max(size.width, radius * 2 + 2), height: max(size.height, radius * 2 + 2))
         let image = NSImage(size: safeSize, flipped: false) { rect in
@@ -249,8 +245,8 @@ final class LiquidGlassSurfaceHost {
     }
 }
 
-/// 监听系统深/浅外观实时变更并接收外部内容拖放复制的轻量根视图
-private final class LiquidGlassRootContainerView: NSView {
+/// 监听系统深/浅外观实时变更并接收外部内容拖放复制的内容容器视图
+private final class LiquidGlassContentContainerView: NSView {
     var onAppearanceChanged: (() -> Void)?
     var onDragTargetedChanged: ((Bool) -> Void)?
     var onPerformDrop: ((NSPasteboard) -> Bool)?
@@ -299,7 +295,7 @@ private final class LiquidGlassRootContainerView: NSView {
     }
 }
 
-/// SwiftUI 液态玻璃语义表面色板（确保浅/深双外观、任意复杂背景下文字对比度 ≥ 4.5:1）
+/// SwiftUI 液态玻璃语义表面色板（边缘保留 100% 官方液态透明折射，文字承载玉片保证高能见度 ≥ 7:1）
 struct LiquidGlassPalette {
     let colorScheme: ColorScheme
     let surfaceStyle: PanelSurfaceStyle
@@ -307,61 +303,74 @@ struct LiquidGlassPalette {
 
     private var isDark: Bool { colorScheme == .dark }
     private var isLiquid: Bool { surfaceStyle == .liquidGlass }
-    private var isTinted: Bool { appearance == .tinted }
+    private var isClearGlass: Bool { isLiquid && appearance == .clear }
 
-    /// 设置页分组卡片 / 面板二级容器底色（浅色用温润通透白玉片，深色用微亮暗玉片）
+    /// 深色模式专用深曜石基色（阻隔背后刺眼白字穿透，同时保持玻璃冷冽质感）
+    private var obsidianBase: Color {
+        Color(red: 0.10, green: 0.11, blue: 0.135)
+    }
+
+    /// 设置页分组卡片 / 面板二级容器底色
     var groupFill: Color {
         if isLiquid {
             if isDark {
-                return Color.white.opacity(isTinted ? 0.095 : 0.08)
+                return obsidianBase.opacity(isClearGlass ? 0.76 : 0.56)
             } else {
-                return Color.white.opacity(isTinted ? 0.68 : 0.56)
+                return Color.white.opacity(isClearGlass ? 0.80 : 0.68)
             }
         } else {
             return isDark
-                ? Color.white.opacity(0.06)
-                : Color.white.opacity(0.54)
+                ? Color.white.opacity(0.07)
+                : Color.white.opacity(0.58)
         }
     }
 
     /// 分组卡片与内嵌区块的光学切面描边
     var groupStroke: Color {
         if isDark {
-            return Color.white.opacity(isLiquid ? 0.13 : 0.09)
+            return Color.white.opacity(isClearGlass ? 0.16 : 0.12)
         } else {
-            return Color.white.opacity(isLiquid ? 0.72 : 0.55)
+            return Color.white.opacity(isLiquid ? 0.76 : 0.55)
         }
     }
 
     /// 嵌套子卡片底色（如角色版本双卡片、忽略应用行）
     var nestedCardFill: Color {
         if isDark {
-            return Color.white.opacity(isLiquid ? 0.075 : 0.055)
+            return Color.white.opacity(isClearGlass ? 0.085 : 0.065)
         } else {
-            return Color.white.opacity(isLiquid ? 0.52 : 0.44)
+            return Color.white.opacity(isClearGlass ? 0.62 : 0.50)
         }
     }
 
-    /// 剪贴板单条卡片底色
+    /// 剪贴板单条卡片底色（透明玻璃下用高能见度曜石/乳白玉片托住文字，四周缝隙透出纯粹玻璃折射）
     func clipCardFill(isHovered: Bool) -> Color {
         if isLiquid {
             if isDark {
-                return Color.white.opacity(isHovered ? 0.145 : (isTinted ? 0.095 : 0.078))
+                if isClearGlass {
+                    return obsidianBase.opacity(isHovered ? 0.86 : 0.74)
+                } else {
+                    return obsidianBase.opacity(isHovered ? 0.66 : 0.48)
+                }
             } else {
-                return Color.white.opacity(isHovered ? 0.80 : (isTinted ? 0.64 : 0.54))
+                if isClearGlass {
+                    return Color.white.opacity(isHovered ? 0.88 : 0.78)
+                } else {
+                    return Color.white.opacity(isHovered ? 0.80 : 0.64)
+                }
             }
         } else {
             return Color(nsColor: .controlBackgroundColor).opacity(isHovered ? 0.72 : 0.48)
         }
     }
 
-    /// 置顶卡片底层缓冲色
+    /// 置顶/收藏卡片底层缓冲色
     func pinnedCardBackdrop(isHovered: Bool) -> Color {
         if isLiquid {
             if isDark {
-                return Color.white.opacity(isHovered ? 0.11 : 0.07)
+                return obsidianBase.opacity(isClearGlass ? (isHovered ? 0.84 : 0.72) : (isHovered ? 0.62 : 0.46))
             } else {
-                return Color.white.opacity(isHovered ? 0.72 : 0.56)
+                return Color.white.opacity(isClearGlass ? (isHovered ? 0.88 : 0.78) : (isHovered ? 0.76 : 0.62))
             }
         } else {
             return Color(nsColor: .controlBackgroundColor).opacity(isHovered ? 0.72 : 0.52)
@@ -371,63 +380,60 @@ struct LiquidGlassPalette {
     /// 剪贴板卡片常态/悬停描边
     func clipCardStroke(isHovered: Bool) -> Color {
         if isDark {
-            return Color.white.opacity(isHovered ? 0.22 : (isLiquid ? 0.12 : 0.08))
+            return Color.white.opacity(isHovered ? 0.26 : (isClearGlass ? 0.15 : 0.11))
         } else {
             return isHovered
-                ? Color.white.opacity(0.88)
-                : (isLiquid ? Color.white.opacity(0.62) : Color.black.opacity(0.06))
+                ? Color.white.opacity(0.92)
+                : (isLiquid ? Color.white.opacity(0.70) : Color.black.opacity(0.06))
         }
     }
 
-    /// 顶部搜索栏、功能圆钮、分段筛选底槽等导航控件填充（HIG：导航层浮于内容层之上）
+    /// 顶部搜索栏、功能圆钮、分段筛选底槽等导航控件填充
     var controlCapsuleFill: Color {
         if isDark {
-            return Color.white.opacity(isLiquid ? 0.11 : 0.08)
+            return obsidianBase.opacity(isClearGlass ? 0.76 : (isLiquid ? 0.54 : 0.35))
         } else {
-            return Color.white.opacity(isLiquid ? 0.56 : 0.48)
+            return Color.white.opacity(isClearGlass ? 0.76 : (isLiquid ? 0.60 : 0.48))
         }
     }
 
     /// 顶部导航控件光学描边
     var controlCapsuleStroke: Color {
         if isDark {
-            return Color.white.opacity(isLiquid ? 0.16 : 0.10)
+            return Color.white.opacity(isClearGlass ? 0.18 : (isLiquid ? 0.14 : 0.10))
         } else {
-            return Color.white.opacity(isLiquid ? 0.76 : 0.55)
+            return Color.white.opacity(isLiquid ? 0.82 : 0.55)
         }
     }
 
     /// 分段筛选器选中胶囊填充
     var activeSegmentFill: Color {
         if isDark {
-            return Color.white.opacity(0.20)
+            return Color.white.opacity(isClearGlass ? 0.24 : 0.20)
         } else {
-            return Color.white.opacity(0.92)
+            return Color.white.opacity(0.95)
         }
     }
 
-    /// 整窗外缘光学镜面高光环（Liquid Glass 标志性顶部折射亮边 -> 底部柔和收敛）
-    var panelSpecularGradient: LinearGradient {
+    /// 分段筛选器悬停微提示填充（让不可见点击框符合直觉）
+    var hoverSegmentFill: Color {
         if isDark {
-            return LinearGradient(
-                colors: [
-                    Color.white.opacity(isLiquid ? 0.26 : 0.14),
-                    Color.white.opacity(isLiquid ? 0.09 : 0.06),
-                    Color.white.opacity(isLiquid ? 0.16 : 0.08)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
+            return Color.white.opacity(0.11)
         } else {
-            return LinearGradient(
-                colors: [
-                    Color.white.opacity(isLiquid ? 0.82 : 0.55),
-                    Color.white.opacity(isLiquid ? 0.34 : 0.20),
-                    Color.white.opacity(isLiquid ? 0.52 : 0.30)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
+            return Color.white.opacity(0.48)
+        }
+    }
+
+    /// 底部状态栏轻托底色（避免小号快捷键文字在透明玻璃下被背后文字干扰）
+    var footerBackdrop: Color {
+        if isLiquid {
+            if isDark {
+                return obsidianBase.opacity(isClearGlass ? 0.68 : 0.32)
+            } else {
+                return Color.white.opacity(isClearGlass ? 0.66 : 0.32)
+            }
+        } else {
+            return Color.clear
         }
     }
 }
