@@ -244,41 +244,174 @@ struct ClipItem: Identifiable, Codable, Equatable {
         return Self.monthDayFormatter.string(from: createdAt)
     }
 
-    /// 零堆分配 + 64KB 索引窗口化极速搜索匹配（杜绝超大日志阻塞实时输入帧率）
+    /// 零堆分配快路径 + 多词跨维度 AND 组合 + 免切输入法拼音/首字母极速搜索匹配
     func matches(query: String) -> Bool {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
         if q.isEmpty { return true }
+
+        // 单一词元零数组分配快路径（保障 2MB 大文本 + 500 条检索 < 3ms）
+        if !q.contains(" ") && !q.contains("\t") {
+            return matchesSingleToken(q)
+        }
+
+        let tokens = q.split(whereSeparator: { $0 == " " || $0 == "\t" })
+        for tokenSub in tokens {
+            if !matchesSingleToken(String(tokenSub)) {
+                return false
+            }
+        }
+        return true
+    }
+
+    private func matchesSingleToken(_ token: String) -> Bool {
         let opts: String.CompareOptions = [.caseInsensitive]
         if let text = text {
             if text.utf8.count <= 65_536 {
-                if text.range(of: q, options: opts) != nil { return true }
+                if text.range(of: token, options: opts) != nil { return true }
             } else {
                 // 超大负载仅检索头部约 32K 字符窗口，将单条最坏耗时锁死在 0.1ms 内
                 let head = text.prefix(32_768)
-                if head.range(of: q, options: opts) != nil { return true }
+                if head.range(of: token, options: opts) != nil { return true }
             }
         }
-        if let alias = customAlias, alias.range(of: q, options: opts) != nil {
+        if let alias = customAlias, alias.range(of: token, options: opts) != nil {
             return true
         }
-        if let cat = pinCategory, cat.title.range(of: q, options: opts) != nil {
+        if let cat = pinCategory, cat.title.range(of: token, options: opts) != nil {
             return true
         }
         #if ICLIP_EDITION_FLOW
-        if let ocr = ocrText, ocr.range(of: q, options: opts) != nil {
+        if let ocr = ocrText, ocr.range(of: token, options: opts) != nil {
             return true
         }
         #endif
         if let paths = filePaths {
-            for path in paths where path.range(of: q, options: opts) != nil {
+            for path in paths where path.range(of: token, options: opts) != nil {
                 return true
             }
         }
-        if let app = sourceAppName, app.range(of: q, options: opts) != nil {
+        if let app = sourceAppName, app.range(of: token, options: opts) != nil {
             return true
         }
-        if type.displayName.range(of: q, options: opts) != nil {
+        if type.displayName.range(of: token, options: opts) != nil {
             return true
+        }
+
+        // 免切中文输入法回退：当输入为 2~20 位纯英文字母时，匹配缓存的中文全拼与拼音首字母
+        if PinyinSearchCache.isPureASCIILetters(token) {
+            return PinyinSearchCache.matchesPinyin(tokenLower: token.lowercased(), for: self)
+        }
+        return false
+    }
+}
+
+/// 线程安全轻量中文全拼与首字母索引缓存（零外部词库依赖，支持英文输入态盲搜中文历史与应用名）
+enum PinyinSearchCache {
+    private final class Entry {
+        let compactFull: String
+        let initials: String
+        init(compactFull: String, initials: String) {
+            self.compactFull = compactFull
+            self.initials = initials
+        }
+    }
+
+    private static let cache: NSCache<NSString, Entry> = {
+        let c = NSCache<NSString, Entry>()
+        c.countLimit = 1024
+        return c
+    }()
+
+    static func isPureASCIILetters(_ s: String) -> Bool {
+        let len = s.utf8.count
+        guard len >= 2 && len <= 20 else { return false }
+        for b in s.utf8 {
+            let isUpper = (b >= 65 && b <= 90)
+            let isLower = (b >= 97 && b <= 122)
+            if !isUpper && !isLower { return false }
+        }
+        return true
+    }
+
+    static func matchesPinyin(tokenLower: String, for item: ClipItem) -> Bool {
+        let cacheKey = "\(item.contentHash)|\(item.customAlias ?? "")|\(item.sourceAppName ?? "")" as NSString
+        let entry: Entry
+        if let hit = cache.object(forKey: cacheKey) {
+            entry = hit
+        } else {
+            let built = buildEntry(for: item)
+            cache.setObject(built, forKey: cacheKey)
+            entry = built
+        }
+        if entry.initials.isEmpty { return false }
+        return entry.initials.contains(tokenLower) || entry.compactFull.contains(tokenLower)
+    }
+
+    private static func buildEntry(for item: ClipItem) -> Entry {
+        var source = ""
+        if let alias = item.customAlias, !alias.isEmpty {
+            source.append(alias)
+            source.append(" ")
+        }
+        if let app = item.sourceAppName, !app.isEmpty {
+            source.append(app)
+            source.append(" ")
+        }
+        source.append(item.type.displayName)
+        if let cat = item.pinCategory {
+            source.append(" ")
+            source.append(cat.title)
+        }
+        if let t = item.text, !t.isEmpty {
+            source.append(" ")
+            source.append(String(t.prefix(64)))
+        } else if let firstPath = item.filePaths?.first {
+            source.append(" ")
+            source.append(URL(fileURLWithPath: firstPath).lastPathComponent)
+        }
+        #if ICLIP_EDITION_FLOW
+        if let ocr = item.ocrText, !ocr.isEmpty {
+            source.append(" ")
+            source.append(String(ocr.prefix(48)))
+        }
+        #endif
+
+        guard containsHanCharacters(source) else {
+            return Entry(compactFull: "", initials: "")
+        }
+
+        let mutable = NSMutableString(string: source) as CFMutableString
+        CFStringTransform(mutable, nil, kCFStringTransformToLatin, false)
+        CFStringTransform(mutable, nil, kCFStringTransformStripCombiningMarks, false)
+        let latin = (mutable as String).lowercased()
+
+        var full = String()
+        full.reserveCapacity(latin.utf8.count)
+        var initials = String()
+        initials.reserveCapacity(32)
+
+        var atWordStart = true
+        for scalar in latin.unicodeScalars {
+            let v = scalar.value
+            if (v >= 97 && v <= 122) || (v >= 48 && v <= 57) {
+                let ch = Character(scalar)
+                full.append(ch)
+                if atWordStart {
+                    initials.append(ch)
+                    atWordStart = false
+                }
+            } else {
+                atWordStart = true
+            }
+        }
+        return Entry(compactFull: full, initials: initials)
+    }
+
+    private static func containsHanCharacters(_ text: String) -> Bool {
+        for scalar in text.unicodeScalars {
+            if scalar.value >= 0x4E00 && scalar.value <= 0x9FFF {
+                return true
+            }
         }
         return false
     }

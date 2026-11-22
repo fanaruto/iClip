@@ -652,4 +652,39 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertEqual(r3.record.status, .queuedForEvolution)
         XCTAssertEqual(engine.suggestions.count, 3)
     }
+
+    // MARK: - 18. 多词跨维度组合搜索与免切输入法拼音/首字母检索测试
+
+    func testMultiTokenCrossFieldAndPinyinInitialsSearch() {
+        let invoiceItem = ClipItem(
+            type: .text,
+            text: "开票抬头：上海怀道科技有限公司\n纳税人识别号：91310000MA1K88888X",
+            contentHash: "text:hd-invoice",
+            sourceAppName: "飞书",
+            isPinned: true,
+            pinCategory: .invoice,
+            customAlias: "总部税号"
+        )
+        let wechatImg = ClipItem(
+            type: .image,
+            imageFileName: "demo.png",
+            imageWidth: 1200,
+            imageHeight: 800,
+            contentHash: "img:wx-shot",
+            sourceAppName: "微信"
+        )
+
+        // 1. 多词空格跨维度组合匹配（来源应用 + 正文关键词 / 类型名）
+        XCTAssertTrue(invoiceItem.matches(query: "飞书 913100"))
+        XCTAssertTrue(invoiceItem.matches(query: "总部 怀道"))
+        XCTAssertTrue(wechatImg.matches(query: "微信 图片"))
+        XCTAssertFalse(wechatImg.matches(query: "微信 税号"))
+
+        // 2. 免切中文输入法：英文全拼与拼音首字母秒搜
+        XCTAssertTrue(invoiceItem.matches(query: "shhdkj"))     // 上海怀道科技 首字母
+        XCTAssertTrue(invoiceItem.matches(query: "huaidao"))    // 怀道 全拼
+        XCTAssertTrue(invoiceItem.matches(query: "zbsh"))       // 总部税号 备注首字母
+        XCTAssertTrue(invoiceItem.matches(query: "feishu 9131"))// 飞书全拼 + 税号片段混合组合
+        XCTAssertTrue(wechatImg.matches(query: "wx tp"))        // 微信 + 图片 双首字母组合
+    }
 }

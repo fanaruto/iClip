@@ -1858,6 +1858,14 @@ struct ClipboardPopoverView: View {
         store.copyAndOptionallyPaste(item, plainTextOnly: false, shouldAutoPaste: true, onBeforePaste: onDismiss)
     }
 
+    func togglePinForSelected() {
+        guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return }
+        let item = filteredItems[nav.selectedIndex]
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
+            store.togglePin(item)
+        }
+    }
+
     func deleteSelected() {
         guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return }
         let item = filteredItems[nav.selectedIndex]
@@ -3669,6 +3677,14 @@ struct ClipboardPopoverView: View {
         guard index >= 0, index < filteredItems.count else { return }
         let item = filteredItems[index]
         store.copyAndOptionallyPaste(item, plainTextOnly: false, shouldAutoPaste: true, onBeforePaste: onDismiss)
+    }
+
+    func togglePinForSelected() {
+        guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return }
+        let item = filteredItems[nav.selectedIndex]
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
+            store.togglePin(item)
+        }
     }
 
     func deleteSelected() {

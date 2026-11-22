@@ -483,6 +483,12 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             return nil
         }
 
+        // ⌘S (keyCode 1) / ⌘D (keyCode 2)：全键盘一键收藏 / 取消收藏当前选中条目
+        if flags == .command, (event.keyCode == 1 || event.keyCode == 2) {
+            rootView.togglePinForSelected()
+            return nil
+        }
+
         if flags == .command, event.keyCode == 51 {
             rootView.deleteSelected()
             return nil
@@ -1041,6 +1047,12 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         // ⌘P (keyCode 35)：一键切换窗口「始终在前（Always on Top）」
         if flags == .command, event.keyCode == 35 {
             store.toggleAlwaysOnTop()
+            return nil
+        }
+
+        // ⌘S (keyCode 1) / ⌘D (keyCode 2)：全键盘一键收藏 / 取消收藏当前选中条目
+        if flags == .command, (event.keyCode == 1 || event.keyCode == 2) {
+            rootView.togglePinForSelected()
             return nil
         }
 
