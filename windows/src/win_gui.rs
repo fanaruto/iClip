@@ -1,11 +1,11 @@
 #![cfg(target_os = "windows")]
 
-use crate::engines::{
+use iclip_core::engines::{
     analyze_text_actions, clean_tracking_url, compress_png_to_white_bg_jpeg,
     render_dynamic_template, render_mockup_frame_png,
 };
-use crate::model::{now_unix_secs, ClipContentType, ClipFilterTab, ClipItem, QuickAction};
-use crate::store::ClipboardStore;
+use iclip_core::model::{now_unix_secs, ClipContentType, ClipFilterTab, ClipItem, QuickAction};
+use iclip_core::store::ClipboardStore;
 use image::{codecs::png::PngEncoder, ColorType, ImageEncoder};
 use std::cell::RefCell;
 use std::ffi::OsString;
@@ -16,7 +16,7 @@ use std::ptr::{null, null_mut};
 use std::time::Instant;
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, FALSE, HWND, LPARAM, LRESULT, POINT, RECT, TRUE, WPARAM,
+    CloseHandle, FALSE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
 };
 use windows_sys::Win32::Graphics::Dwm::{
     DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
@@ -53,9 +53,11 @@ use windows_sys::Win32::UI::HiDpi::{
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     ReleaseCapture, SendInput, SetFocus, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-    KEYEVENTF_KEYUP, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, RegisterHotKey, UnregisterHotKey,
+    KEYEVENTF_KEYUP, MOD_ALT, MOD_NOREPEAT, RegisterHotKey, UnregisterHotKey,
     VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_ESCAPE, VK_RETURN, VK_SHIFT, VK_TAB, VK_UP,
 };
+#[cfg(feature = "flow")]
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::MOD_CONTROL;
 use windows_sys::Win32::UI::Shell::{
     DragQueryFileW, Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE,
     NOTIFYICONDATAW,
@@ -355,7 +357,7 @@ pub fn run_windows_self_test() -> Result<(), String> {
 
         // 2. 验证真实 Win32 剪贴板写入与回读（UTF-16 文本 + CF_HTML 双协议）
         let test_marker = "iClip-Win32-Roundtrip-测试通过-2026";
-        let html_payload = crate::engines::build_windows_cf_html_payload("<table><tr><td>OK</td></tr></table>");
+        let html_payload = iclip_core::engines::build_windows_cf_html_payload("<table><tr><td>OK</td></tr></table>");
         // CI 环境中剪贴板偶发被其他进程短暂占用，最多重试 5 次
         let mut clip_ok = false;
         for _ in 0..5 {
@@ -745,7 +747,7 @@ unsafe fn handle_clipboard_update(hwnd: HWND) {
         if let Some((png_bytes, w, h)) = read_dib_as_png_from_clipboard(hwnd) {
             APP_STATE.with(|cell| {
                 if let Some(st) = cell.borrow_mut().as_mut() {
-                    let hash = crate::model::sha256_hex(&png_bytes);
+                    let hash = iclip_core::model::sha256_hex(&png_bytes);
                     let file_name = format!("{}.png", &hash[0..24]);
                     let full_path = st.store.images_dir.join(&file_name);
                     if std::fs::write(&full_path, &png_bytes).is_ok() {
@@ -1764,7 +1766,7 @@ unsafe fn apply_image_studio_transform(hwnd: HWND, store_idx: usize, to_jpeg: bo
     let Some(path) = img_path else { return };
     let Ok(raw_png) = std::fs::read(&path) else { return };
 
-    let transformed = if to_jpeg {
+    let transformed: Option<Vec<u8>> = if to_jpeg {
         compress_png_to_white_bg_jpeg(&raw_png, 82)
     } else {
         render_mockup_frame_png(&raw_png, 36).map(|(b, _, _)| b)
