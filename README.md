@@ -1,18 +1,22 @@
 # iClip
 
-> 只有 **1.2 MB**、零第三方依赖、采用苹果 macOS 原生液态玻璃（Liquid Glass）打造的轻量菜单栏剪贴板。
+> 只有 **~0.85 MB**、零第三方重型运行时依赖、同时提供 **macOS 液态玻璃原生版（Swift）** 与 **Windows 11 云母亚克力原生版（Rust Win32）** 的超轻量双端剪贴板。
 
-按下 **`⌥V`**（支持自定义快捷键），苹果原生液态玻璃面板在你的**鼠标光标旁**直觉出现；**双击任意记录**（或按回车）直接键入光标所在区域，让每天高频发生的复制粘贴顺手又丝滑。
+按下 **`⌥V`**（macOS）或 **`Alt+V`**（Windows），系统级毛玻璃面板在你的**鼠标光标旁**直觉滑落；**双击任意记录**（或按回车）直接键入光标所在区域，让每天高频发生的复制粘贴顺手又丝滑。
 
 <p align="center">
-  <img src="assets/demo.gif" alt="iClip 实机运行演示：鼠标旁唤醒、苹果原生液态玻璃蒙版调节、图片 3 列悬停放大与双击键入" width="760" />
+  <img src="assets/demo.gif" alt="iClip 实机运行演示：鼠标旁唤醒、原生液态玻璃/云母材质、图片悬停放大与双击键入" width="760" />
 </p>
 
-> 📥 **iClip v2.0 双角色专属安装包（开箱即用 + 极简纯净模式 + 应用内一键切轨 OTA）**：
-> 前往 [GitHub Releases](https://github.com/fanaruto/iClip/releases/latest) 按你的主力场景选择，后续也可随时在 **设置 → 使用角色与专属版本** 中一键跨版本 OTA 热切换（保留全部历史与辅助功能权限），或按 **`⌘E`** 一键切换为**极简纯净模式（基础功能版）**：
-> - 👨‍💻 **极客开发与 AI 版（`iClip-Dev-macOS.zip`）**：微秒级语义识别、敏感密钥 AI 结构化脱敏、URL 净链、JSON / 时间戳 / Base64 / cURL / SQL `IN` 瞬变、QuickLook 对照预览、`{{clip_redacted}}` 动态模板插值。
-> - ⚡️ **商务与心流办公版（`iClip-Flow-macOS.zip`）**：FIFO 顺序粘贴队列（`⌃⌥V` 免开面板连填表单 + 自动 `Tab` 跳格）、Apple Vision 离线中英实况文本 OCR 搜图识字、多选跨模态合并粘贴、收藏场景分组槽与备注标题别名。
-> - 🧰 **v2.0 全行业痛点工具箱（极简模式下自动静默隐藏）**：会计零误差人民币大写与多行账单求和、PDF 断行智能愈合与盘古中英排版、Markdown 表格 ↔ Excel 多协议直粘破壁、截图瞬时瘦身与苹果风圆角阴影样机衬底、身份证/企业税号/银行卡离线国标真伪校验与分节、会议逐字稿去时间轴与短信验证码阅后即焚、置顶收藏资产 `.iclip` 跨机归档迁移。
+> 📥 **iClip v2.1 双平台 × 双角色专属安装包（极致低功耗 + 极简纯净开关 + 跨平台 `.iclip` 收藏互通）**：
+> 前往 [GitHub Releases](https://github.com/fanaruto/iClip/releases/latest) 按你的操作系统与主力场景下载，随时可按 **`⌘E`（macOS）/ `Ctrl+E`（Windows）** 一键切换为**极简纯净模式（基础功能版）**：
+> - 🍎 **macOS 原生版**（支持应用内一键跨角色 OTA 热切换，保留历史与辅助功能权限）：
+>   - `iClip-Dev-macOS.zip`（极客开发与 AI 版，849 KB）
+>   - `iClip-Flow-macOS.zip`（商务与心流办公版，864 KB）
+> - 🪟 **Windows 10/11 纯原生单文件绿色版**（免安装双击即用，零 WebView2/Electron 依赖，`AddClipboardFormatListener` 内核级监听 **0.00% 待机 CPU**）：
+>   - `iClip-Dev-Windows-x64.zip`（极客开发与 AI 版）
+>   - `iClip-Flow-Windows-x64.zip`（商务与心流办公版）
+> - 🧰 **v2.1 全行业痛点工具箱（极简模式下自动静默隐藏）**：AI 密钥/内网隐私掩码脱敏、零误差人民币会计大写与多行账单求和、PDF 断行智能愈合与盘古中英排版、Markdown 表格 ↔ Excel `CF_HTML` 多协议自动分列直粘、截图白底瘦身与柔光圆角阴影样机衬底、身份证/企业税号/银行卡国标真伪校验与 `O/0` 手误纠错、会议逐字稿去时间轴与短信验证码 30 秒阅后即焚、置顶收藏 `.iclip` 跨 Mac/Windows 无损互导。
 
 ---
 
