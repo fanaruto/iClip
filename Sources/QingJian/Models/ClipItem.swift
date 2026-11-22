@@ -104,6 +104,8 @@ struct ClipItem: Identifiable, Codable, Equatable {
     var ocrText: String?
     /// 是否已完成离线实况文本扫描
     var ocrChecked: Bool?
+    /// Apple Vision 离线识别出的图片内二维码/条码载荷（链接或纯文本）
+    var qrCodePayload: String?
     var filePaths: [String]?
     var contentHash: String
     var sourceAppName: String?
@@ -123,6 +125,7 @@ struct ClipItem: Identifiable, Codable, Equatable {
         imageHeight: Int? = nil,
         ocrText: String? = nil,
         ocrChecked: Bool? = nil,
+        qrCodePayload: String? = nil,
         filePaths: [String]? = nil,
         contentHash: String,
         sourceAppName: String? = nil,
@@ -139,6 +142,7 @@ struct ClipItem: Identifiable, Codable, Equatable {
         self.imageHeight = imageHeight
         self.ocrText = ocrText
         self.ocrChecked = ocrChecked
+        self.qrCodePayload = qrCodePayload
         self.filePaths = filePaths
         self.contentHash = contentHash
         self.sourceAppName = sourceAppName
@@ -205,13 +209,16 @@ struct ClipItem: Identifiable, Codable, Equatable {
             }
             return "网页链接"
         case .image:
-            #if ICLIP_EDITION_FLOW
+            if let qr = qrCodePayload?.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespacesAndNewlines),
+               !qr.isEmpty {
+                let preview = qr.count > 26 ? String(qr.prefix(26)) + "…" : qr
+                return "二维码：\(preview)"
+            }
             if let ocr = ocrText?.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespacesAndNewlines),
                !ocr.isEmpty {
                 let preview = ocr.count > 26 ? String(ocr.prefix(26)) + "…" : ocr
                 return "实况文本：\(preview)"
             }
-            #endif
             return "PNG 图像"
         case .file:
             guard let first = filePaths?.first else { return "本地文件" }
@@ -292,11 +299,12 @@ struct ClipItem: Identifiable, Codable, Equatable {
         if let cat = pinCategory, cat.title.range(of: token, options: opts) != nil {
             return true
         }
-        #if ICLIP_EDITION_FLOW
+        if let qr = qrCodePayload, qr.range(of: token, options: opts) != nil {
+            return true
+        }
         if let ocr = ocrText, ocr.range(of: token, options: opts) != nil {
             return true
         }
-        #endif
         if let paths = filePaths {
             for path in paths where path.range(of: token, options: opts) != nil {
                 return true
@@ -346,6 +354,8 @@ enum EpisodicQueryMatcher {
         switch tokenLower {
         case "收藏", "@pin", "@star", "pinned", "starred":
             return item.isPinned
+        case "二维码", "qrcode", "@qr":
+            return !(item.qrCodePayload?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
         case "今天", "今日", "today", "@today":
             let start = startOfToday(for: now)
             let ts = item.createdAt.timeIntervalSince1970
@@ -371,7 +381,8 @@ enum EpisodicQueryMatcher {
         case "今天", "今日", "today", "@today",
              "昨天", "昨日", "yesterday", "@yesterday",
              "刚刚", "1h", "1小时", "@1h",
-             "本周", "一周", "7d", "week", "@7d", "@week":
+             "本周", "一周", "7d", "week", "@7d", "@week",
+             "二维码", "qrcode", "@qr":
             return true
         default:
             return false
@@ -472,12 +483,14 @@ enum PinyinSearchCache {
             source.append(" ")
             source.append(URL(fileURLWithPath: firstPath).lastPathComponent)
         }
-        #if ICLIP_EDITION_FLOW
+        if let qr = item.qrCodePayload, !qr.isEmpty {
+            source.append(" ")
+            source.append(String(qr.prefix(48)))
+        }
         if let ocr = item.ocrText, !ocr.isEmpty {
             source.append(" ")
             source.append(String(ocr.prefix(48)))
         }
-        #endif
 
         guard containsHanCharacters(source) else {
             return Entry(compactFull: "", initials: "", aliasFull: "", aliasInitials: "")

@@ -66,7 +66,21 @@ enum QuickLookTabBuilder {
                     supportsSaveBack: false
                 )
             ]
-            if let ocr = item.ocrText?.trimmingCharacters(in: .whitespacesAndNewlines), !ocr.isEmpty {
+            let qr = item.qrCodePayload?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !qr.isEmpty {
+                tabs.append(
+                    QuickLookTabItem(
+                        id: "qrcode",
+                        title: "二维码内容",
+                        payload: .text(qr),
+                        toast: "已键入图中二维码内容",
+                        supportsSaveBack: false
+                    )
+                )
+            }
+            if let ocr = item.ocrText?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !ocr.isEmpty,
+               ocr != qr {
                 tabs.append(
                     QuickLookTabItem(
                         id: "ocr",

@@ -3191,6 +3191,14 @@ struct ClipboardPopoverView: View {
                                                         onBeforePaste: nil
                                                     )
                                                 },
+                                                onExtractOCR: { autoPaste in
+                                                    dismissImagePreview(clearItem: true)
+                                                    store.pasteExtractedOCRText(
+                                                        for: entry.item,
+                                                        shouldAutoPaste: autoPaste,
+                                                        onBeforePaste: autoPaste ? onDismiss : nil
+                                                    )
+                                                },
                                                 onTogglePin: {
                                                     withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
                                                         store.togglePin(entry.item)
@@ -4235,6 +4243,11 @@ struct ClipboardPopoverView: View {
         }
         guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return }
         let item = filteredItems[nav.selectedIndex]
+        if !store.minimalModeEnabled && item.type == .image {
+            dismissImagePreview(clearItem: true)
+            store.pasteExtractedOCRText(for: item, shouldAutoPaste: true, onBeforePaste: onDismiss)
+            return
+        }
         let snapshot = store.semanticSnapshot(for: item)
         if let primaryAction = snapshot.actions.first {
             store.applyTransformAction(primaryAction, for: item, shouldAutoPaste: true, onBeforePaste: onDismiss)

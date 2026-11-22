@@ -92,10 +92,14 @@ struct ClipImageGridTile: View {
                         .font(.system(size: 9.5, weight: .medium, design: .rounded))
                 }
                 Spacer(minLength: 0)
-                if !ClipboardStore.shared.minimalModeEnabled, let ocr = item.ocrText, !ocr.isEmpty {
-                    Image(systemName: "text.viewfinder")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(Color.white.opacity(0.95))
+                if !ClipboardStore.shared.minimalModeEnabled {
+                    let hasQR = !(item.qrCodePayload?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+                    let hasOCR = !(item.ocrText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+                    if hasQR || hasOCR {
+                        Image(systemName: hasQR ? "qrcode.viewfinder" : "text.viewfinder")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(Color.white.opacity(0.95))
+                    }
                 }
             }
             .foregroundStyle(Color.white.opacity(0.92))
@@ -132,13 +136,14 @@ struct ClipImageGridTile: View {
             if isHovered {
                 HStack(spacing: 4) {
                     if !ClipboardStore.shared.minimalModeEnabled {
+                        let hasQR = !(item.qrCodePayload?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
                         HoverActionCircleButton(
-                            symbolName: "text.viewfinder",
+                            symbolName: hasQR ? "qrcode.viewfinder" : "text.viewfinder",
                             size: 22,
                             iconSize: 10,
                             surface: .onImageTile,
                             kind: .ocr,
-                            helpText: "提取图中文字并键入（⇧↵）",
+                            helpText: hasQR ? "提取二维码内容并键入（⇧↵）" : "提取图中文字并键入（⇧↵）",
                             action: { onExtractOCR(true) }
                         )
                     }
@@ -275,11 +280,25 @@ struct ClipImageGridTile: View {
                 }
             }
             Divider()
-            Button("提取图中文字并键入（⇧↵）") {
-                onExtractOCR(true)
-            }
-            Button("仅复制图中文字") {
-                onExtractOCR(false)
+            if let qr = item.qrCodePayload?.trimmingCharacters(in: .whitespacesAndNewlines), !qr.isEmpty {
+                if ClipboardStore.isValidWebURL(qr) {
+                    Button("打开图中二维码链接") {
+                        ClipboardStore.shared.openImageQRCodeURLIfAvailable(item)
+                    }
+                }
+                Button("提取二维码内容并键入（⇧↵）") {
+                    onExtractOCR(true)
+                }
+                Button("仅复制二维码内容") {
+                    onExtractOCR(false)
+                }
+            } else {
+                Button("提取图中文字并键入（⇧↵）") {
+                    onExtractOCR(true)
+                }
+                Button("仅复制图中文字") {
+                    onExtractOCR(false)
+                }
             }
             Divider()
             Button(queueRank != nil ? "移出顺序队列（⌘K）" : "加入顺序队列（⌘K）") {
@@ -484,6 +503,7 @@ struct ClipImageGridTile: View {
     let onSelect: () -> Void
     let onPaste: () -> Void
     let onCopyOnly: () -> Void
+    var onExtractOCR: ((Bool) -> Void)? = nil
     let onTogglePin: () -> Void
     var onEditAlias: (() -> Void)? = nil
     var onOpenQuickLook: (() -> Void)? = nil
@@ -558,6 +578,15 @@ struct ClipImageGridTile: View {
                         .font(.system(size: 9.5, weight: .medium, design: .rounded))
                 }
                 Spacer(minLength: 0)
+                if !ClipboardStore.shared.minimalModeEnabled {
+                    let hasQR = !(item.qrCodePayload?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+                    let hasOCR = !(item.ocrText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+                    if hasQR || hasOCR {
+                        Image(systemName: hasQR ? "qrcode.viewfinder" : "text.viewfinder")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(Color.white.opacity(0.95))
+                    }
+                }
             }
             .foregroundStyle(Color.white.opacity(0.92))
             .padding(.horizontal, 7)
@@ -583,6 +612,19 @@ struct ClipImageGridTile: View {
         .overlay(alignment: .topTrailing) {
             if isHovered {
                 HStack(spacing: 4) {
+                    if !ClipboardStore.shared.minimalModeEnabled, let onExtractOCR {
+                        let hasQR = !(item.qrCodePayload?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+                        HoverActionCircleButton(
+                            symbolName: hasQR ? "qrcode.viewfinder" : "text.viewfinder",
+                            size: 22,
+                            iconSize: 10,
+                            surface: .onImageTile,
+                            kind: .ocr,
+                            helpText: hasQR ? "提取二维码内容并键入（⇧↵）" : "提取图中文字并键入（⇧↵）",
+                            action: { onExtractOCR(true) }
+                        )
+                    }
+
                     HoverActionCircleButton(
                         symbolName: item.isPinned ? "star.fill" : "star",
                         size: 22,
@@ -707,6 +749,29 @@ struct ClipImageGridTile: View {
             }
             if !ClipboardStore.shared.minimalModeEnabled {
                 Divider()
+                if let onExtractOCR {
+                    if let qr = item.qrCodePayload?.trimmingCharacters(in: .whitespacesAndNewlines), !qr.isEmpty {
+                        if ClipboardStore.isValidWebURL(qr) {
+                            Button("打开图中二维码链接") {
+                                ClipboardStore.shared.openImageQRCodeURLIfAvailable(item)
+                            }
+                        }
+                        Button("提取二维码内容并键入（⇧↵）") {
+                            onExtractOCR(true)
+                        }
+                        Button("仅复制二维码内容") {
+                            onExtractOCR(false)
+                        }
+                    } else {
+                        Button("提取图中文字并键入（⇧↵）") {
+                            onExtractOCR(true)
+                        }
+                        Button("仅复制图中文字") {
+                            onExtractOCR(false)
+                        }
+                    }
+                    Divider()
+                }
                 Button("轻量瘦身粘贴（转 JPEG 省 80%+ 体积）") {
                     ClipboardStore.shared.pasteCompressedJPEG(for: item, shouldAutoPaste: false)
                 }

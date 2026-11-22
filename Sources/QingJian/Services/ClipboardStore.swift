@@ -123,6 +123,9 @@ enum CopyAppendHelper {
         if let paths = item.filePaths, !paths.isEmpty {
             return paths.joined(separator: "\n")
         }
+        if let qr = item.qrCodePayload, !qr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return qr
+        }
         if let ocr = item.ocrText, !ocr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return ocr
         }
@@ -415,11 +418,9 @@ final class ClipboardStore: ObservableObject {
         ensureDirectories()
         loadHistory()
         startMonitoring()
-        #if ICLIP_EDITION_FLOW
         if !minimalModeEnabled {
             scheduleLegacyOCRBackfill()
         }
-        #endif
     }
 
     func toggleMinimalMode() {
@@ -481,14 +482,10 @@ final class ClipboardStore: ObservableObject {
             }
 
         case .extractImageOCR(let itemID):
-            #if ICLIP_EDITION_FLOW
             if let target = items.first(where: { $0.id == itemID }) {
                 TactileFeedbackEngine.shared.perform(.magicTransform)
                 pasteExtractedOCRText(for: target, shouldAutoPaste: false, onBeforePaste: nil)
             }
-            #else
-            _ = itemID
-            #endif
 
         case .pinFrequentItem(let itemID):
             if let target = items.first(where: { $0.id == itemID }), !target.isPinned {
@@ -694,6 +691,7 @@ final class ClipboardStore: ObservableObject {
             let rawTIFF = (rawPNG == nil) ? pasteboard.data(forType: .tiff) : nil
             if rawPNG != nil || rawTIFF != nil {
                 let imagesDir = self.imagesDirectoryURL
+                let isMinimal = self.minimalModeEnabled
                 Task.detached(priority: .utility) { [weak self] in
                     let finalPNG: Data?
                     if let rawPNG {
@@ -738,6 +736,7 @@ final class ClipboardStore: ObservableObject {
                     }
                     if alreadyExists { return }
 
+                    let detectedQR = isMinimal ? nil : VisionOCRService.detectBarcodesFast(in: pngData)
                     let fileName = "\(UUID().uuidString).png"
                     let fileURL = imagesDir.appendingPathComponent(fileName)
                     do {
@@ -758,23 +757,33 @@ final class ClipboardStore: ObservableObject {
                             imageFileName: fileName,
                             imageWidth: dims.width,
                             imageHeight: dims.height,
+                            qrCodePayload: detectedQR,
                             contentHash: contentHash,
                             sourceAppName: sourceApp
                         )
                         self.insertOrPromote(item)
                         let reuseCount = AdaptiveIntelligenceEngine.shared.recordContentActivity(contentHash: contentHash)
                         if !self.minimalModeEnabled,
-                           AdaptiveIntelligenceEngine.shared.enabledAutoRules.contains(.compressLargeImage),
-                           pngData.count > 1_500_000 {
+                           let qr = detectedQR, !qr.isEmpty,
+                           AdaptiveIntelligenceEngine.shared.enabledAutoRules.contains(.extractQRCode) {
+                            self.pasteboard.clearContents()
+                            self.pasteboard.setString(qr, forType: .string)
+                            if Self.isValidWebURL(qr) {
+                                self.pasteboard.setString(qr, forType: .URL)
+                            }
+                            self.ignoreNextChangeCount = self.pasteboard.changeCount
+                            self.lastChangeCount = self.pasteboard.changeCount
+                            self.showToast(LearnedAutoRuleKind.extractQRCode.shortToast)
+                        } else if !self.minimalModeEnabled,
+                                  AdaptiveIntelligenceEngine.shared.enabledAutoRules.contains(.compressLargeImage),
+                                  pngData.count > 1_500_000 {
                             self.pasteCompressedJPEG(for: item, shouldAutoPaste: false, onBeforePaste: nil)
                         } else {
                             ActionSparkController.shared.presentIfAppropriate(for: item, reuseCount: reuseCount, in: self)
                         }
-                        #if ICLIP_EDITION_FLOW
                         if !self.minimalModeEnabled {
                             self.scheduleBackgroundOCR(forItemID: item.id, fileURL: fileURL)
                         }
-                        #endif
                     }
                 }
                 return
@@ -1293,6 +1302,7 @@ final class ClipboardStore: ObservableObject {
 
     private func ingestDroppedImageData(rawPNG: Data?, rawTIFF: Data?, sourceApp: String) {
         let imagesDir = self.imagesDirectoryURL
+        let isMinimal = self.minimalModeEnabled
         Task.detached(priority: .utility) { [weak self] in
             let finalPNG: Data?
             if let rawPNG {
@@ -1328,6 +1338,7 @@ final class ClipboardStore: ObservableObject {
             }
             if alreadyExists { return }
 
+            let detectedQR = isMinimal ? nil : VisionOCRService.detectBarcodesFast(in: pngData)
             let fileName = "\(UUID().uuidString).png"
             let fileURL = imagesDir.appendingPathComponent(fileName)
             do {
@@ -1348,15 +1359,14 @@ final class ClipboardStore: ObservableObject {
                     imageFileName: fileName,
                     imageWidth: dims.width,
                     imageHeight: dims.height,
+                    qrCodePayload: detectedQR,
                     contentHash: contentHash,
                     sourceAppName: sourceApp
                 )
                 self.insertOrPromote(item)
-                #if ICLIP_EDITION_FLOW
                 if !self.minimalModeEnabled {
                     self.scheduleBackgroundOCR(forItemID: item.id, fileURL: fileURL)
                 }
-                #endif
             }
         }
     }
@@ -2341,6 +2351,9 @@ final class ClipboardStore: ObservableObject {
             showToast("已合并 \(count) 条到剪贴板")
         }
     }
+    #endif
+
+    // MARK: - 双角色共享：离线二维码直解与实况文本识别（Apple Vision）
 
     func scheduleBackgroundOCR(forItemID itemID: UUID, fileURL: URL) {
         Task.detached(priority: .utility) { [weak self] in
@@ -2376,6 +2389,10 @@ final class ClipboardStore: ObservableObject {
             guard !pending.isEmpty else { return }
             Task.detached(priority: .background) { [weak self] in
                 for (id, url) in pending {
+                    let qrFound: String? = {
+                        guard let raw = try? Data(contentsOf: url, options: [.mappedIfSafe]) else { return nil }
+                        return VisionOCRService.detectBarcodesFast(in: raw)
+                    }()
                     let recognized = await VisionOCRService.recognizeText(at: url)
                     await MainActor.run { [weak self] in
                         guard let self,
@@ -2383,6 +2400,9 @@ final class ClipboardStore: ObservableObject {
                             return
                         }
                         self.items[idx].ocrChecked = true
+                        if let qrFound, !qrFound.isEmpty, self.items[idx].qrCodePayload == nil {
+                            self.items[idx].qrCodePayload = qrFound
+                        }
                         if let recognized, !recognized.isEmpty {
                             self.items[idx].ocrText = recognized
                         }
@@ -2394,16 +2414,27 @@ final class ClipboardStore: ObservableObject {
         }
     }
 
+    /// 提取图片中的二维码载荷或离线实况文本并键入（含二维码时优先提取二维码链接/码值）
     func pasteExtractedOCRText(
         for item: ClipItem,
         shouldAutoPaste: Bool = true,
         onBeforePaste: (() -> Void)? = nil
     ) {
+        if let existingQR = item.qrCodePayload?.trimmingCharacters(in: .whitespacesAndNewlines), !existingQR.isEmpty {
+            if shouldAutoPaste {
+                AdaptiveIntelligenceEngine.shared.recordActionUsed(actionID: "img-qrcode", categoryKey: "qrcode", sourceApp: item.sourceAppName)
+                recordTargetAppPasteIfAppropriate(for: item)
+            }
+            commitPlainStringPaste(existingQR, isQRCode: true, shouldAutoPaste: shouldAutoPaste, onBeforePaste: onBeforePaste)
+            return
+        }
+
         if shouldAutoPaste {
             AdaptiveIntelligenceEngine.shared.recordActionUsed(actionID: "img-ocr", categoryKey: "image", sourceApp: item.sourceAppName)
+            recordTargetAppPasteIfAppropriate(for: item)
         }
         if let existingOCR = item.ocrText?.trimmingCharacters(in: .whitespacesAndNewlines), !existingOCR.isEmpty {
-            commitPlainStringPaste(existingOCR, shouldAutoPaste: shouldAutoPaste, onBeforePaste: onBeforePaste)
+            commitPlainStringPaste(existingOCR, isQRCode: false, shouldAutoPaste: shouldAutoPaste, onBeforePaste: onBeforePaste)
             return
         }
 
@@ -2412,12 +2443,26 @@ final class ClipboardStore: ObservableObject {
             return
         }
 
-        showToast("正在使用系统实况文本识别...")
+        showToast("正在离线识别图中二维码与文字...")
         Task { @MainActor [weak self] in
             guard let self else { return }
+            let detectedQR: String? = await Task.detached(priority: .userInitiated) {
+                guard let data = try? Data(contentsOf: url, options: [.mappedIfSafe]) else { return nil }
+                return VisionOCRService.detectBarcodesFast(in: data)
+            }.value
+
+            if let qr = detectedQR, !qr.isEmpty {
+                if let idx = self.items.firstIndex(where: { $0.id == item.id }) {
+                    self.items[idx].qrCodePayload = qr
+                    self.saveHistory()
+                }
+                self.commitPlainStringPaste(qr, isQRCode: true, shouldAutoPaste: shouldAutoPaste, onBeforePaste: onBeforePaste)
+                return
+            }
+
             guard let recognized = await VisionOCRService.recognizeText(at: url),
                   !recognized.isEmpty else {
-                self.showToast("未在图片中检测到可识别文字")
+                self.showToast("未在图片中检测到二维码或文字")
                 return
             }
             if let idx = self.items.firstIndex(where: { $0.id == item.id }) {
@@ -2425,26 +2470,40 @@ final class ClipboardStore: ObservableObject {
                 self.items[idx].ocrText = recognized
                 self.saveHistory()
             }
-            self.commitPlainStringPaste(recognized, shouldAutoPaste: shouldAutoPaste, onBeforePaste: onBeforePaste)
+            self.commitPlainStringPaste(recognized, isQRCode: false, shouldAutoPaste: shouldAutoPaste, onBeforePaste: onBeforePaste)
         }
     }
 
-    private func commitPlainStringPaste(_ text: String, shouldAutoPaste: Bool, onBeforePaste: (() -> Void)?) {
+    func openImageQRCodeURLIfAvailable(_ item: ClipItem) {
+        guard let qr = item.qrCodePayload?.trimmingCharacters(in: .whitespacesAndNewlines),
+              Self.isValidWebURL(qr),
+              let url = URL(string: qr) else {
+            return
+        }
+        TactileFeedbackEngine.shared.perform(.openLink)
+        NSWorkspace.shared.open(url)
+        onAfterOpenExternalURL?()
+    }
+
+    private func commitPlainStringPaste(_ text: String, isQRCode: Bool, shouldAutoPaste: Bool, onBeforePaste: (() -> Void)?) {
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
+        if isQRCode && Self.isValidWebURL(text) {
+            pasteboard.setString(text, forType: .URL)
+        }
         ignoreNextChangeCount = pasteboard.changeCount
         lastChangeCount = pasteboard.changeCount
 
         onBeforePaste?()
         refreshAccessibilityStatus()
+        let noun = isQRCode ? "图中二维码内容" : "图中文字"
         if shouldAutoPaste && autoPasteEnabled && isAccessibilityGranted {
             Self.schedulePasteWhenTargetReady()
-            showToast("已提取图中文字并键入")
+            showToast("已提取\(noun)并键入")
         } else {
-            showToast("已提取图中文字到剪贴板")
+            showToast("已提取\(noun)到剪贴板")
         }
     }
-    #endif
 
     // MARK: - 零阻塞图片与文件图标缓存
 

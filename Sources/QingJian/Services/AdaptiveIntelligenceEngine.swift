@@ -9,6 +9,7 @@ enum LearnedAutoRuleKind: String, CaseIterable, Codable, Identifiable {
     case extractPureOTP
     case cleanMeetingTranscript
     case compressLargeImage
+    case extractQRCode
 
     var id: String { rawValue }
 
@@ -20,6 +21,7 @@ enum LearnedAutoRuleKind: String, CaseIterable, Codable, Identifiable {
         case .extractPureOTP: return "复制验证码短信直接提取纯数字"
         case .cleanMeetingTranscript: return "复制会议纪要自动剥离时间轴"
         case .compressLargeImage: return "复制超大截图（>1.5MB）自动轻量优化"
+        case .extractQRCode: return "复制二维码截图自动提取链接/内容"
         }
     }
 
@@ -31,6 +33,7 @@ enum LearnedAutoRuleKind: String, CaseIterable, Codable, Identifiable {
         case .extractPureOTP: return "智能契约：已自动提取纯验证码"
         case .cleanMeetingTranscript: return "智能契约：已自动剥离会议时间轴"
         case .compressLargeImage: return "智能契约：已自动轻量优化大图"
+        case .extractQRCode: return "智能契约：已自动提取图中二维码"
         }
     }
 
@@ -43,6 +46,7 @@ enum LearnedAutoRuleKind: String, CaseIterable, Codable, Identifiable {
         case "otp-extract-code": return .extractPureOTP
         case "meet-plain-body", "meet-speaker-notes": return .cleanMeetingTranscript
         case "img-compress": return .compressLargeImage
+        case "img-qrcode": return .extractQRCode
         default: return nil
         }
     }
@@ -498,6 +502,27 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
 
         switch item.type {
         case .image:
+            if let qr = item.qrCodePayload?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !qr.isEmpty,
+               !isCategoryCoolingDown("qrcode") {
+                let isWeb = ClipboardStore.isValidWebURL(qr)
+                let promo = promotableRuleIfEligible(forActionID: "img-qrcode")
+                return AdaptiveSparkCandidate(
+                    actionID: "img-qrcode",
+                    categoryKey: "qrcode",
+                    sourceApp: item.sourceAppName,
+                    symbolName: "qrcode.viewfinder",
+                    shortTitle: isWeb ? "提取二维码链接" : "提取二维码内容",
+                    badgeHint: "扫码直解",
+                    promotableRule: promo,
+                    payload: .replaceClipboardText(
+                        text: qr,
+                        htmlTable: nil,
+                        toast: isWeb ? "已提取图中二维码链接" : "已提取图中二维码内容"
+                    )
+                )
+            }
+
             let cat = "image"
             guard !isCategoryCoolingDown(cat) else { return nil }
 
@@ -508,7 +533,7 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
                 let payload: AdaptiveSparkCandidate.Payload
             }
 
-            var options: [ImgOption] = [
+            let options: [ImgOption] = [
                 ImgOption(
                     id: "img-mockup",
                     symbol: "sparkles.rectangle.stack",
@@ -520,18 +545,14 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
                     symbol: "arrow.down.right.and.arrow.up.left",
                     title: "瘦身 JPEG",
                     payload: .compressImage(itemID: item.id)
-                )
-            ]
-            #if ICLIP_EDITION_FLOW
-            options.append(
+                ),
                 ImgOption(
                     id: "img-ocr",
                     symbol: "text.viewfinder",
                     title: "提取图中文字",
                     payload: .extractImageOCR(itemID: item.id)
                 )
-            )
-            #endif
+            ]
 
             let ranked = rankActions(options, idOf: \.id, sourceApp: item.sourceAppName)
             guard let top = ranked.first else { return nil }
@@ -804,11 +825,22 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
             adoptedEffects.append(!neg ? "已开启「超大截图自动轻量优化」" : "已关闭大图自动优化")
         }
 
-        // E. 动作默认顺位偏好调教（如“截图优先套样机”、“JSON 优先压缩单行”、“金额默认转大写”）
+        let qrAutoKeys = ["二维码", "qrcode", "扫码"]
+        if Self.containsAny(lower, qrAutoKeys) && Self.containsAny(lower, ["自动", "直接提取", "提取", "解析", "不要", "关闭"]) {
+            let neg = Self.isClauseNegated(matching: qrAutoKeys, in: clauses)
+            setAutoRule(.extractQRCode, enabled: !neg)
+            adoptedEffects.append(!neg ? "已开启「复制二维码截图自动提取内容」" : "已关闭二维码自动提取")
+        }
+
+        // E. 动作默认顺位偏好调教（如“截图优先套样机”、“截图优先提取文字”、“JSON 优先压缩单行”、“金额默认转大写”）
         let mockupKeys = ["样机", "圆角阴影", "加壳"]
+        let ocrPrefKeys = ["提取文字", "识图", "ocr", "图中文字"]
         if Self.containsAny(lower, mockupKeys) && !Self.isClauseNegated(matching: mockupKeys, in: clauses) {
             boostPreferredAction("img-mockup", competingIDs: ["img-compress", "img-ocr"])
             adoptedEffects.append("已将「套圆角样机」设为截图首选动作")
+        } else if Self.containsAny(lower, ocrPrefKeys) && !Self.isClauseNegated(matching: ocrPrefKeys, in: clauses) {
+            boostPreferredAction("img-ocr", competingIDs: ["img-mockup", "img-compress"])
+            adoptedEffects.append("已将「提取图中文字」设为截图首选动作")
         } else if Self.containsAny(lower, ["瘦身", "压缩jpeg", "轻量jpeg"]) && adoptedEffects.isEmpty && !Self.isClauseNegated(matching: ["瘦身", "压缩jpeg", "轻量jpeg"], in: clauses) {
             boostPreferredAction("img-compress", competingIDs: ["img-mockup", "img-ocr"])
             adoptedEffects.append("已将「瘦身 JPEG」设为截图首选动作")
@@ -923,6 +955,7 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
         if actionID.hasPrefix("doc-") { return "typography" }
         if actionID.hasPrefix("tbl-") { return "table" }
         if actionID.hasPrefix("redact-") { return "security" }
+        if actionID == "img-qrcode" { return "qrcode" }
         if actionID.hasPrefix("img-") { return "image" }
         if actionID.hasPrefix("meet-") { return "meeting" }
         if actionID.hasPrefix("otp-") { return "otp" }

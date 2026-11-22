@@ -1,4 +1,5 @@
 import XCTest
+import CoreImage
 @testable import QingJian
 
 final class CoreFeatureTests: XCTestCase {
@@ -1028,5 +1029,61 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertFalse(engine.smartContextRankingEnabled)
         let rawOrder = SmartSearchRanker.rankSearchResults([noisyArticle, pinnedTaxID], query: "税号", targetApp: "微信", engine: engine)
         XCTAssertEqual(rawOrder.map(\.id), [noisyArticle.id, pinnedTaxID.id])
+    }
+
+    // MARK: - 27. 全角色零手机「二维码直解（QR Code Instant Decode）」与离线实况文本贯通测试
+
+    @MainActor
+    func testOfflineQRCodeInstantDecodeSparkPriorityAndCrossRoleOCRSearch() throws {
+        // 1. 使用 CoreImage 在内存合成一张带安静区边框的真实二维码 PNG，验证 Apple Vision 离线精准解出原始链接
+        let expectedURL = "https://github.com/fanaruto/iClip"
+        let qrFilter = try XCTUnwrap(CIFilter(name: "CIQRCodeGenerator"))
+        qrFilter.setValue(Data(expectedURL.utf8), forKey: "inputMessage")
+        qrFilter.setValue("M", forKey: "inputCorrectionLevel")
+        let ciRaw = try XCTUnwrap(qrFilter.outputImage)
+        let scaled = ciRaw.transformed(by: CGAffineTransform(scaleX: 12, y: 12))
+        let ciCtx = CIContext()
+        let qrCG = try XCTUnwrap(ciCtx.createCGImage(scaled, from: scaled.extent))
+        let rep = NSBitmapImageRep(cgImage: qrCG)
+        let qrPNG = try XCTUnwrap(rep.representation(using: .png, properties: [:]))
+
+        let decodedPayload = VisionOCRService.detectBarcodesFast(in: qrPNG)
+        XCTAssertEqual(decodedPayload, expectedURL)
+
+        // 2. 验证含二维码与实况文本的图片在双角色（Dev & Flow）中均支持 @qr / 二维码 / 图内中英与拼音首字母秒搜
+        let qrShot = ClipItem(
+            type: .image,
+            imageFileName: "login-qr.png",
+            ocrText: "扫码登录企业控制台",
+            ocrChecked: true,
+            qrCodePayload: expectedURL,
+            contentHash: "img:qr-login",
+            sourceAppName: "Google Chrome"
+        )
+        XCTAssertTrue(qrShot.matches(query: "二维码"))
+        XCTAssertTrue(qrShot.matches(query: "@qr github"))
+        XCTAssertTrue(qrShot.matches(query: "smdl")) // 扫码登录 拼音首字母（Dev 版同步解锁）
+        XCTAssertTrue(qrShot.subtitleInfo.hasPrefix("二维码："))
+
+        // 3. 验证 QuickLook 自动生成「高清原图 + 二维码内容 + 实况文本」三页签
+        let qlTabs = QuickLookTabBuilder.buildTabs(for: qrShot, store: .shared)
+        XCTAssertEqual(qlTabs.map(\.id), ["image", "qrcode", "ocr"])
+        XCTAssertEqual(qlTabs[1].textValue, expectedURL)
+
+        // 4. 验证微星标对二维码截图最高优推荐「提取二维码链接」，且支持自然语言调教开启二维码自动提取与截图优先提字
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("iclip-qr-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let engine = AdaptiveIntelligenceEngine(customDirectoryURL: tempDir)
+
+        let spark = try XCTUnwrap(engine.evaluateSparkCandidate(for: qrShot, reuseCount: 1, minimalMode: false))
+        XCTAssertEqual(spark.actionID, "img-qrcode")
+        XCTAssertEqual(spark.shortTitle, "提取二维码链接")
+
+        _ = engine.adoptUserSuggestion("复制二维码自动提取，普通截图优先提取文字", in: .shared)
+        XCTAssertTrue(engine.enabledAutoRules.contains(.extractQRCode))
+
+        let textShot = ClipItem(type: .image, imageFileName: "err.png", ocrText: "Fatal error: Index out of range", ocrChecked: true, contentHash: "img:err")
+        let textSpark = try XCTUnwrap(engine.evaluateSparkCandidate(for: textShot, reuseCount: 1, minimalMode: false))
+        XCTAssertEqual(textSpark.actionID, "img-ocr")
     }
 }
