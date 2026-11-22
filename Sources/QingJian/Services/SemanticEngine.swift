@@ -478,6 +478,24 @@ enum SemanticEngine {
             }
         }
 
+        // 5.2 法务与出纳国标号码校验（身份证 GB11643 / 税号 GB32100 / 银行卡 Luhn）
+        if primaryKind == nil && !trimmed.contains("\n") && trimmed.count >= 15 && trimmed.count <= 32 {
+            let compActions = ComplianceCodeEngine.analyze(raw)
+            if !compActions.isEmpty {
+                primaryKind = .financeAmount
+                for ca in compActions {
+                    actions.append(TransformAction(
+                        id: ca.id,
+                        title: ca.title,
+                        symbolName: ca.symbolName,
+                        isSecurityAction: ca.id.contains("mask"),
+                        resultText: ca.resultText,
+                        toastText: ca.toastText
+                    ))
+                }
+            }
+        }
+
         // 5.5 二维数据表格协议破壁（Markdown 表格 ↔ Excel TSV / CSV / JSON 数组）
         if primaryKind == nil && raw.utf16.count <= 65_536 && raw.contains("\n") {
             let tblActions = TableBridgeEngine.analyze(raw)

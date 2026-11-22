@@ -855,7 +855,10 @@ final class ClipboardStore: ObservableObject {
         if let cached = financeCache.object(forKey: key) {
             return cached.actions
         }
-        var analyzed = TableBridgeEngine.analyze(raw)
+        var analyzed = ComplianceCodeEngine.analyze(raw)
+        if analyzed.isEmpty {
+            analyzed = TableBridgeEngine.analyze(raw)
+        }
         if analyzed.isEmpty {
             analyzed = FinanceNumberEngine.analyze(raw)
         }
@@ -1189,7 +1192,7 @@ final class ClipboardStore: ObservableObject {
 
         Task.detached(priority: .userInitiated) { [weak self] in
             guard let result = ImageStudioEngine.compressToLightweightJPEG(at: url) else {
-                await MainActor.run { self?.showToast("图片瘦身转换失败") }
+                await MainActor.run { [weak self] in self?.showToast("图片瘦身转换失败") }
                 return
             }
             let savedRatio = origSize > 0 ? max(0, Int(round((1.0 - Double(result.byteCount) / Double(origSize)) * 100))) : 0
@@ -1231,7 +1234,7 @@ final class ClipboardStore: ObservableObject {
 
         Task.detached(priority: .userInitiated) { [weak self] in
             guard let result = ImageStudioEngine.renderAppleMockupFrame(at: url) else {
-                await MainActor.run { self?.showToast("样机衬底生成失败") }
+                await MainActor.run { [weak self] in self?.showToast("样机衬底生成失败") }
                 return
             }
             await MainActor.run { [weak self] in

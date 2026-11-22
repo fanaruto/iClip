@@ -232,6 +232,54 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertEqual(decodedMockup.pixelsHigh, 380)
     }
 
+    // MARK: - 8. 法务与出纳离线国标校验（身份证 GB11643 / 企业税号 GB32100 / 银行卡 Luhn）测试
+
+    func testComplianceCodeVerificationAndFormatting() {
+        // 1. 构造合法的 18 位身份证号（11010519900307123 -> 计算国标校验位）
+        let id17 = "11010519900307123"
+        let expectedIDCheck = ComplianceCodeEngine.expectedIDCardChecksum(first17: id17)
+        XCTAssertNotNil(expectedIDCheck)
+        let validID = id17 + String(expectedIDCheck!)
+        let idActions = ComplianceCodeEngine.analyze(validID)
+        XCTAssertEqual(idActions.first(where: { $0.id == "comp-id-group" })?.resultText, "110105 19900307 123\(expectedIDCheck!)")
+
+        // 故意输错末位，验证引擎精准检出错误并给出正确末位修正值
+        let wrongLast: Character = (expectedIDCheck == "X") ? "0" : "X"
+        let typoID = id17 + String(wrongLast)
+        let typoActions = ComplianceCodeEngine.analyze(typoID)
+        XCTAssertEqual(typoActions.first?.id, "comp-id-invalid")
+        XCTAssertEqual(typoActions.first?.resultText, validID)
+
+        // 2. 构造合法的 18 位统一社会信用代码（GB 32100）
+        let uscc17 = "91440300192203821"
+        let expectedUSCC = ComplianceCodeEngine.expectedUSCCChecksum(first17: uscc17)
+        XCTAssertNotNil(expectedUSCC)
+        let validUSCC = uscc17 + String(expectedUSCC!)
+        let usccActions = ComplianceCodeEngine.analyze(validUSCC)
+        XCTAssertTrue(usccActions.contains(where: { $0.id == "comp-uscc-group" }))
+
+        // 模拟财务把税号里的 0 手误敲成字母 O，验证自动纠错检出
+        let typoUSCC = validUSCC.replacingOccurrences(of: "0300", with: "O3OO")
+        let fixUSCC = ComplianceCodeEngine.analyze(typoUSCC)
+        XCTAssertEqual(fixUSCC.first?.id, "comp-uscc-fix")
+        XCTAssertEqual(fixUSCC.first?.resultText, validUSCC)
+
+        // 3. 标准银联 16 位卡号 Luhn 校验与四位分节
+        let base15 = "622202100111222"
+        var validLuhnCard = ""
+        for d in 0...9 {
+            let cand = base15 + "\(d)"
+            if ComplianceCodeEngine.passesLuhnCheck(cand) {
+                validLuhnCard = cand
+                break
+            }
+        }
+        XCTAssertFalse(validLuhnCard.isEmpty)
+        let cardActions = ComplianceCodeEngine.analyze(validLuhnCard)
+        XCTAssertTrue(cardActions.contains(where: { $0.id == "comp-card-group" }))
+        XCTAssertTrue(cardActions.contains(where: { $0.id == "comp-card-mask" }))
+    }
+
     // MARK: - 5. 语义脱敏、净链与动态模板回归测试
 
     #if !ICLIP_EDITION_FLOW
