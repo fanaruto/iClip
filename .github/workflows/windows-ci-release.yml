@@ -57,12 +57,12 @@ jobs:
       - name: Execute real Win32 GUI + DWM + CF_HTML Clipboard end-to-end self-test
         shell: pwsh
         run: |
-          ./dist-win/iClip-Dev.exe --self-test dist-win/selftest-dev.json
-          if ($LASTEXITCODE -ne 0) { throw "iClip-Dev.exe --self-test failed with code $LASTEXITCODE" }
+          $pDev = Start-Process -FilePath "dist-win/iClip-Dev.exe" -ArgumentList @("--self-test", "dist-win/selftest-dev.json") -Wait -PassThru -NoNewWindow
+          if ($pDev.ExitCode -ne 0) { throw "iClip-Dev.exe --self-test failed with code $($pDev.ExitCode)" }
           Get-Content dist-win/selftest-dev.json
 
-          ./dist-win/iClip-Flow.exe --self-test dist-win/selftest-flow.json
-          if ($LASTEXITCODE -ne 0) { throw "iClip-Flow.exe --self-test failed with code $LASTEXITCODE" }
+          $pFlow = Start-Process -FilePath "dist-win/iClip-Flow.exe" -ArgumentList @("--self-test", "dist-win/selftest-flow.json") -Wait -PassThru -NoNewWindow
+          if ($pFlow.ExitCode -ne 0) { throw "iClip-Flow.exe --self-test failed with code $($pFlow.ExitCode)" }
           Get-Content dist-win/selftest-flow.json
 
       - name: Package Windows release archives & compute SHA-256
