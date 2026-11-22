@@ -119,6 +119,7 @@ struct ClipboardPopoverView: View {
     @ObservedObject var store: ClipboardStore
     @ObservedObject var nav: PanelNavigationModel
     @ObservedObject private var updater = UpdateManager.shared
+    @ObservedObject private var playground = InteractivePlaygroundController.shared
     let onDismiss: () -> Void
     let onQuit: () -> Void
 
@@ -169,6 +170,17 @@ struct ClipboardPopoverView: View {
                             store: store,
                             updater: updater,
                             onOpenSettings: { nav.showSettings = true }
+                        )
+                        .padding(.horizontal, 14)
+                        .padding(.bottom, 8)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                    }
+
+                    if playground.isActive {
+                        InteractivePlaygroundBanner(
+                            playground: playground,
+                            store: store,
+                            glassPalette: glassPalette
                         )
                         .padding(.horizontal, 14)
                         .padding(.bottom, 8)
@@ -274,6 +286,7 @@ struct ClipboardPopoverView: View {
         .animation(.spring(response: 0.25, dampingFraction: 0.85), value: store.toastMessage)
         .onChange(of: nav.isPresented) { _, presented in
             if presented {
+                playground.ensureSeededOnFirstLaunch(in: store)
                 store.onPanelShown(visibleItems: filteredItems)
             } else {
                 dismissImagePreview(clearItem: true)
@@ -291,6 +304,7 @@ struct ClipboardPopoverView: View {
             dismissImagePreview(clearItem: true)
         }
         .onChange(of: nav.selectedTab) { _, _ in
+            playground.recordTabOrArrowNavigation()
             nav.selectedIndex = 0
             dismissImagePreview(clearItem: true)
         }
@@ -1034,6 +1048,26 @@ struct ClipboardPopoverView: View {
                     RoleAndOTASettingsSection(store: store, updater: updater)
                 }
 
+                // 30 秒互动游乐场重玩入口
+                settingsGroup(title: "30 秒互动游乐场（新手破冰）") {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("亲手体验 3 大核心魔法")
+                                .font(.system(size: 13.5, weight: .medium))
+                            Text("注入 3 张可实操演练卡片，30 秒掌握 Tab 冲浪、⇧↵ 智变与 Siri 虹吸球")
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button(playground.isActive ? "正在进行中" : "开启游乐场") {
+                            playground.startOrReplay(in: store)
+                            nav.showSettings = false
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                    }
+                }
+
                 // 外观材质分组（苹果官方液态玻璃 / 毛玻璃，支持官方透明/着色档位与蒙版浓度无级调节）
                 settingsGroup(title: "外观与边缘材质") {
                     HStack {
@@ -1728,6 +1762,7 @@ struct ClipboardPopoverView: View {
     }
 
     func pasteSecondaryActionForSelected() {
+        InteractivePlaygroundController.shared.recordMagicOrCopyAction()
         guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return }
         let item = filteredItems[nav.selectedIndex]
         if !store.minimalModeEnabled && item.type == .image {
@@ -2035,6 +2070,7 @@ struct ClipboardPopoverView: View {
     @ObservedObject var store: ClipboardStore
     @ObservedObject var nav: PanelNavigationModel
     @ObservedObject private var updater = UpdateManager.shared
+    @ObservedObject private var playground = InteractivePlaygroundController.shared
     let onDismiss: () -> Void
     let onQuit: () -> Void
 
@@ -2083,6 +2119,17 @@ struct ClipboardPopoverView: View {
                             store: store,
                             updater: updater,
                             onOpenSettings: { nav.showSettings = true }
+                        )
+                        .padding(.horizontal, 14)
+                        .padding(.bottom, 8)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                    }
+
+                    if playground.isActive {
+                        InteractivePlaygroundBanner(
+                            playground: playground,
+                            store: store,
+                            glassPalette: glassPalette
                         )
                         .padding(.horizontal, 14)
                         .padding(.bottom, 8)
@@ -2196,6 +2243,7 @@ struct ClipboardPopoverView: View {
         .animation(.spring(response: 0.25, dampingFraction: 0.85), value: store.toastMessage)
         .onChange(of: nav.isPresented) { _, presented in
             if presented {
+                playground.ensureSeededOnFirstLaunch(in: store)
                 store.onPanelShown(visibleItems: filteredItems)
             } else {
                 dismissImagePreview(clearItem: true)
@@ -2213,6 +2261,7 @@ struct ClipboardPopoverView: View {
             dismissImagePreview(clearItem: true)
         }
         .onChange(of: nav.selectedTab) { _, _ in
+            playground.recordTabOrArrowNavigation()
             nav.selectedIndex = 0
             dismissImagePreview(clearItem: true)
         }
@@ -2783,6 +2832,26 @@ struct ClipboardPopoverView: View {
                 // 角色版本选择与差异化 GitHub OTA 通道
                 settingsGroup(title: "使用角色与专属版本（GitHub OTA）") {
                     RoleAndOTASettingsSection(store: store, updater: updater)
+                }
+
+                // 30 秒互动游乐场重玩入口
+                settingsGroup(title: "30 秒互动游乐场（新手破冰）") {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("亲手体验 3 大核心魔法")
+                                .font(.system(size: 13.5, weight: .medium))
+                            Text("注入 3 张可实操演练卡片，30 秒掌握 Tab 冲浪、⇧↵ 智变与 Siri 虹吸球")
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button(playground.isActive ? "正在进行中" : "开启游乐场") {
+                            playground.startOrReplay(in: store)
+                            nav.showSettings = false
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                    }
                 }
 
                 // 外观材质分组（苹果官方液态玻璃 / 毛玻璃，支持官方透明/着色档位与蒙版浓度无级调节）
@@ -3460,6 +3529,7 @@ struct ClipboardPopoverView: View {
     }
 
     func pasteSmartTransformedSelected() {
+        InteractivePlaygroundController.shared.recordMagicOrCopyAction()
         guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return }
         let item = filteredItems[nav.selectedIndex]
         let snapshot = store.semanticSnapshot(for: item)

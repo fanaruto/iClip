@@ -645,6 +645,7 @@ final class ClipboardStore: ObservableObject {
     /// 将 iClip 面板内的条目（文本 / 链接 / 图片 / 文件）包装为原生 NSItemProvider，支持直接拖出至任意外部应用
     func makeDragItemProvider(for item: ClipItem) -> NSItemProvider {
         lastInternalDragUptime = ProcessInfo.processInfo.systemUptime
+        InteractivePlaygroundController.shared.recordDragAction()
 
         switch item.type {
         case .image:
@@ -690,17 +691,35 @@ final class ClipboardStore: ObservableObject {
         }
     }
 
-    /// 支持拖放到 iClip 面板或菜单栏图标的原生剪贴板类型
+    /// 最近一次通过拖放成功导入的预览图（供顶部液态水滴空间扭曲动效零重复 IO 直接复用）
+    private(set) var lastImportedDragPreviewCGImage: CGImage?
+
+    private static let legacyFilenamesType = NSPasteboard.PasteboardType("NSFilenamesPboardType")
+    private static let jpegPasteboardType = NSPasteboard.PasteboardType("public.jpeg")
+    private static let webpPasteboardType = NSPasteboard.PasteboardType("org.webmproject.webp")
+    private static let heicPasteboardType = NSPasteboard.PasteboardType("public.heic")
+    private static let gifPasteboardType = NSPasteboard.PasteboardType("com.compuserve.gif")
+
+    /// 支持拖放到 iClip 面板或菜单栏图标的原生剪贴板类型（含微信 Qt / Electron 等跨平台格式）
     nonisolated static let supportedDragTypes: [NSPasteboard.PasteboardType] = [
         .fileURL,
+        NSPasteboard.PasteboardType("NSFilenamesPboardType"),
         .png,
         .tiff,
+        NSPasteboard.PasteboardType("public.jpeg"),
+        NSPasteboard.PasteboardType("org.webmproject.webp"),
+        NSPasteboard.PasteboardType("public.heic"),
+        NSPasteboard.PasteboardType("com.compuserve.gif"),
         .URL,
         .string
     ]
 
     private static let supportedImageExtensions: Set<String> = [
         "png", "jpg", "jpeg", "webp", "heic", "heif", "tiff", "tif", "gif", "bmp"
+    ]
+
+    private static let nonImageDocumentExtensions: Set<String> = [
+        "pdf", "psd", "ai", "eps", "svg", "zip", "rar", "7z", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "mp4", "mov"
     ]
 
     /// 判断拖放内容是否可被 iClip 接收并复制
@@ -712,44 +731,93 @@ final class ClipboardStore: ObservableObject {
     /// 接收拖拽到面板或菜单栏图标的内容：写入系统剪贴板（立即生效 ⌘V）并收录至历史列表
     @discardableResult
     func importAndCopy(from draggingPasteboard: NSPasteboard, sourceLabel: String = "拖拽复制") -> Bool {
+        if !sourceLabel.hasPrefix("游乐场示例") {
+            InteractivePlaygroundController.shared.recordDragAction()
+        }
+        lastImportedDragPreviewCGImage = nil
         let types = draggingPasteboard.types ?? []
 
-        // 1. 本地文件 URL（单张图片文件同时以图片与文件格式写入剪贴板；其余作为文件列表写入）
-        if types.contains(.fileURL),
-           let fileURLs = draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [
-               .urlReadingFileURLsOnly: true
-           ]) as? [URL], !fileURLs.isEmpty {
-            if fileURLs.count == 1,
-               let imageURL = fileURLs.first,
-               Self.supportedImageExtensions.contains(imageURL.pathExtension.lowercased()),
-               let rawFileData = try? Data(contentsOf: imageURL),
-               let nsImage = NSImage(data: rawFileData),
-               let tiffData = nsImage.tiffRepresentation {
-                pasteboard.clearContents()
-                pasteboard.setData(tiffData, forType: .tiff)
-                if imageURL.pathExtension.lowercased() == "png" {
-                    pasteboard.setData(rawFileData, forType: .png)
-                }
-                pasteboard.setString(imageURL.absoluteString, forType: .fileURL)
-                ignoreNextChangeCount = pasteboard.changeCount
-                lastChangeCount = pasteboard.changeCount
-
-                ingestDroppedImageData(
-                    rawPNG: imageURL.pathExtension.lowercased() == "png" ? rawFileData : nil,
-                    rawTIFF: tiffData,
-                    sourceApp: sourceLabel
-                )
-                showToast("已复制图片到剪贴板：\(imageURL.lastPathComponent)")
+        // 1. 优先读取内存直接图像流（网页图片 / 截图 / 跨平台直接图像字节，零磁盘权限依赖）
+        let inMemoryImageTypes: [NSPasteboard.PasteboardType] = [
+            .png, Self.jpegPasteboardType, Self.webpPasteboardType, Self.heicPasteboardType, Self.gifPasteboardType, .tiff
+        ]
+        if inMemoryImageTypes.contains(where: { types.contains($0) }) {
+            let rawData = inMemoryImageTypes.lazy.compactMap { draggingPasteboard.data(forType: $0) }.first { !$0.isEmpty }
+            if let rawData, let normalized = Self.normalizeImageForClipboard(from: rawData) {
+                commitNormalizedImageToPasteboard(normalized, sourceApp: sourceLabel, toastTitle: "已复制图片到剪贴板")
                 return true
             }
+        }
 
-            let nsURLs = fileURLs.map { $0 as NSURL }
+        // 2. 本地文件 URL / NSFilenamesPboardType（重点兼容 Mac 微信 Qt `file://localhost/.../Containers/com.tencent.xinWeChat/...`）
+        let droppedNSURLs = Self.extractDroppedFileNSURLs(from: draggingPasteboard)
+        if !droppedNSURLs.isEmpty {
+            if droppedNSURLs.count == 1 {
+                let singleNSURL = droppedNSURLs[0]
+                let cleanPath = singleNSURL.path ?? (singleNSURL as URL).path
+                let ext = (cleanPath as NSString).pathExtension.lowercased()
+                let mightBeImage = Self.supportedImageExtensions.contains(ext) || (ext.isEmpty && !cleanPath.isEmpty)
+
+                if mightBeImage || !Self.nonImageDocumentExtensions.contains(ext) {
+                    switch Self.readScopedFileData(from: singleNSURL) {
+                    case .success(let fileData):
+                        if Self.supportedImageExtensions.contains(ext) || Self.looksLikeRasterImage(fileData),
+                           let normalized = Self.normalizeImageForClipboard(from: fileData) {
+                            let fileName = (cleanPath as NSString).lastPathComponent
+                            commitNormalizedImageToPasteboard(
+                                normalized,
+                                sourceApp: sourceLabel,
+                                toastTitle: "已复制图片到剪贴板：\(fileName)"
+                            )
+                            return true
+                        }
+                    case .permissionDenied:
+                        handleContainerPermissionBlocked(path: cleanPath)
+                        return false
+                    case .failed:
+                        break
+                    }
+                }
+            }
+
+            // 普通文件或多文件拖入：规范化为干净本地路径 URL（去除 Qt `file://localhost/` 主机头），并校验剪贴板实际写入结果
+            let cleanURLs: [NSURL] = droppedNSURLs.compactMap { nsURL in
+                guard let p = nsURL.path, !p.isEmpty else { return nil }
+                return URL(fileURLWithPath: p) as NSURL
+            }
+            guard !cleanURLs.isEmpty else { return false }
+
+            // 若单文件位于其他 App 受保护沙盒容器且无读取权限，防止 writeObjects 失败把系统剪贴板清空成空数组
+            if let firstPath = cleanURLs[0].path,
+               firstPath.contains("/Library/Containers/"),
+               !FileManager.default.isReadableFile(atPath: firstPath) {
+                let scoped = droppedNSURLs[0].startAccessingSecurityScopedResource()
+                let readable = FileManager.default.isReadableFile(atPath: firstPath)
+                if scoped { droppedNSURLs[0].stopAccessingSecurityScopedResource() }
+                if !readable {
+                    handleContainerPermissionBlocked(path: firstPath)
+                    return false
+                }
+            }
+
+            let tempCheckPB = NSPasteboard.withUniqueName()
+            let canWrite = tempCheckPB.writeObjects(cleanURLs)
+            tempCheckPB.releaseGlobally()
+            guard canWrite else {
+                if let firstPath = cleanURLs[0].path {
+                    handleContainerPermissionBlocked(path: firstPath)
+                } else {
+                    showToast("无法读取拖入的文件")
+                }
+                return false
+            }
+
             pasteboard.clearContents()
-            pasteboard.writeObjects(nsURLs)
+            pasteboard.writeObjects(cleanURLs)
             ignoreNextChangeCount = pasteboard.changeCount
             lastChangeCount = pasteboard.changeCount
 
-            let paths = fileURLs.map { $0.path }
+            let paths = cleanURLs.compactMap { $0.path }
             let hash = Self.sha256(paths.joined(separator: "\n"))
             let item = ClipItem(
                 type: .file,
@@ -758,35 +826,12 @@ final class ClipboardStore: ObservableObject {
                 sourceAppName: sourceLabel
             )
             insertOrPromote(item)
-            if fileURLs.count == 1 {
-                showToast("已复制到剪贴板：\(fileURLs[0].lastPathComponent)")
+            if paths.count == 1 {
+                showToast("已复制到剪贴板：\((paths[0] as NSString).lastPathComponent)")
             } else {
-                showToast("已复制 \(fileURLs.count) 个文件到剪贴板")
+                showToast("已复制 \(paths.count) 个文件到剪贴板")
             }
             return true
-        }
-
-        // 2. 内存图片数据（网页图片 / 截图 / 设计稿直接拖入）
-        if types.contains(.png) || types.contains(.tiff) {
-            let rawPNG = draggingPasteboard.data(forType: .png)
-            let rawTIFF = (rawPNG == nil) ? draggingPasteboard.data(forType: .tiff) : nil
-            if rawPNG != nil || rawTIFF != nil {
-                pasteboard.clearContents()
-                if let rawPNG {
-                    pasteboard.setData(rawPNG, forType: .png)
-                    if let img = NSImage(data: rawPNG), let tiff = img.tiffRepresentation {
-                        pasteboard.setData(tiff, forType: .tiff)
-                    }
-                } else if let rawTIFF {
-                    pasteboard.setData(rawTIFF, forType: .tiff)
-                }
-                ignoreNextChangeCount = pasteboard.changeCount
-                lastChangeCount = pasteboard.changeCount
-
-                ingestDroppedImageData(rawPNG: rawPNG, rawTIFF: rawTIFF, sourceApp: sourceLabel)
-                showToast("已复制图片到剪贴板")
-                return true
-            }
         }
 
         // 3. 网页链接（浏览器地址栏 / 超链接直接拖入）
@@ -851,6 +896,151 @@ final class ClipboardStore: ObservableObject {
         }
 
         return false
+    }
+
+    private struct NormalizedClipboardImage {
+        let pngData: Data
+        let tiffData: Data
+        let cgImage: CGImage?
+    }
+
+    private enum ScopedFileReadResult {
+        case success(Data)
+        case permissionDenied
+        case failed
+    }
+
+    /// 提取拖放剪贴板中的本地文件 NSURL（保留原始 NSURL Security-Scope 上下文，并兼容 Qt/Electron 的 NSFilenamesPboardType）
+    private static func extractDroppedFileNSURLs(from pasteboard: NSPasteboard) -> [NSURL] {
+        if let nsURLs = pasteboard.readObjects(forClasses: [NSURL.self], options: [
+            .urlReadingFileURLsOnly: true
+        ]) as? [NSURL], !nsURLs.isEmpty {
+            return nsURLs
+        }
+        if let rawPaths = pasteboard.propertyList(forType: legacyFilenamesType) as? [String], !rawPaths.isEmpty {
+            return rawPaths.filter { !$0.isEmpty }.map { URL(fileURLWithPath: $0) as NSURL }
+        }
+        return []
+    }
+
+    /// 安全读取拖入文件字节（自动管理 Security-Scoped 访问，区分容器 TCC 权限拦截与普通错误）
+    private static func readScopedFileData(from nsURL: NSURL) -> ScopedFileReadResult {
+        let accessed = nsURL.startAccessingSecurityScopedResource()
+        defer {
+            if accessed {
+                nsURL.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        let primaryURL = nsURL as URL
+        do {
+            let data = try Data(contentsOf: primaryURL, options: [.mappedIfSafe])
+            if !data.isEmpty { return .success(data) }
+        } catch let err as NSError {
+            if isPermissionDeniedError(err) {
+                return .permissionDenied
+            }
+        }
+
+        if let path = nsURL.path, !path.isEmpty {
+            let fallbackURL = URL(fileURLWithPath: path)
+            do {
+                let data = try Data(contentsOf: fallbackURL, options: [.mappedIfSafe])
+                if !data.isEmpty { return .success(data) }
+            } catch let err as NSError {
+                if isPermissionDeniedError(err) {
+                    return .permissionDenied
+                }
+            }
+        }
+
+        return .failed
+    }
+
+    private static func isPermissionDeniedError(_ error: NSError) -> Bool {
+        if error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoPermissionError {
+            return true
+        }
+        if error.domain == NSPOSIXErrorDomain && (error.code == Int(EPERM) || error.code == Int(EACCES)) {
+            return true
+        }
+        if let underlying = error.userInfo[NSUnderlyingErrorKey] as? NSError {
+            return isPermissionDeniedError(underlying)
+        }
+        return false
+    }
+
+    /// 通过文件头魔数嗅探无后缀缓存图片（如微信表情/缓存图 JPEG、PNG、GIF、WebP、BMP、HEIC）
+    private static func looksLikeRasterImage(_ data: Data) -> Bool {
+        guard data.count >= 12 else { return false }
+        let b = [UInt8](data.prefix(12))
+        // PNG: 89 50 4E 47
+        if b[0] == 0x89 && b[1] == 0x50 && b[2] == 0x4E && b[3] == 0x47 { return true }
+        // JPEG: FF D8 FF
+        if b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF { return true }
+        // GIF: GIF87a / GIF89a
+        if b[0] == 0x47 && b[1] == 0x49 && b[2] == 0x46 && b[3] == 0x38 { return true }
+        // WebP: RIFF....WEBP
+        if b[0] == 0x52 && b[1] == 0x49 && b[2] == 0x46 && b[3] == 0x46 &&
+           b[8] == 0x57 && b[9] == 0x45 && b[10] == 0x42 && b[11] == 0x50 { return true }
+        // BMP: BM
+        if b[0] == 0x42 && b[1] == 0x4D { return true }
+        // HEIC/HEIF/AVIF: ....ftyp
+        if b[4] == 0x66 && b[5] == 0x74 && b[6] == 0x79 && b[7] == 0x70 { return true }
+        return false
+    }
+
+    /// 将任意图片数据（JPG/WebP/HEIC/PNG/TIFF/GIF）标准化解码为通用 PNG + TIFF 双格式字节流
+    private static func normalizeImageForClipboard(from rawData: Data) -> NormalizedClipboardImage? {
+        guard let source = CGImageSourceCreateWithData(rawData as CFData, nil),
+              let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            guard let nsImage = NSImage(data: rawData),
+                  let tiff = nsImage.tiffRepresentation,
+                  let rep = NSBitmapImageRep(data: tiff),
+                  let png = rep.representation(using: .png, properties: [:]) else {
+                return nil
+            }
+            return NormalizedClipboardImage(pngData: png, tiffData: tiff, cgImage: rep.cgImage)
+        }
+
+        let rep = NSBitmapImageRep(cgImage: cgImage)
+        guard let pngData = rep.representation(using: .png, properties: [:]),
+              let tiffData = rep.tiffRepresentation else {
+            return nil
+        }
+        return NormalizedClipboardImage(pngData: pngData, tiffData: tiffData, cgImage: cgImage)
+    }
+
+    /// 写入纯正的 PNG + TIFF 双格式到系统剪贴板（不夹带受保护的私有容器 fileURL，确保任何目标应用 ⌘V 100% 粘出原图）
+    private func commitNormalizedImageToPasteboard(
+        _ normalized: NormalizedClipboardImage,
+        sourceApp: String,
+        toastTitle: String
+    ) {
+        lastImportedDragPreviewCGImage = normalized.cgImage
+        pasteboard.clearContents()
+        pasteboard.setData(normalized.pngData, forType: .png)
+        pasteboard.setData(normalized.tiffData, forType: .tiff)
+        ignoreNextChangeCount = pasteboard.changeCount
+        lastChangeCount = pasteboard.changeCount
+
+        ingestDroppedImageData(
+            rawPNG: normalized.pngData,
+            rawTIFF: normalized.tiffData,
+            sourceApp: sourceApp
+        )
+        showToast(toastTitle)
+    }
+
+    /// 当 macOS TCC 拦截跨沙盒容器（如微信 `~/Library/Containers/com.tencent.xinWeChat`）文件读取时：
+    /// 绝不清空原剪贴板、绝不写入损坏记录，并清晰指引用户授权
+    private func handleContainerPermissionBlocked(path: String) {
+        let isWeChat = path.contains("com.tencent.xinWeChat")
+        if isWeChat {
+            showToast("微信沙盒受系统保护，请在「隐私与安全性 › 完全磁盘访问权限」开启 iClip")
+        } else {
+            showToast("应用沙盒受系统保护，请在「隐私与安全性 › 完全磁盘访问权限」开启 iClip")
+        }
     }
 
     private func ingestDroppedImageData(rawPNG: Data?, rawTIFF: Data?, sourceApp: String) {

@@ -560,4 +560,30 @@ final class CoreFeatureTests: XCTestCase {
         dragPB.setString("https://github.com/fanaruto/iClip", forType: .URL)
         XCTAssertTrue(ClipboardStore.canAcceptDrag(from: dragPB))
     }
+
+    // MARK: - 15. 首次打开「30 秒互动游乐场」三步闯关状态机回归测试
+
+    @MainActor
+    func testInteractivePlaygroundProgression() {
+        let pg = InteractivePlaygroundController.shared
+        pg.isActive = true
+        pg.step1TabSwitched = false
+        pg.step2MagicTriggered = false
+        pg.step3DragExperienced = false
+        pg.justFinishedAll = false
+
+        XCTAssertEqual(pg.completedCount, 0)
+        pg.recordTabOrArrowNavigation()
+        XCTAssertTrue(pg.step1TabSwitched)
+        XCTAssertEqual(pg.completedCount, 1)
+
+        pg.recordMagicOrCopyAction()
+        XCTAssertTrue(pg.step2MagicTriggered)
+        XCTAssertEqual(pg.completedCount, 2)
+
+        pg.recordDragAction()
+        XCTAssertTrue(pg.step3DragExperienced)
+        XCTAssertEqual(pg.completedCount, 3)
+        XCTAssertTrue(pg.justFinishedAll)
+    }
 }
