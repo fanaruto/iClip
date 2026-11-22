@@ -1725,6 +1725,9 @@ final class ClipboardStore: ObservableObject {
         }
         showToast("已保存并收藏动态模板")
     }
+    #endif
+
+    // MARK: - 双角色共享：自定义串键入、备注别名（⌘R）与原位微调回写（⌘S）
 
     func pasteCustomString(
         _ text: String,
@@ -1761,7 +1764,61 @@ final class ClipboardStore: ObservableObject {
             showToast("\(toast)（已复制）")
         }
     }
-    #endif
+
+    func setCustomAlias(_ alias: String?, for item: ClipItem) {
+        guard let idx = items.firstIndex(where: { $0.id == item.id }) else { return }
+        let trimmed = alias?.trimmingCharacters(in: .whitespacesAndNewlines)
+        items[idx].customAlias = (trimmed?.isEmpty == false) ? trimmed : nil
+        saveHistory()
+        showToast(items[idx].customAlias != nil ? "已更新备注标题" : "已清除备注标题")
+    }
+
+    /// 纯函数：生成原位微调后的新 ClipItem（保留原 UUID、收藏、分组与备注名，自动重算类型与哈希）
+    nonisolated static func updatedItem(from existing: ClipItem, withNewText newText: String) -> ClipItem? {
+        let trimmed = newText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        switch existing.type {
+        case .text, .link:
+            let finalIsLink = Self.isValidWebURL(trimmed)
+            let newType: ClipContentType = finalIsLink ? .link : .text
+            let newHash = "\(finalIsLink ? "link" : "text"):\(Self.sha256(newText))"
+            return ClipItem(
+                id: existing.id,
+                type: newType,
+                text: newText,
+                contentHash: newHash,
+                sourceAppName: existing.sourceAppName,
+                createdAt: existing.createdAt,
+                isPinned: existing.isPinned,
+                pinCategory: existing.pinCategory,
+                customAlias: existing.customAlias
+            )
+
+        case .image:
+            var copy = existing
+            copy.ocrText = newText
+            copy.ocrChecked = true
+            return copy
+
+        case .file:
+            return nil
+        }
+    }
+
+    /// 原位更新剪贴条目正文或实况文本（完整保留原 UUID、收藏状态、场景分类与备注别名）
+    @discardableResult
+    func updateItemText(_ newText: String, for item: ClipItem) -> Bool {
+        guard let idx = items.firstIndex(where: { $0.id == item.id }) else { return false }
+        guard let updated = Self.updatedItem(from: items[idx], withNewText: newText) else {
+            showToast("内容不能为空")
+            return false
+        }
+        items[idx] = updated
+        saveHistory()
+        showToast(updated.type == .image ? "已更新图片实况文本" : "已原地保存微调内容")
+        return true
+    }
 
     // MARK: - 心流办公版专属能力（顺序队列 + 离线实况识图 + 多选合并 + 场景分组）
 
@@ -1842,14 +1899,6 @@ final class ClipboardStore: ObservableObject {
         } else {
             showToast("已设为普通收藏")
         }
-    }
-
-    func setCustomAlias(_ alias: String?, for item: ClipItem) {
-        guard let idx = items.firstIndex(where: { $0.id == item.id }) else { return }
-        let trimmed = alias?.trimmingCharacters(in: .whitespacesAndNewlines)
-        items[idx].customAlias = (trimmed?.isEmpty == false) ? trimmed : nil
-        saveHistory()
-        showToast(items[idx].customAlias != nil ? "已更新备注标题" : "已清除备注标题")
     }
 
     func queuePosition(for item: ClipItem) -> Int? {
@@ -2380,7 +2429,7 @@ final class ClipboardStore: ObservableObject {
         }
     }
 
-    private func isValidWebURL(_ string: String) -> Bool {
+    nonisolated static func isValidWebURL(_ string: String) -> Bool {
         guard !string.contains("\n"), !string.contains(" ") else { return false }
         guard let url = URL(string: string),
               let scheme = url.scheme?.lowercased(),
@@ -2389,6 +2438,10 @@ final class ClipboardStore: ObservableObject {
             return false
         }
         return true
+    }
+
+    private func isValidWebURL(_ string: String) -> Bool {
+        Self.isValidWebURL(string)
     }
 
     nonisolated private static func sha256(_ string: String) -> String {

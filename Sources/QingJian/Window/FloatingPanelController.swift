@@ -443,12 +443,58 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
 
         if nav.isEditingAlias {
+            if event.keyCode == 53 {
+                rootView.cancelAliasEdit()
+                return nil
+            }
             return event
         }
 
         if InteractivePlaygroundController.shared.isActive, !nav.showSettings {
             if event.keyCode == 53 || event.keyCode == 36 || event.keyCode == 76 {
                 InteractivePlaygroundController.shared.dismiss(in: store)
+                return nil
+            }
+        }
+
+        // QuickLook 原位微调编辑态：放行全部原生文本编辑键，支持 ESC 退出、⌘↵ 直贴、⌘S 存回原条目
+        if nav.showQuickLook && nav.isQuickLookEditing {
+            if event.keyCode == 53 {
+                nav.isQuickLookEditing = false
+                return nil
+            }
+            if flags.contains(.command), (event.keyCode == 36 || event.keyCode == 76) {
+                rootView.commitQuickLookDraftPaste()
+                return nil
+            }
+            if flags == .command, event.keyCode == 1 {
+                rootView.saveQuickLookDraftToItem()
+                return nil
+            }
+            return event
+        }
+
+        // QuickLook 速览态：支持 Space/ESC/⌘Y 关闭、⌘E 原位微调、←/→ 切页、↑/↓ 连续扫视、↵ 键入
+        if nav.showQuickLook {
+            if event.keyCode == 53 || (flags.isEmpty && event.keyCode == 49) || (flags == .command && event.keyCode == 16) {
+                withAnimation(.easeOut(duration: 0.15)) {
+                    nav.showQuickLook = false
+                }
+                return nil
+            }
+            if flags == .command, event.keyCode == 14, rootView.enterQuickLookEditMode() {
+                return nil
+            }
+            if event.keyCode == 123 || event.keyCode == 124 {
+                rootView.stepQuickLookTab(delta: event.keyCode == 123 ? -1 : 1)
+                return nil
+            }
+            if event.keyCode == 126 || event.keyCode == 125 {
+                rootView.moveSelection(direction: event.keyCode == 126 ? .up : .down)
+                return nil
+            }
+            if event.keyCode == 36 || event.keyCode == 76 {
+                rootView.pasteSelected()
                 return nil
             }
         }
@@ -468,6 +514,24 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
 
         if nav.showSettings {
             return event
+        }
+
+        // ⌘Y (keyCode 16) 或搜索框为空时按 Space (keyCode 49)：呼出 Finder 级全模态速览与原位微调舱
+        if !store.minimalModeEnabled && ((flags == .command && event.keyCode == 16) ||
+           (flags.isEmpty && event.keyCode == 49 && nav.searchText.isEmpty)) {
+            if let fieldEditor = panel.firstResponder as? NSTextView, fieldEditor.hasMarkedText() {
+                return event
+            }
+            withAnimation(.spring(response: 0.24, dampingFraction: 0.88)) {
+                nav.showQuickLook = true
+            }
+            return nil
+        }
+
+        // ⌘R (keyCode 15)：对当前选中条目设置/修改记忆备注标题
+        if !store.minimalModeEnabled, flags == .command, event.keyCode == 15 {
+            rootView.beginAliasEditForSelected()
+            return nil
         }
 
         if flags == .command, let chars = event.charactersIgnoringModifiers, let digit = Int(chars), (1...9).contains(digit) {
@@ -1002,6 +1066,14 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     private func handleKeyDown(_ event: NSEvent) -> NSEvent? {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
 
+        if nav.isEditingAlias {
+            if event.keyCode == 53 {
+                rootView.cancelAliasEdit()
+                return nil
+            }
+            return event
+        }
+
         if InteractivePlaygroundController.shared.isActive, !nav.showSettings {
             if event.keyCode == 53 || event.keyCode == 36 || event.keyCode == 76 {
                 InteractivePlaygroundController.shared.dismiss(in: store)
@@ -1009,13 +1081,53 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             }
         }
 
-        if event.keyCode == 53 {
-            if nav.showQuickLook {
+        // QuickLook 原位微调编辑态：放行全部原生文本编辑键，支持 ESC 退出、⌘↵ 直贴、⌘S 存回原条目
+        if nav.showQuickLook && nav.isQuickLookEditing {
+            if event.keyCode == 53 {
+                nav.isQuickLookEditing = false
+                return nil
+            }
+            if flags.contains(.command), (event.keyCode == 36 || event.keyCode == 76) {
+                rootView.commitQuickLookDraftPaste()
+                return nil
+            }
+            if flags == .command, event.keyCode == 1 {
+                rootView.saveQuickLookDraftToItem()
+                return nil
+            }
+            return event
+        }
+
+        // QuickLook 速览态：支持 Space/ESC/⌘Y 关闭、⌘E 原位微调、←/→ 切页、↑/↓ 连续扫视、↵ 键入
+        if nav.showQuickLook {
+            if event.keyCode == 53 || (flags.isEmpty && event.keyCode == 49) || (flags == .command && event.keyCode == 16) {
                 withAnimation(.easeOut(duration: 0.15)) {
                     nav.showQuickLook = false
                 }
-            } else if nav.showSettings {
+                return nil
+            }
+            if flags == .command, event.keyCode == 14, rootView.enterQuickLookEditMode() {
+                return nil
+            }
+            if event.keyCode == 123 || event.keyCode == 124 {
+                rootView.stepQuickLookTab(delta: event.keyCode == 123 ? -1 : 1)
+                return nil
+            }
+            if event.keyCode == 126 || event.keyCode == 125 {
+                rootView.moveSelection(direction: event.keyCode == 126 ? .up : .down)
+                return nil
+            }
+            if event.keyCode == 36 || event.keyCode == 76 {
+                rootView.pasteSelected()
+                return nil
+            }
+        }
+
+        if event.keyCode == 53 {
+            if nav.showSettings {
                 nav.showSettings = false
+            } else if nav.isCreatingTemplate {
+                nav.isCreatingTemplate = false
             } else {
                 hide(restoreFocus: true)
             }
@@ -1023,10 +1135,6 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         }
 
         if nav.showSettings || nav.isCreatingTemplate {
-            if event.keyCode == 53 && nav.isCreatingTemplate {
-                nav.isCreatingTemplate = false
-                return nil
-            }
             return event
         }
 
@@ -1037,8 +1145,14 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
                 return event
             }
             withAnimation(.spring(response: 0.24, dampingFraction: 0.88)) {
-                nav.showQuickLook.toggle()
+                nav.showQuickLook = true
             }
+            return nil
+        }
+
+        // ⌘R (keyCode 15)：对当前选中条目设置/修改记忆备注标题
+        if !store.minimalModeEnabled, flags == .command, event.keyCode == 15 {
+            rootView.beginAliasEditForSelected()
             return nil
         }
 

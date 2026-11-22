@@ -23,6 +23,7 @@ struct ClipCardView: View {
     let onTogglePin: () -> Void
     let onSelectPinCategory: (PinCategory?) -> Void
     let onEditAlias: () -> Void
+    var onOpenQuickLook: (() -> Void)? = nil
     let onDelete: () -> Void
 
     @Environment(\.colorScheme) private var colorScheme
@@ -466,6 +467,12 @@ struct ClipCardView: View {
             onCopyOnly(false)
         }
 
+        if !minimalMode, let onOpenQuickLook {
+            Button("速览与原位微调（Space）") {
+                onOpenQuickLook()
+            }
+        }
+
         if !ClipboardStore.shared.minimalModeEnabled && item.type == .image {
             Divider()
             Button("复制轻量瘦身图（JPEG）") {
@@ -549,7 +556,7 @@ struct ClipCardView: View {
                 }
             }
 
-            Button(item.customAlias != nil ? "修改备注标题..." : "设置备注标题（如：公司税号）...") {
+            Button(item.customAlias != nil ? "修改备注标题（⌘R）..." : "设置备注标题（⌘R）...") {
                 onEditAlias()
             }
         }
@@ -576,6 +583,8 @@ struct ClipCardView: View {
     let onCopyOnly: (Bool) -> Void
     let onApplyTransform: (TransformAction, Bool) -> Void
     let onTogglePin: () -> Void
+    var onEditAlias: (() -> Void)? = nil
+    var onOpenQuickLook: (() -> Void)? = nil
     let onDelete: () -> Void
 
     @Environment(\.colorScheme) private var colorScheme
@@ -1029,6 +1038,19 @@ struct ClipCardView: View {
 
         Button(item.isPinned ? "取消收藏" : "收藏") {
             onTogglePin()
+        }
+
+        if !ClipboardStore.shared.minimalModeEnabled {
+            if let onOpenQuickLook {
+                Button("速览与原位微调（Space）") {
+                    onOpenQuickLook()
+                }
+            }
+            if let onEditAlias {
+                Button(item.customAlias != nil ? "修改备注标题（⌘R）..." : "设置备注标题（⌘R）...") {
+                    onEditAlias()
+                }
+            }
         }
 
         Button("删除", role: .destructive) {

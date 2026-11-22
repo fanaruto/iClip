@@ -34,6 +34,10 @@ final class PanelNavigationModel: ObservableObject {
     @Published var isRecordingHotKey: Bool = false
     @Published var isRecordingQueueHotKey: Bool = false
     @Published var isEditingAlias: Bool = false
+    @Published var showQuickLook: Bool = false
+    @Published var quickLookTabIndex: Int = 0
+    @Published var isQuickLookEditing: Bool = false
+    @Published var quickLookDraftText: String = ""
     @Published var demoPreviewIndex: Int? = nil
     @Published var isDragTargeted: Bool = false
     var suppressAutoHide: Bool = false
@@ -106,6 +110,10 @@ final class PanelNavigationModel: ObservableObject {
         selectedIndex = 0
         preferredGridColumn = nil
         showSettings = false
+        showQuickLook = false
+        isQuickLookEditing = false
+        quickLookDraftText = ""
+        isEditingAlias = false
         isRecordingHotKey = false
         isRecordingQueueHotKey = false
         suppressAutoHide = false
@@ -312,6 +320,43 @@ struct ClipboardPopoverView: View {
                 .transition(.opacity.combined(with: .scale(scale: 0.96)))
             }
         }
+        // QuickLook 全模态速览与原位微调浮层（Space / ⌘Y）
+        .overlay {
+            if nav.showQuickLook,
+               nav.selectedIndex >= 0,
+               nav.selectedIndex < filteredItems.count {
+                let target = filteredItems[nav.selectedIndex]
+                SemanticQuickLookOverlay(
+                    item: target,
+                    tabs: QuickLookTabBuilder.buildTabs(for: target, store: store),
+                    selectedPreviewIndex: $nav.quickLookTabIndex,
+                    isEditing: $nav.isQuickLookEditing,
+                    draftText: $nav.quickLookDraftText,
+                    onCommitPasteText: { content, toast in
+                        nav.isQuickLookEditing = false
+                        nav.showQuickLook = false
+                        store.pasteCustomString(content, sourceItem: target, toast: toast, shouldAutoPaste: true, onBeforePaste: onDismiss)
+                    },
+                    onCommitPasteImage: {
+                        nav.isQuickLookEditing = false
+                        nav.showQuickLook = false
+                        store.copyAndOptionallyPaste(target, plainTextOnly: false, shouldAutoPaste: true, onBeforePaste: onDismiss)
+                    },
+                    onSaveToItem: { updatedText in
+                        if store.updateItemText(updatedText, for: target) {
+                            nav.isQuickLookEditing = false
+                        }
+                    },
+                    onClose: {
+                        withAnimation(.spring(response: 0.22, dampingFraction: 0.9)) {
+                            nav.isQuickLookEditing = false
+                            nav.showQuickLook = false
+                        }
+                    }
+                )
+                .transition(.opacity.combined(with: .scale(scale: 0.96)))
+            }
+        }
         .coordinateSpace(name: "panelRoot")
         .animation(.spring(response: 0.28, dampingFraction: 0.86), value: nav.showSettings)
         .animation(.spring(response: 0.25, dampingFraction: 0.85), value: store.toastMessage)
@@ -320,6 +365,7 @@ struct ClipboardPopoverView: View {
                 playground.cleanupLegacySamplesIfAny(in: store)
                 store.onPanelShown(visibleItems: filteredItems)
             } else {
+                aliasEditingItem = nil
                 dismissImagePreview(clearItem: true)
                 store.onPanelHidden()
             }
@@ -823,13 +869,12 @@ struct ClipboardPopoverView: View {
                                             }
                                         },
                                         onEditAlias: {
-                                            aliasDraftText = item.customAlias ?? ""
-                                            nav.isEditingAlias = true
-                                            withAnimation(.easeOut(duration: 0.16)) {
-                                                aliasEditingItem = item
-                                            }
-                                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                                                isAliasFieldFocused = true
+                                            beginAliasEdit(for: item)
+                                        },
+                                        onOpenQuickLook: {
+                                            nav.selectedIndex = index
+                                            withAnimation(.spring(response: 0.24, dampingFraction: 0.88)) {
+                                                nav.showQuickLook = true
                                             }
                                         },
                                         onDelete: {
@@ -1805,6 +1850,10 @@ struct ClipboardPopoverView: View {
         guard let currentIdx = tabs.firstIndex(of: nav.selectedTab) else { return }
         let nextIdx = (currentIdx + delta + tabs.count) % tabs.count
         dismissImagePreview(clearItem: true)
+        if nav.showQuickLook {
+            nav.isQuickLookEditing = false
+            nav.showQuickLook = false
+        }
         nav.selectedIndex = 0
         nav.preferredGridColumn = nil
         nav.selectedTab = tabs[nextIdx]
@@ -1863,7 +1912,94 @@ struct ClipboardPopoverView: View {
         }
         guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return }
         let item = filteredItems[nav.selectedIndex]
+        if nav.showQuickLook {
+            let tabs = QuickLookTabBuilder.buildTabs(for: item, store: store)
+            guard !tabs.isEmpty else { return }
+            let idx = min(max(nav.quickLookTabIndex, 0), tabs.count - 1)
+            let chosen = tabs[idx]
+            nav.isQuickLookEditing = false
+            nav.showQuickLook = false
+            switch chosen.payload {
+            case .image:
+                store.copyAndOptionallyPaste(item, plainTextOnly: false, shouldAutoPaste: true, onBeforePaste: onDismiss)
+            case .text(let text):
+                if idx == 0 && item.type != .image {
+                    store.copyAndOptionallyPaste(item, plainTextOnly: false, shouldAutoPaste: true, onBeforePaste: onDismiss)
+                } else {
+                    store.pasteCustomString(text, sourceItem: item, toast: chosen.toast, shouldAutoPaste: true, onBeforePaste: onDismiss)
+                }
+            }
+            return
+        }
         store.copyAndOptionallyPaste(item, plainTextOnly: false, shouldAutoPaste: true, onBeforePaste: onDismiss)
+    }
+
+    func stepQuickLookTab(delta: Int) {
+        guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return }
+        let tabs = QuickLookTabBuilder.buildTabs(for: filteredItems[nav.selectedIndex], store: store)
+        guard tabs.count > 1 else { return }
+        nav.quickLookTabIndex = (nav.quickLookTabIndex + delta + tabs.count) % tabs.count
+    }
+
+    func enterQuickLookEditMode() -> Bool {
+        guard nav.showQuickLook,
+              nav.selectedIndex >= 0,
+              nav.selectedIndex < filteredItems.count else { return false }
+        let item = filteredItems[nav.selectedIndex]
+        let tabs = QuickLookTabBuilder.buildTabs(for: item, store: store)
+        guard !tabs.isEmpty else { return false }
+        let idx = min(max(nav.quickLookTabIndex, 0), tabs.count - 1)
+        guard let text = tabs[idx].textValue else { return false }
+        nav.quickLookDraftText = text
+        nav.isQuickLookEditing = true
+        return true
+    }
+
+    func commitQuickLookDraftPaste() {
+        guard nav.showQuickLook,
+              nav.isQuickLookEditing,
+              nav.selectedIndex >= 0,
+              nav.selectedIndex < filteredItems.count else { return }
+        let target = filteredItems[nav.selectedIndex]
+        let draft = nav.quickLookDraftText
+        nav.isQuickLookEditing = false
+        nav.showQuickLook = false
+        store.pasteCustomString(draft, sourceItem: target, toast: "已键入微调内容", shouldAutoPaste: true, onBeforePaste: onDismiss)
+    }
+
+    func saveQuickLookDraftToItem() {
+        guard nav.showQuickLook,
+              nav.isQuickLookEditing,
+              nav.selectedIndex >= 0,
+              nav.selectedIndex < filteredItems.count else { return }
+        let target = filteredItems[nav.selectedIndex]
+        if store.updateItemText(nav.quickLookDraftText, for: target) {
+            nav.isQuickLookEditing = false
+        }
+    }
+
+    func beginAliasEdit(for item: ClipItem) {
+        aliasDraftText = item.customAlias ?? ""
+        nav.isEditingAlias = true
+        withAnimation(.easeOut(duration: 0.16)) {
+            aliasEditingItem = item
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            isAliasFieldFocused = true
+        }
+    }
+
+    func beginAliasEditForSelected() {
+        guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return }
+        beginAliasEdit(for: filteredItems[nav.selectedIndex])
+    }
+
+    func cancelAliasEdit() {
+        aliasEditingItem = nil
+        nav.isEditingAlias = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
+            isSearchFocused = true
+        }
     }
 
     func pasteSecondaryActionForSelected() {
@@ -2085,8 +2221,11 @@ final class PanelNavigationModel: ObservableObject {
     @Published var presentationEpoch: Int = 0
     @Published var scrollRequestEpoch: Int = 0
     @Published var isRecordingHotKey: Bool = false
+    @Published var isEditingAlias: Bool = false
     @Published var showQuickLook: Bool = false
     @Published var quickLookTabIndex: Int = 0
+    @Published var isQuickLookEditing: Bool = false
+    @Published var quickLookDraftText: String = ""
     @Published var isCreatingTemplate: Bool = false
     @Published var demoPreviewIndex: Int? = nil
     @Published var isDragTargeted: Bool = false
@@ -2177,6 +2316,9 @@ final class PanelNavigationModel: ObservableObject {
         preferredGridColumn = nil
         showSettings = false
         showQuickLook = false
+        isQuickLookEditing = false
+        quickLookDraftText = ""
+        isEditingAlias = false
         isCreatingTemplate = false
         isRecordingHotKey = false
         suppressAutoHide = false
@@ -2211,6 +2353,9 @@ struct ClipboardPopoverView: View {
     @State private var hoveredTileItemID: UUID? = nil
     @State private var previewHideWorkItem: DispatchWorkItem? = nil
     @State private var templateDraftText: String = "请帮我审查以下代码并指出潜在问题：\n\n{{clip_redacted}}"
+    @State private var aliasEditingItem: ClipItem? = nil
+    @State private var aliasDraftText: String = ""
+    @FocusState private var isAliasFieldFocused: Bool
 
     var filteredItems: [ClipItem] {
         nav.cachedFilteredItems
@@ -2290,6 +2435,13 @@ struct ClipboardPopoverView: View {
                             .transition(.opacity.combined(with: .move(edge: .top)))
                     }
 
+                    if let editing = aliasEditingItem {
+                        inlineAliasEditorBar(for: editing)
+                            .padding(.horizontal, 14)
+                            .padding(.bottom, 8)
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                    }
+
                     if !store.borderlessPanel {
                         Divider()
                             .opacity(0.28)
@@ -2364,7 +2516,7 @@ struct ClipboardPopoverView: View {
                 .transition(.opacity.combined(with: .scale(scale: 0.96)))
             }
         }
-        // QuickLook 语义原文与变换结果实时对照浮层（⌘Y / Space）
+        // QuickLook 全模态速览与原位微调浮层（⌘Y / Space）
         .overlay {
             if nav.showQuickLook,
                nav.selectedIndex >= 0,
@@ -2372,14 +2524,28 @@ struct ClipboardPopoverView: View {
                 let target = filteredItems[nav.selectedIndex]
                 SemanticQuickLookOverlay(
                     item: target,
-                    snapshot: store.semanticSnapshot(for: target),
+                    tabs: QuickLookTabBuilder.buildTabs(for: target, store: store),
                     selectedPreviewIndex: $nav.quickLookTabIndex,
-                    onCommitPaste: { content, toast in
+                    isEditing: $nav.isQuickLookEditing,
+                    draftText: $nav.quickLookDraftText,
+                    onCommitPasteText: { content, toast in
+                        nav.isQuickLookEditing = false
                         nav.showQuickLook = false
                         store.pasteCustomString(content, sourceItem: target, toast: toast, shouldAutoPaste: true, onBeforePaste: onDismiss)
                     },
+                    onCommitPasteImage: {
+                        nav.isQuickLookEditing = false
+                        nav.showQuickLook = false
+                        store.copyAndOptionallyPaste(target, plainTextOnly: false, shouldAutoPaste: true, onBeforePaste: onDismiss)
+                    },
+                    onSaveToItem: { updatedText in
+                        if store.updateItemText(updatedText, for: target) {
+                            nav.isQuickLookEditing = false
+                        }
+                    },
                     onClose: {
                         withAnimation(.spring(response: 0.22, dampingFraction: 0.9)) {
+                            nav.isQuickLookEditing = false
                             nav.showQuickLook = false
                         }
                     }
@@ -2395,6 +2561,7 @@ struct ClipboardPopoverView: View {
                 playground.cleanupLegacySamplesIfAny(in: store)
                 store.onPanelShown(visibleItems: filteredItems)
             } else {
+                aliasEditingItem = nil
                 dismissImagePreview(clearItem: true)
                 store.onPanelHidden()
             }
@@ -2750,6 +2917,52 @@ struct ClipboardPopoverView: View {
         }
     }
 
+    private func inlineAliasEditorBar(for target: ClipItem) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "tag.fill")
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(Color.accentColor)
+
+            TextField("输入记忆备注（如：生产服 SSH / 常用 SQL），留空清除", text: $aliasDraftText)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12))
+                .focused($isAliasFieldFocused)
+                .onSubmit {
+                    store.setCustomAlias(aliasDraftText, for: target)
+                    aliasEditingItem = nil
+                    nav.isEditingAlias = false
+                }
+
+            Button("保存") {
+                store.setCustomAlias(aliasDraftText, for: target)
+                aliasEditingItem = nil
+                nav.isEditingAlias = false
+            }
+            .buttonStyle(.plain)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3.5)
+            .background(Capsule().fill(Color.accentColor))
+
+            Button {
+                cancelAliasEdit()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 20, height: 20)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .fill(Color.primary.opacity(0.065))
+        )
+    }
+
     // MARK: - 剪贴记录列表
 
     private let imageGridColumns: [GridItem] = Array(
@@ -2805,6 +3018,15 @@ struct ClipboardPopoverView: View {
                                         onTogglePin: {
                                             withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
                                                 store.togglePin(item)
+                                            }
+                                        },
+                                        onEditAlias: {
+                                            beginAliasEdit(for: item)
+                                        },
+                                        onOpenQuickLook: {
+                                            nav.selectedIndex = index
+                                            withAnimation(.spring(response: 0.24, dampingFraction: 0.88)) {
+                                                nav.showQuickLook = true
                                             }
                                         },
                                         onDelete: {
@@ -3677,6 +3899,7 @@ struct ClipboardPopoverView: View {
         let nextIdx = (currentIdx + delta + tabs.count) % tabs.count
         dismissImagePreview(clearItem: true)
         if nav.showQuickLook {
+            nav.isQuickLookEditing = false
             nav.showQuickLook = false
         }
         nav.selectedIndex = 0
@@ -3717,14 +3940,26 @@ struct ClipboardPopoverView: View {
         guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return }
         let item = filteredItems[nav.selectedIndex]
         if nav.showQuickLook {
-            let snap = store.semanticSnapshot(for: item)
-            let totalTabs = 1 + snap.actions.count
-            let idx = min(max(nav.quickLookTabIndex, 0), totalTabs - 1)
+            let tabs = QuickLookTabBuilder.buildTabs(for: item, store: store)
+            guard !tabs.isEmpty else { return }
+            let idx = min(max(nav.quickLookTabIndex, 0), tabs.count - 1)
+            let chosen = tabs[idx]
+            nav.isQuickLookEditing = false
             nav.showQuickLook = false
-            if idx == 0 {
+            switch chosen.payload {
+            case .image:
                 store.copyAndOptionallyPaste(item, plainTextOnly: false, shouldAutoPaste: true, forceRawSecret: true, onBeforePaste: onDismiss)
-            } else {
-                store.applyTransformAction(snap.actions[idx - 1], for: item, shouldAutoPaste: true, onBeforePaste: onDismiss)
+            case .text(let text):
+                if idx == 0 && item.type != .image {
+                    store.copyAndOptionallyPaste(item, plainTextOnly: false, shouldAutoPaste: true, forceRawSecret: true, onBeforePaste: onDismiss)
+                } else {
+                    let snapActions = store.semanticSnapshot(for: item).actions
+                    if item.type != .image, (idx - 1) >= 0, (idx - 1) < snapActions.count {
+                        store.applyTransformAction(snapActions[idx - 1], for: item, shouldAutoPaste: true, onBeforePaste: onDismiss)
+                    } else {
+                        store.pasteCustomString(text, sourceItem: item, toast: chosen.toast, shouldAutoPaste: true, onBeforePaste: onDismiss)
+                    }
+                }
             }
             return
         }
@@ -3739,10 +3974,70 @@ struct ClipboardPopoverView: View {
 
     func stepQuickLookTab(delta: Int) {
         guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return }
-        let snap = store.semanticSnapshot(for: filteredItems[nav.selectedIndex])
-        let total = 1 + snap.actions.count
-        guard total > 1 else { return }
-        nav.quickLookTabIndex = (nav.quickLookTabIndex + delta + total) % total
+        let tabs = QuickLookTabBuilder.buildTabs(for: filteredItems[nav.selectedIndex], store: store)
+        guard tabs.count > 1 else { return }
+        nav.quickLookTabIndex = (nav.quickLookTabIndex + delta + tabs.count) % tabs.count
+    }
+
+    func enterQuickLookEditMode() -> Bool {
+        guard nav.showQuickLook,
+              nav.selectedIndex >= 0,
+              nav.selectedIndex < filteredItems.count else { return false }
+        let item = filteredItems[nav.selectedIndex]
+        let tabs = QuickLookTabBuilder.buildTabs(for: item, store: store)
+        guard !tabs.isEmpty else { return false }
+        let idx = min(max(nav.quickLookTabIndex, 0), tabs.count - 1)
+        guard let text = tabs[idx].textValue else { return false }
+        nav.quickLookDraftText = text
+        nav.isQuickLookEditing = true
+        return true
+    }
+
+    func commitQuickLookDraftPaste() {
+        guard nav.showQuickLook,
+              nav.isQuickLookEditing,
+              nav.selectedIndex >= 0,
+              nav.selectedIndex < filteredItems.count else { return }
+        let target = filteredItems[nav.selectedIndex]
+        let draft = nav.quickLookDraftText
+        nav.isQuickLookEditing = false
+        nav.showQuickLook = false
+        store.pasteCustomString(draft, sourceItem: target, toast: "已键入微调内容", shouldAutoPaste: true, onBeforePaste: onDismiss)
+    }
+
+    func saveQuickLookDraftToItem() {
+        guard nav.showQuickLook,
+              nav.isQuickLookEditing,
+              nav.selectedIndex >= 0,
+              nav.selectedIndex < filteredItems.count else { return }
+        let target = filteredItems[nav.selectedIndex]
+        if store.updateItemText(nav.quickLookDraftText, for: target) {
+            nav.isQuickLookEditing = false
+        }
+    }
+
+    func beginAliasEdit(for item: ClipItem) {
+        aliasDraftText = item.customAlias ?? ""
+        nav.isEditingAlias = true
+        withAnimation(.easeOut(duration: 0.16)) {
+            aliasEditingItem = item
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            isAliasFieldFocused = true
+        }
+    }
+
+    func beginAliasEditForSelected() {
+        guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return }
+        beginAliasEdit(for: filteredItems[nav.selectedIndex])
+    }
+
+    func cancelAliasEdit() {
+        aliasEditingItem = nil
+        nav.isEditingAlias = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
+            isSearchFocused = true
+        }
     }
 
     func pasteTransformAtIndexForSelected(_ actionIndex: Int) {

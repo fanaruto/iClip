@@ -748,4 +748,59 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertNil(InstantMathEvaluator.evaluate("2026-11-23"))
         XCTAssertNil(InstantMathEvaluator.evaluate("91310000"))
     }
+
+    // MARK: - 21. 全模态 Finder 速览（原图/实况文本/单行防执行压平）与原位微调回写无损测试
+
+    @MainActor
+    func testQuickLookTabsSingleLineFlattenAndInPlaceUpdate() throws {
+        // 1. Shell 续行符与尾部换行安全压平（防止粘贴进终端直接回车执行）
+        let shellCmd = """
+        curl -X POST https://api.example.com/v1 \\
+          -H "Authorization: Bearer token" \\
+          -d '{"ok":true}'
+        """
+        XCTAssertTrue(QuickLookTextHelper.containsMultiLine(shellCmd))
+        let flattened = QuickLookTextHelper.flattenToSingleLine(shellCmd + "\n")
+        XCTAssertEqual(flattened, #"curl -X POST https://api.example.com/v1 -H "Authorization: Bearer token" -d '{"ok":true}'"#)
+        XCTAssertFalse(flattened.contains("\n"))
+
+        // 2. 图片速览页签构建：无 OCR 时仅展示「高清原图」，含 OCR 时自动生成「高清原图 + 实况文本」双页签
+        let plainImg = ClipItem(type: .image, imageFileName: "a.png", contentHash: "img:1")
+        let plainImgTabs = QuickLookTabBuilder.buildTabs(for: plainImg, store: .shared)
+        XCTAssertEqual(plainImgTabs.map(\.id), ["image"])
+        XCTAssertEqual(QuickLookTabBuilder.defaultTabIndex(for: plainImg, tabs: plainImgTabs), 0)
+
+        let ocrImg = ClipItem(type: .image, imageFileName: "b.png", ocrText: "发票代码 044001900111", ocrChecked: true, contentHash: "img:2")
+        let ocrImgTabs = QuickLookTabBuilder.buildTabs(for: ocrImg, store: .shared)
+        XCTAssertEqual(ocrImgTabs.map(\.id), ["image", "ocr"])
+        XCTAssertTrue(ocrImgTabs[1].supportsSaveBack)
+
+        // 3. 原位微调回写（⌘S）：完整保留原 UUID、收藏、分组与备注名，并自动重判文本/链接类型与哈希
+        let original = ClipItem(
+            type: .text,
+            text: "ssh -p 2222 root@10.0.0.8",
+            contentHash: "text:old",
+            sourceAppName: "Terminal",
+            isPinned: true,
+            pinCategory: .template,
+            customAlias: "生产服 SSH"
+        )
+        let edited = try XCTUnwrap(ClipboardStore.updatedItem(from: original, withNewText: "ssh -p 22022 deploy@10.0.0.8"))
+        XCTAssertEqual(edited.id, original.id)
+        XCTAssertEqual(edited.type, .text)
+        XCTAssertEqual(edited.text, "ssh -p 22022 deploy@10.0.0.8")
+        XCTAssertNotEqual(edited.contentHash, original.contentHash)
+        XCTAssertTrue(edited.isPinned)
+        XCTAssertEqual(edited.pinCategory, .template)
+        XCTAssertEqual(edited.customAlias, "生产服 SSH")
+        XCTAssertTrue(edited.matches(query: "scf")) // 备注拼音首字母依旧秒搜
+
+        let linkEdited = try XCTUnwrap(ClipboardStore.updatedItem(from: edited, withNewText: "https://github.com/fanaruto/iClip"))
+        XCTAssertEqual(linkEdited.type, .link)
+        XCTAssertTrue(linkEdited.contentHash.hasPrefix("link:"))
+        XCTAssertNil(ClipboardStore.updatedItem(from: edited, withNewText: "   \n  "))
+
+        let ocrEdited = try XCTUnwrap(ClipboardStore.updatedItem(from: ocrImg, withNewText: "发票代码 044001900999"))
+        XCTAssertEqual(ocrEdited.ocrText, "发票代码 044001900999")
+    }
 }
