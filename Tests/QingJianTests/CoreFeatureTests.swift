@@ -803,4 +803,38 @@ final class CoreFeatureTests: XCTestCase {
         let ocrEdited = try XCTUnwrap(ClipboardStore.updatedItem(from: ocrImg, withNewText: "发票代码 044001900999"))
         XCTAssertEqual(ocrEdited.ocrText, "发票代码 044001900999")
     }
+
+    // MARK: - 22. 零离手「⌘C×2 原位智变」与「⌘C×3 无损还原」确定性状态机测试
+
+    @MainActor
+    func testDoubleCopySparkTriggerMachineDebounceAndThirdCopyRestore() throws {
+        var sm = DoubleCopySparkStateMachine()
+        let hash = "link:dirty-utm"
+
+        // 1. 首次复制记录微星标在屏窗口（t = 10.0s，窗口 2.4s）
+        XCTAssertEqual(sm.evaluateIncomingCopy(contentHash: hash, at: 10.0, doubleCopyEnabled: true), .normalCopy)
+        sm.recordOffer(contentHash: hash, at: 10.0, windowSeconds: 2.4)
+
+        // 2. < 140ms 内的机器双通道重写严格过滤，绝不误触发
+        XCTAssertEqual(sm.evaluateIncomingCopy(contentHash: hash, at: 10.06, doubleCopyEnabled: true), .normalCopy)
+
+        // 3. 人类真实第 2 次 ⌘C（t = 10.45s）直接零离手触发微星标转换
+        XCTAssertEqual(sm.evaluateIncomingCopy(contentHash: hash, at: 10.45, doubleCopyEnabled: true), .triggerCandidate)
+        XCTAssertNil(sm.activeHash)
+
+        // 4. 短窗口内按下第 3 次 ⌘C（t = 11.10s）无损还原原始内容，并在随后 1.8s 内静默抑制重弹防止死循环
+        XCTAssertEqual(sm.evaluateIncomingCopy(contentHash: hash, at: 11.10, doubleCopyEnabled: true), .restoreOriginal)
+        XCTAssertEqual(sm.evaluateIncomingCopy(contentHash: hash, at: 11.60, doubleCopyEnabled: true), .suppressReoffer)
+        XCTAssertEqual(sm.evaluateIncomingCopy(contentHash: hash, at: 13.20, doubleCopyEnabled: true), .normalCopy)
+
+        // 5. 自然语言调教随时可开关「连按两次 ⌘C 触发智变」
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("iclip-dblcopy-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let engine = AdaptiveIntelligenceEngine(customDirectoryURL: tempDir)
+        XCTAssertTrue(engine.doubleCopySparkEnabled)
+        _ = engine.adoptUserSuggestion("关闭双击复制触发", in: .shared)
+        XCTAssertFalse(engine.doubleCopySparkEnabled)
+        _ = engine.adoptUserSuggestion("开启连按复制智变", in: .shared)
+        XCTAssertTrue(engine.doubleCopySparkEnabled)
+    }
 }

@@ -322,6 +322,21 @@ struct AdaptiveIntelligenceSettingsSection: View {
 
             if engine.sparkEnabled {
                 HStack {
+                    VStack(alignment: .leading, spacing: 1.5) {
+                        Text("微星标浮现时再按一次 ⌘C 零离手触发")
+                            .font(.system(size: 12.5, weight: .medium))
+                        Text("手指无需移向鼠标：按第 2 次 ⌘C 直接完成智变，按第 3 次 ⌘C 无损还原原文")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Toggle("", isOn: $engine.doubleCopySparkEnabled)
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                        .labelsHidden()
+                }
+
+                HStack {
                     Text("微星标停留时长")
                         .font(.system(size: 12.5, weight: .medium))
                     Spacer()

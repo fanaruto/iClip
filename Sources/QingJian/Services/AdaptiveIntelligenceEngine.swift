@@ -93,6 +93,7 @@ struct AdaptiveSparkCandidate: Equatable {
 private struct AdaptiveBrainState: Codable {
     var sparkEnabled: Bool = true
     var sparkDurationSeconds: Double = 2.0
+    var doubleCopySparkEnabled: Bool? = true
     var cursorDropPodEnabled: Bool? = true
     var actionWeights: [String: Double] = [:]
     var appActionWeights: [String: [String: Double]] = [:]
@@ -128,6 +129,15 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
             let clamped = min(max(sparkDurationSeconds, 1.0), 4.5)
             guard abs(state.sparkDurationSeconds - clamped) > 0.01 else { return }
             state.sparkDurationSeconds = clamped
+            scheduleSave()
+        }
+    }
+
+    /// 微星标浮现期间连按第 2 次 ⌘C 免鼠标零离手触发智变（按第 3 次 ⌘C 自动还原原文）
+    @Published var doubleCopySparkEnabled: Bool {
+        didSet {
+            guard (state.doubleCopySparkEnabled ?? true) != doubleCopySparkEnabled else { return }
+            state.doubleCopySparkEnabled = doubleCopySparkEnabled
             scheduleSave()
         }
     }
@@ -175,6 +185,7 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
         self.state = loaded
         self.sparkEnabled = loaded.sparkEnabled
         self.sparkDurationSeconds = loaded.sparkDurationSeconds
+        self.doubleCopySparkEnabled = loaded.doubleCopySparkEnabled ?? true
         self.cursorDropPodEnabled = loaded.cursorDropPodEnabled ?? true
         self.enabledAutoRules = loaded.enabledAutoRules
         self.mutedSourceApps = loaded.mutedSourceApps
@@ -606,7 +617,14 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
             adoptedEffects.append(shouldMute ? "已在「\(appTarget)」中静默微星标提示" : "已恢复「\(appTarget)」的微星标提示")
         }
 
-        // C. 微星标与拖拽微落点开关调节
+        // C. 微星标、连按 ⌘C×2 智变与拖拽微落点开关调节
+        let doubleCopyKeys = ["双击复制", "连按复制", "二次复制", "两次复制", "双按复制"]
+        if Self.containsAny(lower, doubleCopyKeys) {
+            let neg = Self.isClauseNegated(matching: doubleCopyKeys, in: clauses)
+            doubleCopySparkEnabled = !neg
+            adoptedEffects.append(!neg ? "已开启微星标在屏时「再按 ⌘C 直接智变」" : "已关闭「连按两次 ⌘C 触发智变」（仅保留鼠标点击）")
+        }
+
         let dropPodKeys = ["微落点", "拖拽落点", "光标落点", "拖拽胶囊"]
         if Self.containsAny(lower, dropPodKeys) {
             let neg = Self.isClauseNegated(matching: dropPodKeys, in: clauses)

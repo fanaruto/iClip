@@ -1,17 +1,99 @@
 import AppKit
 import SwiftUI
 
+/// 连按 ⌘C 触发微星标与第 3 次 ⌘C 无损还原的状态机判果
+enum DoubleCopySparkOutcome: Equatable {
+    case normalCopy
+    case triggerCandidate
+    case restoreOriginal
+    case suppressReoffer
+}
+
+/// 纯值类型确定性状态机：零键盘钩子、零辅助功能权限依赖，顺应系统剪贴板物理特性实现「⌘C×2 智变 / ⌘C×3 还原」
+struct DoubleCopySparkStateMachine {
+    private(set) var activeHash: String? = nil
+    private(set) var offeredAtUptime: TimeInterval = -100
+    private(set) var activeWindowSeconds: TimeInterval = 2.2
+
+    private(set) var restorableHash: String? = nil
+    private(set) var triggeredAtUptime: TimeInterval = -100
+
+    private(set) var suppressedHash: String? = nil
+    private(set) var suppressUntilUptime: TimeInterval = -100
+
+    mutating func clearActiveOffer() {
+        activeHash = nil
+        offeredAtUptime = -100
+    }
+
+    mutating func clearAll() {
+        activeHash = nil
+        offeredAtUptime = -100
+        restorableHash = nil
+        triggeredAtUptime = -100
+        suppressedHash = nil
+        suppressUntilUptime = -100
+    }
+
+    mutating func recordOffer(contentHash: String, at uptime: TimeInterval, windowSeconds: TimeInterval) {
+        activeHash = contentHash
+        offeredAtUptime = uptime
+        activeWindowSeconds = max(1.0, windowSeconds)
+    }
+
+    mutating func evaluateIncomingCopy(
+        contentHash: String,
+        at uptime: TimeInterval,
+        doubleCopyEnabled: Bool
+    ) -> DoubleCopySparkOutcome {
+        guard !contentHash.isEmpty else { return .normalCopy }
+
+        if doubleCopyEnabled,
+           let active = activeHash,
+           active == contentHash {
+            let elapsed = uptime - offeredAtUptime
+            // 过滤 < 140ms 的单次复制应用内部双通道重写，仅响应真实人类二次按键
+            if elapsed >= 0.14 && elapsed <= activeWindowSeconds {
+                activeHash = nil
+                restorableHash = contentHash
+                triggeredAtUptime = uptime
+                return .triggerCandidate
+            }
+        }
+
+        if let restorable = restorableHash, restorable == contentHash {
+            let elapsed = uptime - triggeredAtUptime
+            if elapsed >= 0.12 && elapsed <= 2.4 {
+                restorableHash = nil
+                suppressedHash = contentHash
+                suppressUntilUptime = uptime + 1.8
+                return .restoreOriginal
+            }
+            if elapsed > 2.4 {
+                restorableHash = nil
+            }
+        }
+
+        if let sup = suppressedHash, sup == contentHash, uptime <= suppressUntilUptime {
+            return .suppressReoffer
+        }
+
+        return .normalCopy
+    }
+}
+
 /// 复制瞬间浮现于鼠标右下角的「灵动微星标（Action Spark）」：
 /// - 零抢夺焦点（.nonactivatingPanel），不影响当前输入框继续打字或直接 ⌘V；
-/// - 单层 macOS 26 官方 NSGlassEffectView 胶囊，零矩形阴影毛边、锁死外框零抖动；
-/// - 点击即转换写入剪贴板并强化个人习惯权重，支持连续使用后一键晋升「自动契约」，点 × 自动习得退避。
+/// - 支持微星标在屏时直接「再按一次 ⌘C」零离手触发智变，按第 3 次 ⌘C 自动还原原文；
+/// - 单层 macOS 26 官方 NSGlassEffectView 胶囊，零矩形阴影毛边、锁死外框零抖动。
 @MainActor
 final class ActionSparkController {
     static let shared = ActionSparkController()
 
     fileprivate enum DisplayPhase: Equatable {
-        case offering(AdaptiveSparkCandidate)
+        case offering(AdaptiveSparkCandidate, showDoubleCopyHint: Bool)
         case completed(message: String)
+        case restored(message: String)
     }
 
     @MainActor
@@ -27,18 +109,56 @@ final class ActionSparkController {
     private var dismissWorkItem: DispatchWorkItem?
     private var activeCandidate: AdaptiveSparkCandidate?
     private var didInteractInCurrentSession: Bool = false
+    private var doubleCopyMachine = DoubleCopySparkStateMachine()
 
     /// 供外部查询当前主面板是否可见，避免主面板打开时重复弹出微星标
     var isMainPanelVisibleProvider: (() -> Bool)?
 
-    private let compactSize = NSSize(width: 244, height: 38)
-    private let promotableSize = NSSize(width: 304, height: 38)
+    private let compactSize = NSSize(width: 274, height: 38)
+    private let promotableSize = NSSize(width: 328, height: 38)
 
     private init() {}
 
+    /// 在剪贴板捕获到相同哈希时优先判定是否命中「⌘C×2 原位智变」或「⌘C×3 无损还原」
+    func handleIncomingCopy(contentHash: String, in store: ClipboardStore) -> DoubleCopySparkOutcome {
+        let now = ProcessInfo.processInfo.systemUptime
+        let outcome = doubleCopyMachine.evaluateIncomingCopy(
+            contentHash: contentHash,
+            at: now,
+            doubleCopyEnabled: AdaptiveIntelligenceEngine.shared.doubleCopySparkEnabled
+        )
+        switch outcome {
+        case .triggerCandidate:
+            if activeCandidate != nil {
+                handleAccept(promoteToAuto: false, triggeredByDoubleCopy: true, in: store)
+                return .triggerCandidate
+            }
+            return .normalCopy
+
+        case .restoreOriginal:
+            dismissWorkItem?.cancel()
+            activeCandidate = nil
+            didInteractInCurrentSession = true
+            TactileFeedbackEngine.shared.performNavigationStepHaptic()
+            ensurePanel(size: compactSize, store: store)
+            resizePanelIfNeeded(to: compactSize)
+            if let panel, !panel.isVisible {
+                panel.alphaValue = 1
+                panel.orderFrontRegardless()
+            }
+            withAnimation(.easeOut(duration: 0.14)) {
+                viewModel.phase = .restored(message: "已还原原文 · 直接 ⌘V")
+            }
+            scheduleFadeOut(after: 0.85, recordPassiveTimeout: false)
+            return .restoreOriginal
+
+        case .suppressReoffer, .normalCopy:
+            return outcome
+        }
+    }
+
     func presentIfAppropriate(for item: ClipItem, reuseCount: Int, in store: ClipboardStore) {
         guard !(isMainPanelVisibleProvider?() ?? false) else { return }
-        // 演示自动编排模式下不额外插入微星标
         if ProcessInfo.processInfo.arguments.contains("--demo") { return }
 
         guard let candidate = AdaptiveIntelligenceEngine.shared.evaluateSparkCandidate(
@@ -46,20 +166,22 @@ final class ActionSparkController {
             reuseCount: reuseCount,
             minimalMode: store.minimalModeEnabled
         ) else {
+            doubleCopyMachine.clearActiveOffer()
             return
         }
 
-        present(candidate: candidate, in: store)
+        present(candidate: candidate, contentHash: item.contentHash, in: store)
     }
 
     func dismissImmediately() {
         dismissWorkItem?.cancel()
         dismissWorkItem = nil
         activeCandidate = nil
+        doubleCopyMachine.clearAll()
         panel?.orderOut(nil)
     }
 
-    private func present(candidate: AdaptiveSparkCandidate, in store: ClipboardStore) {
+    private func present(candidate: AdaptiveSparkCandidate, contentHash: String, in store: ClipboardStore) {
         let targetSize = (candidate.promotableRule != nil) ? promotableSize : compactSize
         ensurePanel(size: targetSize, store: store)
         guard let panel else { return }
@@ -67,8 +189,15 @@ final class ActionSparkController {
         dismissWorkItem?.cancel()
         activeCandidate = candidate
         didInteractInCurrentSession = false
+        let duration = AdaptiveIntelligenceEngine.shared.sparkDurationSeconds
+        let doubleCopyOn = AdaptiveIntelligenceEngine.shared.doubleCopySparkEnabled
+        doubleCopyMachine.recordOffer(
+            contentHash: contentHash,
+            at: ProcessInfo.processInfo.systemUptime,
+            windowSeconds: duration + 0.35
+        )
         viewModel.isHovered = false
-        viewModel.phase = .offering(candidate)
+        viewModel.phase = .offering(candidate, showDoubleCopyHint: doubleCopyOn)
 
         resizePanelIfNeeded(to: targetSize)
 
@@ -97,7 +226,7 @@ final class ActionSparkController {
             panel.animator().setFrameOrigin(NSPoint(x: originX, y: originY))
         }
 
-        scheduleAutoDismiss(after: AdaptiveIntelligenceEngine.shared.sparkDurationSeconds)
+        scheduleAutoDismiss(after: duration)
     }
 
     private func resizePanelIfNeeded(to size: NSSize) {
@@ -134,10 +263,10 @@ final class ActionSparkController {
         let root = ActionSparkPillView(
             viewModel: viewModel,
             onAccept: { [weak self] in
-                self?.handleAccept(promoteToAuto: false, in: store)
+                self?.handleAccept(promoteToAuto: false, triggeredByDoubleCopy: false, in: store)
             },
             onPromoteAndAccept: { [weak self] in
-                self?.handleAccept(promoteToAuto: true, in: store)
+                self?.handleAccept(promoteToAuto: true, triggeredByDoubleCopy: false, in: store)
             },
             onExplicitDismiss: { [weak self] in
                 self?.handleExplicitDismiss()
@@ -191,9 +320,13 @@ final class ActionSparkController {
         }
     }
 
-    private func handleAccept(promoteToAuto: Bool, in store: ClipboardStore) {
+    private func handleAccept(promoteToAuto: Bool, triggeredByDoubleCopy: Bool, in store: ClipboardStore) {
         guard let candidate = activeCandidate else { return }
         didInteractInCurrentSession = true
+        activeCandidate = nil
+        if !triggeredByDoubleCopy {
+            doubleCopyMachine.clearActiveOffer()
+        }
         dismissWorkItem?.cancel()
 
         AdaptiveIntelligenceEngine.shared.recordActionUsed(
@@ -213,16 +346,25 @@ final class ActionSparkController {
 
         store.executeSparkCandidate(candidate)
 
-        let doneMsg = promoteToAuto ? "已开启自动处理 · 直接 ⌘V" : "已就绪 · 直接 ⌘V 粘贴"
+        let doneMsg: String
+        if promoteToAuto {
+            doneMsg = "已开启自动处理 · 直接 ⌘V"
+        } else if triggeredByDoubleCopy && candidate.actionID != "habit-pin-frequent" {
+            doneMsg = "已智变 · ⌘V 粘贴（再 ⌘C 还原）"
+        } else {
+            doneMsg = "已就绪 · 直接 ⌘V 粘贴"
+        }
         withAnimation(.easeOut(duration: 0.14)) {
             viewModel.phase = .completed(message: doneMsg)
         }
-        scheduleFadeOut(after: 0.72, recordPassiveTimeout: false)
+        scheduleFadeOut(after: triggeredByDoubleCopy ? 1.25 : 0.72, recordPassiveTimeout: false)
     }
 
     private func handleExplicitDismiss() {
         guard let candidate = activeCandidate else { return }
         didInteractInCurrentSession = true
+        activeCandidate = nil
+        doubleCopyMachine.clearActiveOffer()
         dismissWorkItem?.cancel()
 
         AdaptiveIntelligenceEngine.shared.recordSparkExplicitDismiss(
@@ -250,6 +392,7 @@ final class ActionSparkController {
                     AdaptiveIntelligenceEngine.shared.recordSparkPassiveTimeout(categoryKey: candidate.categoryKey)
                 }
                 self.activeCandidate = nil
+                self.doubleCopyMachine.clearActiveOffer()
                 NSAnimationContext.runAnimationGroup { ctx in
                     ctx.duration = 0.16
                     ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
@@ -287,10 +430,10 @@ private struct ActionSparkPillView: View {
                 )
 
             switch viewModel.phase {
-            case .offering(let candidate):
-                HStack(spacing: 6) {
+            case .offering(let candidate, let showDoubleCopyHint):
+                HStack(spacing: 5) {
                     Button(action: onAccept) {
-                        HStack(spacing: 6) {
+                        HStack(spacing: 5.5) {
                             Image(systemName: candidate.symbolName)
                                 .font(.system(size: 12, weight: .semibold))
                                 .foregroundStyle(Color.accentColor)
@@ -305,7 +448,14 @@ private struct ActionSparkPillView: View {
                                 .foregroundStyle(.primary)
                                 .lineLimit(1)
 
-                            if candidate.badgeHint != nil && candidate.promotableRule == nil {
+                            if showDoubleCopyHint && candidate.promotableRule == nil {
+                                Text("⌘C×2")
+                                    .font(.system(size: 9.5, weight: .bold, design: .rounded))
+                                    .foregroundStyle(Color.accentColor)
+                                    .padding(.horizontal, 5)
+                                    .padding(.vertical, 1.5)
+                                    .background(Capsule().fill(Color.accentColor.opacity(0.13)))
+                            } else if candidate.badgeHint != nil && candidate.promotableRule == nil {
                                 Image(systemName: "sparkle")
                                     .font(.system(size: 9.5, weight: .bold))
                                     .foregroundStyle(Color.accentColor.opacity(0.85))
@@ -315,6 +465,7 @@ private struct ActionSparkPillView: View {
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
+                    .help(showDoubleCopyHint ? "点击或直接再按一次 ⌘C 立即执行" : "点击立即执行")
 
                     if candidate.promotableRule != nil {
                         Button(action: onPromoteAndAccept) {
@@ -348,7 +499,20 @@ private struct ActionSparkPillView: View {
                         .font(.system(size: 13.5, weight: .semibold))
                         .foregroundStyle(Color.green)
                     Text(message)
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 12)
+
+            case .restored(let message):
+                HStack(spacing: 7) {
+                    Image(systemName: "arrow.uturn.backward.circle.fill")
+                        .font(.system(size: 13.5, weight: .semibold))
+                        .foregroundStyle(Color.orange)
+                    Text(message)
+                        .font(.system(size: 11.5, weight: .semibold))
                         .foregroundStyle(.primary)
                         .lineLimit(1)
                     Spacer(minLength: 0)

@@ -629,7 +629,10 @@ final class ClipboardStore: ObservableObject {
                 contentHash: contentHash,
                 sourceAppName: sourceApp
             )
+            let copyOutcome = ActionSparkController.shared.handleIncomingCopy(contentHash: contentHash, in: self)
+            if copyOutcome == .triggerCandidate { return }
             insertOrPromote(item)
+            if copyOutcome == .restoreOriginal || copyOutcome == .suppressReoffer { return }
             let reuseCount = AdaptiveIntelligenceEngine.shared.recordContentActivity(contentHash: contentHash)
             if let latest = items.first(where: { $0.contentHash == contentHash }) {
                 ActionSparkController.shared.presentIfAppropriate(for: latest, reuseCount: reuseCount, in: self)
@@ -661,6 +664,10 @@ final class ClipboardStore: ObservableObject {
                     let alreadyExists = await MainActor.run { [weak self] () -> Bool in
                         guard let self else { return true }
                         if let existingIndex = self.items.firstIndex(where: { $0.contentHash == contentHash }) {
+                            let copyOutcome = ActionSparkController.shared.handleIncomingCopy(contentHash: contentHash, in: self)
+                            if copyOutcome == .triggerCandidate {
+                                return true
+                            }
                             var existing = self.items.remove(at: existingIndex)
                             existing.createdAt = Date()
                             existing.sourceAppName = sourceApp ?? existing.sourceAppName
@@ -672,6 +679,9 @@ final class ClipboardStore: ObservableObject {
                             self.items.insert(existing, at: 0)
                             self.items = self.sortItems(self.items)
                             self.saveHistory()
+                            if copyOutcome == .restoreOriginal || copyOutcome == .suppressReoffer {
+                                return true
+                            }
                             let reuseCount = AdaptiveIntelligenceEngine.shared.recordContentActivity(contentHash: contentHash)
                             ActionSparkController.shared.presentIfAppropriate(for: existing, reuseCount: reuseCount, in: self)
                             return true
@@ -757,6 +767,22 @@ final class ClipboardStore: ObservableObject {
             let finalIsLink = isValidWebURL(text.trimmingCharacters(in: .whitespacesAndNewlines))
             let hash = Self.sha256(text)
             let contentHash = "\(finalIsLink ? "link" : "text"):\(hash)"
+            if !didAutoApplyRule {
+                let copyOutcome = ActionSparkController.shared.handleIncomingCopy(contentHash: contentHash, in: self)
+                if copyOutcome == .triggerCandidate {
+                    return
+                }
+                if copyOutcome == .restoreOriginal || copyOutcome == .suppressReoffer {
+                    let restoredItem = ClipItem(
+                        type: finalIsLink ? .link : .text,
+                        text: text,
+                        contentHash: contentHash,
+                        sourceAppName: sourceApp
+                    )
+                    insertOrPromote(restoredItem)
+                    return
+                }
+            }
             let item = ClipItem(
                 type: finalIsLink ? .link : .text,
                 text: text,
