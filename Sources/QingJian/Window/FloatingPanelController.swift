@@ -242,6 +242,11 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         }
     }
 
+    /// 供全局 ⌃⌥C 快捷键在面板已打开时直接追加当前选中条目
+    func appendSelectedCardToClipboard() {
+        rootView.appendSelectedToClipboard()
+    }
+
     /// 弹出面板（鼠标旁直觉位置 + 原生窗口级轻柔滑入 + 内部卡片错峰浮现）
     func show(anchorRect: NSRect? = nil) {
         ActionSparkController.shared.dismissImmediately()
@@ -531,6 +536,12 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         // ⌘R (keyCode 15)：对当前选中条目设置/修改记忆备注标题
         if !store.minimalModeEnabled, flags == .command, event.keyCode == 15 {
             rootView.beginAliasEditForSelected()
+            return nil
+        }
+
+        // ⇧⌘C (keyCode 8)：将当前选中条目换行追加至系统剪贴板末尾（免切窗连环续接）
+        if !store.minimalModeEnabled, flags == [.command, .shift], event.keyCode == 8 {
+            rootView.appendSelectedToClipboard()
             return nil
         }
 
@@ -879,6 +890,11 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         }
     }
 
+    /// 供全局 ⌃⌥C 快捷键在面板已打开时直接追加当前选中条目
+    func appendSelectedCardToClipboard() {
+        rootView.appendSelectedToClipboard()
+    }
+
     /// 弹出面板（鼠标旁直觉位置 + 原生窗口级轻柔滑入 + 内部卡片错峰浮现）
     func show(anchorRect: NSRect? = nil) {
         ActionSparkController.shared.dismissImmediately()
@@ -1153,6 +1169,12 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         // ⌘R (keyCode 15)：对当前选中条目设置/修改记忆备注标题
         if !store.minimalModeEnabled, flags == .command, event.keyCode == 15 {
             rootView.beginAliasEditForSelected()
+            return nil
+        }
+
+        // ⇧⌘C (keyCode 8)：将当前选中条目换行追加至系统剪贴板末尾（免切窗连环续接）
+        if !store.minimalModeEnabled, flags == [.command, .shift], event.keyCode == 8 {
+            rootView.appendSelectedToClipboard()
             return nil
         }
 

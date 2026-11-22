@@ -94,6 +94,7 @@ private struct AdaptiveBrainState: Codable {
     var sparkEnabled: Bool = true
     var sparkDurationSeconds: Double = 2.0
     var doubleCopySparkEnabled: Bool? = true
+    var copyAppendEnabled: Bool? = true
     var cursorDropPodEnabled: Bool? = true
     var actionWeights: [String: Double] = [:]
     var appActionWeights: [String: [String: Double]] = [:]
@@ -142,6 +143,15 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
         }
     }
 
+    /// 跨处选段按 ⌃⌥C 零切窗「续接复制（Copy-Append）」开关
+    @Published var copyAppendEnabled: Bool {
+        didSet {
+            guard (state.copyAppendEnabled ?? true) != copyAppendEnabled else { return }
+            state.copyAppendEnabled = copyAppendEnabled
+            scheduleSave()
+        }
+    }
+
     @Published var cursorDropPodEnabled: Bool {
         didSet {
             guard (state.cursorDropPodEnabled ?? true) != cursorDropPodEnabled else { return }
@@ -186,6 +196,7 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
         self.sparkEnabled = loaded.sparkEnabled
         self.sparkDurationSeconds = loaded.sparkDurationSeconds
         self.doubleCopySparkEnabled = loaded.doubleCopySparkEnabled ?? true
+        self.copyAppendEnabled = loaded.copyAppendEnabled ?? true
         self.cursorDropPodEnabled = loaded.cursorDropPodEnabled ?? true
         self.enabledAutoRules = loaded.enabledAutoRules
         self.mutedSourceApps = loaded.mutedSourceApps
@@ -617,7 +628,14 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
             adoptedEffects.append(shouldMute ? "已在「\(appTarget)」中静默微星标提示" : "已恢复「\(appTarget)」的微星标提示")
         }
 
-        // C. 微星标、连按 ⌘C×2 智变与拖拽微落点开关调节
+        // C. 微星标、连按 ⌘C×2 智变、续接复制与拖拽微落点开关调节
+        let copyAppendKeys = ["续接复制", "追加复制", "累加复制", "连续追加"]
+        if Self.containsAny(lower, copyAppendKeys) {
+            let neg = Self.isClauseNegated(matching: copyAppendKeys, in: clauses)
+            copyAppendEnabled = !neg
+            adoptedEffects.append(!neg ? "已开启 ⌃⌥C 零切窗「续接复制」" : "已关闭 ⌃⌥C「续接复制」")
+        }
+
         let doubleCopyKeys = ["双击复制", "连按复制", "二次复制", "两次复制", "双按复制"]
         if Self.containsAny(lower, doubleCopyKeys) {
             let neg = Self.isClauseNegated(matching: doubleCopyKeys, in: clauses)

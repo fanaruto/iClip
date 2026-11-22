@@ -837,4 +837,33 @@ final class CoreFeatureTests: XCTestCase {
         _ = engine.adoptUserSuggestion("开启连按复制智变", in: .shared)
         XCTAssertTrue(engine.doubleCopySparkEnabled)
     }
+
+    // MARK: - 23. 跨处选段「⌃⌥C 续接复制（Copy-Append）」纯净换行衔接与自然语言调教测试
+
+    @MainActor
+    func testCopyAppendSegmentJoiningAndNaturalLanguageToggle() throws {
+        // 1. 多段换行去重衔接（消除首尾多余空行，保留段内缩进）
+        let s1 = CopyAppendHelper.joinSegments(base: "第一段摘要\n\n", incoming: "\n  - 第二段要点")
+        XCTAssertEqual(s1, "第一段摘要\n  - 第二段要点")
+        let s2 = CopyAppendHelper.joinSegments(base: s1, incoming: "  - 第三段结论")
+        XCTAssertEqual(s2, "第一段摘要\n  - 第二段要点\n  - 第三段结论")
+        XCTAssertEqual(CopyAppendHelper.joinSegments(base: "   ", incoming: "首段文本"), "首段文本")
+
+        // 2. 支持从文本、文件路径与含 OCR 图片提取可追加内容
+        let fileItem = ClipItem(type: .file, filePaths: ["/tmp/a.txt", "/tmp/b.txt"], contentHash: "file:ab")
+        XCTAssertEqual(CopyAppendHelper.extractAppendableText(from: fileItem), "/tmp/a.txt\n/tmp/b.txt")
+        let plainImg = ClipItem(type: .image, imageFileName: "x.png", contentHash: "img:x")
+        XCTAssertNil(CopyAppendHelper.extractAppendableText(from: plainImg))
+
+        // 3. 验证全局默认快捷键为 ⌃⌥C，且支持自然语言即时开关
+        XCTAssertEqual(HotKeyShortcut.defaultCopyAppendShortcut.compactDisplayString, "⌃⌥C")
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("iclip-append-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let engine = AdaptiveIntelligenceEngine(customDirectoryURL: tempDir)
+        XCTAssertTrue(engine.copyAppendEnabled)
+        _ = engine.adoptUserSuggestion("关闭续接复制", in: .shared)
+        XCTAssertFalse(engine.copyAppendEnabled)
+        _ = engine.adoptUserSuggestion("开启追加复制", in: .shared)
+        XCTAssertTrue(engine.copyAppendEnabled)
+    }
 }

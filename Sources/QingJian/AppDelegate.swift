@@ -222,6 +222,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.panelController.toggle(anchorRect: nil)
             }
         }
+        HotKeyManager.shared.registerCopyAppendHotKey { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self,
+                      !ClipboardStore.shared.minimalModeEnabled,
+                      AdaptiveIntelligenceEngine.shared.copyAppendEnabled else { return }
+                if self.panelController.isVisible {
+                    self.panelController.appendSelectedCardToClipboard()
+                } else {
+                    ClipboardStore.shared.triggerGlobalCopyAppend()
+                }
+            }
+        }
         #if ICLIP_EDITION_FLOW
         HotKeyManager.shared.registerQueuePopHotKey(shortcut: ClipboardStore.shared.queuePopShortcut) { [weak self] in
             Task { @MainActor [weak self] in

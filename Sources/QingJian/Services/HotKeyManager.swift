@@ -19,6 +19,12 @@ struct HotKeyShortcut: Codable, Equatable {
         carbonModifiers: UInt32(controlKey | optionKey)
     )
 
+    /// 默认跨处选段「续接复制（Copy-Append）」快捷键：Control + Option + C
+    static let defaultCopyAppendShortcut = HotKeyShortcut(
+        keyCode: UInt32(kVK_ANSI_C),
+        carbonModifiers: UInt32(controlKey | optionKey)
+    )
+
     /// 供界面显示的苹果标准符号串（例如 "⌥ V"、"⌃ ⌥ V"）
     var displayString: String {
         var parts: [String] = []
@@ -77,13 +83,16 @@ final class HotKeyManager {
 
     private var toggleHotKeyRef: EventHotKeyRef?
     private var queueHotKeyRef: EventHotKeyRef?
+    private var copyAppendHotKeyRef: EventHotKeyRef?
     private var eventHandlerRef: EventHandlerRef?
 
     private var onToggleTrigger: (() -> Void)?
     private var onQueueTrigger: (() -> Void)?
+    private var onCopyAppendTrigger: (() -> Void)?
 
     private var currentShortcut: HotKeyShortcut = .defaultShortcut
     private var currentQueueShortcut: HotKeyShortcut = .defaultQueueShortcut
+    private var currentCopyAppendShortcut: HotKeyShortcut = .defaultCopyAppendShortcut
 
     private init() {}
 
@@ -118,6 +127,8 @@ final class HotKeyManager {
                         manager.onToggleTrigger?()
                     } else if id == 2 {
                         manager.onQueueTrigger?()
+                    } else if id == 3 {
+                        manager.onCopyAppendTrigger?()
                     }
                 }
                 return noErr
@@ -177,6 +188,45 @@ final class HotKeyManager {
     }
 
     @discardableResult
+    func registerCopyAppendHotKey(shortcut: HotKeyShortcut = .defaultCopyAppendShortcut, action: @escaping () -> Void) -> Bool {
+        self.onCopyAppendTrigger = action
+        self.currentCopyAppendShortcut = shortcut
+        guard ensureEventHandlerInstalled() else { return false }
+
+        if let ref = copyAppendHotKeyRef {
+            UnregisterEventHotKey(ref)
+            copyAppendHotKeyRef = nil
+        }
+
+        let hotKeyID = EventHotKeyID(signature: OSType(0x514A434C), id: 3)
+        let regStatus = RegisterEventHotKey(
+            shortcut.keyCode,
+            shortcut.carbonModifiers,
+            hotKeyID,
+            GetApplicationEventTarget(),
+            0,
+            &copyAppendHotKeyRef
+        )
+        return regStatus == noErr
+    }
+
+    @discardableResult
+    func updateCopyAppendShortcut(_ shortcut: HotKeyShortcut) -> Bool {
+        guard let action = onCopyAppendTrigger else {
+            currentCopyAppendShortcut = shortcut
+            return true
+        }
+        return registerCopyAppendHotKey(shortcut: shortcut, action: action)
+    }
+
+    func unregisterCopyAppendHotKey() {
+        if let ref = copyAppendHotKeyRef {
+            UnregisterEventHotKey(ref)
+            copyAppendHotKeyRef = nil
+        }
+    }
+
+    @discardableResult
     func updateShortcut(_ shortcut: HotKeyShortcut) -> Bool {
         guard let action = onToggleTrigger else {
             currentShortcut = shortcut
@@ -204,12 +254,19 @@ final class HotKeyManager {
             UnregisterEventHotKey(ref)
             queueHotKeyRef = nil
         }
+        if let ref = copyAppendHotKeyRef {
+            UnregisterEventHotKey(ref)
+            copyAppendHotKeyRef = nil
+        }
     }
 
-    /// 取消或结束录制后恢复当前双通道快捷键
+    /// 取消或结束录制后恢复当前多通道快捷键
     func resumeAfterRecording() {
         _ = updateShortcut(currentShortcut)
         _ = updateQueueShortcut(currentQueueShortcut)
+        if onCopyAppendTrigger != nil {
+            _ = updateCopyAppendShortcut(currentCopyAppendShortcut)
+        }
     }
 
     func unregister() {
@@ -220,6 +277,10 @@ final class HotKeyManager {
         if let ref = queueHotKeyRef {
             UnregisterEventHotKey(ref)
             queueHotKeyRef = nil
+        }
+        if let ref = copyAppendHotKeyRef {
+            UnregisterEventHotKey(ref)
+            copyAppendHotKeyRef = nil
         }
         if let handler = eventHandlerRef {
             RemoveEventHandler(handler)

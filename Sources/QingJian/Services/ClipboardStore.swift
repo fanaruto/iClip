@@ -88,6 +88,48 @@ private final class FinanceActionsBox {
 }
 #endif
 
+/// 跨处选段「续接复制（Copy-Append）」纯函数文本衔接器
+enum CopyAppendHelper {
+    static func joinSegments(base: String, incoming: String) -> String {
+        let normalizedBase = base
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        let normalizedIncoming = incoming
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+
+        if normalizedBase.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return incoming
+        }
+        if normalizedIncoming.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return base
+        }
+
+        var cleanBase = normalizedBase
+        while cleanBase.hasSuffix("\n") {
+            cleanBase.removeLast()
+        }
+        var cleanIncoming = normalizedIncoming
+        while cleanIncoming.hasPrefix("\n") {
+            cleanIncoming.removeFirst()
+        }
+        return "\(cleanBase)\n\(cleanIncoming)"
+    }
+
+    static func extractAppendableText(from item: ClipItem) -> String? {
+        if let t = item.text, !t.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return t
+        }
+        if let paths = item.filePaths, !paths.isEmpty {
+            return paths.joined(separator: "\n")
+        }
+        if let ocr = item.ocrText, !ocr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return ocr
+        }
+        return nil
+    }
+}
+
 /// 剪贴板核心管理与持久化服务（支持极客开发版 / 心流办公版编译期隔离与跨版本无损存储）
 @MainActor
 final class ClipboardStore: ObservableObject {
@@ -224,6 +266,10 @@ final class ClipboardStore: ObservableObject {
     private var pendingOTPExpirationTasks: [UUID: DispatchWorkItem] = [:]
     private var undoRemovedItems: [ClipItem] = []
     private var undoPurgeWorkItem: DispatchWorkItem?
+    private var copyAppendTargetID: UUID? = nil
+    private var copyAppendSegmentCount: Int = 1
+    private var pendingCopyAppendBaseText: String? = nil
+    private var pendingCopyAppendDeadlineUptime: TimeInterval = -100
     private var adaptiveCancellable: AnyCancellable?
     private let diskQueue = DispatchQueue(label: "com.qingjian.clipboard.disk", qos: .utility)
 
@@ -738,6 +784,18 @@ final class ClipboardStore: ObservableObject {
             let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { return }
 
+            // 命中 ⌃⌥C「跨处续接复制」捕获窗口：自动换行拼接并原地更新顶部记录，弹出光标旁轻胶囊
+            if ProcessInfo.processInfo.systemUptime <= pendingCopyAppendDeadlineUptime {
+                pendingCopyAppendDeadlineUptime = -100
+                let base = pendingCopyAppendBaseText ?? ""
+                pendingCopyAppendBaseText = nil
+                commitAppendedSegment(incomingText: rawText, explicitBase: base, sourceApp: sourceApp, showGlobalNotice: true)
+                return
+            }
+
+            copyAppendTargetID = nil
+            copyAppendSegmentCount = 1
+
             var text = rawText
             let isLink = isValidWebURL(trimmed)
             var didAutoApplyRule = false
@@ -790,6 +848,7 @@ final class ClipboardStore: ObservableObject {
                 sourceAppName: sourceApp
             )
             insertOrPromote(item)
+            copyAppendTargetID = items.first(where: { $0.contentHash == contentHash })?.id
             let reuseCount = AdaptiveIntelligenceEngine.shared.recordContentActivity(contentHash: contentHash)
             if !didAutoApplyRule, let latest = items.first(where: { $0.contentHash == contentHash }) {
                 ActionSparkController.shared.presentIfAppropriate(for: latest, reuseCount: reuseCount, in: self)
@@ -1846,6 +1905,134 @@ final class ClipboardStore: ObservableObject {
         return true
     }
 
+    /// 跨处选段按 ⌃⌥C 触发全局「续接复制」：自动发送纯净 ⌘C 并将新选段换行衔接至当前剪贴板末尾
+    func triggerGlobalCopyAppend() {
+        refreshAccessibilityStatus()
+        if isAccessibilityGranted {
+            let currentClip = pasteboard.string(forType: .string)
+                ?? items.first(where: { $0.type == .text || $0.type == .link })?.text
+                ?? ""
+            pendingCopyAppendBaseText = currentClip
+            pendingCopyAppendDeadlineUptime = ProcessInfo.processInfo.systemUptime + 0.75
+            let changeCountBefore = pasteboard.changeCount
+            Self.simulateCommandC()
+
+            // 85ms 极速收割剪贴板，不等常规轮询；若 220ms 后选区无变化则给出轻提示
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.085) { [weak self] in
+                self?.checkPasteboard()
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) { [weak self] in
+                guard let self else { return }
+                self.checkPasteboard()
+                if ProcessInfo.processInfo.systemUptime <= self.pendingCopyAppendDeadlineUptime,
+                   self.pasteboard.changeCount == changeCountBefore {
+                    self.pendingCopyAppendDeadlineUptime = -100
+                    self.pendingCopyAppendBaseText = nil
+                    ActionSparkController.shared.presentTransientNotice(
+                        symbolName: "selection.pin.in.out",
+                        message: "请先选中要续接的文字再按 ⌃⌥C",
+                        duration: 1.2,
+                        in: self
+                    )
+                }
+            }
+            return
+        }
+
+        // 零辅助权限兜底：直接将最近复制的两条文本历史合并为同一剪贴板载荷
+        let recentTexts = items.filter { $0.type == .text || $0.type == .link }.prefix(2)
+        guard recentTexts.count == 2,
+              let newest = recentTexts.first,
+              let older = recentTexts.last,
+              let tNew = newest.text,
+              let tOld = older.text else {
+            ActionSparkController.shared.presentTransientNotice(
+                symbolName: "hand.raised",
+                message: "授权辅助功能后可跨处选字直按 ⌃⌥C 续接",
+                duration: 1.5,
+                in: self
+            )
+            return
+        }
+        copyAppendTargetID = older.id
+        copyAppendSegmentCount = 1
+        items.removeAll { $0.id == newest.id }
+        commitAppendedSegment(incomingText: tNew, explicitBase: tOld, sourceApp: newest.sourceAppName, showGlobalNotice: true)
+    }
+
+    /// 在主面板内将指定卡片（⇧⌘C）追加至当前系统剪贴板末尾
+    func appendItemToCurrentClipboard(_ item: ClipItem) {
+        guard let incoming = CopyAppendHelper.extractAppendableText(from: item) else {
+            showToast("该图片暂无可追加的文本内容")
+            return
+        }
+        let currentBase = pasteboard.string(forType: .string) ?? ""
+        commitAppendedSegment(incomingText: incoming, explicitBase: currentBase, sourceApp: item.sourceAppName, showGlobalNotice: false)
+    }
+
+    private func commitAppendedSegment(
+        incomingText: String,
+        explicitBase: String,
+        sourceApp: String?,
+        showGlobalNotice: Bool
+    ) {
+        let combined = CopyAppendHelper.joinSegments(base: explicitBase, incoming: incomingText)
+        let isFirstSegment = explicitBase.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        copyAppendSegmentCount = isFirstSegment ? 1 : (copyAppendSegmentCount + 1)
+
+        pasteboard.clearContents()
+        pasteboard.setString(combined, forType: .string)
+        ignoreNextChangeCount = pasteboard.changeCount
+        lastChangeCount = pasteboard.changeCount
+
+        let finalIsLink = isValidWebURL(combined.trimmingCharacters(in: .whitespacesAndNewlines))
+        let newType: ClipContentType = finalIsLink ? .link : .text
+        let newHash = "\(finalIsLink ? "link" : "text"):\(Self.sha256(combined))"
+
+        if let targetID = copyAppendTargetID,
+           let idx = items.firstIndex(where: { $0.id == targetID }),
+           !items[idx].isPinned {
+            let existing = items[idx]
+            items[idx] = ClipItem(
+                id: existing.id,
+                type: newType,
+                text: combined,
+                contentHash: newHash,
+                sourceAppName: sourceApp ?? existing.sourceAppName,
+                createdAt: Date(),
+                isPinned: false,
+                pinCategory: existing.pinCategory,
+                customAlias: existing.customAlias
+            )
+            items = sortItems(items)
+            saveHistory()
+        } else {
+            let mergedItem = ClipItem(
+                type: newType,
+                text: combined,
+                contentHash: newHash,
+                sourceAppName: sourceApp
+            )
+            insertOrPromote(mergedItem)
+            copyAppendTargetID = items.first(where: { $0.contentHash == newHash })?.id
+        }
+
+        TactileFeedbackEngine.shared.perform(.queueToggle(added: true))
+        let msg = copyAppendSegmentCount > 1
+            ? "已续接第 \(copyAppendSegmentCount) 段 · 直接 ⌘V"
+            : "已存入首段 · 再选按 ⌃⌥C 续接"
+        if showGlobalNotice {
+            ActionSparkController.shared.presentTransientNotice(
+                symbolName: "plus.rectangle.on.rectangle.fill",
+                message: msg,
+                duration: 1.25,
+                in: self
+            )
+        } else {
+            showToast(copyAppendSegmentCount > 1 ? "已追加至当前剪贴板（共 \(copyAppendSegmentCount) 段）" : "已写入当前剪贴板")
+        }
+    }
+
     // MARK: - 心流办公版专属能力（顺序队列 + 离线实况识图 + 多选合并 + 场景分组）
 
     #if ICLIP_EDITION_FLOW
@@ -2616,6 +2803,20 @@ final class ClipboardStore: ObservableObject {
         let vKeyCode: CGKeyCode = 9
         guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: vKeyCode, keyDown: true),
               let keyUp = CGEvent(keyboardEventSource: source, virtualKey: vKeyCode, keyDown: false) else {
+            return
+        }
+        keyDown.flags = .maskCommand
+        keyUp.flags = .maskCommand
+        keyDown.post(tap: .cghidEventTap)
+        keyUp.post(tap: .cghidEventTap)
+    }
+
+    /// 使用 .privateState 隔离物理按住的 ⌃⌥ 修饰键，向当前前台应用发送纯净 ⌘C
+    private static func simulateCommandC() {
+        let source = CGEventSource(stateID: .privateState)
+        let cKeyCode: CGKeyCode = 8
+        guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: cKeyCode, keyDown: true),
+              let keyUp = CGEvent(keyboardEventSource: source, virtualKey: cKeyCode, keyDown: false) else {
             return
         }
         keyDown.flags = .maskCommand

@@ -354,6 +354,22 @@ struct AdaptiveIntelligenceSettingsSection: View {
 
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
+                    Text("跨处选段按 ⌃⌥C 零切窗「续接复制」")
+                        .font(.system(size: 13.5, weight: .medium))
+                    Text("先 ⌘C 复制首段，后续选中多处段落按 ⌃⌥C 自动换行续接至同一剪贴板，面板内按 ⇧⌘C 亦可追加")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Toggle("", isOn: $engine.copyAppendEnabled)
+                    .toggleStyle(.switch)
+                    .labelsHidden()
+            }
+
+            Divider().opacity(0.35)
+
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
                     Text("拖拽途中按 ⌥ 召唤「光标旁微落点」")
                         .font(.system(size: 13.5, weight: .medium))
                     Text("拖起网页图片、文件或文本时轻按一下 ⌥，在光标尖旁原地松手即存或套样机")

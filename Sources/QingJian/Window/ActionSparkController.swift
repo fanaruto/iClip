@@ -94,6 +94,7 @@ final class ActionSparkController {
         case offering(AdaptiveSparkCandidate, showDoubleCopyHint: Bool)
         case completed(message: String)
         case restored(message: String)
+        case notice(symbolName: String, message: String)
     }
 
     @MainActor
@@ -171,6 +172,45 @@ final class ActionSparkController {
         }
 
         present(candidate: candidate, contentHash: item.contentHash, in: store)
+    }
+
+    /// 在光标右下角轻浮一条非抢焦液态玻璃状态胶囊（用于 ⌃⌥C 跨处续接复制等瞬时反馈）
+    func presentTransientNotice(symbolName: String, message: String, duration: Double = 1.15, in store: ClipboardStore) {
+        if ProcessInfo.processInfo.arguments.contains("--demo") { return }
+        dismissWorkItem?.cancel()
+        activeCandidate = nil
+        didInteractInCurrentSession = true
+        doubleCopyMachine.clearActiveOffer()
+
+        ensurePanel(size: compactSize, store: store)
+        guard let panel else { return }
+        resizePanelIfNeeded(to: compactSize)
+
+        let mouse = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) ?? NSScreen.main ?? NSScreen.screens[0]
+        let visible = screen.visibleFrame
+        var originX = mouse.x + 14
+        if originX + compactSize.width > visible.maxX - 10 {
+            originX = max(visible.minX + 10, mouse.x - compactSize.width - 14)
+        }
+        var originY = mouse.y - compactSize.height - 12
+        if originY < visible.minY + 10 {
+            originY = min(visible.maxY - compactSize.height - 10, mouse.y + 18)
+        }
+
+        viewModel.phase = .notice(symbolName: symbolName, message: message)
+        if !panel.isVisible {
+            panel.setFrameOrigin(NSPoint(x: originX, y: originY - 4))
+            panel.alphaValue = 0
+            panel.orderFrontRegardless()
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.14
+                ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
+                panel.animator().alphaValue = 1
+                panel.animator().setFrameOrigin(NSPoint(x: originX, y: originY))
+            }
+        }
+        scheduleFadeOut(after: duration, recordPassiveTimeout: false)
     }
 
     func dismissImmediately() {
@@ -511,6 +551,19 @@ private struct ActionSparkPillView: View {
                     Image(systemName: "arrow.uturn.backward.circle.fill")
                         .font(.system(size: 13.5, weight: .semibold))
                         .foregroundStyle(Color.orange)
+                    Text(message)
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 12)
+
+            case .notice(let symbolName, let message):
+                HStack(spacing: 7) {
+                    Image(systemName: symbolName)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Color.accentColor)
                     Text(message)
                         .font(.system(size: 11.5, weight: .semibold))
                         .foregroundStyle(.primary)

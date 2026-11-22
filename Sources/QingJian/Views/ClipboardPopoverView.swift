@@ -1994,6 +1994,11 @@ struct ClipboardPopoverView: View {
         beginAliasEdit(for: filteredItems[nav.selectedIndex])
     }
 
+    func appendSelectedToClipboard() {
+        guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return }
+        store.appendItemToCurrentClipboard(filteredItems[nav.selectedIndex])
+    }
+
     func cancelAliasEdit() {
         aliasEditingItem = nil
         nav.isEditingAlias = false
@@ -4030,6 +4035,11 @@ struct ClipboardPopoverView: View {
     func beginAliasEditForSelected() {
         guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return }
         beginAliasEdit(for: filteredItems[nav.selectedIndex])
+    }
+
+    func appendSelectedToClipboard() {
+        guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return }
+        store.appendItemToCurrentClipboard(filteredItems[nav.selectedIndex])
     }
 
     func cancelAliasEdit() {

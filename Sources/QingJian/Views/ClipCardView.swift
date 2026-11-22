@@ -467,6 +467,12 @@ struct ClipCardView: View {
             onCopyOnly(false)
         }
 
+        if !minimalMode && CopyAppendHelper.extractAppendableText(from: item) != nil {
+            Button("追加至当前剪贴板（⇧⌘C）") {
+                ClipboardStore.shared.appendItemToCurrentClipboard(item)
+            }
+        }
+
         if !minimalMode, let onOpenQuickLook {
             Button("速览与原位微调（Space）") {
                 onOpenQuickLook()
@@ -996,6 +1002,12 @@ struct ClipCardView: View {
 
         Button("仅复制到剪贴板") {
             onCopyOnly(false)
+        }
+
+        if !ClipboardStore.shared.minimalModeEnabled && CopyAppendHelper.extractAppendableText(from: item) != nil {
+            Button("追加至当前剪贴板（⇧⌘C）") {
+                ClipboardStore.shared.appendItemToCurrentClipboard(item)
+            }
         }
 
         if !ClipboardStore.shared.minimalModeEnabled && item.type == .image {
