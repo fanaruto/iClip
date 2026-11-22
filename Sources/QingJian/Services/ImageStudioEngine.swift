@@ -84,6 +84,22 @@ enum ImageStudioEngine {
             guard let source = CGImageSourceCreateWithURL(imageURL as CFURL, nil) else {
                 return nil
             }
+            return renderAppleMockupFrame(fromSource: source, maxSourceEdge: maxSourceEdge)
+        }
+    }
+
+    /// 从内存图像字节流零磁盘 I/O 直接渲染苹果风圆角柔和阴影样机图
+    static func renderAppleMockupFrame(from imageData: Data, maxSourceEdge: Int = 2200) -> ProcessedImageResult? {
+        autoreleasepool {
+            guard let source = CGImageSourceCreateWithData(imageData as CFData, nil) else {
+                return nil
+            }
+            return renderAppleMockupFrame(fromSource: source, maxSourceEdge: maxSourceEdge)
+        }
+    }
+
+    private static func renderAppleMockupFrame(fromSource source: CGImageSource, maxSourceEdge: Int) -> ProcessedImageResult? {
+        autoreleasepool {
             let thumbOpts: [CFString: Any] = [
                 kCGImageSourceCreateThumbnailFromImageAlways: true,
                 kCGImageSourceCreateThumbnailWithTransform: true,

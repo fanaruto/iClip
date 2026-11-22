@@ -93,6 +93,7 @@ struct AdaptiveSparkCandidate: Equatable {
 private struct AdaptiveBrainState: Codable {
     var sparkEnabled: Bool = true
     var sparkDurationSeconds: Double = 2.0
+    var cursorDropPodEnabled: Bool? = true
     var actionWeights: [String: Double] = [:]
     var appActionWeights: [String: [String: Double]] = [:]
     var actionAcceptCounts: [String: Int] = [:]
@@ -127,6 +128,14 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
             let clamped = min(max(sparkDurationSeconds, 1.0), 4.5)
             guard abs(state.sparkDurationSeconds - clamped) > 0.01 else { return }
             state.sparkDurationSeconds = clamped
+            scheduleSave()
+        }
+    }
+
+    @Published var cursorDropPodEnabled: Bool {
+        didSet {
+            guard (state.cursorDropPodEnabled ?? true) != cursorDropPodEnabled else { return }
+            state.cursorDropPodEnabled = cursorDropPodEnabled
             scheduleSave()
         }
     }
@@ -166,6 +175,7 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
         self.state = loaded
         self.sparkEnabled = loaded.sparkEnabled
         self.sparkDurationSeconds = loaded.sparkDurationSeconds
+        self.cursorDropPodEnabled = loaded.cursorDropPodEnabled ?? true
         self.enabledAutoRules = loaded.enabledAutoRules
         self.mutedSourceApps = loaded.mutedSourceApps
         self.totalLearnedInteractions = loaded.totalLearnedInteractions
@@ -596,7 +606,14 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
             adoptedEffects.append(shouldMute ? "已在「\(appTarget)」中静默微星标提示" : "已恢复「\(appTarget)」的微星标提示")
         }
 
-        // C. 微星标总开关与停留快慢调节
+        // C. 微星标与拖拽微落点开关调节
+        let dropPodKeys = ["微落点", "拖拽落点", "光标落点", "拖拽胶囊"]
+        if Self.containsAny(lower, dropPodKeys) {
+            let neg = Self.isClauseNegated(matching: dropPodKeys, in: clauses)
+            cursorDropPodEnabled = !neg
+            adoptedEffects.append(!neg ? "已开启拖拽时按 ⌥ 召唤「光标旁微落点」" : "已关闭拖拽时的「光标旁微落点」")
+        }
+
         let sparkKeys = ["微星标", "光标提示", "悬浮胶囊", "星标提示"]
         if adoptedEffects.isEmpty && Self.containsAny(lower, sparkKeys) {
             let neg = Self.isClauseNegated(matching: sparkKeys, in: clauses)

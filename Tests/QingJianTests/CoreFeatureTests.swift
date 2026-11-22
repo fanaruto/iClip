@@ -687,4 +687,44 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertTrue(invoiceItem.matches(query: "feishu 9131"))// 飞书全拼 + 税号片段混合组合
         XCTAssertTrue(wechatImg.matches(query: "wx tp"))        // 微信 + 图片 双首字母组合
     }
+
+    // MARK: - 19. 拖拽途中按 ⌥「光标旁微落点」载荷识别、内存样机与自然语言调教测试
+
+    @MainActor
+    func testCursorDropPodPayloadDetectionAndInMemoryMockup() throws {
+        let dragPB = NSPasteboard.withUniqueName()
+        defer { dragPB.releaseGlobally() }
+
+        // 1. 纯文本拖拽识别为单槽模式（非图片）
+        dragPB.clearContents()
+        dragPB.setString("拖拽文本片段", forType: .string)
+        XCTAssertFalse(CursorDropPodController.containsImageDragPayload(in: dragPB))
+
+        // 2. 构造一张 16x16 内存 PNG 图像，验证识别为双槽图片模式且支持零磁盘 I/O 直出圆角阴影样机
+        let img = NSImage(size: NSSize(width: 64, height: 48), flipped: false) { rect in
+            NSColor.systemBlue.setFill()
+            rect.fill()
+            return true
+        }
+        let tiff = try XCTUnwrap(img.tiffRepresentation)
+        let rep = try XCTUnwrap(NSBitmapImageRep(data: tiff))
+        let pngData = try XCTUnwrap(rep.representation(using: .png, properties: [:]))
+
+        dragPB.clearContents()
+        dragPB.setData(pngData, forType: .png)
+        XCTAssertTrue(CursorDropPodController.containsImageDragPayload(in: dragPB))
+
+        let mockup = try XCTUnwrap(ImageStudioEngine.renderAppleMockupFrame(from: pngData))
+        XCTAssertGreaterThan(mockup.byteCount, 100)
+
+        // 3. 验证自然语言调教可随时关闭/开启光标旁微落点
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("iclip-droppod-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let engine = AdaptiveIntelligenceEngine(customDirectoryURL: tempDir)
+        XCTAssertTrue(engine.cursorDropPodEnabled)
+        _ = engine.adoptUserSuggestion("关闭拖拽微落点", in: .shared)
+        XCTAssertFalse(engine.cursorDropPodEnabled)
+        _ = engine.adoptUserSuggestion("开启拖拽微落点", in: .shared)
+        XCTAssertTrue(engine.cursorDropPodEnabled)
+    }
 }

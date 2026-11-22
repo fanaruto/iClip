@@ -16,6 +16,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         setupStatusItem()
         setupGlobalHotKey()
+        CursorDropPodController.shared.startMonitoring()
 
         if !ProcessInfo.processInfo.arguments.contains("--demo") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
@@ -32,6 +33,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         HotKeyManager.shared.unregister()
+        CursorDropPodController.shared.stopMonitoring()
         ClipboardStore.shared.stopMonitoring()
     }
 

@@ -259,6 +259,22 @@ struct AdaptiveIntelligenceSettingsSection: View {
                 }
             }
 
+            Divider().opacity(0.35)
+
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("拖拽途中按 ⌥ 召唤「光标旁微落点」")
+                        .font(.system(size: 13.5, weight: .medium))
+                    Text("拖起网页图片、文件或文本时轻按一下 ⌥，在光标尖旁原地松手即存或套样机")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Toggle("", isOn: $engine.cursorDropPodEnabled)
+                    .toggleStyle(.switch)
+                    .labelsHidden()
+            }
+
             if !engine.mutedSourceApps.isEmpty {
                 VStack(alignment: .leading, spacing: 5) {
                     Text("微星标免打扰应用")

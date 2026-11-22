@@ -40,6 +40,9 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         ActionSparkController.shared.isMainPanelVisibleProvider = { [weak self] in
             self?.isVisible ?? false
         }
+        CursorDropPodController.shared.isMainPanelVisibleProvider = { [weak self] in
+            self?.isVisible ?? false
+        }
     }
 
     private func observeExternalActiveApp() {
@@ -242,6 +245,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     /// 弹出面板（鼠标旁直觉位置 + 原生窗口级轻柔滑入 + 内部卡片错峰浮现）
     func show(anchorRect: NSRect? = nil) {
         ActionSparkController.shared.dismissImmediately()
+        CursorDropPodController.shared.dismissImmediately()
         hideWorkItem?.cancel()
         hideWorkItem = nil
 
@@ -603,6 +607,9 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         ActionSparkController.shared.isMainPanelVisibleProvider = { [weak self] in
             self?.isVisible ?? false
         }
+        CursorDropPodController.shared.isMainPanelVisibleProvider = { [weak self] in
+            self?.isVisible ?? false
+        }
     }
 
     private func observeExternalActiveApp() {
@@ -805,6 +812,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     /// 弹出面板（鼠标旁直觉位置 + 原生窗口级轻柔滑入 + 内部卡片错峰浮现）
     func show(anchorRect: NSRect? = nil) {
         ActionSparkController.shared.dismissImmediately()
+        CursorDropPodController.shared.dismissImmediately()
         hideWorkItem?.cancel()
         hideWorkItem = nil
 

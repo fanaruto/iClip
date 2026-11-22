@@ -828,8 +828,9 @@ final class ClipboardStore: ObservableObject {
         }
     }
 
-    /// 最近一次通过拖放成功导入的预览图（供顶部液态水滴空间扭曲动效零重复 IO 直接复用）
+    /// 最近一次通过拖放成功导入的预览图与标准 PNG 数据（供光标微落点样机渲染零磁盘竞态直接复用）
     private(set) var lastImportedDragPreviewCGImage: CGImage?
+    private(set) var lastImportedDragPNGData: Data?
 
     private static let legacyFilenamesType = NSPasteboard.PasteboardType("NSFilenamesPboardType")
     private static let jpegPasteboardType = NSPasteboard.PasteboardType("public.jpeg")
@@ -869,6 +870,7 @@ final class ClipboardStore: ObservableObject {
     @discardableResult
     func importAndCopy(from draggingPasteboard: NSPasteboard, sourceLabel: String = "拖拽复制") -> Bool {
         lastImportedDragPreviewCGImage = nil
+        lastImportedDragPNGData = nil
         let types = draggingPasteboard.types ?? []
 
         // 1. 优先读取内存直接图像流（网页图片 / 截图 / 跨平台直接图像字节，零磁盘权限依赖）
@@ -1152,6 +1154,7 @@ final class ClipboardStore: ObservableObject {
         toastTitle: String
     ) {
         lastImportedDragPreviewCGImage = normalized.cgImage
+        lastImportedDragPNGData = normalized.pngData
         pasteboard.clearContents()
         pasteboard.setData(normalized.pngData, forType: .png)
         pasteboard.setData(normalized.tiffData, forType: .tiff)
@@ -1164,6 +1167,26 @@ final class ClipboardStore: ObservableObject {
             sourceApp: sourceApp
         )
         showToast(toastTitle)
+    }
+
+    /// 将刚通过拖放导入的内存图像字节零竞态渲染为苹果风圆角柔和阴影样机图，并写入系统剪贴板
+    func convertLastImportedDragImageToMockup() {
+        guard let pngData = lastImportedDragPNGData else { return }
+        Task.detached(priority: .userInitiated) { [weak self] in
+            guard let result = ImageStudioEngine.renderAppleMockupFrame(from: pngData) else { return }
+            let tiffData = NSImage(data: result.data)?.tiffRepresentation
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.pasteboard.clearContents()
+                self.pasteboard.setData(result.data, forType: .png)
+                if let tiffData {
+                    self.pasteboard.setData(tiffData, forType: .tiff)
+                }
+                self.ignoreNextChangeCount = self.pasteboard.changeCount
+                self.lastChangeCount = self.pasteboard.changeCount
+                self.showToast("已生成圆角阴影样机图到剪贴板")
+            }
+        }
     }
 
     /// 当 macOS TCC 拦截跨沙盒容器（如微信 `~/Library/Containers/com.tencent.xinWeChat`）文件读取时：
