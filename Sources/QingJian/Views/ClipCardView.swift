@@ -28,6 +28,8 @@ struct ClipCardView: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var isHovered: Bool = false
     @State private var asyncThumbnail: NSImage? = nil
+    @State private var lastTapUptime: TimeInterval = 0
+    @State private var showCopiedInlineFlash: Bool = false
 
     private var glassPalette: LiquidGlassPalette {
         LiquidGlassPalette(colorScheme: colorScheme, surfaceStyle: surfaceStyle, appearance: liquidGlassAppearance)
@@ -85,6 +87,14 @@ struct ClipCardView: View {
                             Text("·")
                             Text(appName)
                                 .lineLimit(1)
+                        }
+
+                        if showCopiedInlineFlash {
+                            Text("·")
+                            Text("✓ 已复制")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(isSelected ? Color.white : Color.green)
+                                .transition(.opacity)
                         }
 
                         Spacer(minLength: 4)
@@ -158,21 +168,46 @@ struct ClipCardView: View {
                 onSelect()
             }
         }
-        .onTapGesture(count: 2) {
-            onPaste(false)
-        }
         .onDrag {
             ClipboardStore.shared.makeDragItemProvider(for: item)
         }
-        .onTapGesture(count: 1) {
-            if !minimalMode && NSEvent.modifierFlags.contains(.command) {
-                onToggleMerge()
-            } else {
-                onSelect()
-            }
+        .onTapGesture {
+            handleCardTap()
         }
         .contextMenu {
             contextMenuItems
+        }
+    }
+
+    private func handleCardTap() {
+        let now = ProcessInfo.processInfo.systemUptime
+        let eventClickCount = (NSApp.currentEvent?.type == .leftMouseUp) ? (NSApp.currentEvent?.clickCount ?? 1) : 1
+        let isDoubleTap = eventClickCount >= 2 || (now - lastTapUptime) <= min(NSEvent.doubleClickInterval, 0.32)
+        lastTapUptime = isDoubleTap ? 0 : now
+
+        if isDoubleTap {
+            onPaste(false)
+            return
+        }
+        if !minimalMode && NSEvent.modifierFlags.contains(.command) {
+            onToggleMerge()
+        } else if item.type == .link {
+            onSelect()
+            onCopyOnly(false)
+            triggerCopiedInlineFlash()
+        } else {
+            onSelect()
+        }
+    }
+
+    private func triggerCopiedInlineFlash() {
+        withAnimation(.easeOut(duration: 0.14)) {
+            showCopiedInlineFlash = true
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) {
+            withAnimation(.easeOut(duration: 0.22)) {
+                showCopiedInlineFlash = false
+            }
         }
     }
 
@@ -221,7 +256,13 @@ struct ClipCardView: View {
             .frame(width: 46, height: 46)
 
         case .link:
-            iconBadge(symbol: "link", tint: .blue)
+            LinkLaunchLogoButton(
+                defaultSymbol: "link",
+                tint: .blue,
+                isSelectedCard: isSelected
+            ) {
+                ClipboardStore.shared.openLinkInBrowser(item)
+            }
 
         case .text:
             EmptyView()
@@ -458,11 +499,9 @@ struct ClipCardView: View {
             }
         }
 
-        if item.type == .link,
-           let raw = item.text?.trimmingCharacters(in: .whitespacesAndNewlines),
-           let url = URL(string: raw) {
+        if item.type == .link, ClipboardStore.shared.resolvedBrowserURL(for: item) != nil {
             Button("在浏览器中打开") {
-                NSWorkspace.shared.open(url)
+                ClipboardStore.shared.openLinkInBrowser(item)
             }
         }
 
@@ -525,6 +564,8 @@ struct ClipCardView: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var isHovered: Bool = false
     @State private var asyncThumbnail: NSImage? = nil
+    @State private var lastTapUptime: TimeInterval = 0
+    @State private var showCopiedInlineFlash: Bool = false
 
     private var glassPalette: LiquidGlassPalette {
         LiquidGlassPalette(colorScheme: colorScheme, surfaceStyle: surfaceStyle, appearance: liquidGlassAppearance)
@@ -586,6 +627,14 @@ struct ClipCardView: View {
                                 .lineLimit(1)
                         }
 
+                        if showCopiedInlineFlash {
+                            Text("·")
+                            Text("✓ 已复制")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(isSelected ? Color.white : Color.green)
+                                .transition(.opacity)
+                        }
+
                         Spacer(minLength: 4)
 
                         Text(item.relativeTimeText)
@@ -626,17 +675,44 @@ struct ClipCardView: View {
                 onSelect()
             }
         }
-        .onTapGesture(count: 2) {
-            onPaste(false)
-        }
         .onDrag {
             ClipboardStore.shared.makeDragItemProvider(for: item)
         }
-        .onTapGesture(count: 1) {
-            onSelect()
+        .onTapGesture {
+            handleCardTap()
         }
         .contextMenu {
             contextMenuItems
+        }
+    }
+
+    private func handleCardTap() {
+        let now = ProcessInfo.processInfo.systemUptime
+        let eventClickCount = (NSApp.currentEvent?.type == .leftMouseUp) ? (NSApp.currentEvent?.clickCount ?? 1) : 1
+        let isDoubleTap = eventClickCount >= 2 || (now - lastTapUptime) <= min(NSEvent.doubleClickInterval, 0.32)
+        lastTapUptime = isDoubleTap ? 0 : now
+
+        if isDoubleTap {
+            onPaste(false)
+            return
+        }
+        if item.type == .link {
+            onSelect()
+            onCopyOnly(false)
+            triggerCopiedInlineFlash()
+        } else {
+            onSelect()
+        }
+    }
+
+    private func triggerCopiedInlineFlash() {
+        withAnimation(.easeOut(duration: 0.14)) {
+            showCopiedInlineFlash = true
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) {
+            withAnimation(.easeOut(duration: 0.22)) {
+                showCopiedInlineFlash = false
+            }
         }
     }
 
@@ -733,10 +809,13 @@ struct ClipCardView: View {
             .frame(width: 46, height: 46)
 
         case .link:
-            if let kind = semantic.primaryKind, kind == .dirtyURL {
-                iconBadge(symbol: "sparkles", tint: .teal)
-            } else {
-                iconBadge(symbol: "link", tint: .blue)
+            let isDirty = (semantic.primaryKind == .dirtyURL)
+            LinkLaunchLogoButton(
+                defaultSymbol: isDirty ? "sparkles" : "link",
+                tint: isDirty ? .teal : .blue,
+                isSelectedCard: isSelected
+            ) {
+                ClipboardStore.shared.openLinkInBrowser(item)
             }
 
         case .text:
@@ -909,11 +988,9 @@ struct ClipCardView: View {
             }
         }
 
-        if item.type == .link,
-           let raw = item.text?.trimmingCharacters(in: .whitespacesAndNewlines),
-           let url = URL(string: raw) {
+        if item.type == .link, ClipboardStore.shared.resolvedBrowserURL(for: item) != nil {
             Button("在浏览器中打开") {
-                NSWorkspace.shared.open(url)
+                ClipboardStore.shared.openLinkInBrowser(item)
             }
         }
 
@@ -1215,5 +1292,189 @@ struct HoverActionCircleButton: View {
         default:
             break
         }
+    }
+}
+
+// MARK: - 链接卡片左侧专属直达跃迁徽标（固定 42×42 零布局位移 + 悬停 45° 对角发射微动效）
+
+private struct LinkLaunchKeyframes {
+    var offsetX: CGFloat = 0
+    var offsetY: CGFloat = 0
+    var scale: CGFloat = 1.0
+}
+
+private struct LinkLaunchSpringButtonStyle: ButtonStyle {
+    let isHovered: Bool
+    let reduceMotion: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.90 : (isHovered && !reduceMotion ? 1.08 : 1.0))
+            .animation(.spring(response: 0.22, dampingFraction: 0.66), value: isHovered)
+            .animation(.spring(response: 0.14, dampingFraction: 0.72), value: configuration.isPressed)
+    }
+}
+
+private final class PassivePointingHandNSView: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
+}
+
+private struct PointingHandCursorOverlay: NSViewRepresentable {
+    func makeNSView(context: Context) -> PassivePointingHandNSView {
+        PassivePointingHandNSView()
+    }
+
+    func updateNSView(_ nsView: PassivePointingHandNSView, context: Context) {
+        nsView.window?.invalidateCursorRects(for: nsView)
+    }
+}
+
+struct LinkLaunchLogoButton: View {
+    let defaultSymbol: String
+    let tint: Color
+    let isSelectedCard: Bool
+    let action: () -> Void
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isHovered: Bool = false
+    @State private var launchTrigger: Int = 0
+    @State private var haloScale: CGFloat = 0.92
+    @State private var haloOpacity: Double = 0.0
+
+    private var activeSymbol: String {
+        isHovered ? "arrow.up.right" : defaultSymbol
+    }
+
+    private var iconColor: Color {
+        if isHovered {
+            return isSelectedCard ? Color(nsColor: .controlAccentColor) : .white
+        }
+        return isSelectedCard ? .white : tint
+    }
+
+    var body: some View {
+        let baseButton = Button {
+            if !reduceMotion {
+                haloScale = 0.96
+                haloOpacity = 0.92
+                withAnimation(.easeOut(duration: 0.30)) {
+                    haloScale = 1.38
+                    haloOpacity = 0.0
+                }
+            }
+            action()
+        } label: {
+            ZStack {
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .fill(badgeBackground)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 11, style: .continuous)
+                            .strokeBorder(
+                                isHovered
+                                    ? Color.white.opacity(isSelectedCard ? 0.90 : 0.45)
+                                    : Color.clear,
+                                lineWidth: 0.85
+                            )
+                    )
+
+                animatedSymbol
+            }
+            .frame(width: 42, height: 42)
+            .overlay {
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.85), lineWidth: 1.2)
+                    .scaleEffect(haloScale)
+                    .opacity(haloOpacity)
+                    .allowsHitTesting(false)
+            }
+            .overlay {
+                PointingHandCursorOverlay()
+                    .allowsHitTesting(false)
+            }
+            .shadow(
+                color: isHovered
+                    ? (isSelectedCard ? Color.black.opacity(0.20) : tint.opacity(0.42))
+                    : .clear,
+                radius: isHovered ? 6 : 0,
+                y: isHovered ? 2 : 0
+            )
+        }
+        .buttonStyle(LinkLaunchSpringButtonStyle(isHovered: isHovered, reduceMotion: reduceMotion))
+        .contentShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+        .help("点击直接在浏览器中访问链接")
+        .animation(.spring(response: 0.22, dampingFraction: 0.74), value: isHovered)
+        .onHover { hovering in
+            if hovering && !isHovered {
+                launchTrigger &+= 1
+                TactileFeedbackEngine.shared.perform(.hoverTick)
+            }
+            isHovered = hovering
+        }
+
+        if #available(macOS 15.0, *) {
+            baseButton.pointerStyle(.link)
+        } else {
+            baseButton
+        }
+    }
+
+    private var badgeBackground: AnyShapeStyle {
+        if isHovered {
+            if isSelectedCard {
+                return AnyShapeStyle(Color.white.opacity(0.96))
+            }
+            return AnyShapeStyle(
+                LinearGradient(
+                    colors: [tint, Color(red: 0.12, green: 0.64, blue: 0.98)],
+                    startPoint: .bottomLeading,
+                    endPoint: .topTrailing
+                )
+            )
+        }
+        return AnyShapeStyle(isSelectedCard ? Color.white.opacity(0.22) : tint.opacity(0.13))
+    }
+
+    private var animatedSymbol: some View {
+        let isReduced = reduceMotion
+        let symbolView = Image(systemName: activeSymbol)
+            .font(.system(size: isHovered ? 17 : 18, weight: isHovered ? .semibold : .medium))
+            .foregroundStyle(iconColor)
+            .contentTransition(.symbolEffect(.replace.upUp.byLayer))
+
+        return symbolView.keyframeAnimator(
+            initialValue: LinkLaunchKeyframes(),
+            trigger: launchTrigger,
+            content: { content, val in
+                content
+                    .scaleEffect(isReduced ? 1.0 : val.scale)
+                    .offset(
+                        x: isReduced ? 0.0 : val.offsetX,
+                        y: isReduced ? 0.0 : val.offsetY
+                    )
+            },
+            keyframes: { _ in
+                KeyframeTrack(\.offsetX) {
+                    CubicKeyframe(-1.4, duration: 0.065)
+                    SpringKeyframe(2.2, duration: 0.12, spring: .bouncy)
+                    SpringKeyframe(0.0, duration: 0.16, spring: .smooth)
+                }
+                KeyframeTrack(\.offsetY) {
+                    CubicKeyframe(1.4, duration: 0.065)
+                    SpringKeyframe(-2.2, duration: 0.12, spring: .bouncy)
+                    SpringKeyframe(0.0, duration: 0.16, spring: .smooth)
+                }
+                KeyframeTrack(\.scale) {
+                    CubicKeyframe(0.90, duration: 0.065)
+                    SpringKeyframe(1.15, duration: 0.12, spring: .bouncy)
+                    SpringKeyframe(1.00, duration: 0.16, spring: .smooth)
+                }
+            }
+        )
     }
 }

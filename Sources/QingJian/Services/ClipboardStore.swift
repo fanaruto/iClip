@@ -189,6 +189,8 @@ final class ClipboardStore: ObservableObject {
         }
     }
     @Published var toastMessage: String? = nil
+    /// 在外部浏览器直接打开链接后通知悬浮窗丝滑收起（不抢回原应用焦点）
+    var onAfterOpenExternalURL: (() -> Void)? = nil
 
     private let pasteboard = NSPasteboard.general
     private var lastChangeCount: Int
@@ -1218,8 +1220,44 @@ final class ClipboardStore: ObservableObject {
         if shouldAutoPaste && autoPasteEnabled && isAccessibilityGranted {
             Self.schedulePasteWhenTargetReady()
         } else {
-            showToast(plainTextOnly ? "已复制纯文本" : "已复制到剪贴板")
+            let copiedMsg = plainTextOnly ? "已复制纯文本" : (item.type == .link ? "已复制链接到剪贴板" : "已复制到剪贴板")
+            showToast(copiedMsg)
         }
+    }
+
+    /// 解析链接条目的可访问 URL（兼容含中文未转义路径及省略协议头的本地域名）
+    func resolvedBrowserURL(for item: ClipItem) -> URL? {
+        let raw = (item.text ?? item.primaryTitle).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return nil }
+        if let direct = URL(string: raw), direct.scheme != nil {
+            return direct
+        }
+        if let encoded = raw.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed),
+           let encodedURL = URL(string: encoded),
+           encodedURL.scheme != nil {
+            return encodedURL
+        }
+        let lower = raw.lowercased()
+        let isLocal = lower.hasPrefix("localhost") || lower.hasPrefix("127.0.0.1") || lower.hasPrefix("0.0.0.0")
+        let prefixed = (isLocal ? "http://" : "https://") + raw
+        if let url = URL(string: prefixed) {
+            return url
+        }
+        if let encoded = prefixed.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) {
+            return URL(string: encoded)
+        }
+        return nil
+    }
+
+    /// 点击链接卡片左侧徽标：触发跃迁声触反馈并直接在默认浏览器中打开链接
+    func openLinkInBrowser(_ item: ClipItem) {
+        guard let url = resolvedBrowserURL(for: item) else {
+            showToast("无效的链接地址")
+            return
+        }
+        TactileFeedbackEngine.shared.perform(.openLink)
+        NSWorkspace.shared.open(url)
+        onAfterOpenExternalURL?()
     }
 
     /// 针对一次性验证码条目在粘贴后启动 30 秒无痕清理倒计时（极简模式或已固定记录绝不误删）
@@ -1255,9 +1293,16 @@ final class ClipboardStore: ObservableObject {
         pasteboard.clearContents()
 
         switch item.type {
-        case .text, .link:
+        case .text:
             if let text = item.text {
                 pasteboard.setString(text, forType: .string)
+            }
+        case .link:
+            if let text = item.text {
+                pasteboard.setString(text, forType: .string)
+                if !plainTextOnly {
+                    pasteboard.setString(text, forType: .URL)
+                }
             }
         case .image:
             if let url = imageURL(for: item), let pngData = try? Data(contentsOf: url) {

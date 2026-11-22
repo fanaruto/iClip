@@ -16,6 +16,7 @@ final class TactileFeedbackEngine {
         case hoverTick
         case tabSwitch
         case pasteCommit
+        case openLink
         case favoriteOn
         case favoriteOff
         case queueToggle(added: Bool)
@@ -29,6 +30,7 @@ final class TactileFeedbackEngine {
         case hoverTick
         case tabSwitch
         case pasteCommit
+        case openLink
         case favoriteOn
         case favoriteOff
         case queueIn
@@ -75,6 +77,12 @@ final class TactileFeedbackEngine {
         case .pasteCommit:
             haptic(.generic)
             playSound(.pasteCommit, volume: 0.28)
+
+        case .openLink:
+            // 清脆跃迁发射震感：先轻触对焦，32ms 后向上弹射确认
+            haptic(.alignment)
+            scheduleHaptic(.levelChange, after: 0.032)
+            playSound(.openLink, volume: 0.28)
 
         case .favoriteOn:
             // 双段渐强摘星震感：先轻触对齐，42ms 后星芒锁定
@@ -176,6 +184,16 @@ final class TactileFeedbackEngine {
             let t2 = max(0.0, t - 0.016)
             let note2 = t >= 0.016 ? sin(2.0 * .pi * 1568.0 * t2) * exp(-t2 * 85.0) * min(1.0, t2 / 0.002) : 0.0
             return (note1 * 0.52 + note2 * 0.62) * 0.65
+        }
+
+        // 3b. 链接跃迁直达：60ms 清透上扬滑音 + 高八度泛音（G5 -> D6 -> G6 轻盈发射感）
+        soundBank[.openLink] = Self.makeSound(duration: 0.060) { t, _ in
+            let p = t / 0.060
+            let sweep = 2.0 * .pi * (784.0 * t + 392.0 * p * t)
+            let env1 = min(1.0, t / 0.002) * exp(-t * 62.0)
+            let dt = max(0.0, t - 0.020)
+            let chime = t >= 0.020 ? sin(2.0 * .pi * 1568.0 * dt) * min(1.0, dt / 0.002) * exp(-dt * 78.0) : 0.0
+            return (sin(sweep) * env1 * 0.52 + chime * 0.58) * 0.66
         }
 
         // 4. 点亮收藏星标：78ms 水晶大三和弦微琶音（E6 -> G#6 -> B6 轻盈绽放）

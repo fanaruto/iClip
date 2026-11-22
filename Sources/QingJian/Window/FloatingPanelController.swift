@@ -82,6 +82,9 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         self.hostingView = hosting
 
         self.panel = p
+        store.onAfterOpenExternalURL = { [weak self] in
+            self?.hide(restoreFocus: false)
+        }
         surfaceHost.onDragTargetedChanged = { [weak self] targeted in
             guard let self else { return }
             withAnimation(.easeOut(duration: 0.14)) {
@@ -575,6 +578,9 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         self.hostingView = hosting
 
         self.panel = p
+        store.onAfterOpenExternalURL = { [weak self] in
+            self?.hide(restoreFocus: false)
+        }
         surfaceHost.onDragTargetedChanged = { [weak self] targeted in
             guard let self else { return }
             withAnimation(.easeOut(duration: 0.14)) {
