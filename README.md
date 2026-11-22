@@ -8,10 +8,11 @@
   <img src="assets/demo.gif" alt="iClip 实机运行演示：鼠标旁唤醒、苹果原生液态玻璃蒙版调节、图片 3 列悬停放大与双击键入" width="760" />
 </p>
 
-> 📥 **双角色专属安装包（开箱即用 + 应用内一键切轨 OTA）**：
-> 前往 [GitHub Releases](https://github.com/fanaruto/iClip/releases/latest) 按你的主力场景选择，后续也可随时在 **设置 → 使用角色与专属版本** 中一键跨版本 OTA 热切换（保留全部历史与辅助功能权限）：
+> 📥 **iClip v2.0 双角色专属安装包（开箱即用 + 极简纯净模式 + 应用内一键切轨 OTA）**：
+> 前往 [GitHub Releases](https://github.com/fanaruto/iClip/releases/latest) 按你的主力场景选择，后续也可随时在 **设置 → 使用角色与专属版本** 中一键跨版本 OTA 热切换（保留全部历史与辅助功能权限），或按 **`⌘E`** 一键切换为**极简纯净模式（基础功能版）**：
 > - 👨‍💻 **极客开发与 AI 版（`iClip-Dev-macOS.zip`）**：微秒级语义识别、敏感密钥 AI 结构化脱敏、URL 净链、JSON / 时间戳 / Base64 / cURL / SQL `IN` 瞬变、QuickLook 对照预览、`{{clip_redacted}}` 动态模板插值。
 > - ⚡️ **商务与心流办公版（`iClip-Flow-macOS.zip`）**：FIFO 顺序粘贴队列（`⌃⌥V` 免开面板连填表单 + 自动 `Tab` 跳格）、Apple Vision 离线中英实况文本 OCR 搜图识字、多选跨模态合并粘贴、收藏场景分组槽与备注标题别名。
+> - 🧰 **v2.0 全行业痛点工具箱（极简模式下自动静默隐藏）**：会计零误差人民币大写与多行账单求和、PDF 断行智能愈合与盘古中英排版、Markdown 表格 ↔ Excel 多协议直粘破壁、截图瞬时瘦身与苹果风圆角阴影样机衬底、身份证/企业税号/银行卡离线国标真伪校验与分节、会议逐字稿去时间轴与短信验证码阅后即焚、置顶收藏资产 `.iclip` 跨机归档迁移。
 
 ---
 

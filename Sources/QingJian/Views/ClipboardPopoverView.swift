@@ -1327,8 +1327,8 @@ struct ClipboardPopoverView: View {
 
 
 
-                // 存储分组
-                settingsGroup(title: "存储上限") {
+                // 存储与资产归档分组
+                settingsGroup(title: "存储与收藏资产迁移") {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("保留最近未固定记录数（固定记录不受限制）")
                             .font(.system(size: 12))
@@ -1341,6 +1341,31 @@ struct ClipboardPopoverView: View {
                         }
                         .pickerStyle(.segmented)
                         .labelsHidden()
+                    }
+
+                    Divider().opacity(0.35)
+
+                    HStack(spacing: 8) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("置顶收藏与模板离线归档")
+                                .font(.system(size: 13.5, weight: .medium))
+                            Text("当前已固定 \(store.pinnedItemCount) 条（含分组、备注与常用图），支持跨机迁移")
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+
+                        Button("导入...") {
+                            importPinnedArchiveAction()
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+
+                        Button("导出 (.iclip)") {
+                            exportPinnedArchiveAction()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
                     }
                 }
 
@@ -1620,6 +1645,76 @@ struct ClipboardPopoverView: View {
             ?? (bundle.object(forInfoDictionaryKey: "CFBundleName") as? String)
             ?? url.deletingPathExtension().lastPathComponent
         store.addIgnoredApp(bundleIdentifier: bundleID, displayName: name)
+    }
+
+    private func exportPinnedArchiveAction() {
+        guard store.pinnedItemCount > 0 else {
+            store.showToast("暂无已固定的收藏记录可导出")
+            return
+        }
+
+        let df = DateFormatter()
+        df.dateFormat = "yyyyMMdd"
+        let defaultName = "iClip-收藏资产-\(df.string(from: Date())).iclip"
+
+        nav.suppressAutoHide = true
+        let panel = NSSavePanel()
+        panel.title = "导出 iClip 置顶收藏与模板归档"
+        panel.nameFieldStringValue = defaultName
+        panel.canCreateDirectories = true
+        panel.allowsOtherFileTypes = true
+        if let iclipType = UTType(filenameExtension: "iclip", conformingTo: .json) {
+            panel.allowedContentTypes = [iclipType]
+        }
+
+        let response = panel.runModal()
+        nav.suppressAutoHide = false
+
+        guard response == .OK, var targetURL = panel.url else { return }
+        if targetURL.pathExtension.isEmpty {
+            targetURL = targetURL.appendingPathExtension("iclip")
+        }
+
+        do {
+            let count = try store.exportPinnedArchive(to: targetURL)
+            store.showToast("已导出 \(count) 条收藏至 \(targetURL.lastPathComponent)")
+        } catch {
+            store.showToast(error.localizedDescription)
+        }
+    }
+
+    private func importPinnedArchiveAction() {
+        nav.suppressAutoHide = true
+        let panel = NSOpenPanel()
+        panel.title = "选择要导入合并的 .iclip 收藏归档包"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowsOtherFileTypes = true
+        var allowed: [UTType] = [.json, .data]
+        if let iclipType = UTType(filenameExtension: "iclip") {
+            allowed.insert(iclipType, at: 0)
+        }
+        panel.allowedContentTypes = allowed
+
+        let response = panel.runModal()
+        nav.suppressAutoHide = false
+
+        guard response == .OK, let sourceURL = panel.url else { return }
+        do {
+            let summary = try store.importPinnedArchive(from: sourceURL)
+            if summary.importedNewCount > 0 && summary.updatedExistingCount > 0 {
+                store.showToast("已导入 \(summary.importedNewCount) 条新收藏，补齐 \(summary.updatedExistingCount) 条既有记录")
+            } else if summary.importedNewCount > 0 {
+                store.showToast("已成功导入 \(summary.importedNewCount) 条收藏资产")
+            } else if summary.updatedExistingCount > 0 {
+                store.showToast("已合并更新 \(summary.updatedExistingCount) 条既有收藏")
+            } else {
+                store.showToast("归档内 \(summary.totalInBundle) 条收藏均已在本地存在")
+            }
+        } catch {
+            store.showToast(error.localizedDescription)
+        }
     }
 
     private func clampSelection() {
@@ -2802,8 +2897,8 @@ struct ClipboardPopoverView: View {
 
 
 
-                // 存储分组
-                settingsGroup(title: "存储上限") {
+                // 存储与资产归档分组
+                settingsGroup(title: "存储与收藏资产迁移") {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("保留最近未固定记录数（固定记录不受限制）")
                             .font(.system(size: 12))
@@ -2816,6 +2911,31 @@ struct ClipboardPopoverView: View {
                         }
                         .pickerStyle(.segmented)
                         .labelsHidden()
+                    }
+
+                    Divider().opacity(0.35)
+
+                    HStack(spacing: 8) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("置顶收藏与模板离线归档")
+                                .font(.system(size: 13.5, weight: .medium))
+                            Text("当前已固定 \(store.pinnedItemCount) 条（含分组、备注与常用图），支持跨机迁移")
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+
+                        Button("导入...") {
+                            importPinnedArchiveAction()
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+
+                        Button("导出 (.iclip)") {
+                            exportPinnedArchiveAction()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
                     }
                 }
 
@@ -3091,6 +3211,76 @@ struct ClipboardPopoverView: View {
             ?? (bundle.object(forInfoDictionaryKey: "CFBundleName") as? String)
             ?? url.deletingPathExtension().lastPathComponent
         store.addIgnoredApp(bundleIdentifier: bundleID, displayName: name)
+    }
+
+    private func exportPinnedArchiveAction() {
+        guard store.pinnedItemCount > 0 else {
+            store.showToast("暂无已固定的收藏记录可导出")
+            return
+        }
+
+        let df = DateFormatter()
+        df.dateFormat = "yyyyMMdd"
+        let defaultName = "iClip-收藏资产-\(df.string(from: Date())).iclip"
+
+        nav.suppressAutoHide = true
+        let panel = NSSavePanel()
+        panel.title = "导出 iClip 置顶收藏与模板归档"
+        panel.nameFieldStringValue = defaultName
+        panel.canCreateDirectories = true
+        panel.allowsOtherFileTypes = true
+        if let iclipType = UTType(filenameExtension: "iclip", conformingTo: .json) {
+            panel.allowedContentTypes = [iclipType]
+        }
+
+        let response = panel.runModal()
+        nav.suppressAutoHide = false
+
+        guard response == .OK, var targetURL = panel.url else { return }
+        if targetURL.pathExtension.isEmpty {
+            targetURL = targetURL.appendingPathExtension("iclip")
+        }
+
+        do {
+            let count = try store.exportPinnedArchive(to: targetURL)
+            store.showToast("已导出 \(count) 条收藏至 \(targetURL.lastPathComponent)")
+        } catch {
+            store.showToast(error.localizedDescription)
+        }
+    }
+
+    private func importPinnedArchiveAction() {
+        nav.suppressAutoHide = true
+        let panel = NSOpenPanel()
+        panel.title = "选择要导入合并的 .iclip 收藏归档包"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowsOtherFileTypes = true
+        var allowed: [UTType] = [.json, .data]
+        if let iclipType = UTType(filenameExtension: "iclip") {
+            allowed.insert(iclipType, at: 0)
+        }
+        panel.allowedContentTypes = allowed
+
+        let response = panel.runModal()
+        nav.suppressAutoHide = false
+
+        guard response == .OK, let sourceURL = panel.url else { return }
+        do {
+            let summary = try store.importPinnedArchive(from: sourceURL)
+            if summary.importedNewCount > 0 && summary.updatedExistingCount > 0 {
+                store.showToast("已导入 \(summary.importedNewCount) 条新收藏，补齐 \(summary.updatedExistingCount) 条既有记录")
+            } else if summary.importedNewCount > 0 {
+                store.showToast("已成功导入 \(summary.importedNewCount) 条收藏资产")
+            } else if summary.updatedExistingCount > 0 {
+                store.showToast("已合并更新 \(summary.updatedExistingCount) 条既有收藏")
+            } else {
+                store.showToast("归档内 \(summary.totalInBundle) 条收藏均已在本地存在")
+            }
+        } catch {
+            store.showToast(error.localizedDescription)
+        }
     }
 
     private func clampSelection() {

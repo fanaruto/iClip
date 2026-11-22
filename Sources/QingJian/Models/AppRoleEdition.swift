@@ -10,6 +10,11 @@ enum AppRoleEdition: String, Codable, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
+    /// 当前客户端版本号字符串
+    static var currentVersionString: String {
+        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "2.0.0"
+    }
+
     /// 当前正在运行的客户端二进制所属角色版本
     static var installed: AppRoleEdition {
         if let plistValue = Bundle.main.infoDictionary?["IClipEdition"] as? String,

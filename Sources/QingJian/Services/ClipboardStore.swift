@@ -779,6 +779,33 @@ final class ClipboardStore: ObservableObject {
         showToast("已清空未固定记录")
     }
 
+    // MARK: - 收藏话术与模板离线归档迁移（.iclip）
+
+    var pinnedItemCount: Int {
+        items.filter(\.isPinned).count
+    }
+
+    func exportPinnedArchive(to destinationURL: URL) throws -> Int {
+        let data = try ArchiveBackupService.exportPinnedArchiveData(
+            from: items,
+            imagesDirectoryURL: imagesDirectoryURL
+        )
+        try data.write(to: destinationURL, options: .atomic)
+        return pinnedItemCount
+    }
+
+    func importPinnedArchive(from sourceURL: URL) throws -> ArchiveImportSummary {
+        let data = try Data(contentsOf: sourceURL)
+        let (merged, summary) = try ArchiveBackupService.mergeArchiveData(
+            data,
+            into: items,
+            imagesDirectoryURL: imagesDirectoryURL
+        )
+        self.items = sortItems(merged)
+        saveHistory(immediate: true)
+        return summary
+    }
+
     func showToast(_ message: String) {
         toastWorkItem?.cancel()
         toastMessage = message

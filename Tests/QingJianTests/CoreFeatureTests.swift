@@ -345,7 +345,118 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertNil(MeetingAndEphemeralEngine.cleanMeetingTranscript(serverLogs))
     }
 
-    // MARK: - 10. 语义脱敏、净链与动态模板回归测试
+    // MARK: - 10. 置顶收藏与模板自包含归档（.iclip）跨机迁移与幂等去重合并测试
+
+    func testPinnedArchiveExportAndNonDestructiveMerge() throws {
+        let fm = FileManager.default
+        let srcImgDir = fm.temporaryDirectory.appendingPathComponent("iclip-arch-src-\(UUID().uuidString)", isDirectory: true)
+        let dstImgDir = fm.temporaryDirectory.appendingPathComponent("iclip-arch-dst-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: srcImgDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: dstImgDir, withIntermediateDirectories: true)
+        defer {
+            try? fm.removeItem(at: srcImgDir)
+            try? fm.removeItem(at: dstImgDir)
+        }
+
+        // 无固定项时导出应明确拒绝并抛出 .noPinnedItems
+        let unpinnedSecret = ClipItem(
+            type: .text,
+            text: "临时短信验证码 839201",
+            contentHash: "text:ephemeral-1",
+            isPinned: false
+        )
+        XCTAssertThrowsError(try ArchiveBackupService.exportPinnedArchiveData(from: [unpinnedSecret], imagesDirectoryURL: srcImgDir)) { err in
+            XCTAssertEqual(err as? ArchiveBackupError, .noPinnedItems)
+        }
+
+        // 准备真实 1x1 PNG 数据写入源图片目录
+        let fakePNGBytes = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x01, 0x02, 0x03])
+        let srcImageName = "pinned-qr.png"
+        try fakePNGBytes.write(to: srcImgDir.appendingPathComponent(srcImageName))
+
+        let pinnedInvoice = ClipItem(
+            type: .text,
+            text: "公司名称：轻剪科技有限公司\n税号：91440300MA5F123456",
+            contentHash: "text:invoice-01",
+            isPinned: true,
+            pinCategory: .invoice,
+            customAlias: "深圳总部开票资料"
+        )
+        let pinnedQRImage = ClipItem(
+            type: .image,
+            imageFileName: srcImageName,
+            imageWidth: 320,
+            imageHeight: 320,
+            ocrText: "企业对公收款码",
+            ocrChecked: true,
+            contentHash: "img:qr-01",
+            isPinned: true,
+            pinCategory: .reply,
+            customAlias: "商务收款二维码"
+        )
+
+        // 1. 导出：验证未固定的临时记录绝不被打包进 .iclip
+        let archiveData = try ArchiveBackupService.exportPinnedArchiveData(
+            from: [unpinnedSecret, pinnedInvoice, pinnedQRImage],
+            imagesDirectoryURL: srcImgDir,
+            appVersion: "2.0.0",
+            editionKey: "flow"
+        )
+        let archiveJSONStr = try XCTUnwrap(String(data: archiveData, encoding: .utf8))
+        XCTAssertFalse(archiveJSONStr.contains("839201"))
+        XCTAssertTrue(archiveJSONStr.contains("深圳总部开票资料"))
+
+        // 2. 目标机器已有本地记录 + 一条同哈希但未固定无备注的相同开票文本
+        let localNote = ClipItem(type: .text, text: "本地草稿笔记", contentHash: "text:local-draft", isPinned: false)
+        let localUnpinnedInvoice = ClipItem(
+            type: .text,
+            text: pinnedInvoice.text,
+            contentHash: "text:invoice-01",
+            isPinned: false,
+            pinCategory: nil,
+            customAlias: nil
+        )
+
+        let (mergedOnce, summaryOnce) = try ArchiveBackupService.mergeArchiveData(
+            archiveData,
+            into: [localNote, localUnpinnedInvoice],
+            imagesDirectoryURL: dstImgDir
+        )
+        XCTAssertEqual(summaryOnce.totalInBundle, 2)
+        XCTAssertEqual(summaryOnce.importedNewCount, 1)      // 图片收款码为全新导入
+        XCTAssertEqual(summaryOnce.updatedExistingCount, 1)  // 开票资料自动补齐置顶、分组与备注
+        XCTAssertEqual(mergedOnce.count, 3)                  // 本地草稿完好无损
+
+        let upgradedInvoice = try XCTUnwrap(mergedOnce.first(where: { $0.contentHash == "text:invoice-01" }))
+        XCTAssertTrue(upgradedInvoice.isPinned)
+        XCTAssertEqual(upgradedInvoice.pinCategory, .invoice)
+        XCTAssertEqual(upgradedInvoice.customAlias, "深圳总部开票资料")
+
+        let restoredQR = try XCTUnwrap(mergedOnce.first(where: { $0.contentHash == "img:qr-01" }))
+        XCTAssertTrue(restoredQR.isPinned)
+        XCTAssertEqual(restoredQR.ocrText, "企业对公收款码")
+        let restoredFileName = try XCTUnwrap(restoredQR.imageFileName)
+        let restoredDiskBytes = try Data(contentsOf: dstImgDir.appendingPathComponent(restoredFileName))
+        XCTAssertEqual(restoredDiskBytes, fakePNGBytes)
+
+        // 3. 幂等性验证：二次重复导入同一归档包零重复膨胀
+        let (mergedTwice, summaryTwice) = try ArchiveBackupService.mergeArchiveData(
+            archiveData,
+            into: mergedOnce,
+            imagesDirectoryURL: dstImgDir
+        )
+        XCTAssertEqual(summaryTwice.importedNewCount, 0)
+        XCTAssertEqual(summaryTwice.updatedExistingCount, 0)
+        XCTAssertEqual(mergedTwice.count, 3)
+
+        // 4. 非法文件防御验证
+        let invalidData = "{\"hello\":\"world\"}".data(using: .utf8)!
+        XCTAssertThrowsError(try ArchiveBackupService.mergeArchiveData(invalidData, into: [], imagesDirectoryURL: dstImgDir)) { err in
+            XCTAssertEqual(err as? ArchiveBackupError, .invalidArchiveFormat)
+        }
+    }
+
+    // MARK: - 11. 语义脱敏、净链与动态模板回归测试
 
     #if !ICLIP_EDITION_FLOW
     func testSemanticRedactionAndTemplateInterpolation() {
