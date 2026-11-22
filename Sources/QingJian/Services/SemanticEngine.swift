@@ -11,6 +11,7 @@ enum SemanticKind: String, Equatable {
     case colorCode
     case json
     case financeAmount
+    case pdfTypography
     case timestamp
     case multilineList
     case base64
@@ -25,6 +26,7 @@ enum SemanticKind: String, Equatable {
         case .colorCode: return "颜色色值"
         case .json: return "JSON"
         case .financeAmount: return "金额账单"
+        case .pdfTypography: return "PDF/排版"
         case .timestamp: return "时间戳"
         case .multilineList: return "多行数据列"
         case .base64: return "Base64"
@@ -41,6 +43,7 @@ enum SemanticKind: String, Equatable {
         case .colorCode: return "paintpalette.fill"
         case .json: return "curlybraces"
         case .financeAmount: return "yensign.circle.fill"
+        case .pdfTypography: return "text.redaction"
         case .timestamp: return "clock.badge.checkmark"
         case .multilineList: return "list.bullet.rectangle"
         case .base64: return "lock.open.rotation"
@@ -57,6 +60,7 @@ enum SemanticKind: String, Equatable {
         case .colorCode: return .systemPink
         case .json: return .systemPurple
         case .financeAmount: return .systemBrown
+        case .pdfTypography: return .systemTeal
         case .timestamp: return .systemCyan
         case .multilineList: return .systemMint
         case .base64: return .systemIndigo
@@ -69,6 +73,7 @@ enum SemanticKind: String, Equatable {
         switch token.lowercased() {
         case "@tpl", "@snippet", "@模板": return .dynamicTemplate
         case "@rmb", "@money", "@sum", "@金额", "@大写": return .financeAmount
+        case "@pdf", "@typo", "@排版", "@断行": return .pdfTypography
         case "@secret", "@key", "@env", "@脱敏", "@密钥": return .sensitiveSecret
         case "@url", "@clean", "@净链": return .dirtyURL
         case "@curl", "@http": return .curlCommand
@@ -508,16 +513,34 @@ enum SemanticEngine {
             }
         }
 
-        // 7. 多行数据列转换（一键转 SQL IN 子句 / JSON 数组 / 逗号分隔）或深层代码去公共缩进
-        if raw.utf16.count <= 32_768 && trimmed.contains("\n") && primaryKind != .json && primaryKind != .curlCommand {
+        // 8. PDF 跨行断句愈合与中英间距美化 vs 多行数据列转换（SQL IN / JSON 数组）
+        if raw.utf16.count <= 32_768 && primaryKind == nil {
+            let docActions = DocumentTypographyEngine.analyze(raw)
+            if DocumentTypographyEngine.looksLikeBrokenPDFParagraphs(raw), !docActions.isEmpty {
+                primaryKind = .pdfTypography
+                for da in docActions {
+                    actions.append(TransformAction(
+                        id: da.id,
+                        title: da.title,
+                        symbolName: da.symbolName,
+                        isSecurityAction: false,
+                        resultText: da.resultText,
+                        toastText: da.toastText
+                    ))
+                }
+            }
+        }
+
+        if raw.utf16.count <= 32_768 && trimmed.contains("\n") && primaryKind != .json && primaryKind != .curlCommand && primaryKind != .pdfTypography {
             let rawLines = raw.components(separatedBy: .newlines)
             let cleanItems = rawLines
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty }
 
-            // 判断是否为整齐的 ID / 词条数据列（2~500 行，每行 ≤ 96 字符且不含典型代码花括号分号）
+            // 判断是否为整齐的 ID / 词条数据列（2~500 行，每行 ≤ 64 字符且不含典型句子标点与代码花括号分号）
             let looksLikeColumn = cleanItems.count >= 2 && cleanItems.count <= 500 && cleanItems.allSatisfy { line in
-                line.count <= 96 && !line.contains("{") && !line.contains("}") && !line.hasSuffix(";")
+                line.count <= 64 && !line.contains("{") && !line.contains("}") && !line.hasSuffix(";")
+                    && !line.contains("。") && !line.contains("，")
             }
 
             if looksLikeColumn {
@@ -600,6 +623,24 @@ enum SemanticEngine {
                         isSecurityAction: false,
                         resultText: upperSnake,
                         toastText: "已转为常量命名"
+                    ))
+                }
+            }
+        }
+
+        // 单行中英混排粘连排版美化兜底
+        if primaryKind == nil && !trimmed.contains("\n") && raw.utf16.count <= 8_192 {
+            let docActions = DocumentTypographyEngine.analyze(raw)
+            if !docActions.isEmpty {
+                primaryKind = .pdfTypography
+                for da in docActions {
+                    actions.append(TransformAction(
+                        id: da.id,
+                        title: da.title,
+                        symbolName: da.symbolName,
+                        isSecurityAction: false,
+                        resultText: da.resultText,
+                        toastText: da.toastText
                     ))
                 }
             }

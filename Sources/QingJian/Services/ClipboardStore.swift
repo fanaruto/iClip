@@ -842,7 +842,10 @@ final class ClipboardStore: ObservableObject {
         if let cached = financeCache.object(forKey: key) {
             return cached.actions
         }
-        let analyzed = FinanceNumberEngine.analyze(raw)
+        var analyzed = FinanceNumberEngine.analyze(raw)
+        if analyzed.isEmpty {
+            analyzed = DocumentTypographyEngine.analyze(raw)
+        }
         financeCache.setObject(FinanceActionsBox(analyzed), forKey: key)
         return analyzed
     }

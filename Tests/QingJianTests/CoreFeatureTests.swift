@@ -107,6 +107,46 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertNil(legacyDecoded.first?.pinCategory)
     }
 
+    // MARK: - 5. PDF 断行智能愈合与盘古中英排版边界测试
+
+    func testPDFLineBreakHealingAndHyphenation() {
+        let brokenEnglishPDF = """
+        Modern transformer archi-
+        tectures achieve state-of-the-
+        art accuracy in real-time tasks.
+
+        1. First key contribution
+        2. Second key contribution
+        """
+        let healed = DocumentTypographyEngine.healPDFLineBreaks(brokenEnglishPDF)
+        XCTAssertTrue(healed.contains("architectures achieve state-of-the-art accuracy in real-time tasks."))
+        // 真实空行分段与列表项必须完整保留，不被粘成一坨
+        XCTAssertTrue(healed.contains("\n\n1. First key contribution\n\n2. Second key contribution"))
+
+        let brokenChinesePDF = """
+        在跨语言合同与双栏学术论文阅读场景下，复制出
+        来的文字经常在句中出现硬折行，严重影响大模型翻
+        译与笔记摘录体验。
+        """
+        let healedCN = DocumentTypographyEngine.healPDFLineBreaks(brokenChinesePDF)
+        XCTAssertEqual(healedCN, "在跨语言合同与双栏学术论文阅读场景下，复制出来的文字经常在句中出现硬折行，严重影响大模型翻译与笔记摘录体验。")
+    }
+
+    func testPanguSpacingProtectsURLsAndCode() {
+        let messy = "使用iClip在macOS15上提升300%效率，详见https://github.com/fanaruto/iClip仓库"
+        let spaced = DocumentTypographyEngine.applyPanguSpacing(messy)
+        XCTAssertEqual(spaced, "使用 iClip 在 macOS15 上提升 300% 效率，详见 https://github.com/fanaruto/iClip 仓库")
+
+        // 代码块绝不能误触发 PDF 断行或盘古排版
+        let swiftCode = """
+        func computeValue(x: Int) -> Int {
+            let result = x * 2
+            return result
+        }
+        """
+        XCTAssertTrue(DocumentTypographyEngine.analyze(swiftCode).isEmpty)
+    }
+
     // MARK: - 5. 语义脱敏、净链与动态模板回归测试
 
     #if !ICLIP_EDITION_FLOW
