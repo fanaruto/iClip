@@ -194,6 +194,8 @@ final class ClipboardStore: ObservableObject {
         }
     }
     @Published var toastMessage: String? = nil
+    /// 是否存在处于 8 秒保护窗口内可按 ⌘Z 恢复的最近一次删除/清空快照
+    @Published private(set) var canUndoLastDeletion: Bool = false
     /// 在外部浏览器直接打开链接后通知悬浮窗丝滑收起（不抢回原应用焦点）
     var onAfterOpenExternalURL: (() -> Void)? = nil
 
@@ -220,6 +222,8 @@ final class ClipboardStore: ObservableObject {
     private var appearanceSaveWorkItem: DispatchWorkItem?
     private var cacheTrimWorkItem: DispatchWorkItem?
     private var pendingOTPExpirationTasks: [UUID: DispatchWorkItem] = [:]
+    private var undoRemovedItems: [ClipItem] = []
+    private var undoPurgeWorkItem: DispatchWorkItem?
     private var adaptiveCancellable: AnyCancellable?
     private let diskQueue = DispatchQueue(label: "com.qingjian.clipboard.disk", qos: .utility)
 
@@ -1497,32 +1501,115 @@ final class ClipboardStore: ObservableObject {
         pendingOTPExpirationTasks[item.id]?.cancel()
         pendingOTPExpirationTasks.removeValue(forKey: item.id)
         guard let idx = items.firstIndex(where: { $0.id == item.id }) else { return }
-        if userInitiated {
-            TactileFeedbackEngine.shared.perform(.deleteItem)
-        }
         let removed = items.remove(at: idx)
         #if ICLIP_EDITION_FLOW
         pasteQueueIDs.removeAll { $0 == removed.id }
         selectedMergeIDs.removeAll { $0 == removed.id }
         #endif
-        deleteImageFileIfNeeded(for: removed)
         saveHistory()
+
+        if userInitiated {
+            TactileFeedbackEngine.shared.perform(.deleteItem)
+            stageDeletionUndoBuffer([removed])
+            showToast("已删除 · 按 ⌘Z 撤销", duration: 3.4)
+        } else {
+            deleteImageFileIfNeeded(for: removed)
+        }
     }
 
     func clearUnpinned() {
         let toRemove = items.filter { !$0.isPinned }
+        guard !toRemove.isEmpty else { return }
         #if ICLIP_EDITION_FLOW
         let removedIDs = Set(toRemove.map(\.id))
         pasteQueueIDs.removeAll { removedIDs.contains($0) }
         selectedMergeIDs.removeAll { removedIDs.contains($0) }
         #endif
-        for item in toRemove {
-            deleteImageFileIfNeeded(for: item)
-        }
         items = items.filter { $0.isPinned }
         saveHistory()
         TactileFeedbackEngine.shared.perform(.deleteItem)
-        showToast("已清空未收藏记录")
+        stageDeletionUndoBuffer(toRemove)
+        showToast("已清空 \(toRemove.count) 条 · 按 ⌘Z 撤销", duration: 4.2)
+    }
+
+    /// 暂存被删条目并延迟 8 秒物理清理图片，支持手滑后按 ⌘Z 或点击胶囊零损原位恢复
+    private func stageDeletionUndoBuffer(_ newlyRemoved: [ClipItem]) {
+        flushPendingUndoImages()
+        undoRemovedItems = newlyRemoved
+        canUndoLastDeletion = true
+
+        let work = DispatchWorkItem { [weak self] in
+            self?.flushPendingUndoImages()
+        }
+        undoPurgeWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8.0, execute: work)
+    }
+
+    private func flushPendingUndoImages() {
+        undoPurgeWorkItem?.cancel()
+        undoPurgeWorkItem = nil
+        guard !undoRemovedItems.isEmpty else {
+            canUndoLastDeletion = false
+            return
+        }
+        let activeHashes = Set(items.map(\.contentHash))
+        for item in undoRemovedItems where !activeHashes.contains(item.contentHash) {
+            deleteImageFileIfNeeded(for: item)
+        }
+        undoRemovedItems.removeAll()
+        canUndoLastDeletion = false
+    }
+
+    /// 撤销最近一次删除或清空操作（⌘Z）
+    @discardableResult
+    func undoLastDeletion() -> Bool {
+        guard canUndoLastDeletion, !undoRemovedItems.isEmpty else { return false }
+        undoPurgeWorkItem?.cancel()
+        undoPurgeWorkItem = nil
+
+        let existingIDs = Set(items.map(\.id))
+        let toRestore = undoRemovedItems.filter { !existingIDs.contains($0.id) }
+        undoRemovedItems.removeAll()
+        canUndoLastDeletion = false
+        guard !toRestore.isEmpty else { return false }
+
+        items = sortItems(items + toRestore)
+        saveHistory()
+        TactileFeedbackEngine.shared.perform(.favoriteOn)
+        showToast("已恢复 \(toRestore.count) 条记录")
+        return true
+    }
+
+    /// 将即时速算结果写入系统剪贴板并按需键入外部目标窗口
+    func pasteInstantValue(
+        _ valueText: String,
+        toast: String,
+        shouldAutoPaste: Bool = true,
+        onBeforePaste: (() -> Void)? = nil
+    ) {
+        pasteboard.clearContents()
+        pasteboard.setString(valueText, forType: .string)
+        ignoreNextChangeCount = pasteboard.changeCount
+        lastChangeCount = pasteboard.changeCount
+
+        let hash = Self.sha256(valueText)
+        let item = ClipItem(
+            type: .text,
+            text: valueText,
+            contentHash: "text:\(hash)",
+            sourceAppName: "iClip 速算"
+        )
+        insertOrPromote(item)
+
+        TactileFeedbackEngine.shared.perform(.pasteCommit)
+        onBeforePaste?()
+        refreshAccessibilityStatus()
+        if shouldAutoPaste && autoPasteEnabled && isAccessibilityGranted {
+            Self.schedulePasteWhenTargetReady()
+            showToast(toast)
+        } else {
+            showToast("\(toast)（已复制）")
+        }
     }
 
     // MARK: - 收藏话术与模板离线归档迁移（.iclip）
@@ -1552,14 +1639,14 @@ final class ClipboardStore: ObservableObject {
         return summary
     }
 
-    func showToast(_ message: String) {
+    func showToast(_ message: String, duration: TimeInterval = 1.6) {
         toastWorkItem?.cancel()
         toastMessage = message
         let work = DispatchWorkItem { [weak self] in
             self?.toastMessage = nil
         }
         toastWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: work)
     }
 
     // MARK: - 极客开发版专属能力（微秒级语义总线 + 密钥脱敏 + 动态模板）

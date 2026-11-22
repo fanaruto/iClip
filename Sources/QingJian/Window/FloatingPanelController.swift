@@ -493,6 +493,12 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             return nil
         }
 
+        // ⌘Z (keyCode 6)：若搜索框为空且存在 8 秒保护窗口内的删除/清空快照，一键原位恢复
+        if flags == .command, event.keyCode == 6, nav.searchText.isEmpty, store.canUndoLastDeletion {
+            _ = store.undoLastDeletion()
+            return nil
+        }
+
         if flags == .command, event.keyCode == 51 {
             rootView.deleteSelected()
             return nil
@@ -1061,6 +1067,12 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         // ⌘S (keyCode 1) / ⌘D (keyCode 2)：全键盘一键收藏 / 取消收藏当前选中条目
         if flags == .command, (event.keyCode == 1 || event.keyCode == 2) {
             rootView.togglePinForSelected()
+            return nil
+        }
+
+        // ⌘Z (keyCode 6)：若搜索框为空且存在 8 秒保护窗口内的删除/清空快照，一键原位恢复
+        if flags == .command, event.keyCode == 6, nav.searchText.isEmpty, store.canUndoLastDeletion {
+            _ = store.undoLastDeletion()
             return nil
         }
 

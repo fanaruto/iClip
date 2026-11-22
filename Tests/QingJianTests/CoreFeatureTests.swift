@@ -727,4 +727,25 @@ final class CoreFeatureTests: XCTestCase {
         _ = engine.adoptUserSuggestion("开启拖拽微落点", in: .shared)
         XCTAssertTrue(engine.cursorDropPodEnabled)
     }
+
+    // MARK: - 20. 搜索框即时四则速算（精确小数除法/防日期误判/大写直出）与误删撤销测试
+
+    @MainActor
+    func testInstantMathEvaluatorAndSafetyGuards() throws {
+        // 1. 浮点除法不丢小数、括号优先级与中文乘除号支持
+        let r1 = try XCTUnwrap(InstantMathEvaluator.evaluate("5 / 2"))
+        XCTAssertEqual(r1.plainValue, "2.5")
+        XCTAssertEqual(r1.rmbUppercase, "贰元伍角整")
+
+        let r2 = try XCTUnwrap(InstantMathEvaluator.evaluate("(3,200 + 800) × 1.13"))
+        XCTAssertEqual(r2.plainValue, "4520")
+        XCTAssertEqual(r2.formattedThousands, "4,520")
+        XCTAssertEqual(r2.rmbUppercase, "肆仟伍佰贰拾元整")
+
+        // 2. 边界安全守卫：半截算式、除以 0、ISO 日期与普通纯数字不触发误判且绝不崩溃
+        XCTAssertNil(InstantMathEvaluator.evaluate("128 + "))
+        XCTAssertNil(InstantMathEvaluator.evaluate("100 / 0"))
+        XCTAssertNil(InstantMathEvaluator.evaluate("2026-11-23"))
+        XCTAssertNil(InstantMathEvaluator.evaluate("91310000"))
+    }
 }

@@ -1,5 +1,81 @@
 import SwiftUI
 
+/// 搜索框即时四则速算与人民币会计大写直出卡片（零阻塞递归解析，按 ↵ 贴数值 / 按 ⇧↵ 贴大写）
+struct InstantMathCardView: View {
+    let math: InstantMathResult
+    let onCommitPlain: () -> Void
+    let onCommitRMB: (() -> Void)?
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "function")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 28, height: 28)
+                .background(Circle().fill(Color.accentColor.opacity(0.14)))
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text("= \(math.formattedThousands)")
+                        .font(.system(size: 14.5, weight: .bold, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+
+                    if math.formattedThousands != math.plainValue {
+                        Text("(\(math.plainValue))")
+                            .font(.system(size: 11, weight: .medium))
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+
+                if let rmb = math.rmbUppercase {
+                    Text(rmb)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+
+            Spacer(minLength: 4)
+
+            if let rmb = math.rmbUppercase, !rmb.isEmpty, let onCommitRMB {
+                Button(action: onCommitRMB) {
+                    Text("大写 ⇧↵")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(Color.accentColor)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Capsule().fill(Color.accentColor.opacity(0.13)))
+                }
+                .buttonStyle(.plain)
+            }
+
+            Button(action: onCommitPlain) {
+                Text("键入 ↵")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4.5)
+                    .background(Capsule().fill(Color.accentColor))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 11)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .fill(Color.accentColor.opacity(0.09))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .strokeBorder(Color.accentColor.opacity(0.24), lineWidth: 0.65)
+        )
+    }
+}
+
 /// 顶栏「始终在前（Always on Top · ⌘P）」32×32 原生玻璃图钉圆钮（锁死外框尺寸，零布局抖动）
 struct AlwaysOnTopPinButton: View {
     @ObservedObject var store: ClipboardStore

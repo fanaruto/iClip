@@ -190,6 +190,23 @@ struct ClipboardPopoverView: View {
                         .padding(.horizontal, 14)
                         .padding(.bottom, 8)
                         .transition(.opacity.combined(with: .move(edge: .top)))
+                    } else if let math = InstantMathEvaluator.evaluate(nav.searchText) {
+                        InstantMathCardView(
+                            math: math,
+                            onCommitPlain: {
+                                nav.searchText = ""
+                                store.pasteInstantValue(math.plainValue, toast: "已键入计算结果 \(math.plainValue)", shouldAutoPaste: true, onBeforePaste: onDismiss)
+                            },
+                            onCommitRMB: math.rmbUppercase.map { rmb in
+                                {
+                                    nav.searchText = ""
+                                    store.pasteInstantValue(rmb, toast: "已键入大写金额", shouldAutoPaste: true, onBeforePaste: onDismiss)
+                                }
+                            }
+                        )
+                        .padding(.horizontal, 14)
+                        .padding(.bottom, 8)
+                        .transition(.opacity.combined(with: .move(edge: .top)))
                     }
 
                     if !store.minimalModeEnabled && nav.selectedTab == .pinned {
@@ -1672,16 +1689,35 @@ struct ClipboardPopoverView: View {
     // MARK: - 轻提示胶囊
 
     private func toastPill(_ message: String) -> some View {
-        Text(message)
-            .font(.system(size: 12.5, weight: .medium))
-            .foregroundStyle(.white)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 7)
-            .background(
-                Capsule()
-                    .fill(Color.black.opacity(0.78))
-                    .shadow(color: Color.black.opacity(0.2), radius: 8, y: 3)
-            )
+        HStack(spacing: 8) {
+            Text(message)
+                .font(.system(size: 12.5, weight: .medium))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+
+            if store.canUndoLastDeletion && message.contains("⌘Z") {
+                Button {
+                    withAnimation(.spring(response: 0.24, dampingFraction: 0.85)) {
+                        _ = store.undoLastDeletion()
+                    }
+                } label: {
+                    Text("撤销")
+                        .font(.system(size: 11.5, weight: .bold))
+                        .foregroundStyle(Color.accentColor)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 2.5)
+                        .background(Capsule().fill(Color.white))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 7)
+        .background(
+            Capsule()
+                .fill(Color.black.opacity(0.80))
+                .shadow(color: Color.black.opacity(0.22), radius: 8, y: 3)
+        )
     }
 
     // MARK: - 图片悬停纯净原图预览控制
@@ -1819,12 +1855,25 @@ struct ClipboardPopoverView: View {
             store.showToast(outcome.message)
             return
         }
+        if (filteredItems.isEmpty || nav.searchText.trimmingCharacters(in: .whitespaces).hasPrefix("=")),
+           let math = InstantMathEvaluator.evaluate(nav.searchText) {
+            nav.searchText = ""
+            store.pasteInstantValue(math.plainValue, toast: "已键入计算结果 \(math.plainValue)", shouldAutoPaste: true, onBeforePaste: onDismiss)
+            return
+        }
         guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return }
         let item = filteredItems[nav.selectedIndex]
         store.copyAndOptionallyPaste(item, plainTextOnly: false, shouldAutoPaste: true, onBeforePaste: onDismiss)
     }
 
     func pasteSecondaryActionForSelected() {
+        if (filteredItems.isEmpty || nav.searchText.trimmingCharacters(in: .whitespaces).hasPrefix("=")),
+           let math = InstantMathEvaluator.evaluate(nav.searchText),
+           let rmb = math.rmbUppercase {
+            nav.searchText = ""
+            store.pasteInstantValue(rmb, toast: "已键入大写金额", shouldAutoPaste: true, onBeforePaste: onDismiss)
+            return
+        }
         guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return }
         let item = filteredItems[nav.selectedIndex]
         if !store.minimalModeEnabled && item.type == .image {
@@ -2207,6 +2256,23 @@ struct ClipboardPopoverView: View {
                             nav.searchText = ""
                             store.showToast(outcome.message)
                         }
+                        .padding(.horizontal, 14)
+                        .padding(.bottom, 8)
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                    } else if let math = InstantMathEvaluator.evaluate(nav.searchText) {
+                        InstantMathCardView(
+                            math: math,
+                            onCommitPlain: {
+                                nav.searchText = ""
+                                store.pasteInstantValue(math.plainValue, toast: "已键入计算结果 \(math.plainValue)", shouldAutoPaste: true, onBeforePaste: onDismiss)
+                            },
+                            onCommitRMB: math.rmbUppercase.map { rmb in
+                                {
+                                    nav.searchText = ""
+                                    store.pasteInstantValue(rmb, toast: "已键入大写金额", shouldAutoPaste: true, onBeforePaste: onDismiss)
+                                }
+                            }
+                        )
                         .padding(.horizontal, 14)
                         .padding(.bottom, 8)
                         .transition(.opacity.combined(with: .move(edge: .top)))
@@ -3494,16 +3560,35 @@ struct ClipboardPopoverView: View {
     // MARK: - 轻提示胶囊
 
     private func toastPill(_ message: String) -> some View {
-        Text(message)
-            .font(.system(size: 12.5, weight: .medium))
-            .foregroundStyle(.white)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 7)
-            .background(
-                Capsule()
-                    .fill(Color.black.opacity(0.78))
-                    .shadow(color: Color.black.opacity(0.2), radius: 8, y: 3)
-            )
+        HStack(spacing: 8) {
+            Text(message)
+                .font(.system(size: 12.5, weight: .medium))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+
+            if store.canUndoLastDeletion && message.contains("⌘Z") {
+                Button {
+                    withAnimation(.spring(response: 0.24, dampingFraction: 0.85)) {
+                        _ = store.undoLastDeletion()
+                    }
+                } label: {
+                    Text("撤销")
+                        .font(.system(size: 11.5, weight: .bold))
+                        .foregroundStyle(Color.accentColor)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 2.5)
+                        .background(Capsule().fill(Color.white))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 7)
+        .background(
+            Capsule()
+                .fill(Color.black.opacity(0.80))
+                .shadow(color: Color.black.opacity(0.22), radius: 8, y: 3)
+        )
     }
 
     // MARK: - 图片悬停纯净原图预览控制
@@ -3623,6 +3708,12 @@ struct ClipboardPopoverView: View {
             store.showToast(outcome.message)
             return
         }
+        if (filteredItems.isEmpty || nav.searchText.trimmingCharacters(in: .whitespaces).hasPrefix("=")),
+           let math = InstantMathEvaluator.evaluate(nav.searchText) {
+            nav.searchText = ""
+            store.pasteInstantValue(math.plainValue, toast: "已键入计算结果 \(math.plainValue)", shouldAutoPaste: true, onBeforePaste: onDismiss)
+            return
+        }
         guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return }
         let item = filteredItems[nav.selectedIndex]
         if nav.showQuickLook {
@@ -3663,6 +3754,13 @@ struct ClipboardPopoverView: View {
     }
 
     func pasteSmartTransformedSelected() {
+        if (filteredItems.isEmpty || nav.searchText.trimmingCharacters(in: .whitespaces).hasPrefix("=")),
+           let math = InstantMathEvaluator.evaluate(nav.searchText),
+           let rmb = math.rmbUppercase {
+            nav.searchText = ""
+            store.pasteInstantValue(rmb, toast: "已键入大写金额", shouldAutoPaste: true, onBeforePaste: onDismiss)
+            return
+        }
         guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return }
         let item = filteredItems[nav.selectedIndex]
         let snapshot = store.semanticSnapshot(for: item)
