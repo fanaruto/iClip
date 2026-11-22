@@ -37,19 +37,26 @@ struct ClipCardView: View {
         minimalMode ? [] : ClipboardStore.shared.financeActions(for: item)
     }
 
+    private var hasLeadingVisual: Bool {
+        item.type != .text
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .center, spacing: 12) {
-                leadingThumbnail
+                if hasLeadingVisual {
+                    leadingThumbnail
+                }
 
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 5.5) {
                     Text(minimalMode ? item.rawContentPreview : item.primaryTitle)
                         .font(.system(size: 13.5, weight: .medium))
+                        .lineSpacing(2.5)
                         .foregroundStyle(isSelected ? Color.white : Color.primary)
                         .lineLimit(2)
                         .multilineTextAlignment(.leading)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.trailing, 36)
+                        .padding(.trailing, 42)
 
                     HStack(spacing: 6) {
                         if item.isPinned {
@@ -103,46 +110,46 @@ struct ClipCardView: View {
                 }
             }
 
-            if !minimalMode && (isSelected || isHovered) && !financeActions.isEmpty {
-                HStack(spacing: 6) {
-                    ForEach(Array(financeActions.enumerated()), id: \.element.id) { idx, action in
-                        Button {
-                            onApplyFinanceAction(action, true)
-                        } label: {
-                            HStack(spacing: 4) {
-                                Image(systemName: action.symbolName)
-                                    .font(.system(size: 10, weight: .semibold))
-                                Text(action.title)
-                                    .font(.system(size: 11, weight: .medium))
-                                    .lineLimit(1)
-                                if idx == 0 {
-                                    Text("⇧↵")
-                                        .font(.system(size: 9.5, weight: .semibold))
-                                        .opacity(0.75)
+            if !minimalMode && !financeActions.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(Array(financeActions.enumerated()), id: \.element.id) { idx, action in
+                            Button {
+                                onApplyFinanceAction(action, true)
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: action.symbolName)
+                                        .font(.system(size: 10, weight: .semibold))
+                                    Text(action.title)
+                                        .font(.system(size: 11, weight: .medium))
+                                        .lineLimit(1)
+                                    if idx == 0 {
+                                        Text("⇧↵")
+                                            .font(.system(size: 9.5, weight: .semibold))
+                                            .opacity(0.75)
+                                    }
                                 }
+                                .foregroundStyle(isSelected ? Color.white : Color.primary.opacity(isHovered ? 0.90 : 0.72))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3.5)
+                                .background(
+                                    Capsule()
+                                        .fill(isSelected ? Color.white.opacity(0.20) : Color.primary.opacity(isHovered ? 0.085 : 0.055))
+                                )
                             }
-                            .foregroundStyle(isSelected ? Color.white : Color.primary.opacity(0.88))
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 3.5)
-                            .background(
-                                Capsule()
-                                    .fill(isSelected ? Color.white.opacity(0.20) : Color.primary.opacity(0.075))
-                            )
+                            .buttonStyle(.plain)
                         }
-                        .buttonStyle(.plain)
                     }
-                    Spacer(minLength: 0)
                 }
-                .padding(.leading, 54)
-                .transition(.opacity.combined(with: .move(edge: .top)))
+                .padding(.leading, hasLeadingVisual ? 58 : 0)
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
+        .padding(.horizontal, hasLeadingVisual ? 12 : 14)
+        .padding(.vertical, hasLeadingVisual ? 10 : 11)
         .background(cardBackground)
         .overlay(cardBorder)
         .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .scaleEffect(isHovered && !isSelected ? 1.005 : 1.0)
+        .scaleEffect(isHovered ? 1.012 : 1.0)
         .animation(.spring(response: 0.22, dampingFraction: 0.85), value: isHovered)
         .animation(.spring(response: 0.2, dampingFraction: 0.85), value: isSelected)
         .onHover { hovering in
@@ -217,7 +224,7 @@ struct ClipCardView: View {
             iconBadge(symbol: "link", tint: .blue)
 
         case .text:
-            iconBadge(symbol: "doc.text", tint: .indigo)
+            EmptyView()
         }
     }
 
@@ -281,22 +288,25 @@ struct ClipCardView: View {
     }
 
     private var hoverActions: some View {
-        HStack(spacing: 4) {
+        let surface: HoverActionSurface = isSelected ? .onSelectedCard : .onStandardCard
+        return HStack(spacing: 5) {
             if !minimalMode {
                 HoverActionCircleButton(
                     symbolName: mergeRank != nil ? "checkmark.square.fill" : "square.stack",
-                    size: 22,
-                    iconSize: 10,
-                    kind: .standard(activeColor: mergeRank != nil ? .green : nil),
+                    size: 24,
+                    iconSize: 11,
+                    surface: surface,
+                    kind: .merge(isActive: mergeRank != nil),
                     helpText: mergeRank != nil ? "取消勾选合并" : "勾选加入合并粘贴（⌘单击 / ⌘M）",
                     action: onToggleMerge
                 )
 
                 HoverActionCircleButton(
                     symbolName: queueRank != nil ? "checkmark.circle.fill" : "plus.circle",
-                    size: 22,
-                    iconSize: 10,
-                    kind: .standard(activeColor: queueRank != nil ? .accentColor : nil),
+                    size: 24,
+                    iconSize: 11,
+                    surface: surface,
+                    kind: .queue(isActive: queueRank != nil),
                     helpText: queueRank != nil ? "移出顺序粘贴队列" : "加入顺序粘贴队列（⌘K）",
                     action: onToggleQueue
                 )
@@ -304,17 +314,20 @@ struct ClipCardView: View {
 
             HoverActionCircleButton(
                 symbolName: item.isPinned ? "star.fill" : "star",
-                size: 22,
-                iconSize: 10,
+                size: 24,
+                iconSize: 11,
+                surface: surface,
                 kind: .star(isPinned: item.isPinned),
                 helpText: item.isPinned ? "取消收藏" : "收藏",
                 action: onTogglePin
             )
 
             HoverActionCircleButton(
-                symbolName: "trash.fill",
-                size: 22,
-                iconSize: 10,
+                symbolName: "trash",
+                hoverSymbolName: "trash.fill",
+                size: 24,
+                iconSize: 11,
+                surface: surface,
                 kind: .delete,
                 helpText: "删除此条记录",
                 action: onDelete
@@ -521,19 +534,29 @@ struct ClipCardView: View {
         ClipboardStore.shared.semanticSnapshot(for: item)
     }
 
+    private var hasLeadingVisual: Bool {
+        if item.type == .text {
+            return semantic.parsedColorRGBA != nil
+        }
+        return true
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .center, spacing: 12) {
-                leadingThumbnail
+                if hasLeadingVisual {
+                    leadingThumbnail
+                }
 
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 5.5) {
                     Text(item.primaryTitle)
                         .font(.system(size: 13.5, weight: .medium))
+                        .lineSpacing(2.5)
                         .foregroundStyle(isSelected ? Color.white : Color.primary)
                         .lineLimit(2)
                         .multilineTextAlignment(.leading)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.trailing, 34)
+                        .padding(.trailing, 40)
 
                     HStack(spacing: 6) {
                         if item.isPinned {
@@ -582,19 +605,19 @@ struct ClipCardView: View {
                 }
             }
 
-            // 仅在选中或悬停且存在语义变换时浮现原生胶囊动作条，零常驻视觉噪音
-            if (isSelected || isHovered) && !semantic.actions.isEmpty {
+            // 常驻布局占位 + 悬停/选中亮度提振：彻底根除鼠标滑过卡片时的纵向伸缩抖动与横向撑宽
+            if !semantic.actions.isEmpty {
                 transformActionStrip(actions: semantic.actions)
-                    .padding(.leading, 54)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
+                    .opacity((isSelected || isHovered) ? 1.0 : 0.78)
+                    .padding(.leading, hasLeadingVisual ? (item.type == .text ? 48 : 54) : 0)
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
+        .padding(.horizontal, hasLeadingVisual ? 12 : 14)
+        .padding(.vertical, hasLeadingVisual ? 10 : 11)
         .background(cardBackground)
         .overlay(cardBorder)
         .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .scaleEffect(isHovered && !isSelected ? 1.005 : 1.0)
+        .scaleEffect(isHovered ? 1.012 : 1.0)
         .animation(.spring(response: 0.22, dampingFraction: 0.86), value: isHovered)
         .animation(.spring(response: 0.2, dampingFraction: 0.86), value: isSelected)
         .onHover { hovering in
@@ -620,33 +643,34 @@ struct ClipCardView: View {
     // MARK: - 瞬时语义变换胶囊条
 
     private func transformActionStrip(actions: [TransformAction]) -> some View {
-        HStack(spacing: 6) {
-            ForEach(Array(actions.enumerated()), id: \.element.id) { idx, action in
-                Button {
-                    onApplyTransform(action, true)
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: action.symbolName)
-                            .font(.system(size: 10, weight: .semibold))
-                        Text(action.title)
-                            .font(.system(size: 11, weight: .medium))
-                            .lineLimit(1)
-                        Text(idx == 0 ? "⇧↵" : "⌃\(idx + 1)")
-                            .font(.system(size: 9.5, weight: .semibold))
-                            .opacity(0.72)
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(Array(actions.enumerated()), id: \.element.id) { idx, action in
+                    Button {
+                        onApplyTransform(action, true)
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: action.symbolName)
+                                .font(.system(size: 10, weight: .semibold))
+                            Text(action.title)
+                                .font(.system(size: 11, weight: .medium))
+                                .lineLimit(1)
+                            Text(idx == 0 ? "⇧↵" : "⌃\(idx + 1)")
+                                .font(.system(size: 9.5, weight: .semibold))
+                                .opacity(0.72)
+                        }
+                        .foregroundStyle(chipForeground(for: action))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3.5)
+                        .background(
+                            Capsule()
+                                .fill(chipBackground(for: action))
+                        )
                     }
-                    .foregroundStyle(chipForeground(for: action))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3.5)
-                    .background(
-                        Capsule()
-                            .fill(chipBackground(for: action))
-                    )
+                    .buttonStyle(.plain)
+                    .help("点击直接执行「\(action.title)」并键入光标处")
                 }
-                .buttonStyle(.plain)
-                .help("点击直接执行「\(action.title)」并键入光标处")
             }
-            Spacer(minLength: 0)
         }
     }
 
@@ -717,18 +741,16 @@ struct ClipCardView: View {
 
         case .text:
             if let rgba = semantic.parsedColorRGBA {
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .fill(Color(red: rgba.r, green: rgba.g, blue: rgba.b, opacity: rgba.a))
-                    .frame(width: 42, height: 42)
+                    .frame(width: 36, height: 36)
                     .overlay(
-                        RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
                             .strokeBorder(Color.white.opacity(0.45), lineWidth: 1)
                     )
                     .shadow(color: Color.black.opacity(0.12), radius: 3, y: 1)
-            } else if let kind = semantic.primaryKind {
-                iconBadge(symbol: kind.symbolName, tint: Color(nsColor: kind.tintColor))
             } else {
-                iconBadge(symbol: "doc.text", tint: .indigo)
+                EmptyView()
             }
         }
     }
@@ -759,20 +781,24 @@ struct ClipCardView: View {
     }
 
     private var hoverActions: some View {
-        HStack(spacing: 4) {
+        let surface: HoverActionSurface = isSelected ? .onSelectedCard : .onStandardCard
+        return HStack(spacing: 5) {
             HoverActionCircleButton(
                 symbolName: item.isPinned ? "star.fill" : "star",
-                size: 22,
-                iconSize: 10,
+                size: 24,
+                iconSize: 11,
+                surface: surface,
                 kind: .star(isPinned: item.isPinned),
                 helpText: item.isPinned ? "取消收藏" : "收藏",
                 action: onTogglePin
             )
 
             HoverActionCircleButton(
-                symbolName: "trash.fill",
-                size: 22,
-                iconSize: 10,
+                symbolName: "trash",
+                hoverSymbolName: "trash.fill",
+                size: 24,
+                iconSize: 11,
+                surface: surface,
                 kind: .delete,
                 helpText: "删除此条记录",
                 action: onDelete
@@ -904,116 +930,290 @@ struct ClipCardView: View {
 }
 #endif
 
-// MARK: - 统一高对比悬停操作圆钮（带语义微动效与弹性按压反馈）
+// MARK: - 默认克制半透明 + 悬停唤醒专属物理特性微动效圆钮
 
-enum HoverActionKind {
+enum HoverActionSurface {
+    case onSelectedCard
+    case onStandardCard
+    case onImageTile
+}
+
+enum HoverActionKind: Equatable {
+    case merge(isActive: Bool)
+    case queue(isActive: Bool)
     case star(isPinned: Bool)
     case delete
-    case standard(activeColor: Color?)
+    case ocr
+}
+
+private struct IconMotionKeyframes {
+    var rotation: Double = 0
+    var scaleX: CGFloat = 1.0
+    var scaleY: CGFloat = 1.0
+    var offsetY: CGFloat = 0
 }
 
 private struct HoverActionSpringButtonStyle: ButtonStyle {
     let isHovered: Bool
+    let reduceMotion: Bool
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .scaleEffect(configuration.isPressed ? 0.88 : (isHovered ? 1.14 : 1.0))
-            .offset(y: isHovered && !configuration.isPressed ? -0.5 : 0)
-            .animation(.spring(response: 0.24, dampingFraction: 0.58), value: isHovered)
-            .animation(.spring(response: 0.16, dampingFraction: 0.68), value: configuration.isPressed)
+            .scaleEffect(configuration.isPressed ? 0.88 : (isHovered && !reduceMotion ? 1.12 : 1.0))
+            .animation(.spring(response: 0.22, dampingFraction: 0.66), value: isHovered)
+            .animation(.spring(response: 0.14, dampingFraction: 0.72), value: configuration.isPressed)
     }
 }
 
 struct HoverActionCircleButton: View {
     let symbolName: String
+    var hoverSymbolName: String? = nil
     let size: CGFloat
     let iconSize: CGFloat
+    var surface: HoverActionSurface = .onSelectedCard
     let kind: HoverActionKind
     let helpText: String
     let action: () -> Void
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isHovered: Bool = false
+    @State private var hoverTrigger: Int = 0
+    @State private var ringBurstScale: CGFloat = 0.6
+    @State private var ringBurstOpacity: Double = 0.0
+
+    private var effectiveSymbol: String {
+        if isHovered, let hoverSymbolName {
+            return hoverSymbolName
+        }
+        return symbolName
+    }
 
     private var foregroundColor: Color {
-        switch kind {
-        case .star(let isPinned):
-            if isPinned {
-                return Color(red: 1.0, green: 0.72, blue: 0.16)
-            }
-            return isHovered ? Color(red: 1.0, green: 0.86, blue: 0.42) : .white
-        case .delete, .standard:
+        if isHovered {
             return .white
+        }
+        switch kind {
+        case .star(let isPinned) where isPinned:
+            return surface == .onSelectedCard
+                ? Color(red: 1.0, green: 0.86, blue: 0.36)
+                : Color.orange
+        case .merge(let isActive) where isActive:
+            return surface == .onSelectedCard ? .white : .green
+        case .queue(let isActive) where isActive:
+            return surface == .onSelectedCard ? .white : .accentColor
+        default:
+            switch surface {
+            case .onSelectedCard, .onImageTile:
+                return Color.white.opacity(0.95)
+            case .onStandardCard:
+                return Color.primary.opacity(0.76)
+            }
         }
     }
 
     private var backgroundColor: Color {
-        switch kind {
-        case .star(let isPinned):
-            if isHovered {
-                return Color.black.opacity(isPinned ? 0.78 : 0.72)
+        if isHovered {
+            switch kind {
+            case .merge:
+                return Color(red: 0.15, green: 0.76, blue: 0.46).opacity(0.94)
+            case .queue:
+                return Color(red: 0.16, green: 0.54, blue: 0.98).opacity(0.94)
+            case .star:
+                return Color(red: 0.98, green: 0.64, blue: 0.12).opacity(0.94)
+            case .delete:
+                return Color(red: 0.94, green: 0.24, blue: 0.28).opacity(0.94)
+            case .ocr:
+                return Color(red: 0.12, green: 0.66, blue: 0.90).opacity(0.94)
             }
-            return Color.black.opacity(0.58)
-        case .delete:
-            return isHovered ? Color.red.opacity(0.96) : Color.red.opacity(0.82)
-        case .standard(let activeColor):
-            if let activeColor {
-                return activeColor.opacity(isHovered ? 0.98 : 0.88)
-            }
-            return Color.black.opacity(isHovered ? 0.74 : 0.58)
+        }
+
+        // 默认态：纯净半透明同色系磨砂圆钮（严格复刻红框视觉，不抢戏）
+        switch surface {
+        case .onSelectedCard:
+            return Color.white.opacity(0.20)
+        case .onStandardCard:
+            return Color.primary.opacity(0.08)
+        case .onImageTile:
+            return Color.black.opacity(0.46)
         }
     }
 
-    private var glowColor: Color {
+    private var borderColor: Color {
+        if isHovered {
+            return Color.white.opacity(0.42)
+        }
+        switch surface {
+        case .onSelectedCard:
+            return Color.white.opacity(0.22)
+        case .onStandardCard:
+            return Color.primary.opacity(0.10)
+        case .onImageTile:
+            return Color.white.opacity(0.24)
+        }
+    }
+
+    private var shadowColor: Color {
         guard isHovered else { return .clear }
         switch kind {
-        case .star:
-            return Color.orange.opacity(0.45)
-        case .delete:
-            return Color.red.opacity(0.52)
-        case .standard(let activeColor):
-            return (activeColor ?? Color.white).opacity(0.32)
+        case .merge:  return Color(red: 0.12, green: 0.72, blue: 0.42).opacity(0.38)
+        case .queue:  return Color(red: 0.14, green: 0.50, blue: 0.96).opacity(0.38)
+        case .star:   return Color.orange.opacity(0.42)
+        case .delete: return Color.red.opacity(0.42)
+        case .ocr:    return Color.cyan.opacity(0.38)
         }
     }
 
-    private var iconRotation: Angle {
-        guard isHovered else { return .zero }
-        switch kind {
-        case .star:
-            return .degrees(16)
-        case .delete:
-            return .degrees(-10)
-        case .standard:
-            return .zero
+    // 针对队列 `+` 按钮的常驻棘轮旋入角（hover 旋至 90°，移出丝滑回 0°）
+    private var steadyRotation: Double {
+        guard !reduceMotion else { return 0 }
+        if case .queue(let isActive) = kind, !isActive {
+            return isHovered ? 90 : 0
         }
+        return 0
     }
 
     var body: some View {
-        Button(action: action) {
-            Image(systemName: symbolName)
-                .font(.system(size: iconSize, weight: .semibold))
-                .foregroundStyle(foregroundColor)
-                .rotationEffect(iconRotation)
-                .scaleEffect(isHovered ? 1.08 : 1.0)
-                .symbolEffect(.bounce, value: symbolName)
+        Button {
+            triggerClickHaloIfNeeded()
+            action()
+        } label: {
+            animatedIcon
                 .frame(width: size, height: size)
                 .background(
                     Circle()
                         .fill(backgroundColor)
                         .overlay(
                             Circle()
-                                .strokeBorder(
-                                    Color.white.opacity(isHovered ? 0.34 : 0.0),
-                                    lineWidth: 0.75
-                                )
+                                .strokeBorder(borderColor, lineWidth: 0.65)
                         )
                 )
-                .shadow(color: glowColor, radius: isHovered ? 5 : 0, y: isHovered ? 1.5 : 0)
+                .overlay {
+                    // 点亮收藏或勾选时的零占位光环涟漪
+                    Circle()
+                        .strokeBorder(Color.white.opacity(0.85), lineWidth: 1.2)
+                        .scaleEffect(ringBurstScale)
+                        .opacity(ringBurstOpacity)
+                        .allowsHitTesting(false)
+                }
+                .shadow(color: shadowColor, radius: isHovered ? 5 : 0, y: isHovered ? 2 : 0)
         }
-        .buttonStyle(HoverActionSpringButtonStyle(isHovered: isHovered))
+        .buttonStyle(HoverActionSpringButtonStyle(isHovered: isHovered, reduceMotion: reduceMotion))
         .help(helpText)
-        .animation(.spring(response: 0.24, dampingFraction: 0.58), value: isHovered)
+        .animation(.spring(response: 0.24, dampingFraction: 0.72), value: isHovered)
+        .animation(.spring(response: 0.26, dampingFraction: 0.66), value: steadyRotation)
         .onHover { hovering in
+            if hovering && !isHovered {
+                hoverTrigger &+= 1
+                TactileFeedbackEngine.shared.perform(.hoverTick)
+            }
             isHovered = hovering
+        }
+    }
+
+    private var animatedIcon: some View {
+        let isReduced = reduceMotion
+        let currentKind = kind
+        let baseIcon = Image(systemName: effectiveSymbol)
+            .font(.system(size: iconSize, weight: .medium))
+            .foregroundStyle(foregroundColor)
+            .rotationEffect(.degrees(steadyRotation))
+            .symbolEffect(.bounce, value: symbolName)
+
+        return baseIcon.keyframeAnimator(
+            initialValue: IconMotionKeyframes(),
+            trigger: hoverTrigger,
+            content: { content, val in
+                content
+                    .scaleEffect(x: isReduced ? 1.0 : val.scaleX, y: isReduced ? 1.0 : val.scaleY)
+                    .rotationEffect(.degrees(isReduced ? 0.0 : val.rotation))
+                    .offset(y: isReduced ? 0.0 : val.offsetY)
+            },
+            keyframes: { _ in
+                KeyframeTrack(\.rotation) {
+                    if currentKind == .delete {
+                        CubicKeyframe(-13.0, duration: 0.07)
+                        CubicKeyframe(10.0, duration: 0.08)
+                        CubicKeyframe(-6.0, duration: 0.08)
+                        SpringKeyframe(0.0, duration: 0.14, spring: .smooth)
+                    } else if case .star = currentKind {
+                        CubicKeyframe(20.0, duration: 0.12)
+                        SpringKeyframe(0.0, duration: 0.24, spring: .bouncy)
+                    } else {
+                        LinearKeyframe(0.0, duration: 0.01)
+                    }
+                }
+                KeyframeTrack(\.offsetY) {
+                    if case .star = currentKind {
+                        CubicKeyframe(-2.2, duration: 0.12)
+                        SpringKeyframe(0.0, duration: 0.22, spring: .bouncy)
+                    } else if currentKind == .delete {
+                        CubicKeyframe(-1.0, duration: 0.08)
+                        SpringKeyframe(0.0, duration: 0.16, spring: .smooth)
+                    } else {
+                        LinearKeyframe(0.0, duration: 0.01)
+                    }
+                }
+                KeyframeTrack(\.scaleX) {
+                    if case .merge = currentKind {
+                        SpringKeyframe(1.12, duration: 0.10, spring: .snappy)
+                        SpringKeyframe(0.95, duration: 0.13, spring: .bouncy)
+                        SpringKeyframe(1.00, duration: 0.13, spring: .smooth)
+                    } else if currentKind == .ocr {
+                        CubicKeyframe(1.22, duration: 0.09)
+                        CubicKeyframe(0.93, duration: 0.09)
+                        SpringKeyframe(1.00, duration: 0.15, spring: .snappy)
+                    } else if case .star = currentKind {
+                        CubicKeyframe(1.18, duration: 0.12)
+                        SpringKeyframe(1.00, duration: 0.22, spring: .bouncy)
+                    } else if case .queue(let isActive) = currentKind {
+                        SpringKeyframe(isActive ? 1.15 : 1.08, duration: 0.12, spring: .bouncy)
+                        SpringKeyframe(1.00, duration: 0.15, spring: .smooth)
+                    } else {
+                        LinearKeyframe(1.00, duration: 0.01)
+                    }
+                }
+                KeyframeTrack(\.scaleY) {
+                    if case .merge = currentKind {
+                        SpringKeyframe(0.80, duration: 0.10, spring: .snappy)
+                        SpringKeyframe(1.12, duration: 0.13, spring: .bouncy)
+                        SpringKeyframe(1.00, duration: 0.13, spring: .smooth)
+                    } else if currentKind == .ocr {
+                        CubicKeyframe(1.22, duration: 0.09)
+                        CubicKeyframe(0.93, duration: 0.09)
+                        SpringKeyframe(1.00, duration: 0.15, spring: .snappy)
+                    } else if case .star = currentKind {
+                        CubicKeyframe(1.18, duration: 0.12)
+                        SpringKeyframe(1.00, duration: 0.22, spring: .bouncy)
+                    } else if case .queue(let isActive) = currentKind {
+                        SpringKeyframe(isActive ? 1.15 : 1.08, duration: 0.12, spring: .bouncy)
+                        SpringKeyframe(1.00, duration: 0.15, spring: .smooth)
+                    } else {
+                        LinearKeyframe(1.00, duration: 0.01)
+                    }
+                }
+            }
+        )
+    }
+
+    private func triggerClickHaloIfNeeded() {
+        guard !reduceMotion else { return }
+        switch kind {
+        case .star(let isPinned) where !isPinned:
+            ringBurstScale = 0.85
+            ringBurstOpacity = 0.95
+            withAnimation(.easeOut(duration: 0.34)) {
+                ringBurstScale = 1.65
+                ringBurstOpacity = 0.0
+            }
+        case .merge(let isActive) where !isActive, .queue(let isActive) where !isActive:
+            ringBurstScale = 0.88
+            ringBurstOpacity = 0.85
+            withAnimation(.easeOut(duration: 0.28)) {
+                ringBurstScale = 1.50
+                ringBurstOpacity = 0.0
+            }
+        default:
+            break
         }
     }
 }

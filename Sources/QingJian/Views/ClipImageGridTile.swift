@@ -122,9 +122,10 @@ struct ClipImageGridTile: View {
                     if !ClipboardStore.shared.minimalModeEnabled {
                         HoverActionCircleButton(
                             symbolName: "text.viewfinder",
-                            size: 21,
-                            iconSize: 9.5,
-                            kind: .standard(activeColor: .accentColor),
+                            size: 22,
+                            iconSize: 10,
+                            surface: .onImageTile,
+                            kind: .ocr,
                             helpText: "提取图中文字并键入（⇧↵）",
                             action: { onExtractOCR(true) }
                         )
@@ -132,17 +133,20 @@ struct ClipImageGridTile: View {
 
                     HoverActionCircleButton(
                         symbolName: item.isPinned ? "star.fill" : "star",
-                        size: 21,
-                        iconSize: 9.5,
+                        size: 22,
+                        iconSize: 10,
+                        surface: .onImageTile,
                         kind: .star(isPinned: item.isPinned),
                         helpText: item.isPinned ? "取消收藏" : "收藏",
                         action: onTogglePin
                     )
 
                     HoverActionCircleButton(
-                        symbolName: "trash.fill",
-                        size: 21,
-                        iconSize: 9.5,
+                        symbolName: "trash",
+                        hoverSymbolName: "trash.fill",
+                        size: 22,
+                        iconSize: 10,
+                        surface: .onImageTile,
                         kind: .delete,
                         helpText: "删除图片",
                         action: onDelete
@@ -189,7 +193,7 @@ struct ClipImageGridTile: View {
             radius: isSelected ? 8 : (isHovered ? 9 : 4),
             y: isHovered ? 4 : 2
         )
-        .scaleEffect(isHovered ? 1.035 : (isSelected ? 1.02 : 1.0))
+        .scaleEffect(isHovered ? 1.028 : 1.0)
         .animation(.spring(response: 0.22, dampingFraction: 0.9), value: isHovered)
         .animation(.spring(response: 0.2, dampingFraction: 0.88), value: isSelected)
         .contentShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
@@ -534,17 +538,20 @@ struct ClipImageGridTile: View {
                 HStack(spacing: 4) {
                     HoverActionCircleButton(
                         symbolName: item.isPinned ? "star.fill" : "star",
-                        size: 21,
-                        iconSize: 9.5,
+                        size: 22,
+                        iconSize: 10,
+                        surface: .onImageTile,
                         kind: .star(isPinned: item.isPinned),
                         helpText: item.isPinned ? "取消收藏" : "收藏",
                         action: onTogglePin
                     )
 
                     HoverActionCircleButton(
-                        symbolName: "trash.fill",
-                        size: 21,
-                        iconSize: 9.5,
+                        symbolName: "trash",
+                        hoverSymbolName: "trash.fill",
+                        size: 22,
+                        iconSize: 10,
+                        surface: .onImageTile,
                         kind: .delete,
                         helpText: "删除图片",
                         action: onDelete
@@ -591,7 +598,7 @@ struct ClipImageGridTile: View {
             radius: isSelected ? 8 : (isHovered ? 9 : 4),
             y: isHovered ? 4 : 2
         )
-        .scaleEffect(isHovered ? 1.035 : (isSelected ? 1.02 : 1.0))
+        .scaleEffect(isHovered ? 1.028 : 1.0)
         .animation(.spring(response: 0.22, dampingFraction: 0.9), value: isHovered)
         .animation(.spring(response: 0.2, dampingFraction: 0.88), value: isSelected)
         .contentShape(RoundedRectangle(cornerRadius: 13, style: .continuous))

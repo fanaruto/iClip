@@ -63,6 +63,8 @@ build_edition() {
     <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSAppDataUsageDescription</key>
+    <string>需要读取您从微信等应用拖拽到 iClip 的图片或文件，以便为您复制到剪贴板。</string>
     <key>UTExportedTypeDeclarations</key>
     <array>
         <dict>

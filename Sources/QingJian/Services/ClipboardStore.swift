@@ -122,6 +122,17 @@ final class ClipboardStore: ObservableObject {
     @Published var autoPasteEnabled: Bool {
         didSet { UserDefaults.standard.set(autoPasteEnabled, forKey: "autoPasteEnabled") }
     }
+    /// 交互微音效开关（关闭后静默无声，但仍保留细腻触控板震动）
+    @Published var soundEffectsEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(soundEffectsEnabled, forKey: TactileFeedbackEngine.soundEnabledDefaultsKey)
+            if soundEffectsEnabled {
+                TactileFeedbackEngine.shared.perform(.favoriteOn)
+            } else {
+                TactileFeedbackEngine.shared.performNavigationStepHaptic()
+            }
+        }
+    }
     /// 一次性验证码（OTP）粘贴后 30 秒自动无痕销毁（极简模式或已固定条目不生效）
     @Published var autoExpireOTP: Bool {
         didSet { UserDefaults.standard.set(autoExpireOTP, forKey: "autoExpireOTP") }
@@ -234,6 +245,7 @@ final class ClipboardStore: ObservableObject {
         self.minimalModeEnabled = UserDefaults.standard.bool(forKey: "minimalModeEnabled")
 
         self.autoPasteEnabled = UserDefaults.standard.object(forKey: "autoPasteEnabled") as? Bool ?? true
+        self.soundEffectsEnabled = UserDefaults.standard.object(forKey: TactileFeedbackEngine.soundEnabledDefaultsKey) as? Bool ?? true
         self.autoExpireOTP = UserDefaults.standard.object(forKey: "autoExpireOTP") as? Bool ?? true
         let savedStyle = UserDefaults.standard.string(forKey: "panelSurfaceStyle") ?? PanelSurfaceStyle.liquidGlass.rawValue
         if savedStyle == "clearGlass" {
@@ -339,6 +351,7 @@ final class ClipboardStore: ObservableObject {
 
     func toggleMinimalMode() {
         minimalModeEnabled.toggle()
+        TactileFeedbackEngine.shared.perform(.tabSwitch)
         showToast(minimalModeEnabled ? "已开启极简纯净模式（基础功能版）" : "已恢复「\(AppRoleEdition.installed.title)」进阶功能")
     }
 
@@ -1190,6 +1203,7 @@ final class ClipboardStore: ObservableObject {
         #endif
 
         writeToPasteboard(item, plainTextOnly: plainTextOnly)
+        TactileFeedbackEngine.shared.perform(.pasteCommit)
 
         if let idx = items.firstIndex(where: { $0.id == item.id }) {
             items[idx].createdAt = Date()
@@ -1231,7 +1245,7 @@ final class ClipboardStore: ObservableObject {
                   !current.isPinned else {
                 return
             }
-            self.delete(current)
+            self.delete(current, userInitiated: false)
         }
         pendingOTPExpirationTasks[targetID] = work
         DispatchQueue.main.asyncAfter(deadline: .now() + delaySeconds, execute: work)
@@ -1276,13 +1290,17 @@ final class ClipboardStore: ObservableObject {
         }
         items = sortItems(items)
         saveHistory()
+        TactileFeedbackEngine.shared.perform(pinned ? .favoriteOn : .favoriteOff)
         showToast(pinned ? "已收藏" : "已取消收藏")
     }
 
-    func delete(_ item: ClipItem) {
+    func delete(_ item: ClipItem, userInitiated: Bool = true) {
         pendingOTPExpirationTasks[item.id]?.cancel()
         pendingOTPExpirationTasks.removeValue(forKey: item.id)
         guard let idx = items.firstIndex(where: { $0.id == item.id }) else { return }
+        if userInitiated {
+            TactileFeedbackEngine.shared.perform(.deleteItem)
+        }
         let removed = items.remove(at: idx)
         #if ICLIP_EDITION_FLOW
         pasteQueueIDs.removeAll { $0 == removed.id }
@@ -1304,6 +1322,7 @@ final class ClipboardStore: ObservableObject {
         }
         items = items.filter { $0.isPinned }
         saveHistory()
+        TactileFeedbackEngine.shared.perform(.deleteItem)
         showToast("已清空未收藏记录")
     }
 
@@ -1430,6 +1449,7 @@ final class ClipboardStore: ObservableObject {
             saveHistory()
         }
 
+        TactileFeedbackEngine.shared.perform(.magicTransform)
         onBeforePaste?()
         scheduleOTPAutoExpireIfNeeded(for: sourceItem)
 
@@ -1490,6 +1510,7 @@ final class ClipboardStore: ObservableObject {
             saveHistory()
         }
 
+        TactileFeedbackEngine.shared.perform(.magicTransform)
         onBeforePaste?()
         scheduleOTPAutoExpireIfNeeded(for: item)
         refreshAccessibilityStatus()
@@ -1539,9 +1560,11 @@ final class ClipboardStore: ObservableObject {
     func toggleQueueMembership(_ item: ClipItem) {
         if let idx = pasteQueueIDs.firstIndex(of: item.id) {
             pasteQueueIDs.remove(at: idx)
+            TactileFeedbackEngine.shared.perform(.queueToggle(added: false))
             showToast("已移出顺序队列")
         } else {
             pasteQueueIDs.append(item.id)
+            TactileFeedbackEngine.shared.perform(.queueToggle(added: true))
             showToast("已加入顺序队列 #\(pasteQueueIDs.count)")
         }
     }
@@ -1608,8 +1631,10 @@ final class ClipboardStore: ObservableObject {
     func toggleMergeSelection(_ item: ClipItem) {
         if let idx = selectedMergeIDs.firstIndex(of: item.id) {
             selectedMergeIDs.remove(at: idx)
+            TactileFeedbackEngine.shared.perform(.queueToggle(added: false))
         } else {
             selectedMergeIDs.append(item.id)
+            TactileFeedbackEngine.shared.perform(.queueToggle(added: true))
         }
     }
 

@@ -92,6 +92,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             guard let self else { return false }
             let ok = self.store.importAndCopy(from: draggingPasteboard, sourceLabel: "拖拽复制")
             if ok {
+                TactileFeedbackEngine.shared.perform(.pasteCommit)
                 self.nav.selectedIndex = 0
                 self.nav.preferredGridColumn = nil
                 self.nav.scrollRequestEpoch &+= 1
@@ -584,6 +585,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             guard let self else { return false }
             let ok = self.store.importAndCopy(from: draggingPasteboard, sourceLabel: "拖拽复制")
             if ok {
+                TactileFeedbackEngine.shared.perform(.pasteCommit)
                 self.nav.selectedIndex = 0
                 self.nav.preferredGridColumn = nil
                 self.nav.scrollRequestEpoch &+= 1

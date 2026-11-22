@@ -243,7 +243,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button?.highlight(highlighted)
             let anchor = self.statusItemScreenRect()
             if highlighted {
-                BlackHolePortalController.shared.engage(anchorRect: anchor)
+                BlackHolePortalController.shared.engage(
+                    anchorRect: anchor,
+                    mouseLocation: NSEvent.mouseLocation,
+                    dragPasteboard: NSPasteboard(name: .drag)
+                )
             } else {
                 BlackHolePortalController.shared.disengageToApproachingOrDismiss(
                     mouseLocation: NSEvent.mouseLocation,
@@ -255,7 +259,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return false }
             let ok = ClipboardStore.shared.importAndCopy(from: pasteboard, sourceLabel: "黑洞吞噬")
             if ok {
-                BlackHolePortalController.shared.triggerDevour()
+                BlackHolePortalController.shared.triggerDevour(
+                    from: pasteboard,
+                    dropScreenPoint: NSEvent.mouseLocation
+                )
                 self.flashStatusItemCopiedFeedback()
             } else {
                 BlackHolePortalController.shared.dismiss()
@@ -334,9 +341,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let center = NSPoint(x: anchor.midX, y: anchor.midY)
         let distance = hypot(mouse.x - center.x, mouse.y - center.y)
 
-        if distance < 125 {
-            BlackHolePortalController.shared.showApproaching(anchorRect: anchor)
-        } else if distance > 165, BlackHolePortalController.shared.phase == .approaching {
+        if distance < 135 {
+            BlackHolePortalController.shared.showApproaching(
+                anchorRect: anchor,
+                mouseLocation: mouse,
+                dragPasteboard: dragPB
+            )
+        } else if distance > 175, BlackHolePortalController.shared.phase == .approaching {
             BlackHolePortalController.shared.dismiss()
         }
     }

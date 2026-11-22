@@ -306,6 +306,7 @@ struct ClipboardPopoverView: View {
             dismissImagePreview(clearItem: true)
         }
         .onChange(of: nav.selectedTab) { _, _ in
+            TactileFeedbackEngine.shared.perform(.tabSwitch)
             nav.selectedIndex = 0
             dismissImagePreview(clearItem: true)
         }
@@ -1278,6 +1279,22 @@ struct ClipboardPopoverView: View {
 
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
+                            Text("交互微音效反馈")
+                                .font(.system(size: 13.5, weight: .medium))
+                            Text("为悬停、键入、收藏、转换与删除提供温润微声学反馈，并与触控板多级震动联动")
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Toggle("", isOn: $store.soundEffectsEnabled)
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+                    }
+
+                    Divider().opacity(0.35)
+
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
                             Text("顺序出队后自动按 Tab 跳格")
                                 .font(.system(size: 13.5, weight: .medium))
                             Text("连续按 \(store.queuePopShortcut.compactDisplayString) 填表时自动跳往下一个输入框")
@@ -1737,6 +1754,7 @@ struct ClipboardPopoverView: View {
         if extendMergeSelection {
             store.ensureMergeSelected(filteredItems[nav.selectedIndex])
         }
+        TactileFeedbackEngine.shared.performNavigationStepHaptic()
         nav.scrollRequestEpoch &+= 1
     }
 
@@ -2262,6 +2280,7 @@ struct ClipboardPopoverView: View {
             dismissImagePreview(clearItem: true)
         }
         .onChange(of: nav.selectedTab) { _, _ in
+            TactileFeedbackEngine.shared.perform(.tabSwitch)
             nav.selectedIndex = 0
             dismissImagePreview(clearItem: true)
         }
@@ -3014,6 +3033,22 @@ struct ClipboardPopoverView: View {
 
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
+                            Text("交互微音效反馈")
+                                .font(.system(size: 13.5, weight: .medium))
+                            Text("为悬停、键入、收藏、转换与删除提供温润微声学反馈，并与触控板多级震动联动")
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Toggle("", isOn: $store.soundEffectsEnabled)
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+                    }
+
+                    Divider().opacity(0.35)
+
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
                             Text("复制链接时自动剥离追踪参数")
                                 .font(.system(size: 13.5, weight: .medium))
                             Text("自动移除 utm_source、spm、fbclid 等营销尾巴")
@@ -3486,6 +3521,7 @@ struct ClipboardPopoverView: View {
         )
         nav.selectedIndex = result.index
         nav.preferredGridColumn = result.preferredColumn
+        TactileFeedbackEngine.shared.performNavigationStepHaptic()
         nav.scrollRequestEpoch &+= 1
     }
 
