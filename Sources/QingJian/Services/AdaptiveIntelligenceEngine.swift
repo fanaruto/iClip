@@ -96,6 +96,7 @@ private struct AdaptiveBrainState: Codable {
     var doubleCopySparkEnabled: Bool? = true
     var copyAppendEnabled: Bool? = true
     var cursorDropPodEnabled: Bool? = true
+    var smartContextRankingEnabled: Bool? = true
     var actionWeights: [String: Double] = [:]
     var appActionWeights: [String: [String: Double]] = [:]
     var actionAcceptCounts: [String: Int] = [:]
@@ -105,6 +106,8 @@ private struct AdaptiveBrainState: Codable {
     var mutedSourceApps: [String] = []
     var recentReuseCounts: [String: Int] = [:]
     var recentReuseOrder: [String] = []
+    var targetAppPasteCounts: [String: [String: Int]]? = [:]
+    var targetAppDisplayNames: [String: String]? = [:]
     var totalLearnedInteractions: Int = 0
 }
 
@@ -160,6 +163,16 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
         }
     }
 
+    /// 情境感知搜索与收藏排序开关：自动记忆「哪条记录常贴入哪个目标窗口」并优化检索/收藏顺位
+    @Published var smartContextRankingEnabled: Bool {
+        didSet {
+            guard (state.smartContextRankingEnabled ?? true) != smartContextRankingEnabled else { return }
+            state.smartContextRankingEnabled = smartContextRankingEnabled
+            revision &+= 1
+            scheduleSave()
+        }
+    }
+
     @Published private(set) var enabledAutoRules: Set<LearnedAutoRuleKind> = []
     @Published private(set) var mutedSourceApps: [String] = []
     @Published private(set) var suggestions: [UserSuggestionRecord] = []
@@ -198,6 +211,7 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
         self.doubleCopySparkEnabled = loaded.doubleCopySparkEnabled ?? true
         self.copyAppendEnabled = loaded.copyAppendEnabled ?? true
         self.cursorDropPodEnabled = loaded.cursorDropPodEnabled ?? true
+        self.smartContextRankingEnabled = loaded.smartContextRankingEnabled ?? true
         self.enabledAutoRules = loaded.enabledAutoRules
         self.mutedSourceApps = loaded.mutedSourceApps
         self.totalLearnedInteractions = loaded.totalLearnedInteractions
@@ -316,6 +330,75 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
 
     func reuseCount(for contentHash: String) -> Int {
         state.recentReuseCounts[contentHash] ?? 0
+    }
+
+    /// 记录用户将某条内容实际粘贴进外部目标应用（如微信、飞书、Terminal、Cursor），构建个人目标场景记忆
+    func recordPasteToTargetApp(contentHash: String, targetApp: String?) {
+        guard !contentHash.isEmpty, let appKey = normalizedAppKey(targetApp) else { return }
+        let cleanDisplay = Self.compactAppDisplayName(from: targetApp ?? appKey)
+
+        var allApps = state.targetAppPasteCounts ?? [:]
+        var appBucket = allApps[appKey] ?? [:]
+        appBucket[contentHash] = min((appBucket[contentHash] ?? 0) + 1, 999)
+
+        // 单目标应用最多保留 80 条高频哈希，防止长期运行 JSON 膨胀
+        if appBucket.count > 80 {
+            if let victim = appBucket.filter({ $0.key != contentHash }).min(by: { $0.value < $1.value })?.key {
+                appBucket.removeValue(forKey: victim)
+            }
+        }
+        allApps[appKey] = appBucket
+
+        // 全局最多跟踪 32 个外部常用应用
+        if allApps.count > 32 {
+            if let leastUsedApp = allApps
+                .filter({ $0.key != appKey })
+                .min(by: { lhs, rhs in
+                    lhs.value.values.reduce(0, +) < rhs.value.values.reduce(0, +)
+                })?.key {
+                allApps.removeValue(forKey: leastUsedApp)
+                state.targetAppDisplayNames?.removeValue(forKey: leastUsedApp)
+            }
+        }
+        state.targetAppPasteCounts = allApps
+
+        var names = state.targetAppDisplayNames ?? [:]
+        names[appKey] = cleanDisplay
+        state.targetAppDisplayNames = names
+
+        state.totalLearnedInteractions += 1
+        totalLearnedInteractions = state.totalLearnedInteractions
+        revision &+= 1
+        scheduleSave()
+    }
+
+    /// 查询某条内容在指定目标应用中的历史主动粘贴次数
+    func targetAppPasteCount(for contentHash: String, targetApp: String?) -> Int {
+        guard !contentHash.isEmpty, let appKey = normalizedAppKey(targetApp) else { return 0 }
+        return state.targetAppPasteCounts?[appKey]?[contentHash] ?? 0
+    }
+
+    /// 当当前外部目标应用下该条目已被主动粘贴 ≥ 2 次时，返回紧凑的情境记忆微标签（如「✦ 微信常用」）
+    func preferredTargetAppBadge(for contentHash: String, activeTargetApp: String?) -> String? {
+        guard smartContextRankingEnabled else { return nil }
+        guard let appKey = normalizedAppKey(activeTargetApp) else { return nil }
+        let count = state.targetAppPasteCounts?[appKey]?[contentHash] ?? 0
+        guard count >= 2 else { return nil }
+        let label = state.targetAppDisplayNames?[appKey] ?? Self.compactAppDisplayName(from: activeTargetApp ?? "")
+        guard !label.isEmpty else { return nil }
+        return "✦ \(label)常用"
+    }
+
+    private static func compactAppDisplayName(from raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = trimmed.lowercased()
+        if lower == "google chrome" { return "Chrome" }
+        if lower == "visual studio code" { return "VSCode" }
+        if lower == "iterm2" { return "iTerm" }
+        if trimmed.count > 8 {
+            return String(trimmed.prefix(7)) + "…"
+        }
+        return trimmed
     }
 
     // MARK: - 3. 已采纳的「复制即自动处理」契约执行
@@ -650,6 +733,13 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
             adoptedEffects.append(!neg ? "已开启拖拽时按 ⌥ 召唤「光标旁微落点」" : "已关闭拖拽时的「光标旁微落点」")
         }
 
+        let smartRankKeys = ["智能排序", "情境排序", "上下文排序", "习惯置顶", "常用置顶"]
+        if Self.containsAny(lower, smartRankKeys) {
+            let neg = Self.isClauseNegated(matching: smartRankKeys, in: clauses)
+            smartContextRankingEnabled = !neg
+            adoptedEffects.append(!neg ? "已开启目标应用情境智能检索与收藏置顶" : "已关闭情境智能排序（恢复纯时间排序）")
+        }
+
         let sparkKeys = ["微星标", "光标提示", "悬浮胶囊", "星标提示"]
         if adoptedEffects.isEmpty && Self.containsAny(lower, sparkKeys) {
             let neg = Self.isClauseNegated(matching: sparkKeys, in: clauses)
@@ -806,6 +896,8 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
         state.actionAcceptCounts.removeAll()
         state.categoryDismissStreaks.removeAll()
         state.declinedAutoRules.removeAll()
+        state.targetAppPasteCounts?.removeAll()
+        state.targetAppDisplayNames?.removeAll()
         state.totalLearnedInteractions = 0
         totalLearnedInteractions = 0
         revision &+= 1

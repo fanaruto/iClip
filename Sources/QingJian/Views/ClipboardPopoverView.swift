@@ -46,10 +46,12 @@ final class PanelNavigationModel: ObservableObject {
     private(set) var cachedDisplayRows: [ClipDisplayRow] = []
     private(set) var cachedVisualRows: [[Int]] = []
     var preferredGridColumn: Int? = nil
+    private weak var storeRef: ClipboardStore?
     private var cancellables = Set<AnyCancellable>()
 
     init(store: ClipboardStore? = nil) {
         let resolvedStore = store ?? .shared
+        self.storeRef = resolvedStore
         rebuildCache(items: resolvedStore.items, tab: selectedTab, pinCat: selectedPinCategory, query: searchText)
 
         Publishers.CombineLatest4(resolvedStore.$items, $selectedTab, $selectedPinCategory, $searchText)
@@ -57,11 +59,24 @@ final class PanelNavigationModel: ObservableObject {
                 self?.rebuildCache(items: items, tab: tab, pinCat: pinCat, query: query)
             }
             .store(in: &cancellables)
+
+        Publishers.Merge(
+            resolvedStore.$activeTargetAppName.dropFirst().map { _ in () },
+            AdaptiveIntelligenceEngine.shared.$revision.dropFirst().map { _ in () }
+        )
+        .receive(on: RunLoop.main)
+        .sink { [weak self] _ in
+            guard let self, let s = self.storeRef else { return }
+            guard self.selectedTab == .pinned || !self.searchText.isEmpty else { return }
+            self.rebuildCache(items: s.items, tab: self.selectedTab, pinCat: self.selectedPinCategory, query: self.searchText)
+        }
+        .store(in: &cancellables)
     }
 
     private func rebuildCache(items: [ClipItem], tab: ClipFilterTab, pinCat: PinCategory?, query: String) {
+        let resolvedStore = storeRef ?? .shared
         let effectiveQuery = (QuickSuggestionCommandBanner.extractPayload(from: query) != nil) ? "" : query
-        let filtered = items.filter { item in
+        let rawMatched = items.filter { item in
             let tabMatches: Bool
             switch tab {
             case .all: tabMatches = true
@@ -77,6 +92,26 @@ final class PanelNavigationModel: ObservableObject {
             case .file: tabMatches = item.type == .file
             }
             return tabMatches && item.matches(query: effectiveQuery)
+        }
+
+        let filtered: [ClipItem]
+        if resolvedStore.minimalModeEnabled {
+            filtered = rawMatched
+        } else if !effectiveQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            filtered = SmartSearchRanker.rankSearchResults(
+                rawMatched,
+                query: effectiveQuery,
+                targetApp: resolvedStore.activeTargetAppName,
+                engine: .shared
+            )
+        } else if tab == .pinned {
+            filtered = SmartSearchRanker.rankPinnedItemsForContext(
+                rawMatched,
+                targetApp: resolvedStore.activeTargetAppName,
+                engine: .shared
+            )
+        } else {
+            filtered = rawMatched
         }
 
         var rows: [ClipDisplayRow] = []
@@ -2303,6 +2338,18 @@ final class PanelNavigationModel: ObservableObject {
                 self?.rebuildCache(items: items, tab: tab, query: query)
             }
             .store(in: &cancellables)
+
+        Publishers.Merge(
+            resolvedStore.$activeTargetAppName.dropFirst().map { _ in () },
+            AdaptiveIntelligenceEngine.shared.$revision.dropFirst().map { _ in () }
+        )
+        .receive(on: RunLoop.main)
+        .sink { [weak self] _ in
+            guard let self, let s = self.storeRef else { return }
+            guard self.selectedTab == .pinned || !self.searchText.isEmpty else { return }
+            self.rebuildCache(items: s.items, tab: self.selectedTab, query: self.searchText)
+        }
+        .store(in: &cancellables)
     }
 
     private func rebuildCache(items: [ClipItem], tab: ClipFilterTab, query: String) {
@@ -2321,7 +2368,7 @@ final class PanelNavigationModel: ObservableObject {
         }
 
         let resolvedStore = storeRef ?? .shared
-        let filtered = items.filter { item in
+        let rawMatched = items.filter { item in
             let tabMatches: Bool
             switch tab {
             case .all: tabMatches = true
@@ -2337,6 +2384,26 @@ final class PanelNavigationModel: ObservableObject {
                 guard snap.primaryKind == requiredSemantic else { return false }
             }
             return item.matches(query: textQuery)
+        }
+
+        let filtered: [ClipItem]
+        if resolvedStore.minimalModeEnabled {
+            filtered = rawMatched
+        } else if !textQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            filtered = SmartSearchRanker.rankSearchResults(
+                rawMatched,
+                query: textQuery,
+                targetApp: resolvedStore.activeTargetAppName,
+                engine: .shared
+            )
+        } else if tab == .pinned {
+            filtered = SmartSearchRanker.rankPinnedItemsForContext(
+                rawMatched,
+                targetApp: resolvedStore.activeTargetAppName,
+                engine: .shared
+            )
+        } else {
+            filtered = rawMatched
         }
 
         var rows: [ClipDisplayRow] = []

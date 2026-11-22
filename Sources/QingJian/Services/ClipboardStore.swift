@@ -236,6 +236,8 @@ final class ClipboardStore: ObservableObject {
         }
     }
     @Published var toastMessage: String? = nil
+    /// 当前外部目标窗口应用名（即唤起面板或钉住面板即将粘贴的目标应用，供情境心智引擎学习与置顶）
+    @Published var activeTargetAppName: String? = nil
     /// 是否存在处于 8 秒保护窗口内可按 ⌘Z 恢复的最近一次删除/清空快照
     @Published private(set) var canUndoLastDeletion: Bool = false
     /// 在外部浏览器直接打开链接后通知悬浮窗丝滑收起（不抢回原应用焦点）
@@ -1442,6 +1444,7 @@ final class ClipboardStore: ObservableObject {
         writeToPasteboard(item, plainTextOnly: plainTextOnly)
         if shouldAutoPaste {
             AdaptiveIntelligenceEngine.shared.recordContentActivity(contentHash: item.contentHash)
+            recordTargetAppPasteIfAppropriate(for: item)
             TactileFeedbackEngine.shared.perform(.pasteCommit)
             if let idx = items.firstIndex(where: { $0.id == item.id }) {
                 items[idx].createdAt = Date()
@@ -1582,6 +1585,14 @@ final class ClipboardStore: ObservableObject {
         }
         pendingOTPExpirationTasks[targetID] = work
         DispatchQueue.main.asyncAfter(deadline: .now() + delaySeconds, execute: work)
+    }
+
+    private func recordTargetAppPasteIfAppropriate(for item: ClipItem) {
+        guard !minimalModeEnabled else { return }
+        AdaptiveIntelligenceEngine.shared.recordPasteToTargetApp(
+            contentHash: item.contentHash,
+            targetApp: activeTargetAppName
+        )
     }
 
     private func writeToPasteboard(_ item: ClipItem, plainTextOnly: Bool) {
@@ -1883,6 +1894,9 @@ final class ClipboardStore: ObservableObject {
         ignoreNextChangeCount = pasteboard.changeCount
         lastChangeCount = pasteboard.changeCount
 
+        if shouldAutoPaste {
+            recordTargetAppPasteIfAppropriate(for: sourceItem)
+        }
         if let idx = items.firstIndex(where: { $0.id == sourceItem.id }) {
             items[idx].createdAt = Date()
             items = sortItems(items)
@@ -2135,6 +2149,9 @@ final class ClipboardStore: ObservableObject {
         ignoreNextChangeCount = pasteboard.changeCount
         lastChangeCount = pasteboard.changeCount
 
+        if shouldAutoPaste {
+            recordTargetAppPasteIfAppropriate(for: item)
+        }
         if let idx = items.firstIndex(where: { $0.id == item.id }) {
             items[idx].createdAt = Date()
             items = sortItems(items)
@@ -2204,6 +2221,7 @@ final class ClipboardStore: ObservableObject {
                 let remaining = pasteQueueIDs.count
                 let nextPreview = nextQueuedItem?.primaryTitle
                 writeToPasteboard(target, plainTextOnly: false)
+                recordTargetAppPasteIfAppropriate(for: target)
                 onBeforePaste?()
                 refreshAccessibilityStatus()
                 let sendTabAfter = queueAutoTabEnabled

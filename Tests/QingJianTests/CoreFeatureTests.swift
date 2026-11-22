@@ -944,4 +944,89 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertFalse(yesterdayCurl.matches(query: "curl !utm_source", now: todayNoon))
         XCTAssertTrue(recentWeChatImg.matches(query: "今天 !terminal", now: todayNoon))
     }
+
+    // MARK: - 26. 目标窗口情境记忆（Target App Affinity）与第一性相关度检索引擎测试
+
+    @MainActor
+    func testSmartSearchRankerAliasPriorityAndTargetAppAffinity() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("iclip-smartrank-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let engine = AdaptiveIntelligenceEngine(customDirectoryURL: tempDir)
+
+        let now = Date()
+        // 刚刚复制的无关长文（偶然提到「税号」二字，时间最新）
+        let noisyArticle = ClipItem(
+            type: .text,
+            text: String(repeating: "这是一段普通的行业新闻摘要，文末顺便提到了请核对企业税号是否变更。", count: 15),
+            contentHash: "text:noisy-article",
+            sourceAppName: "Safari",
+            createdAt: now
+        )
+        // 三天前收藏并设置备注别名的真正税号条目
+        let pinnedTaxID = ClipItem(
+            type: .text,
+            text: "91310000MA1K88888X",
+            contentHash: "text:real-tax",
+            sourceAppName: "飞书",
+            createdAt: now.addingTimeInterval(-3 * 86_400),
+            isPinned: true,
+            customAlias: "总部税号"
+        )
+
+        // 1. 搜「税号」或备注拼音首字母「zbsh」时，精准备注收藏必须排在无关新长文之前（#1）
+        let byKeyword = SmartSearchRanker.rankSearchResults([noisyArticle, pinnedTaxID], query: "税号", targetApp: nil, engine: engine)
+        XCTAssertEqual(byKeyword.map(\.id), [pinnedTaxID.id, noisyArticle.id])
+
+        let byAliasPinyin = SmartSearchRanker.rankSearchResults([noisyArticle, pinnedTaxID], query: "zbsh", targetApp: nil, engine: engine)
+        XCTAssertEqual(byAliasPinyin.map(\.id), [pinnedTaxID.id, noisyArticle.id])
+
+        // 2. 纯时间筛选词（如「今天」）严守时间倒序铁律，绝不乱排
+        let secondRecent = ClipItem(type: .text, text: "今天较早记录", contentHash: "text:t2", createdAt: now.addingTimeInterval(-600))
+        let pureTimeRanked = SmartSearchRanker.rankSearchResults([noisyArticle, secondRecent], query: "今天", targetApp: "微信", engine: engine)
+        XCTAssertEqual(pureTimeRanked.map(\.id), [noisyArticle.id, secondRecent.id])
+
+        // 3. 目标窗口情境分流：在「微信」搜地址置顶收货地址，在「Terminal」搜地址置顶服务器地址
+        let officeAddr = ClipItem(
+            type: .text,
+            text: "地址：上海市浦东新区张江高科园区 88 号（收件人王经理）",
+            contentHash: "text:addr-wx",
+            createdAt: now.addingTimeInterval(-3600),
+            isPinned: true
+        )
+        let serverAddr = ClipItem(
+            type: .text,
+            text: "地址：10.24.0.88:5432（生产只读库）",
+            contentHash: "text:addr-term",
+            createdAt: now.addingTimeInterval(-1800),
+            isPinned: true
+        )
+
+        engine.recordPasteToTargetApp(contentHash: officeAddr.contentHash, targetApp: "微信")
+        engine.recordPasteToTargetApp(contentHash: officeAddr.contentHash, targetApp: "微信")
+        engine.recordPasteToTargetApp(contentHash: serverAddr.contentHash, targetApp: "Terminal")
+        engine.recordPasteToTargetApp(contentHash: serverAddr.contentHash, targetApp: "Terminal")
+        engine.recordPasteToTargetApp(contentHash: serverAddr.contentHash, targetApp: "Terminal")
+
+        let inWeChat = SmartSearchRanker.rankSearchResults([serverAddr, officeAddr], query: "地址", targetApp: "微信", engine: engine)
+        XCTAssertEqual(inWeChat.first?.id, officeAddr.id)
+
+        let inTerminal = SmartSearchRanker.rankSearchResults([officeAddr, serverAddr], query: "地址", targetApp: "Terminal", engine: engine)
+        XCTAssertEqual(inTerminal.first?.id, serverAddr.id)
+
+        // 4. 收藏夹无搜索情境置顶与紧凑微标签（✦ 微信常用 / ✦ Chrome常用）
+        let pinnedForWeChat = SmartSearchRanker.rankPinnedItemsForContext([pinnedTaxID, serverAddr, officeAddr], targetApp: "微信", engine: engine)
+        XCTAssertEqual(pinnedForWeChat.first?.id, officeAddr.id)
+        XCTAssertEqual(engine.preferredTargetAppBadge(for: officeAddr.contentHash, activeTargetApp: "微信"), "✦ 微信常用")
+        XCTAssertNil(engine.preferredTargetAppBadge(for: officeAddr.contentHash, activeTargetApp: "Terminal"))
+
+        // 未建立习惯的目标应用完全保持原始收藏顺序
+        let pinnedForSafari = SmartSearchRanker.rankPinnedItemsForContext([pinnedTaxID, serverAddr, officeAddr], targetApp: "Safari", engine: engine)
+        XCTAssertEqual(pinnedForSafari.map(\.id), [pinnedTaxID.id, serverAddr.id, officeAddr.id])
+
+        // 5. 自然语言调教一键关闭情境智能排序后立即恢复原始时间序
+        _ = engine.adoptUserSuggestion("关闭智能排序", in: .shared)
+        XCTAssertFalse(engine.smartContextRankingEnabled)
+        let rawOrder = SmartSearchRanker.rankSearchResults([noisyArticle, pinnedTaxID], query: "税号", targetApp: "微信", engine: engine)
+        XCTAssertEqual(rawOrder.map(\.id), [noisyArticle.id, pinnedTaxID.id])
+    }
 }

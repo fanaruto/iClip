@@ -96,13 +96,24 @@ struct ClipCardView: View {
                                 .font(.system(size: 10, weight: .semibold))
                                 .foregroundStyle(isSelected ? Color.white : Color.green)
                                 .transition(.opacity)
-                        } else if !ClipboardStore.shared.minimalModeEnabled && !item.isPinned {
-                            let reuse = AdaptiveIntelligenceEngine.shared.reuseCount(for: item.contentHash)
-                            if reuse >= 3 {
+                        } else if !ClipboardStore.shared.minimalModeEnabled {
+                            if let contextBadge = AdaptiveIntelligenceEngine.shared.preferredTargetAppBadge(
+                                for: item.contentHash,
+                                activeTargetApp: ClipboardStore.shared.activeTargetAppName
+                            ) {
                                 Text("·")
-                                Text("高频 ×\(reuse)")
+                                Text(contextBadge)
                                     .font(.system(size: 10, weight: .semibold))
-                                    .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.orange)
+                                    .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.accentColor)
+                                    .lineLimit(1)
+                            } else if !item.isPinned {
+                                let reuse = AdaptiveIntelligenceEngine.shared.reuseCount(for: item.contentHash)
+                                if reuse >= 3 {
+                                    Text("·")
+                                    Text("高频 ×\(reuse)")
+                                        .font(.system(size: 10, weight: .semibold))
+                                        .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.orange)
+                                }
                             }
                         }
 
@@ -665,13 +676,24 @@ struct ClipCardView: View {
                                 .font(.system(size: 10, weight: .semibold))
                                 .foregroundStyle(isSelected ? Color.white : Color.green)
                                 .transition(.opacity)
-                        } else if !ClipboardStore.shared.minimalModeEnabled && !item.isPinned {
-                            let reuse = AdaptiveIntelligenceEngine.shared.reuseCount(for: item.contentHash)
-                            if reuse >= 3 {
+                        } else if !ClipboardStore.shared.minimalModeEnabled {
+                            if let contextBadge = AdaptiveIntelligenceEngine.shared.preferredTargetAppBadge(
+                                for: item.contentHash,
+                                activeTargetApp: ClipboardStore.shared.activeTargetAppName
+                            ) {
                                 Text("·")
-                                Text("高频 ×\(reuse)")
+                                Text(contextBadge)
                                     .font(.system(size: 10, weight: .semibold))
-                                    .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.orange)
+                                    .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.accentColor)
+                                    .lineLimit(1)
+                            } else if !item.isPinned {
+                                let reuse = AdaptiveIntelligenceEngine.shared.reuseCount(for: item.contentHash)
+                                if reuse >= 3 {
+                                    Text("·")
+                                    Text("高频 ×\(reuse)")
+                                        .font(.system(size: 10, weight: .semibold))
+                                        .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.orange)
+                                }
                             }
                         }
 

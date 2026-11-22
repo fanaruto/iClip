@@ -59,6 +59,9 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
                     return
                 }
                 self.previousApp = app
+                if self.store.activeTargetAppName != app.localizedName {
+                    self.store.activeTargetAppName = app.localizedName
+                }
             }
         }
     }
@@ -253,6 +256,15 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         return tv.selectedRange().length > 0
     }
 
+    /// 聚焦并全选顶部搜索框（⌘F），消除失焦状态下按 ⌘F 触发的系统报错音
+    private func focusAndSelectSearchField() {
+        nav.focusTrigger = UUID()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) { [weak self] in
+            guard let tv = self?.panel?.firstResponder as? NSTextView else { return }
+            tv.selectAll(nil)
+        }
+    }
+
     /// 弹出面板（鼠标旁直觉位置 + 原生窗口级轻柔滑入 + 内部卡片错峰浮现）
     func show(anchorRect: NSRect? = nil) {
         ActionSparkController.shared.dismissImmediately()
@@ -263,6 +275,9 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         if let front = NSWorkspace.shared.frontmostApplication,
            front.bundleIdentifier != Bundle.main.bundleIdentifier {
             previousApp = front
+            if store.activeTargetAppName != front.localizedName {
+                store.activeTargetAppName = front.localizedName
+            }
         }
 
         nav.isPresented = false
@@ -525,6 +540,9 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
                 withAnimation(.easeOut(duration: 0.15)) {
                     store.clearMergeSelection()
                 }
+            } else if !nav.searchText.isEmpty {
+                nav.searchText = ""
+                nav.focusTrigger = UUID()
             } else {
                 hide(restoreFocus: true)
             }
@@ -533,6 +551,12 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
 
         if nav.showSettings {
             return event
+        }
+
+        // ⌘F (keyCode 3)：随时聚焦并全选顶部搜索框
+        if flags == .command, event.keyCode == 3 {
+            focusAndSelectSearchField()
+            return nil
         }
 
         // ⌘Y (keyCode 16) 或搜索框为空时按 Space (keyCode 49)：呼出 Finder 级全模态速览与原位微调舱
@@ -741,6 +765,9 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
                     return
                 }
                 self.previousApp = app
+                if self.store.activeTargetAppName != app.localizedName {
+                    self.store.activeTargetAppName = app.localizedName
+                }
             }
         }
     }
@@ -935,6 +962,15 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         return tv.selectedRange().length > 0
     }
 
+    /// 聚焦并全选顶部搜索框（⌘F），消除失焦状态下按 ⌘F 触发的系统报错音
+    private func focusAndSelectSearchField() {
+        nav.focusTrigger = UUID()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) { [weak self] in
+            guard let tv = self?.panel?.firstResponder as? NSTextView else { return }
+            tv.selectAll(nil)
+        }
+    }
+
     /// 弹出面板（鼠标旁直觉位置 + 原生窗口级轻柔滑入 + 内部卡片错峰浮现）
     func show(anchorRect: NSRect? = nil) {
         ActionSparkController.shared.dismissImmediately()
@@ -945,6 +981,9 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         if let front = NSWorkspace.shared.frontmostApplication,
            front.bundleIdentifier != Bundle.main.bundleIdentifier {
             previousApp = front
+            if store.activeTargetAppName != front.localizedName {
+                store.activeTargetAppName = front.localizedName
+            }
         }
 
         nav.isPresented = false
@@ -1192,6 +1231,9 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
                 nav.showSettings = false
             } else if nav.isCreatingTemplate {
                 nav.isCreatingTemplate = false
+            } else if !nav.searchText.isEmpty {
+                nav.searchText = ""
+                nav.focusTrigger = UUID()
             } else {
                 hide(restoreFocus: true)
             }
@@ -1200,6 +1242,12 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
 
         if nav.showSettings || nav.isCreatingTemplate {
             return event
+        }
+
+        // ⌘F (keyCode 3)：随时聚焦并全选顶部搜索框
+        if flags == .command, event.keyCode == 3 {
+            focusAndSelectSearchField()
+            return nil
         }
 
         // ⌘Y (keyCode 16) 随时切换 QuickLook 对照速览；搜索框为空时按 Space (keyCode 49) 同样触发 QuickLook

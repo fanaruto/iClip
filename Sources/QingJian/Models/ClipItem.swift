@@ -365,6 +365,27 @@ enum EpisodicQueryMatcher {
             return false
         }
     }
+
+    static func isTimeScopeToken(_ tokenLower: String) -> Bool {
+        switch tokenLower {
+        case "今天", "今日", "today", "@today",
+             "昨天", "昨日", "yesterday", "@yesterday",
+             "刚刚", "1h", "1小时", "@1h",
+             "本周", "一周", "7d", "week", "@7d", "@week":
+            return true
+        default:
+            return false
+        }
+    }
+
+    static func isPinScopeToken(_ tokenLower: String) -> Bool {
+        switch tokenLower {
+        case "收藏", "@pin", "@star", "pinned", "starred":
+            return true
+        default:
+            return false
+        }
+    }
 }
 
 /// 线程安全轻量中文全拼与首字母索引缓存（零外部词库依赖，支持英文输入态盲搜中文历史与应用名）
@@ -372,9 +393,13 @@ enum PinyinSearchCache {
     private final class Entry {
         let compactFull: String
         let initials: String
-        init(compactFull: String, initials: String) {
+        let aliasFull: String
+        let aliasInitials: String
+        init(compactFull: String, initials: String, aliasFull: String, aliasInitials: String) {
             self.compactFull = compactFull
             self.initials = initials
+            self.aliasFull = aliasFull
+            self.aliasInitials = aliasInitials
         }
     }
 
@@ -396,24 +421,40 @@ enum PinyinSearchCache {
     }
 
     static func matchesPinyin(tokenLower: String, for item: ClipItem) -> Bool {
-        let cacheKey = "\(item.contentHash)|\(item.customAlias ?? "")|\(item.sourceAppName ?? "")" as NSString
-        let entry: Entry
-        if let hit = cache.object(forKey: cacheKey) {
-            entry = hit
-        } else {
-            let built = buildEntry(for: item)
-            cache.setObject(built, forKey: cacheKey)
-            entry = built
-        }
+        let entry = resolvedEntry(for: item)
         if entry.initials.isEmpty { return false }
         return entry.initials.contains(tokenLower) || entry.compactFull.contains(tokenLower)
     }
 
+    static func matchesAliasPinyin(tokenLower: String, for item: ClipItem) -> Bool {
+        guard let alias = item.customAlias, !alias.isEmpty else { return false }
+        let entry = resolvedEntry(for: item)
+        guard !entry.aliasInitials.isEmpty else { return false }
+        return entry.aliasInitials == tokenLower
+            || entry.aliasFull == tokenLower
+            || entry.aliasInitials.hasPrefix(tokenLower)
+            || entry.aliasFull.hasPrefix(tokenLower)
+    }
+
+    private static func resolvedEntry(for item: ClipItem) -> Entry {
+        let cacheKey = "\(item.contentHash)|\(item.customAlias ?? "")|\(item.sourceAppName ?? "")" as NSString
+        if let hit = cache.object(forKey: cacheKey) {
+            return hit
+        }
+        let built = buildEntry(for: item)
+        cache.setObject(built, forKey: cacheKey)
+        return built
+    }
+
     private static func buildEntry(for item: ClipItem) -> Entry {
         var source = ""
+        var aliasPair: (full: String, initials: String) = ("", "")
         if let alias = item.customAlias, !alias.isEmpty {
             source.append(alias)
             source.append(" ")
+            if containsHanCharacters(alias) {
+                aliasPair = transliterate(alias)
+            }
         }
         if let app = item.sourceAppName, !app.isEmpty {
             source.append(app)
@@ -439,10 +480,20 @@ enum PinyinSearchCache {
         #endif
 
         guard containsHanCharacters(source) else {
-            return Entry(compactFull: "", initials: "")
+            return Entry(compactFull: "", initials: "", aliasFull: "", aliasInitials: "")
         }
 
-        let mutable = NSMutableString(string: source) as CFMutableString
+        let mainPair = transliterate(source)
+        return Entry(
+            compactFull: mainPair.full,
+            initials: mainPair.initials,
+            aliasFull: aliasPair.full,
+            aliasInitials: aliasPair.initials
+        )
+    }
+
+    private static func transliterate(_ text: String) -> (full: String, initials: String) {
+        let mutable = NSMutableString(string: text) as CFMutableString
         CFStringTransform(mutable, nil, kCFStringTransformToLatin, false)
         CFStringTransform(mutable, nil, kCFStringTransformStripCombiningMarks, false)
         let latin = (mutable as String).lowercased()
@@ -466,7 +517,7 @@ enum PinyinSearchCache {
                 atWordStart = true
             }
         }
-        return Entry(compactFull: full, initials: initials)
+        return (full, initials)
     }
 
     private static func containsHanCharacters(_ text: String) -> Bool {
@@ -476,5 +527,174 @@ enum PinyinSearchCache {
             }
         }
         return false
+    }
+}
+
+/// 第一性相关度 × 目标窗口情境检索引擎：
+/// 1. 守护「空搜索时间流」铁律：日常全部列表空搜索严格保持复制时间倒序，#1 永不乱跳；
+/// 2. 主动搜索时综合计算「备注别名命中 > 前缀精确命中 > 收藏沉淀 > 当前目标应用粘贴亲和度 > 全局复用」；
+/// 3. 收藏夹无搜索时自动将「当前外部目标应用（如微信 / 终端 / Cursor）最常粘贴的收藏」智能置顶。
+enum SmartSearchRanker {
+    @MainActor
+    static func rankSearchResults(
+        _ matchedItems: [ClipItem],
+        query: String,
+        targetApp: String?,
+        engine: AdaptiveIntelligenceEngine
+    ) -> [ClipItem] {
+        guard engine.smartContextRankingEnabled, matchedItems.count > 1 else {
+            return matchedItems
+        }
+
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return matchedItems }
+
+        let rawTokens = trimmed.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
+        var positiveContentTokens: [String] = []
+        var hasPinScope = false
+
+        for tok in rawTokens {
+            if tok.hasPrefix("!") && tok.utf8.count >= 2 && !tok.hasPrefix("!=") {
+                continue
+            }
+            let lower = tok.lowercased()
+            if EpisodicQueryMatcher.isTimeScopeToken(lower) {
+                continue
+            }
+            if EpisodicQueryMatcher.isPinScopeToken(lower) {
+                hasPinScope = true
+                continue
+            }
+            positiveContentTokens.append(tok)
+        }
+
+        // 若用户仅输入时间词（如「今天」「昨天」），严格保留自然时间流；若仅输入「收藏 / @pin」，应用目标窗口常用收藏排序
+        if positiveContentTokens.isEmpty {
+            if hasPinScope {
+                return rankPinnedItemsForContext(matchedItems, targetApp: targetApp, engine: engine)
+            }
+            return matchedItems
+        }
+
+        let joinedQueryLower = positiveContentTokens.joined(separator: " ").lowercased()
+        let firstTokenLower = positiveContentTokens[0].lowercased()
+
+        let scored: [(offset: Int, score: Double, item: ClipItem)] = matchedItems.enumerated().map { idx, item in
+            let s = relevanceScore(
+                for: item,
+                joinedQueryLower: joinedQueryLower,
+                firstTokenLower: firstTokenLower,
+                tokens: positiveContentTokens,
+                targetApp: targetApp,
+                engine: engine
+            )
+            return (idx, s, item)
+        }
+
+        return scored.sorted { lhs, rhs in
+            if abs(lhs.score - rhs.score) > 0.5 {
+                return lhs.score > rhs.score
+            }
+            return lhs.offset < rhs.offset
+        }.map(\.item)
+    }
+
+    @MainActor
+    static func rankPinnedItemsForContext(
+        _ pinnedItems: [ClipItem],
+        targetApp: String?,
+        engine: AdaptiveIntelligenceEngine
+    ) -> [ClipItem] {
+        guard engine.smartContextRankingEnabled, pinnedItems.count > 1, targetApp != nil else {
+            return pinnedItems
+        }
+
+        let decorated: [(offset: Int, appCount: Int, item: ClipItem)] = pinnedItems.enumerated().map { idx, item in
+            let count = engine.targetAppPasteCount(for: item.contentHash, targetApp: targetApp)
+            return (idx, count >= 2 ? count : 0, item)
+        }
+
+        guard decorated.contains(where: { $0.appCount >= 2 }) else {
+            return pinnedItems
+        }
+
+        return decorated.sorted { lhs, rhs in
+            if lhs.appCount != rhs.appCount {
+                return lhs.appCount > rhs.appCount
+            }
+            return lhs.offset < rhs.offset
+        }.map(\.item)
+    }
+
+    @MainActor
+    private static func relevanceScore(
+        for item: ClipItem,
+        joinedQueryLower: String,
+        firstTokenLower: String,
+        tokens: [String],
+        targetApp: String?,
+        engine: AdaptiveIntelligenceEngine
+    ) -> Double {
+        var score: Double = 0
+
+        // 1. 备注别名（⌘R）精准度：用户特意命名的记忆索引享有最高权重
+        if let rawAlias = item.customAlias?.trimmingCharacters(in: .whitespacesAndNewlines), !rawAlias.isEmpty {
+            let aliasLower = rawAlias.lowercased()
+            if aliasLower == joinedQueryLower || aliasLower == firstTokenLower {
+                score += 140
+            } else if aliasLower.hasPrefix(joinedQueryLower) || aliasLower.hasPrefix(firstTokenLower) {
+                score += 95
+            } else if tokens.contains(where: { aliasLower.contains($0.lowercased()) }) {
+                score += 65
+            } else if PinyinSearchCache.isPureASCIILetters(firstTokenLower),
+                      PinyinSearchCache.matchesAliasPinyin(tokenLower: firstTokenLower, for: item) {
+                score += 85
+            }
+        }
+
+        // 2. 正文 / 文件名紧凑命中度（避免数千字长文偶然包含某词压过精悍的目标条目）
+        if let rawText = item.text {
+            let byteCount = rawText.utf8.count
+            let head = String(rawText.prefix(160)).trimmingCharacters(in: .whitespacesAndNewlines)
+            let headLower = head.lowercased()
+            if byteCount <= 256 && headLower == joinedQueryLower {
+                score += 110
+            } else if headLower.hasPrefix(joinedQueryLower) || headLower.hasPrefix(firstTokenLower) {
+                score += 48
+            } else if headLower.contains(firstTokenLower) {
+                score += 22
+            }
+            if byteCount <= 360 {
+                score += 12
+            }
+        } else if let firstPath = item.filePaths?.first {
+            let fileNameLower = URL(fileURLWithPath: firstPath).lastPathComponent.lowercased()
+            if fileNameLower == joinedQueryLower || fileNameLower == firstTokenLower {
+                score += 90
+            } else if fileNameLower.hasPrefix(firstTokenLower) {
+                score += 48
+            } else if fileNameLower.contains(firstTokenLower) {
+                score += 24
+            }
+        }
+
+        // 3. 个人收藏资产权重
+        if item.isPinned {
+            score += 30
+        }
+
+        // 4. 目标窗口情境亲和度（例如在「微信」里搜地址 vs 在「终端」里搜地址）
+        let appCount = engine.targetAppPasteCount(for: item.contentHash, targetApp: targetApp)
+        if appCount > 0 {
+            score += min(Double(appCount) * 22.0, 88.0)
+        }
+
+        // 5. 全局历史复用频次微调
+        let globalReuse = engine.reuseCount(for: item.contentHash)
+        if globalReuse > 1 {
+            score += min(Double(globalReuse - 1) * 4.0, 20.0)
+        }
+
+        return score
     }
 }

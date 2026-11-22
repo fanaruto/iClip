@@ -305,6 +305,22 @@ struct AdaptiveIntelligenceSettingsSection: View {
 
             Divider().opacity(0.35)
 
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("目标窗口情境智能检索与常用置顶")
+                        .font(.system(size: 13.5, weight: .medium))
+                    Text("自动记忆你在微信、终端或 IDE 常贴的条目，在搜索与收藏夹中按当前窗口习惯优先置顶（日常全部流保持纯时间序）")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Toggle("", isOn: $engine.smartContextRankingEnabled)
+                    .toggleStyle(.switch)
+                    .labelsHidden()
+            }
+
+            Divider().opacity(0.35)
+
             // 3. 光标角「灵动微星标（Action Spark）」开关与停留时长
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
