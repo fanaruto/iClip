@@ -608,6 +608,12 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             return nil
         }
 
+        // ⌥1 ~ ⌥6：全键盘一键直达顶部分类（全部 / 收藏 / 文本 / 链接 / 图片 / 文件）
+        if flags == .option, let targetTab = ClipFilterTab.fromOptionKeyCode(event.keyCode) {
+            rootView.selectFilterTab(targetTab)
+            return nil
+        }
+
         // ⌘E (keyCode 14)：一键切换极简纯净模式（基础功能版）
         if flags == .command, event.keyCode == 14 {
             store.toggleMinimalMode()
@@ -1302,6 +1308,12 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
 
         if flags == .command, let chars = event.charactersIgnoringModifiers, let digit = Int(chars), (1...9).contains(digit) {
             rootView.pasteItem(at: digit - 1)
+            return nil
+        }
+
+        // ⌥1 ~ ⌥6：全键盘一键直达顶部分类（全部 / 收藏 / 文本 / 链接 / 图片 / 文件）
+        if flags == .option, let targetTab = ClipFilterTab.fromOptionKeyCode(event.keyCode) {
+            rootView.selectFilterTab(targetTab)
             return nil
         }
 

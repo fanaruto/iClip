@@ -90,6 +90,31 @@ enum ClipFilterTab: String, CaseIterable, Identifiable {
         case .file: return "doc"
         }
     }
+
+    /// 对应 ⌥1 ~ ⌥6 全键盘类目直达快捷键文案
+    var optionShortcutLabel: String {
+        switch self {
+        case .all: return "⌥1"
+        case .pinned: return "⌥2"
+        case .text: return "⌥3"
+        case .link: return "⌥4"
+        case .image: return "⌥5"
+        case .file: return "⌥6"
+        }
+    }
+
+    /// 将 macOS 主键盘数字键虚拟键码（kVK_ANSI_1...6）映射为分类标签，免受输入法或 Option 特殊符号干扰
+    static func fromOptionKeyCode(_ keyCode: UInt16) -> ClipFilterTab? {
+        switch keyCode {
+        case 18: return .all     // ⌥1
+        case 19: return .pinned  // ⌥2
+        case 20: return .text    // ⌥3
+        case 21: return .link    // ⌥4
+        case 23: return .image   // ⌥5 (kVK_ANSI_5 = 0x17)
+        case 22: return .file    // ⌥6 (kVK_ANSI_6 = 0x16)
+        default: return nil
+        }
+    }
 }
 
 /// 单条剪贴板记录（双角色共享超集持久化 Schema，确保通过 OTA 跨角色切换时历史与元数据 100% 无损）

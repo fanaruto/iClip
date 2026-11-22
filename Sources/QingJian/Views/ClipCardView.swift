@@ -14,6 +14,7 @@ struct ClipCardView: View {
     let liquidGlassAppearance: LiquidGlassAppearance
     let borderlessPanel: Bool
     let onSelect: () -> Void
+    var onHoverSelect: (() -> Bool)? = nil
     let onPaste: (Bool) -> Void
     let onCopyOnly: (Bool) -> Void
     let onToggleQueue: () -> Void
@@ -193,10 +194,23 @@ struct ClipCardView: View {
         .scaleEffect(isHovered ? 1.012 : 1.0)
         .animation(.spring(response: 0.22, dampingFraction: 0.85), value: isHovered)
         .animation(.spring(response: 0.2, dampingFraction: 0.85), value: isSelected)
-        .onHover { hovering in
-            isHovered = hovering
-            if hovering {
-                onSelect()
+        .onContinuousHover { phase in
+            switch phase {
+            case .active:
+                let allowed: Bool
+                if let onHoverSelect {
+                    allowed = onHoverSelect()
+                } else {
+                    onSelect()
+                    allowed = true
+                }
+                if allowed && !isHovered {
+                    isHovered = true
+                }
+            case .ended:
+                if isHovered {
+                    isHovered = false
+                }
             }
         }
         .onDrag {
@@ -216,7 +230,9 @@ struct ClipCardView: View {
         let isDoubleTap = eventClickCount >= 2 || (now - lastTapUptime) <= min(NSEvent.doubleClickInterval, 0.32)
         lastTapUptime = isDoubleTap ? 0 : now
 
+        if !isHovered { isHovered = true }
         if isDoubleTap {
+            onSelect()
             onPaste(false)
             return
         }
@@ -596,6 +612,7 @@ struct ClipCardView: View {
     let liquidGlassAppearance: LiquidGlassAppearance
     let borderlessPanel: Bool
     let onSelect: () -> Void
+    var onHoverSelect: (() -> Bool)? = nil
     let onPaste: (Bool) -> Void
     let onCopyOnly: (Bool) -> Void
     let onApplyTransform: (TransformAction, Bool) -> Void
@@ -731,10 +748,23 @@ struct ClipCardView: View {
         .scaleEffect(isHovered ? 1.012 : 1.0)
         .animation(.spring(response: 0.22, dampingFraction: 0.86), value: isHovered)
         .animation(.spring(response: 0.2, dampingFraction: 0.86), value: isSelected)
-        .onHover { hovering in
-            isHovered = hovering
-            if hovering {
-                onSelect()
+        .onContinuousHover { phase in
+            switch phase {
+            case .active:
+                let allowed: Bool
+                if let onHoverSelect {
+                    allowed = onHoverSelect()
+                } else {
+                    onSelect()
+                    allowed = true
+                }
+                if allowed && !isHovered {
+                    isHovered = true
+                }
+            case .ended:
+                if isHovered {
+                    isHovered = false
+                }
             }
         }
         .onDrag {
@@ -754,7 +784,9 @@ struct ClipCardView: View {
         let isDoubleTap = eventClickCount >= 2 || (now - lastTapUptime) <= min(NSEvent.doubleClickInterval, 0.32)
         lastTapUptime = isDoubleTap ? 0 : now
 
+        if !isHovered { isHovered = true }
         if isDoubleTap {
+            onSelect()
             onPaste(false)
             return
         }

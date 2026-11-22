@@ -1,4 +1,47 @@
 import Foundation
+import CoreGraphics
+
+/// 键鼠焦点防冲突守卫：
+/// 当面板唤起滑入、方向键滚动、切换类目或输入检索词时锁定当前全局屏幕光标锚点；
+/// 在鼠标发生真实物理位移（>= movementThreshold）前抑制静止光标触发的幽灵悬停抢焦点与误弹大图预览。
+struct PointerSelectionGuard {
+    private(set) var lockedMouseLocation: CGPoint? = nil
+    private(set) var lockedAtUptime: TimeInterval = -100
+    var movementThreshold: CGFloat = 3.5
+    var minHoldDuration: TimeInterval = 0.04
+
+    var isLocked: Bool {
+        lockedMouseLocation != nil
+    }
+
+    /// 在面板唤起或键盘导航瞬间锁定当前全局光标坐标
+    mutating func lock(at mouseLocation: CGPoint, uptime: TimeInterval) {
+        lockedMouseLocation = mouseLocation
+        lockedAtUptime = uptime
+    }
+
+    /// 鼠标真实点击卡片时立即解除锁定
+    mutating func unlock() {
+        lockedMouseLocation = nil
+    }
+
+    /// 判断当前全局光标位置是否允许触发悬停选中（发生真实物理移动后自动解锁放行）
+    mutating func allowHoverSelection(currentMouseLocation: CGPoint, uptime: TimeInterval) -> Bool {
+        guard let anchor = lockedMouseLocation else {
+            return true
+        }
+        guard (uptime - lockedAtUptime) >= minHoldDuration else {
+            return false
+        }
+        let dx = currentMouseLocation.x - anchor.x
+        let dy = currentMouseLocation.y - anchor.y
+        if hypot(dx, dy) >= movementThreshold {
+            lockedMouseLocation = nil
+            return true
+        }
+        return false
+    }
+}
 
 /// 剪贴板混合列表（普通单行卡片 + 3 列图片网格）的二维方向键导航方向
 enum PanelNavigationDirection {

@@ -1180,4 +1180,109 @@ final class CoreFeatureTests: XCTestCase {
         )
         XCTAssertEqual(rendered, "您好 王先生，今日（2026-11-23 星期一）已为您寄出")
     }
+
+    // MARK: - 30. 键鼠防冲突守卫（`PointerSelectionGuard`）、`⌥1~⌥6` 类目直达与历史资产原子自愈测试
+
+    func testPointerSelectionGuardOptionTabsAndHistorySelfHealing() throws {
+        // 1. 静止鼠标与微抖动绝不抢走面板唤起/键盘导航焦点；真实移动 >= 3.5pt 立即解锁接管
+        var guardState = PointerSelectionGuard()
+        XCTAssertFalse(guardState.isLocked)
+        XCTAssertTrue(guardState.allowHoverSelection(currentMouseLocation: CGPoint(x: 300, y: 500), uptime: 1.0))
+
+        guardState.lock(at: CGPoint(x: 300, y: 500), uptime: 10.0)
+        XCTAssertTrue(guardState.isLocked)
+        // 面板滑入或列表滚动经过静止光标（0 位移）与桌面光学微抖动（< 3.5pt）：严格抑制悬停抢焦点
+        XCTAssertFalse(guardState.allowHoverSelection(currentMouseLocation: CGPoint(x: 300, y: 500), uptime: 10.25))
+        XCTAssertFalse(guardState.allowHoverSelection(currentMouseLocation: CGPoint(x: 302, y: 501), uptime: 10.30))
+        XCTAssertTrue(guardState.isLocked)
+
+        // 用户真实移动鼠标（位移 5pt >= 3.5pt）：立即解锁放行
+        XCTAssertTrue(guardState.allowHoverSelection(currentMouseLocation: CGPoint(x: 305, y: 500), uptime: 10.35))
+        XCTAssertFalse(guardState.isLocked)
+
+        // 鼠标物理点击直接解锁
+        guardState.lock(at: CGPoint(x: 100, y: 100), uptime: 20.0)
+        guardState.unlock()
+        XCTAssertFalse(guardState.isLocked)
+
+        // 2. ⌥1 ~ ⌥6 虚拟键码精确映射（特别验证 macOS kVK_ANSI_5=23 与 kVK_ANSI_6=22 顺序）
+        XCTAssertEqual(ClipFilterTab.fromOptionKeyCode(18), .all)
+        XCTAssertEqual(ClipFilterTab.fromOptionKeyCode(19), .pinned)
+        XCTAssertEqual(ClipFilterTab.fromOptionKeyCode(20), .text)
+        XCTAssertEqual(ClipFilterTab.fromOptionKeyCode(21), .link)
+        XCTAssertEqual(ClipFilterTab.fromOptionKeyCode(23), .image)
+        XCTAssertEqual(ClipFilterTab.fromOptionKeyCode(22), .file)
+        XCTAssertNil(ClipFilterTab.fromOptionKeyCode(26))
+
+        // 3. 主 history.json 断电损坏时从 history.backup.json 零损自愈，并隔离损坏现场
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("iclip-selfheal-\(UUID().uuidString)", isDirectory: true)
+        let imagesDir = tempDir.appendingPathComponent("images", isDirectory: true)
+        try FileManager.default.createDirectory(at: imagesDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let primaryURL = tempDir.appendingPathComponent("history.json")
+        let backupURL = tempDir.appendingPathComponent("history.backup.json")
+        let corruptURL = tempDir.appendingPathComponent("history.corrupt.json")
+
+        let pinnedItem = ClipItem(
+            type: .text,
+            text: "ssh prod-gateway",
+            contentHash: "text:ssh",
+            isPinned: true,
+            customAlias: "生产网关"
+        )
+        let imageItem = ClipItem(
+            type: .image,
+            imageFileName: "referenced.png",
+            contentHash: "img:ref"
+        )
+        HistoryPersistenceHelper.writeSnapshot([pinnedItem, imageItem], primaryURL: primaryURL, backupURL: backupURL)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: primaryURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: backupURL.path))
+
+        // 模拟异常截断损坏主文件
+        try Data("{broken_json_eof".utf8).write(to: primaryURL)
+        let healOutcome = HistoryPersistenceHelper.loadSnapshot(
+            primaryURL: primaryURL,
+            backupURL: backupURL,
+            corruptURL: corruptURL
+        )
+        guard case .recoveredFromBackup(let recovered) = healOutcome else {
+            return XCTFail("应当从原子备份无损自愈，实际结果：\(healOutcome)")
+        }
+        XCTAssertEqual(recovered.count, 2)
+        XCTAssertEqual(recovered.first?.customAlias, "生产网关")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: corruptURL.path))
+        let healedReload = HistoryPersistenceHelper.loadSnapshot(
+            primaryURL: primaryURL,
+            backupURL: backupURL,
+            corruptURL: corruptURL
+        )
+        XCTAssertEqual(healedReload, .loadedPrimary(recovered))
+
+        // 4. 孤儿图片精准清理：保护活跃引用图片与 60s 内新写入图片，仅清理陈旧无主图片
+        let now = Date()
+        let refFile = imagesDir.appendingPathComponent("referenced.png")
+        let freshUnrefFile = imagesDir.appendingPathComponent("inflight.png")
+        let staleOrphanFile = imagesDir.appendingPathComponent("orphan.png")
+
+        try Data([0x89, 0x50, 0x4E, 0x47]).write(to: refFile)
+        try Data([0x89, 0x50, 0x4E, 0x47]).write(to: freshUnrefFile)
+        try Data([0x89, 0x50, 0x4E, 0x47]).write(to: staleOrphanFile)
+
+        try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-7200)], ofItemAtPath: refFile.path)
+        try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-10)], ofItemAtPath: freshUnrefFile.path)
+        try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-180)], ofItemAtPath: staleOrphanFile.path)
+
+        let pruned = HistoryPersistenceHelper.pruneOrphanedImages(
+            in: imagesDir,
+            referencedFileNames: ["referenced.png"],
+            minimumAgeSeconds: 60,
+            now: now
+        )
+        XCTAssertEqual(pruned, 1)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: refFile.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: freshUnrefFile.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: staleOrphanFile.path))
+    }
 }

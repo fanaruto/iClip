@@ -46,6 +46,7 @@ final class PanelNavigationModel: ObservableObject {
     private(set) var cachedDisplayRows: [ClipDisplayRow] = []
     private(set) var cachedVisualRows: [[Int]] = []
     var preferredGridColumn: Int? = nil
+    var pointerGuard = PointerSelectionGuard()
     private weak var storeRef: ClipboardStore?
     private var cancellables = Set<AnyCancellable>()
 
@@ -155,8 +156,37 @@ final class PanelNavigationModel: ObservableObject {
         isRecordingQueueHotKey = false
         suppressAutoHide = false
         isDragTargeted = false
+        lockPointerAtCurrentMouse()
         presentationEpoch &+= 1
         focusTrigger = UUID()
+    }
+
+    func lockPointerAtCurrentMouse() {
+        pointerGuard.lock(
+            at: NSEvent.mouseLocation,
+            uptime: ProcessInfo.processInfo.systemUptime
+        )
+    }
+
+    func selectExplicitly(_ index: Int) {
+        pointerGuard.unlock()
+        if selectedIndex != index {
+            selectedIndex = index
+        }
+    }
+
+    @discardableResult
+    func selectByHover(_ index: Int) -> Bool {
+        guard pointerGuard.allowHoverSelection(
+            currentMouseLocation: NSEvent.mouseLocation,
+            uptime: ProcessInfo.processInfo.systemUptime
+        ) else {
+            return false
+        }
+        if selectedIndex != index {
+            selectedIndex = index
+        }
+        return true
     }
 }
 
@@ -432,11 +462,13 @@ struct ClipboardPopoverView: View {
         }
         .onChange(of: nav.searchText) { _, _ in
             nav.selectedIndex = 0
+            nav.lockPointerAtCurrentMouse()
             dismissImagePreview(clearItem: true)
         }
         .onChange(of: nav.selectedTab) { _, _ in
             TactileFeedbackEngine.shared.perform(.tabSwitch)
             nav.selectedIndex = 0
+            nav.lockPointerAtCurrentMouse()
             dismissImagePreview(clearItem: true)
         }
         .onChange(of: nav.demoPreviewIndex) { _, targetIdx in
@@ -674,6 +706,7 @@ struct ClipboardPopoverView: View {
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
+                        .help("\(tab.title)（\(tab.optionShortcutLabel)）")
                     }
                 }
                 .padding(.horizontal, inset)
@@ -869,7 +902,10 @@ struct ClipboardPopoverView: View {
                                         liquidGlassAppearance: store.liquidGlassAppearance,
                                         borderlessPanel: store.borderlessPanel,
                                         onSelect: {
-                                            nav.selectedIndex = index
+                                            nav.selectExplicitly(index)
+                                        },
+                                        onHoverSelect: {
+                                            nav.selectByHover(index)
                                         },
                                         onPaste: { plainTextOnly in
                                             store.copyAndOptionallyPaste(
@@ -953,7 +989,10 @@ struct ClipboardPopoverView: View {
                                                 isSelected: entry.index == nav.selectedIndex,
                                                 queueRank: store.queuePosition(for: entry.item),
                                                 onSelect: {
-                                                    nav.selectedIndex = entry.index
+                                                    nav.selectExplicitly(entry.index)
+                                                },
+                                                onHoverSelect: {
+                                                    nav.selectByHover(entry.index)
                                                 },
                                                 onPaste: {
                                                     dismissImagePreview(clearItem: true)
@@ -1943,6 +1982,17 @@ struct ClipboardPopoverView: View {
         let tabs = ClipFilterTab.allCases
         guard let currentIdx = tabs.firstIndex(of: nav.selectedTab) else { return }
         let nextIdx = (currentIdx + delta + tabs.count) % tabs.count
+        selectFilterTab(tabs[nextIdx])
+    }
+
+    func selectFilterTab(_ tab: ClipFilterTab) {
+        if nav.selectedTab == tab {
+            nav.selectedIndex = 0
+            nav.preferredGridColumn = nil
+            nav.lockPointerAtCurrentMouse()
+            nav.scrollRequestEpoch &+= 1
+            return
+        }
         dismissImagePreview(clearItem: true)
         if nav.showQuickLook {
             nav.isQuickLookEditing = false
@@ -1950,7 +2000,8 @@ struct ClipboardPopoverView: View {
         }
         nav.selectedIndex = 0
         nav.preferredGridColumn = nil
-        nav.selectedTab = tabs[nextIdx]
+        nav.lockPointerAtCurrentMouse()
+        nav.selectedTab = tab
     }
 
     func moveSelection(direction: PanelNavigationDirection, extendMergeSelection: Bool = false) {
@@ -1971,6 +2022,7 @@ struct ClipboardPopoverView: View {
         if extendMergeSelection {
             store.ensureMergeSelected(filteredItems[nav.selectedIndex])
         }
+        nav.lockPointerAtCurrentMouse()
         TactileFeedbackEngine.shared.performNavigationStepHaptic()
         nav.scrollRequestEpoch &+= 1
     }
@@ -2398,6 +2450,7 @@ final class PanelNavigationModel: ObservableObject {
     private(set) var cachedDisplayRows: [ClipDisplayRow] = []
     private(set) var cachedVisualRows: [[Int]] = []
     var preferredGridColumn: Int? = nil
+    var pointerGuard = PointerSelectionGuard()
     private weak var storeRef: ClipboardStore?
     private var cancellables = Set<AnyCancellable>()
 
@@ -2520,8 +2573,37 @@ final class PanelNavigationModel: ObservableObject {
         isRecordingHotKey = false
         suppressAutoHide = false
         isDragTargeted = false
+        lockPointerAtCurrentMouse()
         presentationEpoch &+= 1
         focusTrigger = UUID()
+    }
+
+    func lockPointerAtCurrentMouse() {
+        pointerGuard.lock(
+            at: NSEvent.mouseLocation,
+            uptime: ProcessInfo.processInfo.systemUptime
+        )
+    }
+
+    func selectExplicitly(_ index: Int) {
+        pointerGuard.unlock()
+        if selectedIndex != index {
+            selectedIndex = index
+        }
+    }
+
+    @discardableResult
+    func selectByHover(_ index: Int) -> Bool {
+        guard pointerGuard.allowHoverSelection(
+            currentMouseLocation: NSEvent.mouseLocation,
+            uptime: ProcessInfo.processInfo.systemUptime
+        ) else {
+            return false
+        }
+        if selectedIndex != index {
+            selectedIndex = index
+        }
+        return true
     }
 }
 
@@ -2788,11 +2870,13 @@ struct ClipboardPopoverView: View {
         }
         .onChange(of: nav.searchText) { _, _ in
             nav.selectedIndex = 0
+            nav.lockPointerAtCurrentMouse()
             dismissImagePreview(clearItem: true)
         }
         .onChange(of: nav.selectedTab) { _, _ in
             TactileFeedbackEngine.shared.perform(.tabSwitch)
             nav.selectedIndex = 0
+            nav.lockPointerAtCurrentMouse()
             dismissImagePreview(clearItem: true)
         }
         .onChange(of: nav.demoPreviewIndex) { _, targetIdx in
@@ -2997,6 +3081,7 @@ struct ClipboardPopoverView: View {
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
+                        .help("\(tab.title)（\(tab.optionShortcutLabel)）")
                     }
                 }
                 .padding(.horizontal, inset)
@@ -3203,7 +3288,10 @@ struct ClipboardPopoverView: View {
                                         liquidGlassAppearance: store.liquidGlassAppearance,
                                         borderlessPanel: store.borderlessPanel,
                                         onSelect: {
-                                            nav.selectedIndex = index
+                                            nav.selectExplicitly(index)
+                                        },
+                                        onHoverSelect: {
+                                            nav.selectByHover(index)
                                         },
                                         onPaste: { plainTextOnly in
                                             store.copyAndOptionallyPaste(
@@ -3264,7 +3352,10 @@ struct ClipboardPopoverView: View {
                                                 index: entry.index,
                                                 isSelected: entry.index == nav.selectedIndex,
                                                 onSelect: {
-                                                    nav.selectedIndex = entry.index
+                                                    nav.selectExplicitly(entry.index)
+                                                },
+                                                onHoverSelect: {
+                                                    nav.selectByHover(entry.index)
                                                 },
                                                 onPaste: {
                                                     dismissImagePreview(clearItem: true)
@@ -4159,6 +4250,17 @@ struct ClipboardPopoverView: View {
         let tabs = ClipFilterTab.allCases
         guard let currentIdx = tabs.firstIndex(of: nav.selectedTab) else { return }
         let nextIdx = (currentIdx + delta + tabs.count) % tabs.count
+        selectFilterTab(tabs[nextIdx])
+    }
+
+    func selectFilterTab(_ tab: ClipFilterTab) {
+        if nav.selectedTab == tab {
+            nav.selectedIndex = 0
+            nav.preferredGridColumn = nil
+            nav.lockPointerAtCurrentMouse()
+            nav.scrollRequestEpoch &+= 1
+            return
+        }
         dismissImagePreview(clearItem: true)
         if nav.showQuickLook {
             nav.isQuickLookEditing = false
@@ -4166,7 +4268,8 @@ struct ClipboardPopoverView: View {
         }
         nav.selectedIndex = 0
         nav.preferredGridColumn = nil
-        nav.selectedTab = tabs[nextIdx]
+        nav.lockPointerAtCurrentMouse()
+        nav.selectedTab = tab
     }
 
     func moveSelection(direction: PanelNavigationDirection) {
@@ -4181,6 +4284,7 @@ struct ClipboardPopoverView: View {
         )
         nav.selectedIndex = result.index
         nav.preferredGridColumn = result.preferredColumn
+        nav.lockPointerAtCurrentMouse()
         TactileFeedbackEngine.shared.performNavigationStepHaptic()
         nav.scrollRequestEpoch &+= 1
     }

@@ -133,6 +133,114 @@ enum CopyAppendHelper {
     }
 }
 
+/// 剪贴板历史持久化自愈结果
+enum HistoryLoadOutcome: Equatable {
+    case emptyFreshInstall
+    case loadedPrimary([ClipItem])
+    case recoveredFromBackup([ClipItem])
+    case corruptedUnrecoverable
+
+    var items: [ClipItem] {
+        switch self {
+        case .loadedPrimary(let list), .recoveredFromBackup(let list):
+            return list
+        case .emptyFreshInstall, .corruptedUnrecoverable:
+            return []
+        }
+    }
+}
+
+/// 剪贴板历史双模原子持久化与无主孤儿图片自洁辅助器
+enum HistoryPersistenceHelper {
+    /// 原子写入主快照，并在快照非空（或用户主动删除清空）时同步原子刷新备份快照
+    static func writeSnapshot(
+        _ items: [ClipItem],
+        primaryURL: URL,
+        backupURL: URL,
+        allowEmptyBackup: Bool = false
+    ) {
+        guard let data = try? JSONEncoder().encode(items) else { return }
+        do {
+            try data.write(to: primaryURL, options: .atomic)
+            if !items.isEmpty || allowEmptyBackup {
+                try? data.write(to: backupURL, options: .atomic)
+            }
+        } catch {
+            // 磁盘异常时不触碰既有 backupURL，保护最近一份完好快照
+        }
+    }
+
+    /// 加载剪贴板历史：若主文件因断电/截断损坏则自动从 backupURL 无损自愈，并隔离损坏原件
+    static func loadSnapshot(
+        primaryURL: URL,
+        backupURL: URL,
+        corruptURL: URL
+    ) -> HistoryLoadOutcome {
+        let fm = FileManager.default
+        let primaryExists = fm.fileExists(atPath: primaryURL.path)
+        let backupExists = fm.fileExists(atPath: backupURL.path)
+
+        if primaryExists {
+            if let data = try? Data(contentsOf: primaryURL),
+               let decoded = try? JSONDecoder().decode([ClipItem].self, from: data) {
+                if !decoded.isEmpty && !backupExists {
+                    try? data.write(to: backupURL, options: .atomic)
+                }
+                return .loadedPrimary(decoded)
+            }
+            try? fm.removeItem(at: corruptURL)
+            try? fm.moveItem(at: primaryURL, to: corruptURL)
+        }
+
+        if backupExists,
+           let backupData = try? Data(contentsOf: backupURL),
+           let recovered = try? JSONDecoder().decode([ClipItem].self, from: backupData) {
+            try? backupData.write(to: primaryURL, options: .atomic)
+            return .recoveredFromBackup(recovered)
+        }
+
+        return primaryExists ? .corruptedUnrecoverable : .emptyFreshInstall
+    }
+
+    /// 扫描 images 目录并安全清理无任何历史记录引用的陈旧孤儿图片（保护 minimumAgeSeconds 内的新写入图片）
+    @discardableResult
+    static func pruneOrphanedImages(
+        in imagesDirectoryURL: URL,
+        referencedFileNames: Set<String>,
+        minimumAgeSeconds: TimeInterval = 60,
+        now: Date = Date()
+    ) -> Int {
+        let fm = FileManager.default
+        guard let urls = try? fm.contentsOfDirectory(
+            at: imagesDirectoryURL,
+            includingPropertiesForKeys: [.isRegularFileKey, .contentModificationDateKey, .creationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return 0
+        }
+
+        let imageExtensions: Set<String> = ["png", "jpg", "jpeg", "tiff", "webp", "heic"]
+        var removedCount = 0
+        for fileURL in urls {
+            let ext = fileURL.pathExtension.lowercased()
+            guard imageExtensions.contains(ext) else { continue }
+            let name = fileURL.lastPathComponent
+            guard !referencedFileNames.contains(name) else { continue }
+
+            let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .contentModificationDateKey, .creationDateKey])
+            guard values?.isRegularFile == true else { continue }
+            if let modified = values?.contentModificationDate ?? values?.creationDate,
+               now.timeIntervalSince(modified) < minimumAgeSeconds {
+                continue
+            }
+            if (try? fm.removeItem(at: fileURL)) != nil {
+                removedCount += 1
+            }
+        }
+        return removedCount
+    }
+}
+
 /// 剪贴板核心管理与持久化服务（支持极客开发版 / 心流办公版编译期隔离与跨版本无损存储）
 @MainActor
 final class ClipboardStore: ObservableObject {
@@ -280,6 +388,8 @@ final class ClipboardStore: ObservableObject {
 
     private let appSupportURL: URL
     private let historyFileURL: URL
+    private let historyBackupFileURL: URL
+    private let historyCorruptFileURL: URL
     private let imagesDirectoryURL: URL
 
     private static let concealedType = NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")
@@ -289,6 +399,8 @@ final class ClipboardStore: ObservableObject {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         self.appSupportURL = base.appendingPathComponent("QingJian", isDirectory: true)
         self.historyFileURL = appSupportURL.appendingPathComponent("history.json")
+        self.historyBackupFileURL = appSupportURL.appendingPathComponent("history.backup.json")
+        self.historyCorruptFileURL = appSupportURL.appendingPathComponent("history.corrupt.json")
         self.imagesDirectoryURL = appSupportURL.appendingPathComponent("images", isDirectory: true)
 
         let installed = AppRoleEdition.installed
@@ -418,6 +530,7 @@ final class ClipboardStore: ObservableObject {
         ensureDirectories()
         loadHistory()
         startMonitoring()
+        scheduleOrphanedImageCleanup()
         if !minimalModeEnabled {
             scheduleLegacyOCRBackfill()
         }
@@ -519,13 +632,32 @@ final class ClipboardStore: ObservableObject {
     }
 
     private func loadHistory() {
-        guard FileManager.default.fileExists(atPath: historyFileURL.path) else { return }
-        do {
-            let data = try Data(contentsOf: historyFileURL)
-            let decoded = try JSONDecoder().decode([ClipItem].self, from: data)
-            self.items = sortItems(decoded)
-        } catch {
-            self.items = []
+        let outcome = HistoryPersistenceHelper.loadSnapshot(
+            primaryURL: historyFileURL,
+            backupURL: historyBackupFileURL,
+            corruptURL: historyCorruptFileURL
+        )
+        self.items = sortItems(outcome.items)
+        if case .recoveredFromBackup(let recovered) = outcome, !recovered.isEmpty {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                self?.showToast("已从原子备份自动恢复 \(recovered.count) 条历史记录", duration: 3.0)
+            }
+        }
+    }
+
+    /// 启动 5 秒后在后台低优串行队列清理无主孤儿图片（保护在库图片、8 秒撤销缓冲图片及 60 秒内新写入图片）
+    private func scheduleOrphanedImageCleanup() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
+            guard let self else { return }
+            let referenced = Set((self.items + self.undoRemovedItems).compactMap(\.imageFileName))
+            let imagesDir = self.imagesDirectoryURL
+            self.diskQueue.async {
+                _ = HistoryPersistenceHelper.pruneOrphanedImages(
+                    in: imagesDir,
+                    referencedFileNames: referenced,
+                    minimumAgeSeconds: 60
+                )
+            }
         }
     }
 
@@ -539,16 +671,20 @@ final class ClipboardStore: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: work)
     }
 
-    private func saveHistory(immediate: Bool = false) {
+    private func saveHistory(immediate: Bool = false, allowEmptyBackup: Bool = false) {
         saveWorkItem?.cancel()
         let snapshot = self.items
         let targetURL = self.historyFileURL
+        let backupURL = self.historyBackupFileURL
 
         let work = DispatchWorkItem { [diskQueue] in
             diskQueue.async {
-                if let data = try? JSONEncoder().encode(snapshot) {
-                    try? data.write(to: targetURL, options: .atomic)
-                }
+                HistoryPersistenceHelper.writeSnapshot(
+                    snapshot,
+                    primaryURL: targetURL,
+                    backupURL: backupURL,
+                    allowEmptyBackup: allowEmptyBackup
+                )
             }
         }
 
@@ -1676,7 +1812,7 @@ final class ClipboardStore: ObservableObject {
         pasteQueueIDs.removeAll { $0 == removed.id }
         selectedMergeIDs.removeAll { $0 == removed.id }
         #endif
-        saveHistory()
+        saveHistory(allowEmptyBackup: true)
 
         if userInitiated {
             TactileFeedbackEngine.shared.perform(.deleteItem)
@@ -1696,7 +1832,7 @@ final class ClipboardStore: ObservableObject {
         selectedMergeIDs.removeAll { removedIDs.contains($0) }
         #endif
         items = items.filter { $0.isPinned }
-        saveHistory()
+        saveHistory(allowEmptyBackup: true)
         TactileFeedbackEngine.shared.perform(.deleteItem)
         stageDeletionUndoBuffer(toRemove)
         showToast("已清空 \(toRemove.count) 条 · 按 ⌘Z 撤销", duration: 4.2)

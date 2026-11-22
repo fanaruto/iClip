@@ -14,6 +14,7 @@ struct ClipImageGridTile: View {
     let isSelected: Bool
     let queueRank: Int?
     let onSelect: () -> Void
+    var onHoverSelect: (() -> Bool)? = nil
     let onPaste: () -> Void
     let onCopyOnly: () -> Void
     let onToggleQueue: () -> Void
@@ -229,12 +230,26 @@ struct ClipImageGridTile: View {
                     }
             }
         }
-        .onHover { hovering in
-            isHovered = hovering
-            if hovering {
-                onSelect()
+        .onContinuousHover { phase in
+            switch phase {
+            case .active:
+                let allowed: Bool
+                if let onHoverSelect {
+                    allowed = onHoverSelect()
+                } else {
+                    onSelect()
+                    allowed = true
+                }
+                if allowed && !isHovered {
+                    isHovered = true
+                    onHoverChange(true, frameBox.rect)
+                }
+            case .ended:
+                if isHovered {
+                    isHovered = false
+                    onHoverChange(false, frameBox.rect)
+                }
             }
-            onHoverChange(hovering, frameBox.rect)
         }
         .onDrag {
             ClipboardStore.shared.makeDragItemProvider(for: item)
@@ -244,7 +259,9 @@ struct ClipImageGridTile: View {
             let clickCount = (NSApp.currentEvent?.type == .leftMouseUp) ? (NSApp.currentEvent?.clickCount ?? 1) : 1
             let isDouble = clickCount >= 2 || (now - lastTapUptime) <= min(NSEvent.doubleClickInterval, 0.32)
             lastTapUptime = isDouble ? 0 : now
+            if !isHovered { isHovered = true }
             if isDouble {
+                onSelect()
                 onPaste()
             } else {
                 onSelect()
@@ -501,6 +518,7 @@ struct ClipImageGridTile: View {
     let index: Int
     let isSelected: Bool
     let onSelect: () -> Void
+    var onHoverSelect: (() -> Bool)? = nil
     let onPaste: () -> Void
     let onCopyOnly: () -> Void
     var onExtractOCR: ((Bool) -> Void)? = nil
@@ -706,12 +724,26 @@ struct ClipImageGridTile: View {
                     }
             }
         }
-        .onHover { hovering in
-            isHovered = hovering
-            if hovering {
-                onSelect()
+        .onContinuousHover { phase in
+            switch phase {
+            case .active:
+                let allowed: Bool
+                if let onHoverSelect {
+                    allowed = onHoverSelect()
+                } else {
+                    onSelect()
+                    allowed = true
+                }
+                if allowed && !isHovered {
+                    isHovered = true
+                    onHoverChange(true, frameBox.rect)
+                }
+            case .ended:
+                if isHovered {
+                    isHovered = false
+                    onHoverChange(false, frameBox.rect)
+                }
             }
-            onHoverChange(hovering, frameBox.rect)
         }
         .onDrag {
             ClipboardStore.shared.makeDragItemProvider(for: item)
@@ -721,7 +753,9 @@ struct ClipImageGridTile: View {
             let clickCount = (NSApp.currentEvent?.type == .leftMouseUp) ? (NSApp.currentEvent?.clickCount ?? 1) : 1
             let isDouble = clickCount >= 2 || (now - lastTapUptime) <= min(NSEvent.doubleClickInterval, 0.32)
             lastTapUptime = isDouble ? 0 : now
+            if !isHovered { isHovered = true }
             if isDouble {
+                onSelect()
                 onPaste()
             } else {
                 onSelect()
