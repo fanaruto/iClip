@@ -560,6 +560,16 @@ struct ClipCardView: View {
             Button("在浏览器中打开（⌘O）") {
                 ClipboardStore.shared.openLinkInBrowser(item)
             }
+        } else if item.type == .text, let rawText = item.text {
+            if URLTrackingCleaner.extractFirstCleanedWebURL(from: rawText) != nil {
+                Button("在浏览器中打开内嵌链接（⌘O）") {
+                    _ = ClipboardStore.shared.openItemExternally(item)
+                }
+            } else if URLTrackingCleaner.resolveExistingLocalFileURL(from: rawText) != nil {
+                Button("在访达中定位路径（⌘O）") {
+                    _ = ClipboardStore.shared.openItemExternally(item)
+                }
+            }
         }
 
         Divider()
@@ -1097,6 +1107,16 @@ struct ClipCardView: View {
         if item.type == .link, ClipboardStore.shared.resolvedBrowserURL(for: item) != nil {
             Button("在浏览器中打开（⌘O）") {
                 ClipboardStore.shared.openLinkInBrowser(item)
+            }
+        } else if item.type == .text, let rawText = item.text {
+            if URLTrackingCleaner.extractFirstCleanedWebURL(from: rawText) != nil {
+                Button("在浏览器中打开内嵌链接（⌘O）") {
+                    _ = ClipboardStore.shared.openItemExternally(item)
+                }
+            } else if URLTrackingCleaner.resolveExistingLocalFileURL(from: rawText) != nil {
+                Button("在访达中定位路径（⌘O）") {
+                    _ = ClipboardStore.shared.openItemExternally(item)
+                }
             }
         }
 

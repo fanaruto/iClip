@@ -4,6 +4,7 @@ import AppKit
 /// 可由用户习惯自动晋升或通过建议直接开启的「复制即自动处理」契约规则
 enum LearnedAutoRuleKind: String, CaseIterable, Codable, Identifiable {
     case stripRichTextFormatting
+    case extractCleanShareLink
     case cleanTrackingURL
     case healPDFLineBreaks
     case applyPanguSpacing
@@ -17,6 +18,7 @@ enum LearnedAutoRuleKind: String, CaseIterable, Codable, Identifiable {
     var title: String {
         switch self {
         case .stripRichTextFormatting: return "复制富文本自动剥离脏样式（智能保护表格）"
+        case .extractCleanShareLink: return "复制社媒分享口令自动剥壳提取纯净链接"
         case .cleanTrackingURL: return "复制链接自动剥离追踪尾巴"
         case .healPDFLineBreaks: return "复制 PDF 段落自动愈合断行"
         case .applyPanguSpacing: return "复制中英混排自动加盘古空格"
@@ -30,6 +32,7 @@ enum LearnedAutoRuleKind: String, CaseIterable, Codable, Identifiable {
     var shortToast: String {
         switch self {
         case .stripRichTextFormatting: return "智能契约：已自动净化为纯文本"
+        case .extractCleanShareLink: return "智能契约：已从分享口令提取纯净链接"
         case .cleanTrackingURL: return "智能契约：已自动净链去追踪"
         case .healPDFLineBreaks: return "智能契约：已自动愈合 PDF 断行"
         case .applyPanguSpacing: return "智能契约：已自动优化中英间距"
@@ -44,6 +47,7 @@ enum LearnedAutoRuleKind: String, CaseIterable, Codable, Identifiable {
     static func fromActionID(_ actionID: String) -> LearnedAutoRuleKind? {
         switch actionID {
         case "strip-rich-style": return .stripRichTextFormatting
+        case "extract-share-url": return .extractCleanShareLink
         case "clean-url": return .cleanTrackingURL
         case "doc-pdf-heal": return .healPDFLineBreaks
         case "doc-pangu-space": return .applyPanguSpacing
@@ -468,6 +472,14 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
                 return (code, .extractPureOTP)
             }
 
+            // 分享口令自动剥壳提纯（若同时含提取码/会议密码则自动保留原文，绝不误吞密码）
+            if state.enabledAutoRules.contains(.extractCleanShareLink),
+               !MeetingAndEphemeralEngine.isOTPMessage(rawText),
+               let shareURL = URLTrackingCleaner.extractCleanShareURL(from: rawText),
+               shareURL != trimmed {
+                return (shareURL, .extractCleanShareLink)
+            }
+
             if state.enabledAutoRules.contains(.cleanMeetingTranscript),
                let cleaned = MeetingAndEphemeralEngine.cleanMeetingTranscript(rawText),
                cleaned.plainBody != trimmed {
@@ -813,6 +825,13 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
         }
 
         // D. 复制即自动处理的 6 大个人进化契约
+        let shareLinkKeys = ["分享口令", "分享文案", "口令链接", "提取链接", "提纯链接", "口令废话"]
+        if Self.containsAny(lower, shareLinkKeys) {
+            let neg = Self.isClauseNegated(matching: shareLinkKeys, in: clauses)
+            setAutoRule(.extractCleanShareLink, enabled: !neg)
+            adoptedEffects.append(!neg ? "已开启「复制分享口令自动提取纯净链接」" : "已关闭分享口令自动提取链接")
+        }
+
         let urlKeys = ["净链", "追踪参数", "追踪尾巴", "utm", "干净链接"]
         if Self.containsAny(lower, urlKeys) {
             let neg = Self.isClauseNegated(matching: urlKeys, in: clauses)
@@ -1008,6 +1027,7 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
         if actionID.hasPrefix("otp-") { return "otp" }
         if actionID.hasPrefix("comp-") { return "compliance" }
         if actionID == "clean-url" { return "url_tracking" }
+        if actionID == "extract-share-url" { return "share_url" }
         return actionID
     }
 
@@ -1110,13 +1130,16 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
     }
 }
 
-/// 双版本共享的轻量 URL 追踪参数剥离工具（保障 Dev 与 Flow 版本都能执行自动净链契约）
+/// 双版本共享的轻量 URL 追踪剥离、混排分享口令提纯与本地路径解析工具
 enum URLTrackingCleaner {
-    private static let trackingParams: Set<String> = [
+    static let trackingParams: Set<String> = [
         "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "utm_id",
-        "spm", "spm_id_from", "vd_source", "from_spmid", "share_source", "share_medium",
+        "spm", "spm_id_from", "vd_source", "from_spmid", "from_source", "share_source", "share_medium",
+        "share_plat", "share_from", "share_tag", "share_session_id", "unique_k",
+        "xhsshare", "xsec_source", "apptime", "appuid", "author_share",
+        "tt_from", "u_code", "iid", "from_copylink",
         "fbclid", "gclid", "dclid", "msclkid", "twclid", "igshid", "igsh",
-        "mc_cid", "mc_eid", "_hsenc", "_hsmi", "mkt_tok", "yclid", "wickedid"
+        "mc_cid", "mc_eid", "_hsenc", "_hsmi", "mkt_tok", "yclid", "wickedid", "si"
     ]
 
     static func cleanTrackingURL(_ raw: String) -> String? {
@@ -1133,6 +1156,196 @@ enum URLTrackingCleaner {
         guard filtered.count < items.count else { return nil }
         comps.queryItems = filtered.isEmpty ? nil : filtered
         return comps.string
+    }
+
+    /// 扫描混排文本中的合法 HTTP(S) 链接：自动在中日韩全角标点/空白处截断，并保留 URL 内部配对括号（如 Wikipedia 词条）
+    static func extractAllWebURLs(from raw: String, limit: Int = 3) -> [String] {
+        guard limit > 0 else { return [] }
+        let inspect = raw.utf16.count > 8_192 ? String(raw.prefix(4_096)) : raw
+        guard inspect.range(of: "http", options: .caseInsensitive) != nil else { return [] }
+
+        let scalars = Array(inspect.unicodeScalars)
+        let count = scalars.count
+        var results: [String] = []
+        var idx = 0
+
+        while idx + 7 < count && results.count < limit {
+            let s0 = scalars[idx].value
+            if s0 == 0x68 || s0 == 0x48 { // 'h' or 'H'
+                let prevIsAlphaNum: Bool
+                if idx > 0 {
+                    let pv = scalars[idx - 1].value
+                    prevIsAlphaNum = (pv >= 0x30 && pv <= 0x39) || (pv >= 0x41 && pv <= 0x5A) || (pv >= 0x61 && pv <= 0x7A)
+                } else {
+                    prevIsAlphaNum = false
+                }
+
+                if !prevIsAlphaNum {
+                    let prefix8 = String(String.UnicodeScalarView(scalars[idx..<min(idx + 8, count)])).lowercased()
+                    let schemeLen: Int
+                    if prefix8.hasPrefix("https://") {
+                        schemeLen = 8
+                    } else if prefix8.hasPrefix("http://") {
+                        schemeLen = 7
+                    } else {
+                        schemeLen = 0
+                    }
+
+                    if schemeLen > 0 {
+                        var end = idx + schemeLen
+                        while end < count {
+                            let v = scalars[end].value
+                            // 遇到空白、控制符、非 ASCII 字符（所有中文与全角标点）或引号尖括号立即终止
+                            if v <= 0x20 || v >= 0x7F { break }
+                            if v == 0x22 || v == 0x27 || v == 0x3C || v == 0x3E || v == 0x60 || v == 0x5C || v == 0x7B || v == 0x7D || v == 0x7C || v == 0x5E {
+                                break
+                            }
+                            end += 1
+                        }
+
+                        var candidate = String(String.UnicodeScalarView(scalars[idx..<end]))
+                        candidate = trimUnmatchedTrailingPunctuation(candidate)
+                        if isValidExtractedWebURL(candidate) {
+                            results.append(candidate)
+                        }
+                        idx = end
+                        continue
+                    }
+                }
+            }
+            idx += 1
+        }
+        return results
+    }
+
+    /// 提取文本中的首个网页链接并自动剥离追踪尾巴（供 ⌘O 浏览器直达使用）
+    static func extractFirstCleanedWebURL(from raw: String) -> String? {
+        guard let first = extractAllWebURLs(from: raw, limit: 1).first else { return nil }
+        return cleanTrackingURL(first) ?? first
+    }
+
+    /// 识别社媒分享口令 / 群聊带链接短消息并剥壳提取唯一纯净 URL（严格排除代码块、cURL、Markdown 语法与多链接列表）
+    static func extractCleanShareURL(from raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count >= 12, trimmed.utf16.count <= 800 else { return nil }
+        if isValidExtractedWebURL(trimmed) { return nil }
+
+        let lower = trimmed.lowercased()
+        if lower.hasPrefix("curl ") || lower.hasPrefix("curl\t") { return nil }
+        if trimmed.contains("](") || trimmed.contains("=\"http") || trimmed.contains("='http") || trimmed.contains(": \"http") {
+            return nil
+        }
+
+        let lines = trimmed.components(separatedBy: .newlines)
+        guard lines.count <= 8 else { return nil }
+        if let firstLine = lines.first?.trimmingCharacters(in: .whitespaces) {
+            for codePrefix in ["import ", "func ", "let ", "var ", "const ", "def ", "class ", "struct ", "{", "SELECT ", "select "] {
+                if firstLine.hasPrefix(codePrefix) { return nil }
+            }
+        }
+
+        let urls = extractAllWebURLs(from: trimmed, limit: 2)
+        guard urls.count == 1, let extracted = urls.first else { return nil }
+        let cleaned = cleanTrackingURL(extracted) ?? extracted
+        guard cleaned != trimmed else { return nil }
+        return cleaned
+    }
+
+    /// 解析单行本地文件/目录路径候选（支持 ~/ 展开、file:// URI、首尾引号剥除，以及终端/IDE 的 `:行:列` 与 `#L行号` 后缀剥除）
+    static func parseLocalPathCandidates(from raw: String) -> [String] {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard s.count >= 2, s.utf16.count <= 1_024, !s.contains("\n"), !s.contains("\r") else {
+            return []
+        }
+
+        if (s.hasPrefix("\"") && s.hasSuffix("\"")) ||
+           (s.hasPrefix("'") && s.hasSuffix("'")) ||
+           (s.hasPrefix("`") && s.hasSuffix("`")) {
+            s.removeFirst()
+            s.removeLast()
+            s = s.trimmingCharacters(in: .whitespaces)
+        }
+
+        if s.lowercased().hasPrefix("file://") {
+            let withoutAnchor = s.replacingOccurrences(of: #"#L\d+(?:-L?\d+)?$"#, with: "", options: .regularExpression)
+            if let fileURL = URL(string: withoutAnchor), fileURL.isFileURL {
+                s = fileURL.path
+            } else {
+                return []
+            }
+        }
+
+        guard s.hasPrefix("~/") || (s.hasPrefix("/") && !s.hasPrefix("//")) else {
+            return []
+        }
+
+        let expanded = NSString(string: s).expandingTildeInPath
+        var candidates: [String] = [expanded]
+
+        let strippedAnchor = expanded.replacingOccurrences(
+            of: #"#L\d+(?:-L?\d+)?$"#,
+            with: "",
+            options: .regularExpression
+        )
+        if strippedAnchor != expanded && !strippedAnchor.isEmpty {
+            candidates.append(strippedAnchor)
+        }
+
+        let strippedLineCol = strippedAnchor.replacingOccurrences(
+            of: #":\d+(?::\d+)?(?::)?$"#,
+            with: "",
+            options: .regularExpression
+        )
+        if strippedLineCol != strippedAnchor && !strippedLineCol.isEmpty {
+            candidates.append(strippedLineCol)
+        }
+
+        return candidates
+    }
+
+    /// 解析并校验磁盘真实存在的本地文件或目录 URL（供面板 ⌘O 一键访达定位）
+    static func resolveExistingLocalFileURL(from raw: String) -> URL? {
+        let fm = FileManager.default
+        for path in parseLocalPathCandidates(from: raw) {
+            if fm.fileExists(atPath: path) {
+                return URL(fileURLWithPath: path)
+            }
+        }
+        return nil
+    }
+
+    private static func trimUnmatchedTrailingPunctuation(_ candidate: String) -> String {
+        var result = candidate
+        let openParens = result.filter { $0 == "(" }.count
+        var closeParens = result.filter { $0 == ")" }.count
+        let openBrackets = result.filter { $0 == "[" }.count
+        var closeBrackets = result.filter { $0 == "]" }.count
+
+        while let last = result.last {
+            if last == "." || last == "," || last == ";" || last == ":" || last == "!" || last == "?" {
+                result.removeLast()
+            } else if last == ")" && closeParens > openParens {
+                result.removeLast()
+                closeParens -= 1
+            } else if last == "]" && closeBrackets > openBrackets {
+                result.removeLast()
+                closeBrackets -= 1
+            } else {
+                break
+            }
+        }
+        return result
+    }
+
+    private static func isValidExtractedWebURL(_ string: String) -> Bool {
+        guard !string.contains(" "), !string.contains("\n") else { return false }
+        guard let comps = URLComponents(string: string),
+              let scheme = comps.scheme?.lowercased(),
+              (scheme == "http" || scheme == "https"),
+              let host = comps.host, !host.isEmpty else {
+            return false
+        }
+        return host.contains(".") || host == "localhost"
     }
 }
 

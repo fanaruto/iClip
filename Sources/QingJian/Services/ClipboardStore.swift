@@ -1695,7 +1695,22 @@ final class ClipboardStore: ObservableObject {
                 openLinkInBrowser(item)
                 return true
             }
-            showToast("当前条目非网页链接或本地文件")
+            // 支持混排分享口令 / 群聊消息内嵌网页链接直接按 ⌘O 在浏览器打开（自动剥离追踪尾巴）
+            if let embeddedURLString = URLTrackingCleaner.extractFirstCleanedWebURL(from: trimmed),
+               let embeddedURL = URL(string: embeddedURLString) {
+                TactileFeedbackEngine.shared.perform(.openLink)
+                NSWorkspace.shared.open(embeddedURL)
+                onAfterOpenExternalURL?()
+                return true
+            }
+            // 支持终端 / IDE 复制的本地路径（含 ~/...、file:// 与 File.swift:128:14 行列号后缀）按 ⌘O 直接访达高亮定位
+            if let localFileURL = URLTrackingCleaner.resolveExistingLocalFileURL(from: trimmed) {
+                TactileFeedbackEngine.shared.perform(.openLink)
+                NSWorkspace.shared.activateFileViewerSelecting([localFileURL])
+                onAfterOpenExternalURL?()
+                return true
+            }
+            showToast("当前条目不含网页链接或存在的本地路径")
             return false
         }
     }

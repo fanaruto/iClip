@@ -1285,4 +1285,63 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: freshUnrefFile.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: staleOrphanFile.path))
     }
+
+    // MARK: - 31. 社媒分享口令剥壳提链（保护业务参数与配对括号）及终端 `路径:行列号` 访达解析测试
+
+    @MainActor
+    func testShareBlurbLinkExtractionAndLocalPathLineColResolution() throws {
+        // 1. 小红书 / B站口令剥壳：自动在中文全角标点处截断，剥离追踪参数，严格保留分集 p=2 与小红书 xsec_token
+        let xhsShare = "67 发布了一篇小红书笔记，快来看吧！😆 https://www.xiaohongshu.com/explore/66a1b2c3?xsec_token=KeepMe123&xhsshare=CopyLink&appuid=9988，复制本条信息，打开【小红书】App查看精彩内容！"
+        XCTAssertEqual(
+            URLTrackingCleaner.extractCleanShareURL(from: xhsShare),
+            "https://www.xiaohongshu.com/explore/66a1b2c3?xsec_token=KeepMe123"
+        )
+
+        let biliShare = "【乔布斯产品演讲】 https://www.bilibili.com/video/BV1xx411c7mD/?p=2&spm_id_from=333.999&vd_source=abcdef123!"
+        XCTAssertEqual(
+            URLTrackingCleaner.extractCleanShareURL(from: biliShare),
+            "https://www.bilibili.com/video/BV1xx411c7mD/?p=2"
+        )
+
+        // 2. 括号配对智能识别：剥除外层包裹括号，完整保留 Wikipedia 词条内部配对括号
+        let wikiNote = "详见词条 (https://en.wikipedia.org/wiki/Swift_(programming_language))."
+        XCTAssertEqual(
+            URLTrackingCleaner.extractCleanShareURL(from: wikiNote),
+            "https://en.wikipedia.org/wiki/Swift_(programming_language)"
+        )
+
+        // 3. 防误伤门控：Markdown 链接、JSON 字段与 cURL 命令绝不误触发分享口令剥壳
+        XCTAssertNil(URLTrackingCleaner.extractCleanShareURL(from: "[iClip 官网](https://github.com/fanaruto/iClip)"))
+        XCTAssertNil(URLTrackingCleaner.extractCleanShareURL(from: #"{"endpoint": "https://api.example.com/v1"}"#))
+        XCTAssertNil(URLTrackingCleaner.extractCleanShareURL(from: "curl -s https://api.example.com/health"))
+
+        // 4. 网盘链接 + 提取码混合文案：提取码与纯净链接双动作并存，且自动提链契约绝不误吞提取码消息
+        let panShare = "通过网盘分享的文件：方案.pdf 链接：https://pan.baidu.com/s/1AbCdEf?utm_source=wechat 提取码：8829"
+        let flowActions = MeetingAndEphemeralEngine.analyze(panShare)
+        XCTAssertEqual(flowActions.map(\.id), ["otp-extract-code", "extract-share-url"])
+        XCTAssertEqual(flowActions.last?.resultText, "https://pan.baidu.com/s/1AbCdEf")
+
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("iclip-sharelink-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let engine = AdaptiveIntelligenceEngine(customDirectoryURL: tempDir)
+        _ = engine.adoptUserSuggestion("开启分享口令自动提取链接", in: .shared)
+        XCTAssertTrue(engine.enabledAutoRules.contains(.extractCleanShareLink))
+        XCTAssertEqual(
+            engine.applyLearnedAutoTextRuleIfEnabled(rawText: biliShare, isLink: false)?.text,
+            "https://www.bilibili.com/video/BV1xx411c7mD/?p=2"
+        )
+        // 含提取码/验证码的网盘消息不自动覆写，防止丢失提取码
+        XCTAssertNil(engine.applyLearnedAutoTextRuleIfEnabled(rawText: panShare, isLink: false))
+
+        // 5. 终端 / 编译器 `路径:行:列` 与 `file://...#L行号` 本地真实文件解析（支撑 ⌘O 访达高亮定位）
+        let realFile = tempDir.appendingPathComponent("SampleSource.swift")
+        try Data("struct Sample {}".utf8).write(to: realFile)
+
+        let compilerDiag = "\(realFile.path):128:14"
+        XCTAssertEqual(URLTrackingCleaner.resolveExistingLocalFileURL(from: compilerDiag)?.path, realFile.path)
+
+        let fileURIWithAnchor = "file://\(realFile.path)#L10-L25"
+        XCTAssertEqual(URLTrackingCleaner.resolveExistingLocalFileURL(from: fileURIWithAnchor)?.path, realFile.path)
+    }
 }

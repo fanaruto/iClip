@@ -83,15 +83,38 @@ enum MeetingAndEphemeralEngine {
         let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
 
-        // 1. 一次性验证码（OTP）提取
+        // 1. 一次性验证码 / 提取码（OTP）提取（若网盘/会议口令同时内嵌分享链接，并列附带「提取纯净链接」胶囊）
         if let otp = extractVerificationCode(from: trimmed), otp != trimmed {
-            return [
+            var actions = [
                 FinanceQuickAction(
                     id: "otp-extract-code",
                     title: "验证码 \(otp)",
                     symbolName: "key.horizontal.fill",
                     resultText: otp,
                     toastText: "已提取纯验证码 \(otp) 并键入"
+                )
+            ]
+            if let shareURL = URLTrackingCleaner.extractCleanShareURL(from: trimmed) {
+                actions.append(FinanceQuickAction(
+                    id: "extract-share-url",
+                    title: "提取纯净链接",
+                    symbolName: "link",
+                    resultText: shareURL,
+                    toastText: "已剥除口令废话与追踪尾巴，键入纯净链接"
+                ))
+            }
+            return actions
+        }
+
+        // 1.5 社媒分享口令 / 群聊混排文案一键剥壳提纯干净 URL
+        if let shareURL = URLTrackingCleaner.extractCleanShareURL(from: trimmed) {
+            return [
+                FinanceQuickAction(
+                    id: "extract-share-url",
+                    title: "提取纯净链接",
+                    symbolName: "link",
+                    resultText: shareURL,
+                    toastText: "已剥除口令废话与追踪尾巴，键入纯净链接"
                 )
             ]
         }

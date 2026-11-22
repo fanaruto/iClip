@@ -175,14 +175,6 @@ enum SemanticEngine {
     /// 最大嗅探字符数上限（8KB 头部足够覆盖所有请求头、配置块与日志首屏，保障 1MB+ 负载 < 0.3ms）
     private static let maxInspectUTF16Count = 8_192
 
-    /// 常见营销与跨站追踪参数集合
-    private static let trackingQueryParams: Set<String> = [
-        "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "utm_id",
-        "spm", "spm_id_from", "vd_source", "from_source", "share_source", "share_medium",
-        "fbclid", "gclid", "dclid", "msclkid", "twclid", "igshid", "igsh",
-        "mc_cid", "mc_eid", "_hsenc", "_hsmi", "mkt_tok", "yclid", "si"
-    ]
-
     /// 预编译安全脱敏正则规则（附带 O(1) 前置子串门控，未包含特征前缀时直接跳过正则引擎）
     private static let secretPatterns: [(name: String, fastHints: [String], regex: NSRegularExpression, replacement: String)] = {
         let specs: [(String, [String], String, String)] = [
@@ -385,7 +377,7 @@ enum SemanticEngine {
             }
         }
 
-        // 3. 链接追踪参数净链检测
+        // 3. 链接追踪参数净链检测与社媒分享口令剥壳提链
         if trimmed.count < 4096, !trimmed.contains("\n"), let cleaned = cleanTrackingURL(trimmed) {
             if primaryKind == nil { primaryKind = .dirtyURL }
             actions.append(TransformAction(
@@ -395,6 +387,16 @@ enum SemanticEngine {
                 isSecurityAction: false,
                 resultText: cleaned,
                 toastText: "已剥离追踪参数并键入纯净链接"
+            ))
+        } else if item.type == .text, let shareURL = URLTrackingCleaner.extractCleanShareURL(from: inspectSlice) {
+            if primaryKind == nil { primaryKind = .dirtyURL }
+            actions.append(TransformAction(
+                id: "extract-share-url",
+                title: "提取纯净链接",
+                symbolName: "link",
+                isSecurityAction: false,
+                resultText: shareURL,
+                toastText: "已剥除口令废话与追踪尾巴，键入纯净链接"
             ))
         }
 
@@ -810,27 +812,9 @@ enum SemanticEngine {
         return result
     }
 
-    /// 剥离营销追踪参数；若原链接不含追踪参数则返回 nil
+    /// 剥离营销追踪参数；若原链接不含追踪参数则返回 nil（复用双版本统一 URLTrackingCleaner）
     static func cleanTrackingURL(_ raw: String) -> String? {
-        guard let components = URLComponents(string: raw),
-              let scheme = components.scheme?.lowercased(),
-              (scheme == "http" || scheme == "https"),
-              let queryItems = components.queryItems, !queryItems.isEmpty else {
-            return nil
-        }
-
-        let filtered = queryItems.filter { item in
-            let key = item.name.lowercased()
-            if trackingQueryParams.contains(key) || key.hasPrefix("utm_") {
-                return false
-            }
-            return true
-        }
-
-        guard filtered.count < queryItems.count else { return nil }
-        var cleaned = components
-        cleaned.queryItems = filtered.isEmpty ? nil : filtered
-        return cleaned.string
+        URLTrackingCleaner.cleanTrackingURL(raw)
     }
 
     // MARK: - JWT 离线零上传解码审查（支持裸 eyJ... 与 Bearer eyJ...，自动解析 exp/iat 时间戳）
