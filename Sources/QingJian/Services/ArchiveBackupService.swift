@@ -45,7 +45,7 @@ enum ArchiveBackupError: LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .noPinnedItems:
-            return "当前暂无已固定的收藏记录，请先点击卡片固定常用话术或模板"
+            return "当前暂无已收藏的记录，请先点击卡片收藏常用话术或模板"
         case .invalidArchiveFormat:
             return "无法解析该归档文件，请确认选择的是有效的 .iclip 备份包"
         case .unsupportedSchemaVersion(let ver):

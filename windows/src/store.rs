@@ -327,10 +327,6 @@ impl ClipboardStore {
     }
 
     fn sort_items(list: &mut [ClipItem]) {
-        list.sort_by(|a, b| {
-            b.is_pinned
-                .cmp(&a.is_pinned)
-                .then_with(|| b.created_unix_secs.cmp(&a.created_unix_secs))
-        });
+        list.sort_by(|a, b| b.created_unix_secs.cmp(&a.created_unix_secs));
     }
 }

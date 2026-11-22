@@ -83,7 +83,7 @@ enum ClipFilterTab: String, CaseIterable, Identifiable {
     var symbolName: String {
         switch self {
         case .all: return "square.grid.2x2"
-        case .pinned: return "pin.fill"
+        case .pinned: return "star.fill"
         case .text: return "text.alignleft"
         case .link: return "safari"
         case .image: return "photo.on.rectangle"

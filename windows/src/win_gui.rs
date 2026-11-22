@@ -1371,6 +1371,8 @@ unsafe fn render_panel_frame(hdc: HDC, w: i32, h: i32, scale: f32, st: &mut WinA
             };
             let card_fill = if is_selected {
                 rgb(46, 98, 226)
+            } else if item.is_pinned {
+                if is_hovered { rgb(66, 52, 30) } else { rgb(54, 42, 24) }
             } else if is_hovered {
                 rgb(36, 41, 56)
             } else {
@@ -1378,6 +1380,8 @@ unsafe fn render_panel_frame(hdc: HDC, w: i32, h: i32, scale: f32, st: &mut WinA
             };
             let card_border = if is_selected {
                 Some(rgb(96, 148, 255))
+            } else if item.is_pinned {
+                Some(rgb(214, 142, 42))
             } else {
                 Some(rgb(44, 50, 66))
             };
@@ -1424,7 +1428,7 @@ unsafe fn render_panel_frame(hdc: HDC, w: i32, h: i32, scale: f32, st: &mut WinA
                 SelectObject(hdc, font_sub);
                 draw_label(
                     hdc,
-                    "钉",
+                    if item.is_pinned { "★" } else { "☆" },
                     &pin_rc,
                     rgb(255, 255, 255),
                     DT_LEFT | DT_VCENTER | DT_SINGLELINE,
@@ -1463,11 +1467,11 @@ unsafe fn render_panel_frame(hdc: HDC, w: i32, h: i32, scale: f32, st: &mut WinA
                 );
             }
 
-            // 副标题与置顶标识
+            // 副标题与收藏标识
             SelectObject(hdc, font_sub);
             let mut sub_line = String::new();
             if item.is_pinned {
-                sub_line.push_str("[已固定] ");
+                sub_line.push_str("★ ");
             }
             if !minimal {
                 if let Some(cat) = item.pin_category {
