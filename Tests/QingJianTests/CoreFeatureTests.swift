@@ -1344,4 +1344,45 @@ final class CoreFeatureTests: XCTestCase {
         let fileURIWithAnchor = "file://\(realFile.path)#L10-L25"
         XCTAssertEqual(URLTrackingCleaner.resolveExistingLocalFileURL(from: fileURIWithAnchor)?.path, realFile.path)
     }
+
+    // MARK: - 32. 原位剪贴差异对比引擎（`ClipboardDiffEngine` 行级 LCS、上下文折叠与 JSON 语义对齐）测试
+
+    @MainActor
+    func testClipboardDiffEngineContextCollapseAndJSONAlignment() throws {
+        // 1. 多行配置修改：长公共前缀自动折叠，改动行严格按 `- 旧行` → `+ 新行` 呈现
+        let oldConfig = (1...10).map { "line_\($0) = ok" }.joined(separator: "\n") + "\nport = 8080\nhost = localhost"
+        let newConfig = (1...10).map { "line_\($0) = ok" }.joined(separator: "\n") + "\nport = 9090\nhost = localhost"
+
+        let diff = try XCTUnwrap(ClipboardDiffEngine.computeDiff(older: oldConfig, newer: newConfig, contextLines: 2))
+        XCTAssertEqual(diff.addedCount, 1)
+        XCTAssertEqual(diff.removedCount, 1)
+        XCTAssertFalse(diff.isJSONNormalized)
+        XCTAssertEqual(diff.rows.first, .collapsedContext(hiddenLineCount: 8))
+        XCTAssertTrue(diff.unifiedPatchText.contains("- port = 8080\n+ port = 9090"))
+
+        // 2. 乱序与压缩 JSON 智能对齐：键值完全相同时精准给出「语义一致」，有字段变化时仅高亮真实差异行
+        let jsonCompact = #"{"user":{"role":"guest","id":101},"code":0}"#
+        let jsonReorderedPretty = "{\n  \"code\": 0,\n  \"user\": {\n    \"id\": 101,\n    \"role\": \"guest\"\n  }\n}"
+        let semanticSame = try XCTUnwrap(ClipboardDiffEngine.computeDiff(older: jsonCompact, newer: jsonReorderedPretty))
+        XCTAssertTrue(semanticSame.isJSONNormalized)
+        XCTAssertFalse(semanticSame.hasChanges)
+        XCTAssertEqual(semanticSame.tabBadgeTitle, "对比 #1 (语义一致)")
+
+        let jsonUpdated = #"{"code":0,"user":{"id":101,"role":"admin"}}"#
+        let jsonDiff = try XCTUnwrap(ClipboardDiffEngine.computeDiff(older: jsonCompact, newer: jsonUpdated))
+        XCTAssertTrue(jsonDiff.isJSONNormalized)
+        XCTAssertEqual(jsonDiff.addedCount, 1)
+        XCTAssertEqual(jsonDiff.removedCount, 1)
+        XCTAssertTrue(jsonDiff.unifiedPatchText.contains("-     \"role\" : \"guest\""))
+        XCTAssertTrue(jsonDiff.unifiedPatchText.contains("+     \"role\" : \"admin\""))
+
+        // 3. Space 与 ⌥Space 默认页签路由：普通文本按 Space 仍默认看原文，按 ⌥Space 直达对比页
+        let plainItem = ClipItem(type: .text, text: oldConfig, contentHash: "text:cfg")
+        let mockTabs = [
+            QuickLookTabItem(id: "raw", title: "原始文本", payload: .text(oldConfig), toast: "", supportsSaveBack: true),
+            QuickLookTabItem(id: QuickLookTabItem.diffLatestTabID, title: diff.tabBadgeTitle, payload: .text(diff.unifiedPatchText), toast: "", supportsSaveBack: false, diffResult: diff)
+        ]
+        XCTAssertEqual(QuickLookTabBuilder.defaultTabIndex(for: plainItem, tabs: mockTabs, preferDiff: false), 0)
+        XCTAssertEqual(QuickLookTabBuilder.defaultTabIndex(for: plainItem, tabs: mockTabs, preferDiff: true), 1)
+    }
 }

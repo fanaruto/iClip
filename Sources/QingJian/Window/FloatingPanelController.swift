@@ -519,6 +519,10 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
                 _ = rootView.openSelectedExternally()
                 return nil
             }
+            if flags == .option, event.keyCode == 49 {
+                rootView.selectQuickLookDiffTabIfAvailable()
+                return nil
+            }
             if event.keyCode == 123 || event.keyCode == 124 {
                 rootView.stepQuickLookTab(delta: event.keyCode == 123 ? -1 : 1)
                 return nil
@@ -559,12 +563,25 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             return nil
         }
 
+        // ⌥Space (keyCode 49)：一键打开速览并直定位至「对比最新剪贴 #1」行级差异标签页
+        if !store.minimalModeEnabled, flags == .option, event.keyCode == 49 {
+            if let fieldEditor = panel.firstResponder as? NSTextView, fieldEditor.hasMarkedText() {
+                return event
+            }
+            nav.quickLookPreferDiff = true
+            withAnimation(.spring(response: 0.24, dampingFraction: 0.88)) {
+                nav.showQuickLook = true
+            }
+            return nil
+        }
+
         // ⌘Y (keyCode 16) 或搜索框为空时按 Space (keyCode 49)：呼出 Finder 级全模态速览与原位微调舱
         if !store.minimalModeEnabled && ((flags == .command && event.keyCode == 16) ||
            (flags.isEmpty && event.keyCode == 49 && nav.searchText.isEmpty)) {
             if let fieldEditor = panel.firstResponder as? NSTextView, fieldEditor.hasMarkedText() {
                 return event
             }
+            nav.quickLookPreferDiff = false
             withAnimation(.spring(response: 0.24, dampingFraction: 0.88)) {
                 nav.showQuickLook = true
             }
@@ -1224,6 +1241,10 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
                 _ = rootView.openSelectedExternally()
                 return nil
             }
+            if flags == .option, event.keyCode == 49 {
+                rootView.selectQuickLookDiffTabIfAvailable()
+                return nil
+            }
             if event.keyCode == 123 || event.keyCode == 124 {
                 rootView.stepQuickLookTab(delta: event.keyCode == 123 ? -1 : 1)
                 return nil
@@ -1262,12 +1283,25 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             return nil
         }
 
+        // ⌥Space (keyCode 49)：一键打开速览并直定位至「对比最新剪贴 #1」行级差异标签页
+        if !store.minimalModeEnabled, flags == .option, event.keyCode == 49 {
+            if let fieldEditor = panel.firstResponder as? NSTextView, fieldEditor.hasMarkedText() {
+                return event
+            }
+            nav.quickLookPreferDiff = true
+            withAnimation(.spring(response: 0.24, dampingFraction: 0.88)) {
+                nav.showQuickLook = true
+            }
+            return nil
+        }
+
         // ⌘Y (keyCode 16) 随时切换 QuickLook 对照速览；搜索框为空时按 Space (keyCode 49) 同样触发 QuickLook
         if !store.minimalModeEnabled && ((flags == .command && event.keyCode == 16) ||
            (flags.isEmpty && event.keyCode == 49 && nav.searchText.isEmpty)) {
             if let fieldEditor = panel.firstResponder as? NSTextView, fieldEditor.hasMarkedText() {
                 return event
             }
+            nav.quickLookPreferDiff = false
             withAnimation(.spring(response: 0.24, dampingFraction: 0.88)) {
                 nav.showQuickLook = true
             }

@@ -36,6 +36,7 @@ final class PanelNavigationModel: ObservableObject {
     @Published var isEditingAlias: Bool = false
     @Published var showQuickLook: Bool = false
     @Published var quickLookTabIndex: Int = 0
+    @Published var quickLookPreferDiff: Bool = false
     @Published var isQuickLookEditing: Bool = false
     @Published var quickLookDraftText: String = ""
     @Published var demoPreviewIndex: Int? = nil
@@ -149,6 +150,7 @@ final class PanelNavigationModel: ObservableObject {
         preferredGridColumn = nil
         showSettings = false
         showQuickLook = false
+        quickLookPreferDiff = false
         isQuickLookEditing = false
         quickLookDraftText = ""
         isEditingAlias = false
@@ -416,6 +418,7 @@ struct ClipboardPopoverView: View {
                     selectedPreviewIndex: $nav.quickLookTabIndex,
                     isEditing: $nav.isQuickLookEditing,
                     draftText: $nav.quickLookDraftText,
+                    preferDiffOnOpen: nav.quickLookPreferDiff,
                     onCommitPasteText: { content, toast in
                         nav.isQuickLookEditing = false
                         nav.showQuickLook = false
@@ -2093,6 +2096,14 @@ struct ClipboardPopoverView: View {
         nav.quickLookTabIndex = (nav.quickLookTabIndex + delta + tabs.count) % tabs.count
     }
 
+    func selectQuickLookDiffTabIfAvailable() {
+        guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return }
+        let tabs = QuickLookTabBuilder.buildTabs(for: filteredItems[nav.selectedIndex], store: store)
+        if let diffIdx = tabs.firstIndex(where: { $0.id == QuickLookTabItem.diffLatestTabID }) {
+            nav.quickLookTabIndex = diffIdx
+        }
+    }
+
     func enterQuickLookEditMode() -> Bool {
         guard nav.showQuickLook,
               nav.selectedIndex >= 0,
@@ -2439,6 +2450,7 @@ final class PanelNavigationModel: ObservableObject {
     @Published var isEditingAlias: Bool = false
     @Published var showQuickLook: Bool = false
     @Published var quickLookTabIndex: Int = 0
+    @Published var quickLookPreferDiff: Bool = false
     @Published var isQuickLookEditing: Bool = false
     @Published var quickLookDraftText: String = ""
     @Published var isCreatingTemplate: Bool = false
@@ -2566,6 +2578,7 @@ final class PanelNavigationModel: ObservableObject {
         preferredGridColumn = nil
         showSettings = false
         showQuickLook = false
+        quickLookPreferDiff = false
         isQuickLookEditing = false
         quickLookDraftText = ""
         isEditingAlias = false
@@ -2824,6 +2837,7 @@ struct ClipboardPopoverView: View {
                     selectedPreviewIndex: $nav.quickLookTabIndex,
                     isEditing: $nav.isQuickLookEditing,
                     draftText: $nav.quickLookDraftText,
+                    preferDiffOnOpen: nav.quickLookPreferDiff,
                     onCommitPasteText: { content, toast in
                         nav.isQuickLookEditing = false
                         nav.showQuickLook = false
@@ -4349,6 +4363,14 @@ struct ClipboardPopoverView: View {
         let tabs = QuickLookTabBuilder.buildTabs(for: filteredItems[nav.selectedIndex], store: store)
         guard tabs.count > 1 else { return }
         nav.quickLookTabIndex = (nav.quickLookTabIndex + delta + tabs.count) % tabs.count
+    }
+
+    func selectQuickLookDiffTabIfAvailable() {
+        guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return }
+        let tabs = QuickLookTabBuilder.buildTabs(for: filteredItems[nav.selectedIndex], store: store)
+        if let diffIdx = tabs.firstIndex(where: { $0.id == QuickLookTabItem.diffLatestTabID }) {
+            nav.quickLookTabIndex = diffIdx
+        }
     }
 
     func enterQuickLookEditMode() -> Bool {
