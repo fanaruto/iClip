@@ -174,7 +174,7 @@ enum DocumentTypographyEngine {
     }
 
     private static func applyPanguProtectingURLs(in line: String) -> String {
-        guard let urlRegex = try? NSRegularExpression(pattern: #"https?://[^\s]+"#) else {
+        guard let urlRegex = try? NSRegularExpression(pattern: #"https?://[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+"#) else {
             return applyPanguRaw(line)
         }
         let nsRange = NSRange(line.startIndex..<line.endIndex, in: line)

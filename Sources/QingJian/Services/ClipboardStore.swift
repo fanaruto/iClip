@@ -768,7 +768,15 @@ final class ClipboardStore: ObservableObject {
         shouldAutoPaste: Bool = true,
         onBeforePaste: (() -> Void)? = nil
     ) {
-        pasteCustomString(action.resultText, sourceItem: item, toast: action.toastText, shouldAutoPaste: shouldAutoPaste, onBeforePaste: onBeforePaste)
+        let htmlPayload = (action.id == "tbl-md-to-excel") ? TableBridgeEngine.toHTMLTable(fromTSV: action.resultText) : nil
+        pasteCustomString(
+            action.resultText,
+            htmlTable: htmlPayload,
+            sourceItem: item,
+            toast: action.toastText,
+            shouldAutoPaste: shouldAutoPaste,
+            onBeforePaste: onBeforePaste
+        )
     }
 
     func latestNonTemplateText(excluding itemID: UUID) -> String? {
@@ -805,6 +813,7 @@ final class ClipboardStore: ObservableObject {
 
     func pasteCustomString(
         _ text: String,
+        htmlTable: String? = nil,
         sourceItem: ClipItem,
         toast: String,
         shouldAutoPaste: Bool = true,
@@ -812,6 +821,10 @@ final class ClipboardStore: ObservableObject {
     ) {
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
+        if let htmlTable {
+            pasteboard.setString(text, forType: .tabularText)
+            pasteboard.setString(htmlTable, forType: .html)
+        }
         ignoreNextChangeCount = pasteboard.changeCount
         lastChangeCount = pasteboard.changeCount
 
@@ -842,7 +855,10 @@ final class ClipboardStore: ObservableObject {
         if let cached = financeCache.object(forKey: key) {
             return cached.actions
         }
-        var analyzed = FinanceNumberEngine.analyze(raw)
+        var analyzed = TableBridgeEngine.analyze(raw)
+        if analyzed.isEmpty {
+            analyzed = FinanceNumberEngine.analyze(raw)
+        }
         if analyzed.isEmpty {
             analyzed = DocumentTypographyEngine.analyze(raw)
         }
@@ -858,6 +874,10 @@ final class ClipboardStore: ObservableObject {
     ) {
         pasteboard.clearContents()
         pasteboard.setString(action.resultText, forType: .string)
+        if action.id == "tbl-md-to-excel", let html = TableBridgeEngine.toHTMLTable(fromTSV: action.resultText) {
+            pasteboard.setString(action.resultText, forType: .tabularText)
+            pasteboard.setString(html, forType: .html)
+        }
         ignoreNextChangeCount = pasteboard.changeCount
         lastChangeCount = pasteboard.changeCount
 

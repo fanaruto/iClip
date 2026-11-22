@@ -10,6 +10,7 @@ enum SemanticKind: String, Equatable {
     case curlCommand
     case colorCode
     case json
+    case dataTable
     case financeAmount
     case pdfTypography
     case timestamp
@@ -25,6 +26,7 @@ enum SemanticKind: String, Equatable {
         case .curlCommand: return "cURL 请求"
         case .colorCode: return "颜色色值"
         case .json: return "JSON"
+        case .dataTable: return "二维表格"
         case .financeAmount: return "金额账单"
         case .pdfTypography: return "PDF/排版"
         case .timestamp: return "时间戳"
@@ -42,6 +44,7 @@ enum SemanticKind: String, Equatable {
         case .curlCommand: return "terminal.fill"
         case .colorCode: return "paintpalette.fill"
         case .json: return "curlybraces"
+        case .dataTable: return "tablecells.fill"
         case .financeAmount: return "yensign.circle.fill"
         case .pdfTypography: return "text.redaction"
         case .timestamp: return "clock.badge.checkmark"
@@ -59,6 +62,7 @@ enum SemanticKind: String, Equatable {
         case .curlCommand: return .systemGreen
         case .colorCode: return .systemPink
         case .json: return .systemPurple
+        case .dataTable: return .systemGreen
         case .financeAmount: return .systemBrown
         case .pdfTypography: return .systemTeal
         case .timestamp: return .systemCyan
@@ -79,6 +83,7 @@ enum SemanticKind: String, Equatable {
         case "@curl", "@http": return .curlCommand
         case "@color", "@hex", "@rgb", "@颜色": return .colorCode
         case "@json": return .json
+        case "@table", "@excel", "@csv", "@tsv", "@表格": return .dataTable
         case "@time", "@ts", "@时间": return .timestamp
         case "@list", "@sql", "@in", "@列表": return .multilineList
         case "@base64", "@b64": return .base64
@@ -470,6 +475,24 @@ enum SemanticEngine {
                     resultText: iso8601,
                     toastText: "已转换为 ISO8601 时间"
                 ))
+            }
+        }
+
+        // 5.5 二维数据表格协议破壁（Markdown 表格 ↔ Excel TSV / CSV / JSON 数组）
+        if primaryKind == nil && raw.utf16.count <= 65_536 && raw.contains("\n") {
+            let tblActions = TableBridgeEngine.analyze(raw)
+            if !tblActions.isEmpty {
+                primaryKind = .dataTable
+                for ta in tblActions {
+                    actions.append(TransformAction(
+                        id: ta.id,
+                        title: ta.title,
+                        symbolName: ta.symbolName,
+                        isSecurityAction: false,
+                        resultText: ta.resultText,
+                        toastText: ta.toastText
+                    ))
+                }
             }
         }
 

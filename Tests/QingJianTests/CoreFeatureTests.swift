@@ -147,6 +147,41 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertTrue(DocumentTypographyEngine.analyze(swiftCode).isEmpty)
     }
 
+    // MARK: - 6. 二维表格协议双向无损转换与防代码缩进误判测试
+
+    func testMarkdownAndExcelTSVTableBridge() {
+        let mdTable = """
+        | **商品名称** | 单价 | 库存 |
+        | :--- | ---: | :---: |
+        | iClip Pro | 0.00 | 999 |
+        | 液态贴膜,高清 | 39.90 | 50 |
+        """
+        let mdActions = TableBridgeEngine.analyze(mdTable)
+        let excelTSV = mdActions.first(where: { $0.id == "tbl-md-to-excel" })?.resultText
+        XCTAssertEqual(excelTSV, "商品名称\t单价\t库存\niClip Pro\t0.00\t999\n液态贴膜,高清\t39.90\t50")
+
+        // CSV 对包含逗号的单元格必须自动加双引号保护
+        let csv = mdActions.first(where: { $0.id == "tbl-md-to-csv" })?.resultText
+        XCTAssertTrue(csv?.contains("\"液态贴膜,高清\",39.90,50") == true)
+
+        // HTML Table 双协议校验
+        let html = TableBridgeEngine.toHTMLTable(fromTSV: excelTSV ?? "")
+        XCTAssertTrue(html?.contains("<th>商品名称</th>") == true)
+        XCTAssertTrue(html?.contains("<td>999</td>") == true)
+
+        // Excel TSV 逆向转 Markdown 与 JSON 对象数组
+        let tsvInput = "姓名\t部门\t职级\n张三\t研发\tP7\n李四\t电商运营\tP6"
+        let tsvActions = TableBridgeEngine.analyze(tsvInput)
+        let backToMD = tsvActions.first(where: { $0.id == "tbl-tsv-to-md" })?.resultText
+        XCTAssertTrue(backToMD?.contains("| 姓名 | 部门 | 职级 |") == true)
+        let toJSON = tsvActions.first(where: { $0.id == "tbl-tsv-to-json" })?.resultText
+        XCTAssertTrue(toJSON?.contains("\"部门\" : \"电商运营\"") == true)
+
+        // Tab 缩进的代码块严禁误判为 Excel TSV 表格
+        let tabIndentedCode = "\tlet a = 1\n\tlet b = 2"
+        XCTAssertTrue(TableBridgeEngine.analyze(tabIndentedCode).isEmpty)
+    }
+
     // MARK: - 5. 语义脱敏、净链与动态模板回归测试
 
     #if !ICLIP_EDITION_FLOW
