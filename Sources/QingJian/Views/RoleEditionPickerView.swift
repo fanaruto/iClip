@@ -6,8 +6,13 @@ struct RoleOnboardingBanner: View {
     @ObservedObject var store: ClipboardStore
     @ObservedObject var updater: UpdateManager
     let onOpenSettings: () -> Void
+    @Environment(\.colorScheme) private var colorScheme
 
     private let installed = AppRoleEdition.installed
+
+    private var glassPalette: LiquidGlassPalette {
+        LiquidGlassPalette(colorScheme: colorScheme, surfaceStyle: store.surfaceStyle, appearance: store.liquidGlassAppearance)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
@@ -46,7 +51,11 @@ struct RoleOnboardingBanner: View {
         .padding(11)
         .background(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Color.primary.opacity(0.055))
+                .fill(glassPalette.groupFill)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(glassPalette.groupStroke, lineWidth: 0.75)
         )
     }
 
@@ -95,11 +104,11 @@ struct RoleOnboardingBanner: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .fill(isSelected ? edition.accentTint.opacity(0.11) : Color.primary.opacity(0.04))
+                    .fill(isSelected ? edition.accentTint.opacity(0.14) : glassPalette.nestedCardFill)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .strokeBorder(isSelected ? edition.accentTint.opacity(0.75) : Color.clear, lineWidth: 1.2)
+                    .strokeBorder(isSelected ? edition.accentTint.opacity(0.75) : glassPalette.groupStroke.opacity(0.7), lineWidth: isSelected ? 1.2 : 0.6)
             )
         }
         .buttonStyle(.plain)
@@ -174,8 +183,13 @@ struct RoleOnboardingBanner: View {
 struct RoleAndOTASettingsSection: View {
     @ObservedObject var store: ClipboardStore
     @ObservedObject var updater: UpdateManager
+    @Environment(\.colorScheme) private var colorScheme
 
     private let installed = AppRoleEdition.installed
+
+    private var glassPalette: LiquidGlassPalette {
+        LiquidGlassPalette(colorScheme: colorScheme, surfaceStyle: store.surfaceStyle, appearance: store.liquidGlassAppearance)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -248,11 +262,11 @@ struct RoleAndOTASettingsSection: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .background(
                                 RoundedRectangle(cornerRadius: 11, style: .continuous)
-                                    .fill(isSelected ? edition.accentTint.opacity(0.11) : Color.primary.opacity(0.04))
+                                    .fill(isSelected ? edition.accentTint.opacity(0.14) : glassPalette.nestedCardFill)
                             )
                             .overlay(
                                 RoundedRectangle(cornerRadius: 11, style: .continuous)
-                                    .strokeBorder(isSelected ? edition.accentTint.opacity(0.8) : Color.clear, lineWidth: 1.2)
+                                    .strokeBorder(isSelected ? edition.accentTint.opacity(0.8) : glassPalette.groupStroke.opacity(0.7), lineWidth: isSelected ? 1.2 : 0.6)
                             )
                         }
                         .buttonStyle(.plain)

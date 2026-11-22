@@ -509,4 +509,38 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertTrue(rendered.contains("sk-***REDACTED***"))
     }
     #endif
+
+    // MARK: - 13. 图片 3 列网格二维方向键导航（↑↓←→）回归测试
+
+    func testGridNavigation2DImageRowsAndColumnMemory() {
+        // 布局：5 张连续图片（2 行：[0,1,2], [3,4]）+ 1 条普通文本（[5]）+ 3 张图片（[6,7,8]）
+        let imageIndices: Set<Int> = [0, 1, 2, 3, 4, 6, 7, 8]
+        let rows = GridNavigationHelper.buildVisualRows(count: 9, imageColumns: 3) { imageIndices.contains($0) }
+        XCTAssertEqual(rows, [[0, 1, 2], [3, 4], [5], [6, 7, 8]])
+
+        // 1. 第 1 行第 2 列 (idx=1) 按 ↓ -> 精准落到第 2 行第 2 列 (idx=4)
+        let step1 = GridNavigationHelper.nextIndex(from: 1, direction: .down, visualRows: rows, preferredColumn: nil)
+        XCTAssertEqual(step1.index, 4)
+        XCTAssertEqual(step1.preferredColumn, 1)
+
+        // 2. 第 1 行第 3 列 (idx=2) 按 ↓ -> 第 2 行只有 2 张图，落到尾张 (idx=4)，但仍记忆第 3 列 (col=2)
+        let step2 = GridNavigationHelper.nextIndex(from: 2, direction: .down, visualRows: rows, preferredColumn: nil)
+        XCTAssertEqual(step2.index, 4)
+        XCTAssertEqual(step2.preferredColumn, 2)
+
+        // 3. 继续按 ↓ 跨过单行文本 (idx=5) 再按 ↓ -> 回到第 3 列 (idx=8)
+        let step3 = GridNavigationHelper.nextIndex(from: step2.index, direction: .down, visualRows: rows, preferredColumn: step2.preferredColumn)
+        XCTAssertEqual(step3.index, 5)
+        let step4 = GridNavigationHelper.nextIndex(from: step3.index, direction: .down, visualRows: rows, preferredColumn: step3.preferredColumn)
+        XCTAssertEqual(step4.index, 8)
+
+        // 4. 左右方向键在网格中丝滑移动并同步列记忆
+        let leftMove = GridNavigationHelper.nextIndex(from: 1, direction: .left, visualRows: rows, preferredColumn: 1)
+        XCTAssertEqual(leftMove.index, 0)
+        XCTAssertEqual(leftMove.preferredColumn, 0)
+
+        let rightMove = GridNavigationHelper.nextIndex(from: 0, direction: .right, visualRows: rows, preferredColumn: 0)
+        XCTAssertEqual(rightMove.index, 1)
+        XCTAssertEqual(rightMove.preferredColumn, 1)
+    }
 }

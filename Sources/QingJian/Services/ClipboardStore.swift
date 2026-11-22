@@ -245,7 +245,7 @@ final class ClipboardStore: ObservableObject {
             self.liquidGlassAppearance = LiquidGlassAppearance(rawValue: savedGlassMode) ?? .tinted
         }
         let savedMask = UserDefaults.standard.object(forKey: "liquidGlassMaskOpacity") as? Double
-        self.liquidGlassMaskOpacity = min(max(savedMask ?? 0.25, 0.0), 1.0)
+        self.liquidGlassMaskOpacity = min(max(savedMask ?? 0.38, 0.0), 1.0)
         self.borderlessPanel = UserDefaults.standard.object(forKey: "borderlessPanel") as? Bool ?? true
 
         if let shortcutData = UserDefaults.standard.data(forKey: "hotKeyShortcut"),
@@ -410,10 +410,7 @@ final class ClipboardStore: ObservableObject {
 
     private func sortItems(_ list: [ClipItem]) -> [ClipItem] {
         list.sorted { lhs, rhs in
-            if lhs.isPinned != rhs.isPinned {
-                return lhs.isPinned && !rhs.isPinned
-            }
-            return lhs.createdAt > rhs.createdAt
+            lhs.createdAt > rhs.createdAt
         }
     }
 
@@ -799,7 +796,7 @@ final class ClipboardStore: ObservableObject {
         }
         items = sortItems(items)
         saveHistory()
-        showToast(pinned ? "已固定到顶部" : "已取消固定")
+        showToast(pinned ? "已收藏" : "已取消收藏")
     }
 
     func delete(_ item: ClipItem) {
@@ -827,7 +824,7 @@ final class ClipboardStore: ObservableObject {
         }
         items = items.filter { $0.isPinned }
         saveHistory()
-        showToast("已清空未固定记录")
+        showToast("已清空未收藏记录")
     }
 
     // MARK: - 收藏话术与模板离线归档迁移（.iclip）
@@ -927,7 +924,7 @@ final class ClipboardStore: ObservableObject {
             items = sortItems(items)
             saveHistory()
         }
-        showToast("已保存并固定动态模板")
+        showToast("已保存并收藏动态模板")
     }
 
     func pasteCustomString(

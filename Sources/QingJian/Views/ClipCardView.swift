@@ -11,6 +11,7 @@ struct ClipCardView: View {
     let queueRank: Int?
     let mergeRank: Int?
     let surfaceStyle: PanelSurfaceStyle
+    let liquidGlassAppearance: LiquidGlassAppearance
     let borderlessPanel: Bool
     let onSelect: () -> Void
     let onPaste: (Bool) -> Void
@@ -24,8 +25,13 @@ struct ClipCardView: View {
     let onEditAlias: () -> Void
     let onDelete: () -> Void
 
+    @Environment(\.colorScheme) private var colorScheme
     @State private var isHovered: Bool = false
     @State private var asyncThumbnail: NSImage? = nil
+
+    private var glassPalette: LiquidGlassPalette {
+        LiquidGlassPalette(colorScheme: colorScheme, surfaceStyle: surfaceStyle, appearance: liquidGlassAppearance)
+    }
 
     private var financeActions: [FinanceQuickAction] {
         minimalMode ? [] : ClipboardStore.shared.financeActions(for: item)
@@ -59,7 +65,7 @@ struct ClipCardView: View {
 
                     HStack(spacing: 6) {
                         if item.isPinned {
-                            Image(systemName: "pin.fill")
+                            Image(systemName: "star.fill")
                                 .font(.system(size: 9.5, weight: .semibold))
                                 .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.orange)
                         }
@@ -301,7 +307,7 @@ struct ClipCardView: View {
             }
 
             Button(action: onTogglePin) {
-                Image(systemName: item.isPinned ? "pin.slash.fill" : "pin")
+                Image(systemName: item.isPinned ? "star.fill" : "star")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(isSelected ? Color.white : (item.isPinned ? Color.orange : Color.secondary))
                     .frame(width: 24, height: 24)
@@ -311,7 +317,7 @@ struct ClipCardView: View {
                     )
             }
             .buttonStyle(.plain)
-            .help(item.isPinned ? "取消固定" : "固定到顶部")
+            .help(item.isPinned ? "取消收藏" : "收藏")
 
             Button(action: onDelete) {
                 Image(systemName: "trash")
@@ -345,27 +351,46 @@ struct ClipCardView: View {
                     )
                 )
                 .shadow(color: Color(nsColor: .controlAccentColor).opacity(0.28), radius: 6, y: 2)
-        } else {
+        } else if item.isPinned {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(
-                    surfaceStyle == .frosted
-                        ? Color(nsColor: .controlBackgroundColor).opacity(isHovered ? 0.68 : 0.42)
-                        : Color.primary.opacity(isHovered ? 0.095 : 0.048)
+                    LinearGradient(
+                        colors: [
+                            Color.orange.opacity(isHovered ? 0.22 : 0.16),
+                            Color.yellow.opacity(isHovered ? 0.14 : 0.09)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
                 )
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(glassPalette.pinnedCardBackdrop(isHovered: isHovered))
+                )
+        } else {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(glassPalette.clipCardFill(isHovered: isHovered))
         }
     }
 
     @ViewBuilder
     private var cardBorder: some View {
-        if borderlessPanel {
-            EmptyView()
+        if borderlessPanel && !item.isPinned {
+            if surfaceStyle == .liquidGlass {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(glassPalette.clipCardStroke(isHovered: isHovered), lineWidth: 0.65)
+            } else {
+                EmptyView()
+            }
         } else {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .strokeBorder(
                     isSelected
-                        ? Color.white.opacity(0.28)
-                        : Color.primary.opacity(isHovered ? 0.12 : 0.06),
-                    lineWidth: 0.75
+                        ? Color.white.opacity(0.32)
+                        : (item.isPinned
+                            ? Color.orange.opacity(isHovered ? 0.62 : 0.45)
+                            : glassPalette.clipCardStroke(isHovered: isHovered)),
+                    lineWidth: (!isSelected && item.isPinned) ? 1.0 : 0.75
                 )
         }
     }
@@ -442,7 +467,7 @@ struct ClipCardView: View {
 
         Divider()
 
-        Button(item.isPinned ? "取消固定" : "固定到顶部") {
+        Button(item.isPinned ? "取消收藏" : "收藏") {
             onTogglePin()
         }
 
@@ -487,6 +512,7 @@ struct ClipCardView: View {
     let index: Int
     let isSelected: Bool
     let surfaceStyle: PanelSurfaceStyle
+    let liquidGlassAppearance: LiquidGlassAppearance
     let borderlessPanel: Bool
     let onSelect: () -> Void
     let onPaste: (Bool) -> Void
@@ -495,8 +521,13 @@ struct ClipCardView: View {
     let onTogglePin: () -> Void
     let onDelete: () -> Void
 
+    @Environment(\.colorScheme) private var colorScheme
     @State private var isHovered: Bool = false
     @State private var asyncThumbnail: NSImage? = nil
+
+    private var glassPalette: LiquidGlassPalette {
+        LiquidGlassPalette(colorScheme: colorScheme, surfaceStyle: surfaceStyle, appearance: liquidGlassAppearance)
+    }
 
     private var semantic: SemanticSnapshot {
         ClipboardStore.shared.semanticSnapshot(for: item)
@@ -526,7 +557,7 @@ struct ClipCardView: View {
 
                     HStack(spacing: 6) {
                         if item.isPinned {
-                            Image(systemName: "pin.fill")
+                            Image(systemName: "star.fill")
                                 .font(.system(size: 9.5, weight: .semibold))
                                 .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.orange)
                         }
@@ -738,7 +769,7 @@ struct ClipCardView: View {
     private var hoverActions: some View {
         HStack(spacing: 5) {
             Button(action: onTogglePin) {
-                Image(systemName: item.isPinned ? "pin.slash.fill" : "pin")
+                Image(systemName: item.isPinned ? "star.fill" : "star")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(isSelected ? Color.white : (item.isPinned ? Color.orange : Color.secondary))
                     .frame(width: 24, height: 24)
@@ -748,7 +779,7 @@ struct ClipCardView: View {
                     )
             }
             .buttonStyle(.plain)
-            .help(item.isPinned ? "取消固定" : "固定到顶部")
+            .help(item.isPinned ? "取消收藏" : "收藏")
 
             Button(action: onDelete) {
                 Image(systemName: "trash")
@@ -782,27 +813,46 @@ struct ClipCardView: View {
                     )
                 )
                 .shadow(color: Color(nsColor: .controlAccentColor).opacity(0.28), radius: 6, y: 2)
-        } else {
+        } else if item.isPinned {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(
-                    surfaceStyle == .frosted
-                        ? Color(nsColor: .controlBackgroundColor).opacity(isHovered ? 0.68 : 0.42)
-                        : Color.primary.opacity(isHovered ? 0.095 : 0.048)
+                    LinearGradient(
+                        colors: [
+                            Color.orange.opacity(isHovered ? 0.22 : 0.16),
+                            Color.yellow.opacity(isHovered ? 0.14 : 0.09)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
                 )
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(glassPalette.pinnedCardBackdrop(isHovered: isHovered))
+                )
+        } else {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(glassPalette.clipCardFill(isHovered: isHovered))
         }
     }
 
     @ViewBuilder
     private var cardBorder: some View {
-        if borderlessPanel {
-            EmptyView()
+        if borderlessPanel && !item.isPinned {
+            if surfaceStyle == .liquidGlass {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(glassPalette.clipCardStroke(isHovered: isHovered), lineWidth: 0.65)
+            } else {
+                EmptyView()
+            }
         } else {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .strokeBorder(
                     isSelected
-                        ? Color.white.opacity(0.28)
-                        : Color.primary.opacity(isHovered ? 0.12 : 0.06),
-                    lineWidth: 0.75
+                        ? Color.white.opacity(0.32)
+                        : (item.isPinned
+                            ? Color.orange.opacity(isHovered ? 0.62 : 0.45)
+                            : glassPalette.clipCardStroke(isHovered: isHovered)),
+                    lineWidth: (!isSelected && item.isPinned) ? 1.0 : 0.75
                 )
         }
     }
@@ -859,7 +909,7 @@ struct ClipCardView: View {
 
         Divider()
 
-        Button(item.isPinned ? "取消固定" : "固定到顶部") {
+        Button(item.isPinned ? "取消收藏" : "收藏") {
             onTogglePin()
         }
 

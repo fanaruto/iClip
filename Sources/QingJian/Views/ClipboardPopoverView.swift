@@ -39,6 +39,8 @@ final class PanelNavigationModel: ObservableObject {
 
     private(set) var cachedFilteredItems: [ClipItem] = []
     private(set) var cachedDisplayRows: [ClipDisplayRow] = []
+    private(set) var cachedVisualRows: [[Int]] = []
+    var preferredGridColumn: Int? = nil
     private var cancellables = Set<AnyCancellable>()
 
     init(store: ClipboardStore? = nil) {
@@ -92,11 +94,15 @@ final class PanelNavigationModel: ObservableObject {
 
         self.cachedFilteredItems = filtered
         self.cachedDisplayRows = rows
+        self.cachedVisualRows = GridNavigationHelper.buildVisualRows(count: filtered.count, imageColumns: 3) {
+            filtered[$0].type == .image
+        }
     }
 
     func resetOnOpen() {
         searchText = ""
         selectedIndex = 0
+        preferredGridColumn = nil
         showSettings = false
         isRecordingHotKey = false
         isRecordingQueueHotKey = false
@@ -115,7 +121,16 @@ struct ClipboardPopoverView: View {
     let onQuit: () -> Void
 
     @Namespace private var tabNamespace
+    @Environment(\.colorScheme) private var colorScheme
     @FocusState private var isSearchFocused: Bool
+
+    private var glassPalette: LiquidGlassPalette {
+        LiquidGlassPalette(
+            colorScheme: colorScheme,
+            surfaceStyle: store.surfaceStyle,
+            appearance: store.liquidGlassAppearance
+        )
+    }
     @State private var previewItem: ClipItem? = nil
     @State private var previewTileRect: CGRect = .zero
     @State private var isPreviewVisible: Bool = false
@@ -220,9 +235,14 @@ struct ClipboardPopoverView: View {
         }
         .frame(width: 420, height: 560)
         .overlay {
-            if !store.borderlessPanel {
+            if store.surfaceStyle == .liquidGlass {
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .strokeBorder(glassPalette.panelSpecularGradient, lineWidth: store.borderlessPanel ? 0.65 : 0.9)
+                    .allowsHitTesting(false)
+            } else if !store.borderlessPanel {
                 RoundedRectangle(cornerRadius: 22, style: .continuous)
                     .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5)
+                    .allowsHitTesting(false)
             }
         }
         // 纯净原图放大预览浮层
@@ -293,14 +313,22 @@ struct ClipboardPopoverView: View {
                 } label: {
                     HStack(spacing: 3) {
                         Image(systemName: "chevron.left")
-                            .font(.system(size: 13, weight: .semibold))
+                            .font(.system(size: 12.5, weight: .semibold))
                         Text("返回")
-                            .font(.system(size: 13.5, weight: .medium))
+                            .font(.system(size: 13, weight: .semibold))
                     }
                     .foregroundStyle(Color.accentColor)
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 6)
-                    .contentShape(Rectangle())
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5.5)
+                    .background(
+                        Capsule()
+                            .fill(glassPalette.controlCapsuleFill)
+                    )
+                    .overlay(
+                        Capsule()
+                            .strokeBorder(glassPalette.controlCapsuleStroke, lineWidth: 0.7)
+                    )
+                    .contentShape(Capsule())
                 }
                 .buttonStyle(.plain)
 
@@ -338,13 +366,11 @@ struct ClipboardPopoverView: View {
                 .padding(.vertical, 8)
                 .background(
                     Capsule()
-                        .fill(Color.primary.opacity(0.07))
+                        .fill(glassPalette.controlCapsuleFill)
                 )
                 .overlay {
-                    if !store.borderlessPanel {
-                        Capsule()
-                            .strokeBorder(Color.primary.opacity(0.06), lineWidth: 0.75)
-                    }
+                    Capsule()
+                        .strokeBorder(glassPalette.controlCapsuleStroke, lineWidth: 0.75)
                 }
 
                 // 顺序粘贴队列采集开关按钮
@@ -460,8 +486,12 @@ struct ClipboardPopoverView: View {
                         .background {
                             if isSelected {
                                 Capsule()
-                                    .fill(Color(nsColor: .controlBackgroundColor).opacity(0.9))
-                                    .shadow(color: Color.black.opacity(0.08), radius: 2, y: 1)
+                                    .fill(glassPalette.activeSegmentFill)
+                                    .overlay(
+                                        Capsule()
+                                            .strokeBorder(glassPalette.controlCapsuleStroke, lineWidth: 0.6)
+                                    )
+                                    .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.24 : 0.08), radius: 2.5, y: 1)
                                     .matchedGeometryEffect(id: "activeTabPill", in: tabNamespace)
                             }
                         }
@@ -472,7 +502,11 @@ struct ClipboardPopoverView: View {
         .padding(3)
         .background(
             Capsule()
-                .fill(Color.primary.opacity(0.06))
+                .fill(glassPalette.controlCapsuleFill)
+        )
+        .overlay(
+            Capsule()
+                .strokeBorder(glassPalette.controlCapsuleStroke.opacity(0.75), lineWidth: 0.6)
         )
     }
 
@@ -651,6 +685,7 @@ struct ClipboardPopoverView: View {
                                         queueRank: store.queuePosition(for: item),
                                         mergeRank: store.mergeSelectionRank(for: item),
                                         surfaceStyle: store.surfaceStyle,
+                                        liquidGlassAppearance: store.liquidGlassAppearance,
                                         borderlessPanel: store.borderlessPanel,
                                         onSelect: {
                                             nav.selectedIndex = index
@@ -910,10 +945,11 @@ struct ClipboardPopoverView: View {
             HStack(spacing: 8) {
                 keyHint("↵", "键入")
                 if !store.minimalModeEnabled {
-                    keyHint("⇥", "出队")
-                    keyHint("⇧↵", "识字/大写")
+                    keyHint("⇥", store.pasteQueueIDs.isEmpty ? "切类目" : "出队")
+                    keyHint(canMoveHorizontallyInGrid ? "↑↓←→" : "⇧↵", canMoveHorizontallyInGrid ? "选图" : "识字/大写")
                 } else {
-                    keyHint("↑↓", "选择")
+                    keyHint("⇥", "切类目")
+                    keyHint(canMoveHorizontallyInGrid ? "↑↓←→" : "↑↓", "选择")
                 }
                 keyHint("ESC", "关闭")
             }
@@ -932,7 +968,7 @@ struct ClipboardPopoverView: View {
                         .background(Circle().fill(Color.primary.opacity(0.06)))
                 }
                 .buttonStyle(.plain)
-                .help("清空未固定记录")
+                .help("清空未收藏记录")
             }
         }
     }
@@ -983,7 +1019,7 @@ struct ClipboardPopoverView: View {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("液态风格")
                                     .font(.system(size: 13.5, weight: .medium))
-                                Text("对应系统 Liquid Glass 透明 / 着色官方样式")
+                                Text("双层光学柔焦 + 原生 Liquid Glass 折射（通透 / 高可读着色）")
                                     .font(.system(size: 11.5))
                                     .foregroundStyle(.secondary)
                             }
@@ -1330,7 +1366,7 @@ struct ClipboardPopoverView: View {
                 // 存储与资产归档分组
                 settingsGroup(title: "存储与收藏资产迁移") {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("保留最近未固定记录数（固定记录不受限制）")
+                        Text("保留最近未收藏记录数（收藏记录不受限制）")
                             .font(.system(size: 12))
                             .foregroundStyle(.secondary)
                         Picker("", selection: $store.maxHistoryCount) {
@@ -1347,9 +1383,9 @@ struct ClipboardPopoverView: View {
 
                     HStack(spacing: 8) {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("置顶收藏与模板离线归档")
+                            Text("收藏与模板离线归档")
                                 .font(.system(size: 13.5, weight: .medium))
-                            Text("当前已固定 \(store.pinnedItemCount) 条（含分组、备注与常用图），支持跨机迁移")
+                            Text("当前已收藏 \(store.pinnedItemCount) 条（含分组、备注与常用图），支持跨机迁移")
                                 .font(.system(size: 11.5))
                                 .foregroundStyle(.secondary)
                         }
@@ -1375,6 +1411,10 @@ struct ClipboardPopoverView: View {
                     Divider().opacity(0.35)
                     shortcutRow("直接键入光标所在区域", "双击 / ↵")
                     Divider().opacity(0.35)
+                    shortcutRow("左 / 右切换内容类目", "⇧⇥ / ⇥")
+                    Divider().opacity(0.35)
+                    shortcutRow("图片网格直观方向导航", "↑ ↓ ← →")
+                    Divider().opacity(0.35)
                     shortcutRow("加入 / 移出顺序粘贴队列", "⌘ K")
                     Divider().opacity(0.35)
                     shortcutRow("按顺序键入队首下一项", "⇥ Tab")
@@ -1396,7 +1436,7 @@ struct ClipboardPopoverView: View {
                         store.clearUnpinned()
                         nav.showSettings = false
                     } label: {
-                        Text("清空未固定历史")
+                        Text("清空未收藏历史")
                             .font(.system(size: 13, weight: .medium))
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 8)
@@ -1428,7 +1468,7 @@ struct ClipboardPopoverView: View {
     private func settingsGroup<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title)
-                .font(.system(size: 11.5, weight: .medium))
+                .font(.system(size: 11.5, weight: .semibold))
                 .foregroundStyle(.secondary)
                 .padding(.leading, 8)
 
@@ -1438,8 +1478,12 @@ struct ClipboardPopoverView: View {
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(Color.primary.opacity(0.045))
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(glassPalette.groupFill)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(glassPalette.groupStroke, lineWidth: 0.75)
             )
         }
     }
@@ -1546,14 +1590,41 @@ struct ClipboardPopoverView: View {
 
     // MARK: - 键盘控制辅助
 
-    func moveSelection(delta: Int, extendMergeSelection: Bool = false) {
+    var canMoveHorizontallyInGrid: Bool {
+        guard !filteredItems.isEmpty else { return false }
+        if nav.selectedTab == .image { return true }
+        guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return false }
+        return filteredItems[nav.selectedIndex].type == .image
+    }
+
+    func stepFilterTab(delta: Int) {
+        let tabs = ClipFilterTab.allCases
+        guard let currentIdx = tabs.firstIndex(of: nav.selectedTab) else { return }
+        let nextIdx = (currentIdx + delta + tabs.count) % tabs.count
+        dismissImagePreview(clearItem: true)
+        withAnimation(.spring(response: 0.26, dampingFraction: 0.84)) {
+            nav.selectedTab = tabs[nextIdx]
+        }
+        nav.selectedIndex = 0
+        nav.preferredGridColumn = nil
+        nav.scrollRequestEpoch &+= 1
+    }
+
+    func moveSelection(direction: PanelNavigationDirection, extendMergeSelection: Bool = false) {
         let count = filteredItems.count
         guard count > 0 else { return }
         dismissImagePreview(clearItem: false)
         if extendMergeSelection, nav.selectedIndex >= 0, nav.selectedIndex < count {
             store.ensureMergeSelected(filteredItems[nav.selectedIndex])
         }
-        nav.selectedIndex = (nav.selectedIndex + delta + count) % count
+        let result = GridNavigationHelper.nextIndex(
+            from: nav.selectedIndex,
+            direction: direction,
+            visualRows: nav.cachedVisualRows,
+            preferredColumn: nav.preferredGridColumn
+        )
+        nav.selectedIndex = result.index
+        nav.preferredGridColumn = result.preferredColumn
         if extendMergeSelection {
             store.ensureMergeSelected(filteredItems[nav.selectedIndex])
         }
@@ -1649,7 +1720,7 @@ struct ClipboardPopoverView: View {
 
     private func exportPinnedArchiveAction() {
         guard store.pinnedItemCount > 0 else {
-            store.showToast("暂无已固定的收藏记录可导出")
+            store.showToast("暂无已收藏的记录可导出")
             return
         }
 
@@ -1659,7 +1730,7 @@ struct ClipboardPopoverView: View {
 
         nav.suppressAutoHide = true
         let panel = NSSavePanel()
-        panel.title = "导出 iClip 置顶收藏与模板归档"
+        panel.title = "导出 iClip 收藏与模板归档"
         panel.nameFieldStringValue = defaultName
         panel.canCreateDirectories = true
         panel.allowsOtherFileTypes = true
@@ -1793,6 +1864,8 @@ final class PanelNavigationModel: ObservableObject {
 
     private(set) var cachedFilteredItems: [ClipItem] = []
     private(set) var cachedDisplayRows: [ClipDisplayRow] = []
+    private(set) var cachedVisualRows: [[Int]] = []
+    var preferredGridColumn: Int? = nil
     private weak var storeRef: ClipboardStore?
     private var cancellables = Set<AnyCancellable>()
 
@@ -1861,11 +1934,15 @@ final class PanelNavigationModel: ObservableObject {
 
         self.cachedFilteredItems = filtered
         self.cachedDisplayRows = rows
+        self.cachedVisualRows = GridNavigationHelper.buildVisualRows(count: filtered.count, imageColumns: 3) {
+            filtered[$0].type == .image
+        }
     }
 
     func resetOnOpen() {
         searchText = ""
         selectedIndex = 0
+        preferredGridColumn = nil
         showSettings = false
         showQuickLook = false
         isCreatingTemplate = false
@@ -1885,7 +1962,16 @@ struct ClipboardPopoverView: View {
     let onQuit: () -> Void
 
     @Namespace private var tabNamespace
+    @Environment(\.colorScheme) private var colorScheme
     @FocusState private var isSearchFocused: Bool
+
+    private var glassPalette: LiquidGlassPalette {
+        LiquidGlassPalette(
+            colorScheme: colorScheme,
+            surfaceStyle: store.surfaceStyle,
+            appearance: store.liquidGlassAppearance
+        )
+    }
     @State private var previewItem: ClipItem? = nil
     @State private var previewTileRect: CGRect = .zero
     @State private var isPreviewVisible: Bool = false
@@ -1973,9 +2059,14 @@ struct ClipboardPopoverView: View {
         }
         .frame(width: 420, height: 560)
         .overlay {
-            if !store.borderlessPanel {
+            if store.surfaceStyle == .liquidGlass {
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .strokeBorder(glassPalette.panelSpecularGradient, lineWidth: store.borderlessPanel ? 0.65 : 0.9)
+                    .allowsHitTesting(false)
+            } else if !store.borderlessPanel {
                 RoundedRectangle(cornerRadius: 22, style: .continuous)
                     .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5)
+                    .allowsHitTesting(false)
             }
         }
         // 纯净原图放大预览浮层
@@ -2068,14 +2159,22 @@ struct ClipboardPopoverView: View {
                 } label: {
                     HStack(spacing: 3) {
                         Image(systemName: "chevron.left")
-                            .font(.system(size: 13, weight: .semibold))
+                            .font(.system(size: 12.5, weight: .semibold))
                         Text("返回")
-                            .font(.system(size: 13.5, weight: .medium))
+                            .font(.system(size: 13, weight: .semibold))
                     }
                     .foregroundStyle(Color.accentColor)
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 6)
-                    .contentShape(Rectangle())
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5.5)
+                    .background(
+                        Capsule()
+                            .fill(glassPalette.controlCapsuleFill)
+                    )
+                    .overlay(
+                        Capsule()
+                            .strokeBorder(glassPalette.controlCapsuleStroke, lineWidth: 0.7)
+                    )
+                    .contentShape(Capsule())
                 }
                 .buttonStyle(.plain)
 
@@ -2113,13 +2212,11 @@ struct ClipboardPopoverView: View {
                 .padding(.vertical, 8)
                 .background(
                     Capsule()
-                        .fill(Color.primary.opacity(0.07))
+                        .fill(glassPalette.controlCapsuleFill)
                 )
                 .overlay {
-                    if !store.borderlessPanel {
-                        Capsule()
-                            .strokeBorder(Color.primary.opacity(0.06), lineWidth: 0.75)
-                    }
+                    Capsule()
+                        .strokeBorder(glassPalette.controlCapsuleStroke, lineWidth: 0.75)
                 }
 
                 // 极简纯净模式（基础功能版）一键切换圆钮（⌘E）
@@ -2203,8 +2300,12 @@ struct ClipboardPopoverView: View {
                         .background {
                             if isSelected {
                                 Capsule()
-                                    .fill(Color(nsColor: .controlBackgroundColor).opacity(0.9))
-                                    .shadow(color: Color.black.opacity(0.08), radius: 2, y: 1)
+                                    .fill(glassPalette.activeSegmentFill)
+                                    .overlay(
+                                        Capsule()
+                                            .strokeBorder(glassPalette.controlCapsuleStroke, lineWidth: 0.6)
+                                    )
+                                    .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.24 : 0.08), radius: 2.5, y: 1)
                                     .matchedGeometryEffect(id: "activeTabPill", in: tabNamespace)
                             }
                         }
@@ -2215,7 +2316,11 @@ struct ClipboardPopoverView: View {
         .padding(3)
         .background(
             Capsule()
-                .fill(Color.primary.opacity(0.06))
+                .fill(glassPalette.controlCapsuleFill)
+        )
+        .overlay(
+            Capsule()
+                .strokeBorder(glassPalette.controlCapsuleStroke.opacity(0.75), lineWidth: 0.6)
         )
     }
 
@@ -2317,7 +2422,7 @@ struct ClipboardPopoverView: View {
                                 nav.isCreatingTemplate = false
                             }
                         } label: {
-                            Text("保存固定")
+                            Text("保存收藏")
                                 .font(.system(size: 11, weight: .semibold))
                                 .foregroundStyle(.white)
                                 .padding(.horizontal, 10)
@@ -2359,6 +2464,7 @@ struct ClipboardPopoverView: View {
                                         index: index,
                                         isSelected: index == nav.selectedIndex,
                                         surfaceStyle: store.surfaceStyle,
+                                        liquidGlassAppearance: store.liquidGlassAppearance,
                                         borderlessPanel: store.borderlessPanel,
                                         onSelect: {
                                             nav.selectedIndex = index
@@ -2516,10 +2622,11 @@ struct ClipboardPopoverView: View {
 
             HStack(spacing: 8) {
                 keyHint("↵", "键入")
-                if !store.minimalModeEnabled {
+                if !store.minimalModeEnabled && !canMoveHorizontallyInGrid {
                     keyHint("⇧↵", "智变")
                 }
-                keyHint("↑↓", "选择")
+                keyHint("⇥", "切类目")
+                keyHint(canMoveHorizontallyInGrid ? "↑↓←→" : "↑↓", "选择")
                 keyHint("ESC", "关闭")
             }
 
@@ -2537,7 +2644,7 @@ struct ClipboardPopoverView: View {
                         .background(Circle().fill(Color.primary.opacity(0.06)))
                 }
                 .buttonStyle(.plain)
-                .help("清空未固定记录")
+                .help("清空未收藏记录")
             }
         }
     }
@@ -2588,7 +2695,7 @@ struct ClipboardPopoverView: View {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("液态风格")
                                     .font(.system(size: 13.5, weight: .medium))
-                                Text("对应系统 Liquid Glass 透明 / 着色官方样式")
+                                Text("双层光学柔焦 + 原生 Liquid Glass 折射（通透 / 高可读着色）")
                                     .font(.system(size: 11.5))
                                     .foregroundStyle(.secondary)
                             }
@@ -2900,7 +3007,7 @@ struct ClipboardPopoverView: View {
                 // 存储与资产归档分组
                 settingsGroup(title: "存储与收藏资产迁移") {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("保留最近未固定记录数（固定记录不受限制）")
+                        Text("保留最近未收藏记录数（收藏记录不受限制）")
                             .font(.system(size: 12))
                             .foregroundStyle(.secondary)
                         Picker("", selection: $store.maxHistoryCount) {
@@ -2917,9 +3024,9 @@ struct ClipboardPopoverView: View {
 
                     HStack(spacing: 8) {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("置顶收藏与模板离线归档")
+                            Text("收藏与模板离线归档")
                                 .font(.system(size: 13.5, weight: .medium))
-                            Text("当前已固定 \(store.pinnedItemCount) 条（含分组、备注与常用图），支持跨机迁移")
+                            Text("当前已收藏 \(store.pinnedItemCount) 条（含分组、备注与常用图），支持跨机迁移")
                                 .font(.system(size: 11.5))
                                 .foregroundStyle(.secondary)
                         }
@@ -2945,6 +3052,10 @@ struct ClipboardPopoverView: View {
                     Divider().opacity(0.35)
                     shortcutRow("直接键入光标所在区域", "双击 / ↵")
                     Divider().opacity(0.35)
+                    shortcutRow("左 / 右切换内容类目", "⇧⇥ / ⇥")
+                    Divider().opacity(0.35)
+                    shortcutRow("图片网格直观方向导航", "↑ ↓ ← →")
+                    Divider().opacity(0.35)
                     shortcutRow("首选智能变换 / 脱敏键入", "⇧ ↵")
                     Divider().opacity(0.35)
                     shortcutRow("直达第 1~3 个语义变换", "⌃ 1 ~ 3")
@@ -2966,7 +3077,7 @@ struct ClipboardPopoverView: View {
                         store.clearUnpinned()
                         nav.showSettings = false
                     } label: {
-                        Text("清空未固定历史")
+                        Text("清空未收藏历史")
                             .font(.system(size: 13, weight: .medium))
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 8)
@@ -2998,7 +3109,7 @@ struct ClipboardPopoverView: View {
     private func settingsGroup<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title)
-                .font(.system(size: 11.5, weight: .medium))
+                .font(.system(size: 11.5, weight: .semibold))
                 .foregroundStyle(.secondary)
                 .padding(.leading, 8)
 
@@ -3008,8 +3119,12 @@ struct ClipboardPopoverView: View {
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(Color.primary.opacity(0.045))
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(glassPalette.groupFill)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(glassPalette.groupStroke, lineWidth: 0.75)
             )
         }
     }
@@ -3116,11 +3231,41 @@ struct ClipboardPopoverView: View {
 
     // MARK: - 键盘控制辅助
 
-    func moveSelection(delta: Int) {
+    var canMoveHorizontallyInGrid: Bool {
+        guard !filteredItems.isEmpty else { return false }
+        if nav.selectedTab == .image { return true }
+        guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return false }
+        return filteredItems[nav.selectedIndex].type == .image
+    }
+
+    func stepFilterTab(delta: Int) {
+        let tabs = ClipFilterTab.allCases
+        guard let currentIdx = tabs.firstIndex(of: nav.selectedTab) else { return }
+        let nextIdx = (currentIdx + delta + tabs.count) % tabs.count
+        dismissImagePreview(clearItem: true)
+        if nav.showQuickLook {
+            nav.showQuickLook = false
+        }
+        withAnimation(.spring(response: 0.26, dampingFraction: 0.84)) {
+            nav.selectedTab = tabs[nextIdx]
+        }
+        nav.selectedIndex = 0
+        nav.preferredGridColumn = nil
+        nav.scrollRequestEpoch &+= 1
+    }
+
+    func moveSelection(direction: PanelNavigationDirection) {
         let count = filteredItems.count
         guard count > 0 else { return }
         dismissImagePreview(clearItem: false)
-        nav.selectedIndex = (nav.selectedIndex + delta + count) % count
+        let result = GridNavigationHelper.nextIndex(
+            from: nav.selectedIndex,
+            direction: direction,
+            visualRows: nav.cachedVisualRows,
+            preferredColumn: nav.preferredGridColumn
+        )
+        nav.selectedIndex = result.index
+        nav.preferredGridColumn = result.preferredColumn
         nav.scrollRequestEpoch &+= 1
     }
 
@@ -3215,7 +3360,7 @@ struct ClipboardPopoverView: View {
 
     private func exportPinnedArchiveAction() {
         guard store.pinnedItemCount > 0 else {
-            store.showToast("暂无已固定的收藏记录可导出")
+            store.showToast("暂无已收藏的记录可导出")
             return
         }
 
@@ -3225,7 +3370,7 @@ struct ClipboardPopoverView: View {
 
         nav.suppressAutoHide = true
         let panel = NSSavePanel()
-        panel.title = "导出 iClip 置顶收藏与模板归档"
+        panel.title = "导出 iClip 收藏与模板归档"
         panel.nameFieldStringValue = defaultName
         panel.canCreateDirectories = true
         panel.allowsOtherFileTypes = true

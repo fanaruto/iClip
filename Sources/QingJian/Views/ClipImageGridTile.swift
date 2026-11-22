@@ -66,7 +66,7 @@ struct ClipImageGridTile: View {
 
             HStack(spacing: 4) {
                 if item.isPinned {
-                    Image(systemName: "pin.fill")
+                    Image(systemName: "star.fill")
                         .font(.system(size: 8.5, weight: .bold))
                         .foregroundStyle(Color.orange)
                 }
@@ -134,14 +134,14 @@ struct ClipImageGridTile: View {
                     }
 
                     Button(action: onTogglePin) {
-                        Image(systemName: item.isPinned ? "pin.slash.fill" : "pin.fill")
+                        Image(systemName: item.isPinned ? "star.fill" : "star")
                             .font(.system(size: 9.5, weight: .semibold))
                             .foregroundStyle(item.isPinned ? Color.orange : Color.white)
                             .frame(width: 21, height: 21)
                             .background(Circle().fill(Color.black.opacity(0.58)))
                     }
                     .buttonStyle(.plain)
-                    .help(item.isPinned ? "取消固定" : "固定到顶部")
+                    .help(item.isPinned ? "取消收藏" : "收藏")
 
                     Button(action: onDelete) {
                         Image(systemName: "trash.fill")
@@ -155,24 +155,46 @@ struct ClipImageGridTile: View {
                 }
                 .padding(5)
                 .transition(.opacity.combined(with: .scale(scale: 0.88)))
+            } else if isSelected {
+                Image(systemName: "return")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 20, height: 20)
+                    .background(Circle().fill(Color(nsColor: .controlAccentColor)))
+                    .overlay(Circle().strokeBorder(Color.white.opacity(0.85), lineWidth: 1))
+                    .shadow(color: Color.black.opacity(0.24), radius: 3, y: 1)
+                    .padding(5)
+                    .allowsHitTesting(false)
+                    .transition(.opacity.combined(with: .scale(scale: 0.85)))
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 13, style: .continuous)
-                .strokeBorder(
-                    isSelected
-                        ? Color(nsColor: .controlAccentColor)
-                        : (isHovered ? Color.white.opacity(0.6) : Color.primary.opacity(0.1)),
-                    lineWidth: isSelected ? 2.0 : (isHovered ? 1.1 : 0.75)
-                )
-        )
+        .overlay {
+            if isSelected {
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.88), lineWidth: 3.6)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 13, style: .continuous)
+                            .strokeBorder(Color(nsColor: .controlAccentColor), lineWidth: 2.5)
+                    )
+            } else {
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .strokeBorder(
+                        item.isPinned
+                            ? Color.orange.opacity(isHovered ? 0.92 : 0.72)
+                            : (isHovered ? Color.white.opacity(0.75) : Color.primary.opacity(0.1)),
+                        lineWidth: item.isPinned ? 1.5 : (isHovered ? 1.2 : 0.75)
+                    )
+            }
+        }
         .shadow(
-            color: Color.black.opacity(isHovered ? 0.18 : (isSelected ? 0.14 : 0.05)),
-            radius: isHovered ? 9 : 4,
+            color: isSelected
+                ? Color(nsColor: .controlAccentColor).opacity(0.42)
+                : Color.black.opacity(isHovered ? 0.18 : 0.05),
+            radius: isSelected ? 8 : (isHovered ? 9 : 4),
             y: isHovered ? 4 : 2
         )
-        .scaleEffect(isHovered ? 1.03 : 1.0)
+        .scaleEffect(isHovered ? 1.035 : (isSelected ? 1.02 : 1.0))
         .animation(.spring(response: 0.22, dampingFraction: 0.9), value: isHovered)
         .animation(.spring(response: 0.2, dampingFraction: 0.88), value: isSelected)
         .contentShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
@@ -231,7 +253,7 @@ struct ClipImageGridTile: View {
             Button(queueRank != nil ? "移出顺序队列（⌘K）" : "加入顺序队列（⌘K）") {
                 onToggleQueue()
             }
-            Button(item.isPinned ? "取消固定" : "固定到顶部") {
+            Button(item.isPinned ? "取消收藏" : "收藏") {
                 onTogglePin()
             }
             Divider()
@@ -473,7 +495,7 @@ struct ClipImageGridTile: View {
 
             HStack(spacing: 4) {
                 if item.isPinned {
-                    Image(systemName: "pin.fill")
+                    Image(systemName: "star.fill")
                         .font(.system(size: 8.5, weight: .bold))
                         .foregroundStyle(Color.orange)
                 }
@@ -513,14 +535,14 @@ struct ClipImageGridTile: View {
             if isHovered {
                 HStack(spacing: 4) {
                     Button(action: onTogglePin) {
-                        Image(systemName: item.isPinned ? "pin.slash.fill" : "pin.fill")
+                        Image(systemName: item.isPinned ? "star.fill" : "star")
                             .font(.system(size: 9.5, weight: .semibold))
                             .foregroundStyle(item.isPinned ? Color.orange : Color.white)
                             .frame(width: 21, height: 21)
                             .background(Circle().fill(Color.black.opacity(0.58)))
                     }
                     .buttonStyle(.plain)
-                    .help(item.isPinned ? "取消固定" : "固定到顶部")
+                    .help(item.isPinned ? "取消收藏" : "收藏")
 
                     Button(action: onDelete) {
                         Image(systemName: "trash.fill")
@@ -534,24 +556,46 @@ struct ClipImageGridTile: View {
                 }
                 .padding(5)
                 .transition(.opacity.combined(with: .scale(scale: 0.88)))
+            } else if isSelected {
+                Image(systemName: "return")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 20, height: 20)
+                    .background(Circle().fill(Color(nsColor: .controlAccentColor)))
+                    .overlay(Circle().strokeBorder(Color.white.opacity(0.85), lineWidth: 1))
+                    .shadow(color: Color.black.opacity(0.24), radius: 3, y: 1)
+                    .padding(5)
+                    .allowsHitTesting(false)
+                    .transition(.opacity.combined(with: .scale(scale: 0.85)))
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 13, style: .continuous)
-                .strokeBorder(
-                    isSelected
-                        ? Color(nsColor: .controlAccentColor)
-                        : (isHovered ? Color.white.opacity(0.6) : Color.primary.opacity(0.1)),
-                    lineWidth: isSelected ? 2.0 : (isHovered ? 1.1 : 0.75)
-                )
-        )
+        .overlay {
+            if isSelected {
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.88), lineWidth: 3.6)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 13, style: .continuous)
+                            .strokeBorder(Color(nsColor: .controlAccentColor), lineWidth: 2.5)
+                    )
+            } else {
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .strokeBorder(
+                        item.isPinned
+                            ? Color.orange.opacity(isHovered ? 0.92 : 0.72)
+                            : (isHovered ? Color.white.opacity(0.75) : Color.primary.opacity(0.1)),
+                        lineWidth: item.isPinned ? 1.5 : (isHovered ? 1.2 : 0.75)
+                    )
+            }
+        }
         .shadow(
-            color: Color.black.opacity(isHovered ? 0.18 : (isSelected ? 0.14 : 0.05)),
-            radius: isHovered ? 9 : 4,
+            color: isSelected
+                ? Color(nsColor: .controlAccentColor).opacity(0.42)
+                : Color.black.opacity(isHovered ? 0.18 : 0.05),
+            radius: isSelected ? 8 : (isHovered ? 9 : 4),
             y: isHovered ? 4 : 2
         )
-        .scaleEffect(isHovered ? 1.03 : 1.0)
+        .scaleEffect(isHovered ? 1.035 : (isSelected ? 1.02 : 1.0))
         .animation(.spring(response: 0.22, dampingFraction: 0.9), value: isHovered)
         .animation(.spring(response: 0.2, dampingFraction: 0.88), value: isSelected)
         .contentShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
@@ -599,7 +643,7 @@ struct ClipImageGridTile: View {
                     ClipboardStore.shared.pasteAppleMockupImage(for: item, shouldAutoPaste: false)
                 }
             }
-            Button(item.isPinned ? "取消固定" : "固定到顶部") {
+            Button(item.isPinned ? "取消收藏" : "收藏") {
                 onTogglePin()
             }
             Divider()

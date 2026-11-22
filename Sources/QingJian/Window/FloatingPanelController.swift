@@ -15,7 +15,7 @@ final class KeyableFloatingPanel: NSPanel {
 final class FloatingPanelController: NSObject, NSWindowDelegate {
     private var panel: KeyableFloatingPanel!
     private var hostingView: NSHostingView<ClipboardPopoverView>!
-    private weak var activeGlassView: AnyObject?
+    private let surfaceHost = LiquidGlassSurfaceHost()
     let nav = PanelNavigationModel()
     private let store = ClipboardStore.shared
     private var rootView: ClipboardPopoverView!
@@ -147,79 +147,24 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             .store(in: &cancellables)
     }
 
-    /// 按苹果官方文档方式将 NSHostingView 直接挂载为 NSGlassEffectView / NSVisualEffectView 的原生内容视图
+    /// 按苹果官方 Liquid Glass 分层规范挂载原生材质根容器（底层柔焦隔断 + 顶层 NSGlassEffectView 光学壳体）
     private func applyNativeSurface(style: PanelSurfaceStyle) {
         let bounds = NSRect(origin: .zero, size: panelSize)
-        hostingView.removeFromSuperview()
-        hostingView.frame = bounds
-        hostingView.autoresizingMask = [.width, .height]
-
-        switch style {
-        case .liquidGlass:
-            if #available(macOS 26.0, *) {
-                let glassView = NSGlassEffectView(frame: bounds)
-                glassView.autoresizingMask = [.width, .height]
-                glassView.cornerRadius = cornerRadius
-                applyGlassParameters(to: glassView, appearance: store.liquidGlassAppearance, maskOpacity: store.liquidGlassMaskOpacity)
-                glassView.contentView = hostingView
-                activeGlassView = glassView
-                panel.contentView = glassView
-                panel.invalidateShadow()
-                return
-            }
-            activeGlassView = nil
-            installVisualEffectSurface(material: .popover, bounds: bounds)
-
-        case .frosted:
-            activeGlassView = nil
-            installVisualEffectSurface(material: .popover, bounds: bounds)
-        }
+        surfaceHost.install(
+            on: panel,
+            hostingView: hostingView,
+            bounds: bounds,
+            cornerRadius: cornerRadius,
+            style: style,
+            appearance: store.liquidGlassAppearance,
+            maskOpacity: store.liquidGlassMaskOpacity
+        )
     }
 
-    /// 零重建原地热更新苹果官方 NSGlassEffectView 蒙版风格与浓度
+    /// 零重建原地热更新苹果官方 Liquid Glass 蒙版风格与浓度
     private func updateLiquidGlassInPlace(appearance: LiquidGlassAppearance, maskOpacity: Double) {
         guard store.surfaceStyle == .liquidGlass else { return }
-        if #available(macOS 26.0, *), let glassView = activeGlassView as? NSGlassEffectView {
-            applyGlassParameters(to: glassView, appearance: appearance, maskOpacity: maskOpacity)
-        }
-    }
-
-    @available(macOS 26.0, *)
-    private func applyGlassParameters(to glassView: NSGlassEffectView, appearance: LiquidGlassAppearance, maskOpacity: Double) {
-        glassView.style = (appearance == .clear) ? .clear : .regular
-        let clamped = min(max(maskOpacity, 0.0), 1.0)
-        if clamped <= 0.01 {
-            glassView.tintColor = nil
-        } else {
-            // 自适应系统浅/深外观的原生着色蒙版，由 WindowServer 硬件单遍合成
-            let alpha = CGFloat(clamped * 0.72)
-            glassView.tintColor = NSColor.windowBackgroundColor.withAlphaComponent(alpha)
-        }
-    }
-
-    private func installVisualEffectSurface(material: NSVisualEffectView.Material, bounds: NSRect) {
-        let effectView = NSVisualEffectView(frame: bounds)
-        effectView.autoresizingMask = [.width, .height]
-        effectView.material = material
-        effectView.blendingMode = .behindWindow
-        effectView.state = .active
-        effectView.maskImage = Self.roundedMaskImage(size: bounds.size, radius: cornerRadius)
-        effectView.addSubview(hostingView)
-        panel.contentView = effectView
-        panel.invalidateShadow()
-    }
-
-    /// 生成精确连续圆角遮罩，让 NSVisualEffectView 配合 WindowServer 原生阴影完美无锯齿、无外框
-    private static func roundedMaskImage(size: NSSize, radius: CGFloat) -> NSImage {
-        let image = NSImage(size: size, flipped: false) { rect in
-            let path = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
-            NSColor.black.setFill()
-            path.fill()
-            return true
-        }
-        image.capInsets = NSEdgeInsets(top: radius, left: radius, bottom: radius, right: radius)
-        image.resizingMode = .stretch
-        return image
+        surfaceHost.updateLiquidGlass(appearance: appearance, maskOpacity: maskOpacity)
     }
 
     /// 切换显隐状态
@@ -463,20 +408,40 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             return nil
         }
 
-        // ⇥ Tab (keyCode 48)：队列非空时直接按 FIFO 顺序吐出队首第一项
-        if !store.minimalModeEnabled, flags.isEmpty, event.keyCode == 48 {
-            if rootView.dequeueAndPasteFromQueue() {
+        // ⇥ Tab / ⇧⇥ Shift+Tab (keyCode 48)：队列非空且按纯 Tab 时优先 FIFO 出队；其余场景左/右切换类目
+        if event.keyCode == 48 {
+            if let fieldEditor = panel.firstResponder as? NSTextView, fieldEditor.hasMarkedText() {
+                return event
+            }
+            if !store.minimalModeEnabled, flags.isEmpty, rootView.dequeueAndPasteFromQueue() {
+                return nil
+            }
+            if flags.isEmpty {
+                rootView.stepFilterTab(delta: 1)
+                return nil
+            }
+            if flags == .shift {
+                rootView.stepFilterTab(delta: -1)
                 return nil
             }
         }
 
+        // ← / → 左右方向键：搜索框为空且处于图片格（或图片类目）时直接左右操控图片选中焦点
+        if (event.keyCode == 123 || event.keyCode == 124), nav.searchText.isEmpty, rootView.canMoveHorizontallyInGrid {
+            rootView.moveSelection(
+                direction: event.keyCode == 123 ? .left : .right,
+                extendMergeSelection: flags.contains(.shift)
+            )
+            return nil
+        }
+
         if event.keyCode == 126 {
-            rootView.moveSelection(delta: -1, extendMergeSelection: flags.contains(.shift))
+            rootView.moveSelection(direction: .up, extendMergeSelection: flags.contains(.shift))
             return nil
         }
 
         if event.keyCode == 125 {
-            rootView.moveSelection(delta: 1, extendMergeSelection: flags.contains(.shift))
+            rootView.moveSelection(direction: .down, extendMergeSelection: flags.contains(.shift))
             return nil
         }
 
@@ -515,7 +480,7 @@ final class KeyableFloatingPanel: NSPanel {
 final class FloatingPanelController: NSObject, NSWindowDelegate {
     private var panel: KeyableFloatingPanel!
     private var hostingView: NSHostingView<ClipboardPopoverView>!
-    private weak var activeGlassView: AnyObject?
+    private let surfaceHost = LiquidGlassSurfaceHost()
     let nav = PanelNavigationModel()
     private let store = ClipboardStore.shared
     private var rootView: ClipboardPopoverView!
@@ -647,79 +612,24 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             .store(in: &cancellables)
     }
 
-    /// 按苹果官方文档方式将 NSHostingView 直接挂载为 NSGlassEffectView / NSVisualEffectView 的原生内容视图
+    /// 按苹果官方 Liquid Glass 分层规范挂载原生材质根容器（底层柔焦隔断 + 顶层 NSGlassEffectView 光学壳体）
     private func applyNativeSurface(style: PanelSurfaceStyle) {
         let bounds = NSRect(origin: .zero, size: panelSize)
-        hostingView.removeFromSuperview()
-        hostingView.frame = bounds
-        hostingView.autoresizingMask = [.width, .height]
-
-        switch style {
-        case .liquidGlass:
-            if #available(macOS 26.0, *) {
-                let glassView = NSGlassEffectView(frame: bounds)
-                glassView.autoresizingMask = [.width, .height]
-                glassView.cornerRadius = cornerRadius
-                applyGlassParameters(to: glassView, appearance: store.liquidGlassAppearance, maskOpacity: store.liquidGlassMaskOpacity)
-                glassView.contentView = hostingView
-                activeGlassView = glassView
-                panel.contentView = glassView
-                panel.invalidateShadow()
-                return
-            }
-            activeGlassView = nil
-            installVisualEffectSurface(material: .popover, bounds: bounds)
-
-        case .frosted:
-            activeGlassView = nil
-            installVisualEffectSurface(material: .popover, bounds: bounds)
-        }
+        surfaceHost.install(
+            on: panel,
+            hostingView: hostingView,
+            bounds: bounds,
+            cornerRadius: cornerRadius,
+            style: style,
+            appearance: store.liquidGlassAppearance,
+            maskOpacity: store.liquidGlassMaskOpacity
+        )
     }
 
-    /// 零重建原地热更新苹果官方 NSGlassEffectView 蒙版风格与浓度
+    /// 零重建原地热更新苹果官方 Liquid Glass 蒙版风格与浓度
     private func updateLiquidGlassInPlace(appearance: LiquidGlassAppearance, maskOpacity: Double) {
         guard store.surfaceStyle == .liquidGlass else { return }
-        if #available(macOS 26.0, *), let glassView = activeGlassView as? NSGlassEffectView {
-            applyGlassParameters(to: glassView, appearance: appearance, maskOpacity: maskOpacity)
-        }
-    }
-
-    @available(macOS 26.0, *)
-    private func applyGlassParameters(to glassView: NSGlassEffectView, appearance: LiquidGlassAppearance, maskOpacity: Double) {
-        glassView.style = (appearance == .clear) ? .clear : .regular
-        let clamped = min(max(maskOpacity, 0.0), 1.0)
-        if clamped <= 0.01 {
-            glassView.tintColor = nil
-        } else {
-            // 自适应系统浅/深外观的原生着色蒙版，由 WindowServer 硬件单遍合成
-            let alpha = CGFloat(clamped * 0.72)
-            glassView.tintColor = NSColor.windowBackgroundColor.withAlphaComponent(alpha)
-        }
-    }
-
-    private func installVisualEffectSurface(material: NSVisualEffectView.Material, bounds: NSRect) {
-        let effectView = NSVisualEffectView(frame: bounds)
-        effectView.autoresizingMask = [.width, .height]
-        effectView.material = material
-        effectView.blendingMode = .behindWindow
-        effectView.state = .active
-        effectView.maskImage = Self.roundedMaskImage(size: bounds.size, radius: cornerRadius)
-        effectView.addSubview(hostingView)
-        panel.contentView = effectView
-        panel.invalidateShadow()
-    }
-
-    /// 生成精确连续圆角遮罩，让 NSVisualEffectView 配合 WindowServer 原生阴影完美无锯齿、无外框
-    private static func roundedMaskImage(size: NSSize, radius: CGFloat) -> NSImage {
-        let image = NSImage(size: size, flipped: false) { rect in
-            let path = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
-            NSColor.black.setFill()
-            path.fill()
-            return true
-        }
-        image.capInsets = NSEdgeInsets(top: radius, left: radius, bottom: radius, right: radius)
-        image.resizingMode = .stretch
-        return image
+        surfaceHost.updateLiquidGlass(appearance: appearance, maskOpacity: maskOpacity)
     }
 
     /// 切换显隐状态
@@ -955,19 +865,40 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             return nil
         }
 
+        // ⇥ Tab / ⇧⇥ Shift+Tab (keyCode 48)：快速左/右切换内容类目
+        if event.keyCode == 48 {
+            if let fieldEditor = panel.firstResponder as? NSTextView, fieldEditor.hasMarkedText() {
+                return event
+            }
+            if flags.isEmpty {
+                rootView.stepFilterTab(delta: 1)
+                return nil
+            }
+            if flags == .shift {
+                rootView.stepFilterTab(delta: -1)
+                return nil
+            }
+        }
+
         // QuickLook 开启时支持 ← / → 左右方向键无缝切换「原始文本」与「变换预览」
         if nav.showQuickLook && (event.keyCode == 123 || event.keyCode == 124) {
             rootView.stepQuickLookTab(delta: event.keyCode == 123 ? -1 : 1)
             return nil
         }
 
+        // ← / → 左右方向键：搜索框为空且处于图片格（或图片类目）时直接左右操控图片选中焦点
+        if !nav.showQuickLook, (event.keyCode == 123 || event.keyCode == 124), nav.searchText.isEmpty, rootView.canMoveHorizontallyInGrid {
+            rootView.moveSelection(direction: event.keyCode == 123 ? .left : .right)
+            return nil
+        }
+
         if event.keyCode == 126 {
-            rootView.moveSelection(delta: -1)
+            rootView.moveSelection(direction: .up)
             return nil
         }
 
         if event.keyCode == 125 {
-            rootView.moveSelection(delta: 1)
+            rootView.moveSelection(direction: .down)
             return nil
         }
 
