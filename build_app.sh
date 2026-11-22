@@ -35,6 +35,7 @@ build_edition() {
   mkdir -p "$staged_app/Contents/MacOS" "$staged_app/Contents/Resources"
   cp "$bin_path" "$staged_app/Contents/MacOS/QingJian"
   chmod +x "$staged_app/Contents/MacOS/QingJian"
+  strip -x "$staged_app/Contents/MacOS/QingJian" 2>/dev/null || true
 
   cat > "$staged_app/Contents/Info.plist" << EOF
 <?xml version="1.0" encoding="UTF-8"?>

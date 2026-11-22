@@ -327,6 +327,16 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             return (NSPoint(x: cardLeft, y: cardBottom), NSPoint(x: 0, y: 10))
         }
 
+        // 「始终在前」空间记忆：若用户已固定窗口并手动摆放过工位，快捷键重开时回到专属桌面工位
+        if store.alwaysOnTop, let pinned = store.savedPinnedPanelOrigin {
+            let targetCenter = NSPoint(x: pinned.x + cardWidth / 2, y: pinned.y + cardHeight / 2)
+            let screen = NSScreen.screens.first(where: { $0.frame.contains(targetCenter) }) ?? NSScreen.main ?? NSScreen.screens[0]
+            let visible = screen.visibleFrame
+            let clampedX = max(visible.minX + 8, min(pinned.x, visible.maxX - cardWidth - 8))
+            let clampedY = max(visible.minY + 8, min(pinned.y, visible.maxY - cardHeight - 8))
+            return (NSPoint(x: clampedX, y: clampedY), NSPoint(x: 0, y: 6))
+        }
+
         // 快捷键呼出：紧贴当前鼠标光标旁直觉出现，自动避让屏幕边缘
         let mouse = NSEvent.mouseLocation
         let screen = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) ?? NSScreen.main ?? NSScreen.screens[0]
@@ -350,7 +360,12 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         )
     }
 
-    // MARK: - 失焦自动隐藏
+    // MARK: - 失焦自动隐藏与钉住工位记忆
+
+    func windowDidMove(_ notification: Notification) {
+        guard store.alwaysOnTop, isVisible, let frame = panel?.frame else { return }
+        store.savePinnedPanelOrigin(frame.origin)
+    }
 
     func windowDidResignKey(_ notification: Notification) {
         if store.alwaysOnTop || nav.suppressAutoHide || nav.isRecordingHotKey || nav.isRecordingQueueHotKey {
@@ -869,6 +884,16 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             return (NSPoint(x: cardLeft, y: cardBottom), NSPoint(x: 0, y: 10))
         }
 
+        // 「始终在前」空间记忆：若用户已固定窗口并手动摆放过工位，快捷键重开时回到专属桌面工位
+        if store.alwaysOnTop, let pinned = store.savedPinnedPanelOrigin {
+            let targetCenter = NSPoint(x: pinned.x + cardWidth / 2, y: pinned.y + cardHeight / 2)
+            let screen = NSScreen.screens.first(where: { $0.frame.contains(targetCenter) }) ?? NSScreen.main ?? NSScreen.screens[0]
+            let visible = screen.visibleFrame
+            let clampedX = max(visible.minX + 8, min(pinned.x, visible.maxX - cardWidth - 8))
+            let clampedY = max(visible.minY + 8, min(pinned.y, visible.maxY - cardHeight - 8))
+            return (NSPoint(x: clampedX, y: clampedY), NSPoint(x: 0, y: 6))
+        }
+
         // 快捷键呼出：紧贴当前鼠标光标旁直觉出现，自动避让屏幕边缘
         let mouse = NSEvent.mouseLocation
         let screen = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) ?? NSScreen.main ?? NSScreen.screens[0]
@@ -892,7 +917,12 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         )
     }
 
-    // MARK: - 失焦自动隐藏
+    // MARK: - 失焦自动隐藏与钉住工位记忆
+
+    func windowDidMove(_ notification: Notification) {
+        guard store.alwaysOnTop, isVisible, let frame = panel?.frame else { return }
+        store.savePinnedPanelOrigin(frame.origin)
+    }
 
     func windowDidResignKey(_ notification: Notification) {
         if store.alwaysOnTop || nav.suppressAutoHide || nav.isRecordingHotKey {

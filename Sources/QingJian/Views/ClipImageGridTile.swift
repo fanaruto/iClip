@@ -25,6 +25,8 @@ struct ClipImageGridTile: View {
     @State private var isHovered: Bool = false
     @State private var asyncThumbnail: NSImage? = nil
     @State private var frameBox = TileFrameBox()
+    @State private var lastTapUptime: TimeInterval = 0
+    @State private var showCopiedInlineFlash: Bool = false
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -70,7 +72,11 @@ struct ClipImageGridTile: View {
                         .font(.system(size: 8.5, weight: .bold))
                         .foregroundStyle(Color.orange)
                 }
-                if let w = item.imageWidth, let h = item.imageHeight {
+                if showCopiedInlineFlash {
+                    Text("✓ 已复制")
+                        .font(.system(size: 9.5, weight: .bold))
+                        .foregroundStyle(Color.green)
+                } else if let w = item.imageWidth, let h = item.imageHeight {
                     Text("\(w)×\(h)")
                         .font(.system(size: 9.5, weight: .medium, design: .rounded))
                         .monospacedDigit()
@@ -219,14 +225,24 @@ struct ClipImageGridTile: View {
             }
             onHoverChange(hovering, frameBox.rect)
         }
-        .onTapGesture(count: 2) {
-            onPaste()
-        }
         .onDrag {
             ClipboardStore.shared.makeDragItemProvider(for: item)
         }
-        .onTapGesture(count: 1) {
-            onSelect()
+        .onTapGesture {
+            let now = ProcessInfo.processInfo.systemUptime
+            let clickCount = (NSApp.currentEvent?.type == .leftMouseUp) ? (NSApp.currentEvent?.clickCount ?? 1) : 1
+            let isDouble = clickCount >= 2 || (now - lastTapUptime) <= min(NSEvent.doubleClickInterval, 0.32)
+            lastTapUptime = isDouble ? 0 : now
+            if isDouble {
+                onPaste()
+            } else {
+                onSelect()
+                onCopyOnly()
+                withAnimation(.easeOut(duration: 0.14)) { showCopiedInlineFlash = true }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    withAnimation(.easeOut(duration: 0.2)) { showCopiedInlineFlash = false }
+                }
+            }
         }
         .contextMenu {
             Button("键入光标处（双击）") {
@@ -456,6 +472,8 @@ struct ClipImageGridTile: View {
     @State private var isHovered: Bool = false
     @State private var asyncThumbnail: NSImage? = nil
     @State private var frameBox = TileFrameBox()
+    @State private var lastTapUptime: TimeInterval = 0
+    @State private var showCopiedInlineFlash: Bool = false
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -501,7 +519,11 @@ struct ClipImageGridTile: View {
                         .font(.system(size: 8.5, weight: .bold))
                         .foregroundStyle(Color.orange)
                 }
-                if let w = item.imageWidth, let h = item.imageHeight {
+                if showCopiedInlineFlash {
+                    Text("✓ 已复制")
+                        .font(.system(size: 9.5, weight: .bold))
+                        .foregroundStyle(Color.green)
+                } else if let w = item.imageWidth, let h = item.imageHeight {
                     Text("\(w)×\(h)")
                         .font(.system(size: 9.5, weight: .medium, design: .rounded))
                         .monospacedDigit()
@@ -624,14 +646,24 @@ struct ClipImageGridTile: View {
             }
             onHoverChange(hovering, frameBox.rect)
         }
-        .onTapGesture(count: 2) {
-            onPaste()
-        }
         .onDrag {
             ClipboardStore.shared.makeDragItemProvider(for: item)
         }
-        .onTapGesture(count: 1) {
-            onSelect()
+        .onTapGesture {
+            let now = ProcessInfo.processInfo.systemUptime
+            let clickCount = (NSApp.currentEvent?.type == .leftMouseUp) ? (NSApp.currentEvent?.clickCount ?? 1) : 1
+            let isDouble = clickCount >= 2 || (now - lastTapUptime) <= min(NSEvent.doubleClickInterval, 0.32)
+            lastTapUptime = isDouble ? 0 : now
+            if isDouble {
+                onPaste()
+            } else {
+                onSelect()
+                onCopyOnly()
+                withAnimation(.easeOut(duration: 0.14)) { showCopiedInlineFlash = true }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    withAnimation(.easeOut(duration: 0.2)) { showCopiedInlineFlash = false }
+                }
+            }
         }
         .contextMenu {
             Button("键入光标处（双击）") {

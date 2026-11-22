@@ -95,6 +95,14 @@ struct ClipCardView: View {
                                 .font(.system(size: 10, weight: .semibold))
                                 .foregroundStyle(isSelected ? Color.white : Color.green)
                                 .transition(.opacity)
+                        } else if !ClipboardStore.shared.minimalModeEnabled && !item.isPinned {
+                            let reuse = AdaptiveIntelligenceEngine.shared.reuseCount(for: item.contentHash)
+                            if reuse >= 3 {
+                                Text("·")
+                                Text("高频 ×\(reuse)")
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.orange)
+                            }
                         }
 
                         Spacer(minLength: 4)
@@ -124,6 +132,7 @@ struct ClipCardView: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
                         ForEach(Array(financeActions.enumerated()), id: \.element.id) { idx, action in
+                            let habitTop = (idx == 0) && AdaptiveIntelligenceEngine.shared.isHabitPreferred(actionID: action.id, sourceApp: item.sourceAppName)
                             Button {
                                 onApplyFinanceAction(action, true)
                             } label: {
@@ -133,6 +142,11 @@ struct ClipCardView: View {
                                     Text(action.title)
                                         .font(.system(size: 11, weight: .medium))
                                         .lineLimit(1)
+                                    if habitTop {
+                                        Image(systemName: "sparkle")
+                                            .font(.system(size: 8.5, weight: .bold))
+                                            .foregroundStyle(isSelected ? Color.white : Color.accentColor)
+                                    }
                                     if idx == 0 {
                                         Text("⇧↵")
                                             .font(.system(size: 9.5, weight: .semibold))
@@ -146,8 +160,13 @@ struct ClipCardView: View {
                                     Capsule()
                                         .fill(isSelected ? Color.white.opacity(0.20) : Color.primary.opacity(isHovered ? 0.085 : 0.055))
                                 )
+                                .overlay(
+                                    Capsule()
+                                        .strokeBorder(habitTop && !isSelected ? Color.accentColor.opacity(0.38) : Color.clear, lineWidth: 0.65)
+                                )
                             }
                             .buttonStyle(.plain)
+                            .help(habitTop ? "已按你的使用习惯自动置顶（⇧↵ 直出）" : "点击执行「\(action.title)」并键入")
                         }
                     }
                 }
@@ -191,12 +210,10 @@ struct ClipCardView: View {
         }
         if !minimalMode && NSEvent.modifierFlags.contains(.command) {
             onToggleMerge()
-        } else if item.type == .link {
+        } else {
             onSelect()
             onCopyOnly(false)
             triggerCopiedInlineFlash()
-        } else {
-            onSelect()
         }
     }
 
@@ -633,6 +650,14 @@ struct ClipCardView: View {
                                 .font(.system(size: 10, weight: .semibold))
                                 .foregroundStyle(isSelected ? Color.white : Color.green)
                                 .transition(.opacity)
+                        } else if !ClipboardStore.shared.minimalModeEnabled && !item.isPinned {
+                            let reuse = AdaptiveIntelligenceEngine.shared.reuseCount(for: item.contentHash)
+                            if reuse >= 3 {
+                                Text("·")
+                                Text("高频 ×\(reuse)")
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.orange)
+                            }
                         }
 
                         Spacer(minLength: 4)
@@ -696,13 +721,9 @@ struct ClipCardView: View {
             onPaste(false)
             return
         }
-        if item.type == .link {
-            onSelect()
-            onCopyOnly(false)
-            triggerCopiedInlineFlash()
-        } else {
-            onSelect()
-        }
+        onSelect()
+        onCopyOnly(false)
+        triggerCopiedInlineFlash()
     }
 
     private func triggerCopiedInlineFlash() {
@@ -722,6 +743,7 @@ struct ClipCardView: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
                 ForEach(Array(actions.enumerated()), id: \.element.id) { idx, action in
+                    let habitTop = (idx == 0) && AdaptiveIntelligenceEngine.shared.isHabitPreferred(actionID: action.id, sourceApp: item.sourceAppName)
                     Button {
                         onApplyTransform(action, true)
                     } label: {
@@ -731,6 +753,11 @@ struct ClipCardView: View {
                             Text(action.title)
                                 .font(.system(size: 11, weight: .medium))
                                 .lineLimit(1)
+                            if habitTop {
+                                Image(systemName: "sparkle")
+                                    .font(.system(size: 8.5, weight: .bold))
+                                    .foregroundStyle(isSelected ? Color.white : Color.accentColor)
+                            }
                             Text(idx == 0 ? "⇧↵" : "⌃\(idx + 1)")
                                 .font(.system(size: 9.5, weight: .semibold))
                                 .opacity(0.72)
@@ -742,9 +769,13 @@ struct ClipCardView: View {
                             Capsule()
                                 .fill(chipBackground(for: action))
                         )
+                        .overlay(
+                            Capsule()
+                                .strokeBorder(habitTop && !isSelected ? Color.accentColor.opacity(0.40) : Color.clear, lineWidth: 0.65)
+                        )
                     }
                     .buttonStyle(.plain)
-                    .help("点击直接执行「\(action.title)」并键入光标处")
+                    .help(habitTop ? "已按你在「\(item.sourceAppName ?? "当前应用")」中的习惯自动置顶（⇧↵ 直出）" : "点击直接执行「\(action.title)」并键入光标处")
                 }
             }
         }

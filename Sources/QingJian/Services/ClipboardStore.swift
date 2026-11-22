@@ -386,6 +386,22 @@ final class ClipboardStore: ObservableObject {
         showToast(alwaysOnTop ? "已钉住窗口：始终在前（⌘P 取消）" : "已取消窗口始终在前")
     }
 
+    /// 读取「始终在前」模式下用户手动拖动摆放的专属桌面工位坐标
+    var savedPinnedPanelOrigin: NSPoint? {
+        guard UserDefaults.standard.object(forKey: "pinnedPanelOriginX") != nil,
+              UserDefaults.standard.object(forKey: "pinnedPanelOriginY") != nil else {
+            return nil
+        }
+        let x = UserDefaults.standard.double(forKey: "pinnedPanelOriginX")
+        let y = UserDefaults.standard.double(forKey: "pinnedPanelOriginY")
+        return NSPoint(x: x, y: y)
+    }
+
+    func savePinnedPanelOrigin(_ origin: NSPoint) {
+        UserDefaults.standard.set(Double(origin.x), forKey: "pinnedPanelOriginX")
+        UserDefaults.standard.set(Double(origin.y), forKey: "pinnedPanelOriginY")
+    }
+
     /// 执行来自光标角「灵动微星标（Action Spark）」的一键动作（转换结果写入剪贴板，供用户随时 ⌘V 粘贴）
     func executeSparkCandidate(_ candidate: AdaptiveSparkCandidate) {
         switch candidate.payload {
@@ -1312,24 +1328,31 @@ final class ClipboardStore: ObservableObject {
         #endif
 
         writeToPasteboard(item, plainTextOnly: plainTextOnly)
-        AdaptiveIntelligenceEngine.shared.recordContentActivity(contentHash: item.contentHash)
-        TactileFeedbackEngine.shared.perform(.pasteCommit)
-
-        if let idx = items.firstIndex(where: { $0.id == item.id }) {
-            items[idx].createdAt = Date()
-            items = sortItems(items)
-            saveHistory()
+        if shouldAutoPaste {
+            AdaptiveIntelligenceEngine.shared.recordContentActivity(contentHash: item.contentHash)
+            TactileFeedbackEngine.shared.perform(.pasteCommit)
+            if let idx = items.firstIndex(where: { $0.id == item.id }) {
+                items[idx].createdAt = Date()
+                items = sortItems(items)
+                saveHistory()
+            }
+        } else {
+            // 原地单击复制：仅写入剪贴板并给细腻触感反馈，绝不跳动卡片行序（确保紧接着的第 2 下双击精准落在同一卡片）
+            TactileFeedbackEngine.shared.performNavigationStepHaptic()
         }
 
         onBeforePaste?()
-        scheduleOTPAutoExpireIfNeeded(for: item)
+        if shouldAutoPaste {
+            scheduleOTPAutoExpireIfNeeded(for: item)
+        }
 
         refreshAccessibilityStatus()
         if shouldAutoPaste && autoPasteEnabled && isAccessibilityGranted {
             Self.schedulePasteWhenTargetReady()
-        } else {
-            let copiedMsg = plainTextOnly ? "已复制纯文本" : (item.type == .link ? "已复制链接到剪贴板" : "已复制到剪贴板")
-            showToast(copiedMsg)
+        } else if shouldAutoPaste {
+            showToast(plainTextOnly ? "已复制纯文本" : "已复制到剪贴板")
+        } else if plainTextOnly {
+            showToast("已复制纯文本")
         }
     }
 
