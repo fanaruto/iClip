@@ -153,6 +153,9 @@ struct ClipCardView: View {
         .onTapGesture(count: 2) {
             onPaste(false)
         }
+        .onDrag {
+            ClipboardStore.shared.makeDragItemProvider(for: item)
+        }
         .onTapGesture(count: 1) {
             if !minimalMode && NSEvent.modifierFlags.contains(.command) {
                 onToggleMerge()
@@ -616,6 +619,9 @@ struct ClipCardView: View {
         }
         .onTapGesture(count: 2) {
             onPaste(false)
+        }
+        .onDrag {
+            ClipboardStore.shared.makeDragItemProvider(for: item)
         }
         .onTapGesture(count: 1) {
             onSelect()

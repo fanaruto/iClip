@@ -631,6 +631,65 @@ final class ClipboardStore: ObservableObject {
 
     // MARK: - 拖拽内容直达剪贴板复制与收录
 
+    /// 记录最近一次从 iClip 面板内部向外发起拖拽的时间戳（防止内部拖出误触发自身拖入遮罩与顶部黑洞）
+    private var lastInternalDragUptime: TimeInterval = -100
+
+    var isInternalDragActive: Bool {
+        (ProcessInfo.processInfo.systemUptime - lastInternalDragUptime) < 3.0
+    }
+
+    func markInternalDragEnded() {
+        lastInternalDragUptime = -100
+    }
+
+    /// 将 iClip 面板内的条目（文本 / 链接 / 图片 / 文件）包装为原生 NSItemProvider，支持直接拖出至任意外部应用
+    func makeDragItemProvider(for item: ClipItem) -> NSItemProvider {
+        lastInternalDragUptime = ProcessInfo.processInfo.systemUptime
+
+        switch item.type {
+        case .image:
+            if let fileName = item.imageFileName {
+                let url = imagesDirectoryURL.appendingPathComponent(fileName)
+                if FileManager.default.fileExists(atPath: url.path),
+                   let provider = NSItemProvider(contentsOf: url) {
+                    provider.suggestedName = fileName
+                    return provider
+                }
+            }
+            if let nsImage = cachedThumbnail(for: item), let tiff = nsImage.tiffRepresentation {
+                let provider = NSItemProvider()
+                provider.registerDataRepresentation(forTypeIdentifier: "public.tiff", visibility: .all) { completion in
+                    completion(tiff, nil)
+                    return nil
+                }
+                return provider
+            }
+            return NSItemProvider(object: (item.primaryTitle) as NSString)
+
+        case .file:
+            if let firstPath = item.filePaths?.first {
+                let fileURL = URL(fileURLWithPath: firstPath)
+                if FileManager.default.fileExists(atPath: firstPath),
+                   let provider = NSItemProvider(contentsOf: fileURL) {
+                    provider.suggestedName = fileURL.lastPathComponent
+                    return provider
+                }
+                return NSItemProvider(object: (fileURL as NSURL))
+            }
+            return NSItemProvider(object: (item.primaryTitle) as NSString)
+
+        case .link:
+            let raw = (item.text ?? item.primaryTitle).trimmingCharacters(in: .whitespacesAndNewlines)
+            if let url = URL(string: raw) {
+                return NSItemProvider(object: url as NSURL)
+            }
+            return NSItemProvider(object: raw as NSString)
+
+        case .text:
+            return NSItemProvider(object: (item.text ?? item.primaryTitle) as NSString)
+        }
+    }
+
     /// 支持拖放到 iClip 面板或菜单栏图标的原生剪贴板类型
     nonisolated static let supportedDragTypes: [NSPasteboard.PasteboardType] = [
         .fileURL,

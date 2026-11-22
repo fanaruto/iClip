@@ -8,6 +8,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var panelController: FloatingPanelController!
     private var statusDropView: StatusItemDropTargetView?
     private var statusFeedbackWorkItem: DispatchWorkItem?
+    private var globalDragMonitor: Any?
+    private var localDragMonitor: Any?
+    private var lastObservedDragChangeCount: Int = -1
+    private var isCurrentDragSessionEligible: Bool = false
     private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -33,6 +37,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        if let monitor = globalDragMonitor {
+            NSEvent.removeMonitor(monitor)
+        }
+        if let monitor = localDragMonitor {
+            NSEvent.removeMonitor(monitor)
+        }
         HotKeyManager.shared.unregister()
         ClipboardStore.shared.stopMonitoring()
     }
@@ -223,19 +233,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #endif
     }
 
-    // MARK: - 菜单栏图标拖放复制
+    // MARK: - 菜单栏图标拖放复制与黑洞奇点吞噬
 
     private func installStatusItemDropTarget(on button: NSStatusBarButton) {
         let dropView = StatusItemDropTargetView(frame: button.bounds)
         dropView.autoresizingMask = [.width, .height]
-        dropView.onHighlightChanged = { [weak button] highlighted in
+        dropView.onHighlightChanged = { [weak self, weak button] highlighted in
+            guard let self else { return }
             button?.highlight(highlighted)
+            let anchor = self.statusItemScreenRect()
+            if highlighted {
+                BlackHolePortalController.shared.engage(anchorRect: anchor)
+            } else {
+                BlackHolePortalController.shared.disengageToApproachingOrDismiss(
+                    mouseLocation: NSEvent.mouseLocation,
+                    anchorRect: anchor
+                )
+            }
         }
         dropView.onPerformDrop = { [weak self] pasteboard in
             guard let self else { return false }
-            let ok = ClipboardStore.shared.importAndCopy(from: pasteboard, sourceLabel: "菜单栏拖拽")
+            let ok = ClipboardStore.shared.importAndCopy(from: pasteboard, sourceLabel: "黑洞吞噬")
             if ok {
+                BlackHolePortalController.shared.triggerDevour()
                 self.flashStatusItemCopiedFeedback()
+            } else {
+                BlackHolePortalController.shared.dismiss()
             }
             return ok
         }
@@ -248,6 +271,85 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         button.addSubview(dropView)
         self.statusDropView = dropView
+
+        // 绑定黑洞视界本体拖放与菜单栏图标状态联动
+        BlackHolePortalController.shared.onPerformDrop = { [weak self] pasteboard in
+            guard let self else { return false }
+            let ok = ClipboardStore.shared.importAndCopy(from: pasteboard, sourceLabel: "黑洞吞噬")
+            if ok {
+                self.flashStatusItemCopiedFeedback()
+            }
+            return ok
+        }
+        BlackHolePortalController.shared.onPhaseChanged = { [weak self] phase in
+            self?.syncStatusItemIcon(forBlackHolePhase: phase)
+        }
+
+        installGlobalDragProximityMonitor()
+    }
+
+    /// 监听全局拖拽移向屏幕顶部菜单栏 Logo：靠近引力半径时自动唤醒黑洞视界
+    private func installGlobalDragProximityMonitor() {
+        let dragPasteboard = NSPasteboard(name: .drag)
+        lastObservedDragChangeCount = dragPasteboard.changeCount
+
+        globalDragMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDragged, .leftMouseUp]) { [weak self] event in
+            Task { @MainActor [weak self] in
+                self?.handleGlobalDragEvent(event)
+            }
+        }
+        localDragMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDragged, .leftMouseUp]) { [weak self] event in
+            self?.handleGlobalDragEvent(event)
+            return event
+        }
+    }
+
+    private func handleGlobalDragEvent(_ event: NSEvent) {
+        if event.type == .leftMouseUp {
+            ClipboardStore.shared.markInternalDragEnded()
+            if BlackHolePortalController.shared.phase != .devouring {
+                BlackHolePortalController.shared.dismiss()
+            }
+            return
+        }
+
+        guard !ClipboardStore.shared.isInternalDragActive else { return }
+
+        let dragPB = NSPasteboard(name: .drag)
+        let currentCount = dragPB.changeCount
+        if currentCount != lastObservedDragChangeCount {
+            lastObservedDragChangeCount = currentCount
+            isCurrentDragSessionEligible = ClipboardStore.canAcceptDrag(from: dragPB)
+        }
+        guard isCurrentDragSessionEligible, let anchor = statusItemScreenRect() else { return }
+
+        let mouse = NSEvent.mouseLocation
+        let center = NSPoint(x: anchor.midX, y: anchor.midY)
+        let distance = hypot(mouse.x - center.x, mouse.y - center.y)
+
+        if distance < 125 {
+            BlackHolePortalController.shared.showApproaching(anchorRect: anchor)
+        } else if distance > 165, BlackHolePortalController.shared.phase == .approaching {
+            BlackHolePortalController.shared.dismiss()
+        }
+    }
+
+    private func syncStatusItemIcon(forBlackHolePhase phase: BlackHolePortalController.Phase) {
+        guard let button = statusItem.button, statusFeedbackWorkItem == nil else { return }
+        let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
+        let symbol: String
+        switch phase {
+        case .approaching, .engaged:
+            symbol = "hurricane"
+        case .devouring:
+            symbol = "checkmark.circle.fill"
+        case .hidden:
+            symbol = AppRoleEdition.installed == .developer ? "doc.on.clipboard" : "list.clipboard"
+        }
+        if let icon = NSImage(systemSymbolName: symbol, accessibilityDescription: "iClip") {
+            button.image = icon.withSymbolConfiguration(config)
+            button.image?.isTemplate = true
+        }
     }
 
     private func flashStatusItemCopiedFeedback() {
@@ -261,8 +363,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.image?.isTemplate = true
         }
 
-        let work = DispatchWorkItem { [weak button] in
-            Task { @MainActor [weak button] in
+        let work = DispatchWorkItem { [weak self, weak button] in
+            Task { @MainActor [weak self, weak button] in
+                self?.statusFeedbackWorkItem = nil
                 guard let button else { return }
                 if let icon = NSImage(systemSymbolName: normalSymbol, accessibilityDescription: "iClip") {
                     button.image = icon.withSymbolConfiguration(config)
@@ -275,7 +378,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-/// 覆盖在菜单栏图标上的轻量拖放接收视图：支持直接拖拽文字/图片/链接/文件到菜单栏图标复制，同时无损转发左右键点击
+/// 覆盖在菜单栏图标上的轻量拖放接收视图：支持直接拖拽文字/图片/链接/文件到菜单栏图标触发黑洞吞噬复制，同时无损转发左右键点击
 private final class StatusItemDropTargetView: NSView {
     var onHighlightChanged: ((Bool) -> Void)?
     var onPerformDrop: ((NSPasteboard) -> Bool)?
@@ -305,13 +408,17 @@ private final class StatusItemDropTargetView: NSView {
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        guard ClipboardStore.canAcceptDrag(from: sender.draggingPasteboard) else { return [] }
+        guard sender.draggingSource == nil,
+              !ClipboardStore.shared.isInternalDragActive,
+              ClipboardStore.canAcceptDrag(from: sender.draggingPasteboard) else { return [] }
         onHighlightChanged?(true)
         return .copy
     }
 
     override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
-        guard ClipboardStore.canAcceptDrag(from: sender.draggingPasteboard) else { return [] }
+        guard sender.draggingSource == nil,
+              !ClipboardStore.shared.isInternalDragActive,
+              ClipboardStore.canAcceptDrag(from: sender.draggingPasteboard) else { return [] }
         return .copy
     }
 
@@ -324,6 +431,8 @@ private final class StatusItemDropTargetView: NSView {
     }
 
     override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        sender.draggingSource == nil &&
+        !ClipboardStore.shared.isInternalDragActive &&
         ClipboardStore.canAcceptDrag(from: sender.draggingPasteboard)
     }
 

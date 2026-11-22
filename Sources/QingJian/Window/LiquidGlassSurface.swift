@@ -267,13 +267,17 @@ private final class LiquidGlassContentContainerView: NSView {
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        guard ClipboardStore.canAcceptDrag(from: sender.draggingPasteboard) else { return [] }
+        guard sender.draggingSource == nil,
+              !ClipboardStore.shared.isInternalDragActive,
+              ClipboardStore.canAcceptDrag(from: sender.draggingPasteboard) else { return [] }
         onDragTargetedChanged?(true)
         return .copy
     }
 
     override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
-        guard ClipboardStore.canAcceptDrag(from: sender.draggingPasteboard) else { return [] }
+        guard sender.draggingSource == nil,
+              !ClipboardStore.shared.isInternalDragActive,
+              ClipboardStore.canAcceptDrag(from: sender.draggingPasteboard) else { return [] }
         return .copy
     }
 
@@ -286,6 +290,8 @@ private final class LiquidGlassContentContainerView: NSView {
     }
 
     override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        sender.draggingSource == nil &&
+        !ClipboardStore.shared.isInternalDragActive &&
         ClipboardStore.canAcceptDrag(from: sender.draggingPasteboard)
     }
 

@@ -223,6 +223,9 @@ struct ClipImageGridTile: View {
         .onTapGesture(count: 2) {
             onPaste()
         }
+        .onDrag {
+            ClipboardStore.shared.makeDragItemProvider(for: item)
+        }
         .onTapGesture(count: 1) {
             onSelect()
         }
@@ -623,6 +626,9 @@ struct ClipImageGridTile: View {
         }
         .onTapGesture(count: 2) {
             onPaste()
+        }
+        .onDrag {
+            ClipboardStore.shared.makeDragItemProvider(for: item)
         }
         .onTapGesture(count: 1) {
             onSelect()
