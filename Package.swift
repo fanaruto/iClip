@@ -17,8 +17,14 @@ let package = Package(
                 .linkedFramework("Carbon"),
                 .linkedFramework("AppKit"),
                 .linkedFramework("SwiftUI"),
-                .linkedFramework("ServiceManagement")
+                .linkedFramework("ServiceManagement"),
+                .linkedFramework("Vision")
             ]
+        ),
+        .testTarget(
+            name: "QingJianTests",
+            dependencies: ["QingJian"],
+            path: "Tests/QingJianTests"
         )
     ]
 )

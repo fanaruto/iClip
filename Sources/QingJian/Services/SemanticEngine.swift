@@ -10,6 +10,7 @@ enum SemanticKind: String, Equatable {
     case curlCommand
     case colorCode
     case json
+    case financeAmount
     case timestamp
     case multilineList
     case base64
@@ -23,6 +24,7 @@ enum SemanticKind: String, Equatable {
         case .curlCommand: return "cURL 请求"
         case .colorCode: return "颜色色值"
         case .json: return "JSON"
+        case .financeAmount: return "金额账单"
         case .timestamp: return "时间戳"
         case .multilineList: return "多行数据列"
         case .base64: return "Base64"
@@ -38,6 +40,7 @@ enum SemanticKind: String, Equatable {
         case .curlCommand: return "terminal.fill"
         case .colorCode: return "paintpalette.fill"
         case .json: return "curlybraces"
+        case .financeAmount: return "yensign.circle.fill"
         case .timestamp: return "clock.badge.checkmark"
         case .multilineList: return "list.bullet.rectangle"
         case .base64: return "lock.open.rotation"
@@ -53,6 +56,7 @@ enum SemanticKind: String, Equatable {
         case .curlCommand: return .systemGreen
         case .colorCode: return .systemPink
         case .json: return .systemPurple
+        case .financeAmount: return .systemBrown
         case .timestamp: return .systemCyan
         case .multilineList: return .systemMint
         case .base64: return .systemIndigo
@@ -60,10 +64,11 @@ enum SemanticKind: String, Equatable {
         }
     }
 
-    /// 支持在搜索框用 @tpl / @json / @secret / @color / @url / @curl / @list / @time / @b64 / @id 快速过滤
+    /// 支持在搜索框用 @tpl / @rmb / @sum / @json / @secret / @color / @url / @curl / @list / @time / @b64 / @id 快速过滤
     static func fromSearchToken(_ token: String) -> SemanticKind? {
         switch token.lowercased() {
         case "@tpl", "@snippet", "@模板": return .dynamicTemplate
+        case "@rmb", "@money", "@sum", "@金额", "@大写": return .financeAmount
         case "@secret", "@key", "@env", "@脱敏", "@密钥": return .sensitiveSecret
         case "@url", "@clean", "@净链": return .dirtyURL
         case "@curl", "@http": return .curlCommand
@@ -463,7 +468,25 @@ enum SemanticEngine {
             }
         }
 
-        // 6. Base64 可读文本解码检测
+        // 6. 财务金额大写与多行明细账单自动求和（仅在未命中 Unix 时间戳时执行）
+        if primaryKind == nil && raw.utf16.count <= 16_384 {
+            let finActions = FinanceNumberEngine.analyze(raw)
+            if !finActions.isEmpty {
+                primaryKind = .financeAmount
+                for fa in finActions {
+                    actions.append(TransformAction(
+                        id: fa.id,
+                        title: fa.title,
+                        symbolName: fa.symbolName,
+                        isSecurityAction: false,
+                        resultText: fa.resultText,
+                        toastText: fa.toastText
+                    ))
+                }
+            }
+        }
+
+        // 7. Base64 可读文本解码检测
         if primaryKind == nil,
            trimmed.count >= 12, trimmed.count <= 4096,
            trimmed.count % 4 == 0,

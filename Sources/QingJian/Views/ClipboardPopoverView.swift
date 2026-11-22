@@ -148,7 +148,7 @@ struct ClipboardPopoverView: View {
                             removal: .move(edge: .trailing).combined(with: .opacity)
                         ))
                 } else {
-                    if !store.hasConfirmedRoleEdition || store.targetRoleEdition != AppRoleEdition.installed {
+                    if !store.minimalModeEnabled && (!store.hasConfirmedRoleEdition || store.targetRoleEdition != AppRoleEdition.installed) {
                         RoleOnboardingBanner(
                             store: store,
                             updater: updater,
@@ -163,14 +163,14 @@ struct ClipboardPopoverView: View {
                         .padding(.horizontal, 14)
                         .padding(.bottom, 8)
 
-                    if nav.selectedTab == .pinned {
+                    if !store.minimalModeEnabled && nav.selectedTab == .pinned {
                         pinCategoryBar
                             .padding(.horizontal, 14)
                             .padding(.bottom, 8)
                             .transition(.opacity.combined(with: .move(edge: .top)))
                     }
 
-                    if store.isQueueModeActive || !store.pasteQueueIDs.isEmpty {
+                    if !store.minimalModeEnabled && (store.isQueueModeActive || !store.pasteQueueIDs.isEmpty) {
                         pasteQueueBanner
                             .padding(.horizontal, 14)
                             .padding(.bottom, 8)
@@ -197,7 +197,7 @@ struct ClipboardPopoverView: View {
                             .opacity(0.28)
                     }
 
-                    if !store.selectedMergeIDs.isEmpty {
+                    if !store.minimalModeEnabled && !store.selectedMergeIDs.isEmpty {
                         mergeActionBar
                             .padding(.horizontal, 14)
                             .padding(.top, 8)
@@ -348,6 +348,7 @@ struct ClipboardPopoverView: View {
                 }
 
                 // 顺序粘贴队列采集开关按钮
+                if !store.minimalModeEnabled {
                 Button {
                     withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
                         store.isQueueModeActive.toggle()
@@ -378,6 +379,26 @@ struct ClipboardPopoverView: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel(store.isQueueModeActive ? "关闭顺序粘贴队列采集" : "开启顺序粘贴队列采集")
                 .help(store.isQueueModeActive ? "关闭顺序队列采集" : "开启顺序粘贴队列（解决多字段来回切窗填表）")
+                }
+
+                // 极简纯净模式（基础功能版）一键切换圆钮（⌘E）
+                Button {
+                    withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
+                        store.toggleMinimalMode()
+                    }
+                } label: {
+                    Image(systemName: store.minimalModeEnabled ? "leaf.fill" : "leaf")
+                        .font(.system(size: 13.5, weight: .medium))
+                        .foregroundStyle(store.minimalModeEnabled ? Color.white : Color.secondary)
+                        .frame(width: 32, height: 32)
+                        .background(
+                            Circle()
+                                .fill(store.minimalModeEnabled ? Color.green : Color.primary.opacity(0.06))
+                        )
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("极简纯净模式开关")
+                .help(store.minimalModeEnabled ? "极简基础版已开启（点击或按 ⌘E 恢复进阶功能）" : "开启极简纯净模式（基础功能版 · ⌘E）")
 
                 // 暂停/恢复监听按钮
                 Button {
@@ -626,6 +647,7 @@ struct ClipboardPopoverView: View {
                                         item: item,
                                         index: index,
                                         isSelected: index == nav.selectedIndex,
+                                        minimalMode: store.minimalModeEnabled,
                                         queueRank: store.queuePosition(for: item),
                                         mergeRank: store.mergeSelectionRank(for: item),
                                         surfaceStyle: store.surfaceStyle,
@@ -661,6 +683,14 @@ struct ClipboardPopoverView: View {
                                         },
                                         onExtractOCR: { autoPaste in
                                             store.pasteExtractedOCRText(
+                                                for: item,
+                                                shouldAutoPaste: autoPaste,
+                                                onBeforePaste: autoPaste ? onDismiss : nil
+                                            )
+                                        },
+                                        onApplyFinanceAction: { action, autoPaste in
+                                            store.applyFinanceAction(
+                                                action,
                                                 for: item,
                                                 shouldAutoPaste: autoPaste,
                                                 onBeforePaste: autoPaste ? onDismiss : nil
@@ -879,8 +909,12 @@ struct ClipboardPopoverView: View {
 
             HStack(spacing: 8) {
                 keyHint("↵", "键入")
-                keyHint("⇥", "出队")
-                keyHint("⇧↵", "识字")
+                if !store.minimalModeEnabled {
+                    keyHint("⇥", "出队")
+                    keyHint("⇧↵", "识字/大写")
+                } else {
+                    keyHint("↑↓", "选择")
+                }
                 keyHint("ESC", "关闭")
             }
 
@@ -1509,9 +1543,11 @@ struct ClipboardPopoverView: View {
     func pasteSecondaryActionForSelected() {
         guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return }
         let item = filteredItems[nav.selectedIndex]
-        if item.type == .image {
+        if !store.minimalModeEnabled && item.type == .image {
             dismissImagePreview(clearItem: true)
             store.pasteExtractedOCRText(for: item, shouldAutoPaste: true, onBeforePaste: onDismiss)
+        } else if !store.minimalModeEnabled, let finAction = store.financeActions(for: item).first {
+            store.applyFinanceAction(finAction, for: item, shouldAutoPaste: true, onBeforePaste: onDismiss)
         } else {
             store.copyAndOptionallyPaste(item, plainTextOnly: true, shouldAutoPaste: true, onBeforePaste: onDismiss)
         }
@@ -1769,7 +1805,7 @@ struct ClipboardPopoverView: View {
                             removal: .move(edge: .trailing).combined(with: .opacity)
                         ))
                 } else {
-                    if !store.hasConfirmedRoleEdition || store.targetRoleEdition != AppRoleEdition.installed {
+                    if !store.minimalModeEnabled && (!store.hasConfirmedRoleEdition || store.targetRoleEdition != AppRoleEdition.installed) {
                         RoleOnboardingBanner(
                             store: store,
                             updater: updater,
@@ -1784,14 +1820,14 @@ struct ClipboardPopoverView: View {
                         .padding(.horizontal, 14)
                         .padding(.bottom, nav.searchText.trimmingCharacters(in: .whitespaces).hasPrefix("@") ? 6 : 10)
 
-                    if nav.searchText.trimmingCharacters(in: .whitespaces).hasPrefix("@") {
+                    if !store.minimalModeEnabled && nav.searchText.trimmingCharacters(in: .whitespaces).hasPrefix("@") {
                         semanticTokenHintBar
                             .padding(.horizontal, 14)
                             .padding(.bottom, 8)
                             .transition(.opacity.combined(with: .move(edge: .top)))
                     }
 
-                    if nav.selectedTab == .pinned {
+                    if !store.minimalModeEnabled && nav.selectedTab == .pinned {
                         pinnedTemplateToolbar
                             .padding(.horizontal, 14)
                             .padding(.bottom, 8)
@@ -1946,7 +1982,7 @@ struct ClipboardPopoverView: View {
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(.secondary)
 
-                    TextField("搜索历史或输入 @json @secret @color...", text: $nav.searchText)
+                    TextField(store.minimalModeEnabled ? "搜索剪贴历史..." : "搜索历史或输入 @rmb @json @secret...", text: $nav.searchText)
                         .textFieldStyle(.plain)
                         .font(.system(size: 13.5))
                         .focused($isSearchFocused)
@@ -1974,6 +2010,25 @@ struct ClipboardPopoverView: View {
                             .strokeBorder(Color.primary.opacity(0.06), lineWidth: 0.75)
                     }
                 }
+
+                // 极简纯净模式（基础功能版）一键切换圆钮（⌘E）
+                Button {
+                    withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
+                        store.toggleMinimalMode()
+                    }
+                } label: {
+                    Image(systemName: store.minimalModeEnabled ? "leaf.fill" : "leaf")
+                        .font(.system(size: 13.5, weight: .medium))
+                        .foregroundStyle(store.minimalModeEnabled ? Color.white : Color.secondary)
+                        .frame(width: 32, height: 32)
+                        .background(
+                            Circle()
+                                .fill(store.minimalModeEnabled ? Color.green : Color.primary.opacity(0.06))
+                        )
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("极简纯净模式开关")
+                .help(store.minimalModeEnabled ? "极简基础版已开启（点击或按 ⌘E 恢复进阶功能）" : "开启极简纯净模式（基础功能版 · ⌘E）")
 
                 // 暂停/恢复监听按钮
                 Button {
@@ -2055,6 +2110,7 @@ struct ClipboardPopoverView: View {
 
     private var semanticTokenHintBar: some View {
         let tokens: [(token: String, label: String)] = [
+            ("@rmb", "金额大写"),
             ("@tpl", "模板"),
             ("@secret", "凭据"),
             ("@json", "JSON"),
@@ -2349,7 +2405,9 @@ struct ClipboardPopoverView: View {
 
             HStack(spacing: 8) {
                 keyHint("↵", "键入")
-                keyHint("⇧↵", "智变")
+                if !store.minimalModeEnabled {
+                    keyHint("⇧↵", "智变")
+                }
                 keyHint("↑↓", "选择")
                 keyHint("ESC", "关闭")
             }

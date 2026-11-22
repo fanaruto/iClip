@@ -80,7 +80,7 @@ struct ClipImageGridTile: View {
                         .font(.system(size: 9.5, weight: .medium, design: .rounded))
                 }
                 Spacer(minLength: 0)
-                if let ocr = item.ocrText, !ocr.isEmpty {
+                if !ClipboardStore.shared.minimalModeEnabled, let ocr = item.ocrText, !ocr.isEmpty {
                     Image(systemName: "text.viewfinder")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(Color.white.opacity(0.95))
@@ -93,7 +93,7 @@ struct ClipImageGridTile: View {
         }
         .frame(height: 98)
         .overlay(alignment: .topLeading) {
-            if let rank = queueRank {
+            if !ClipboardStore.shared.minimalModeEnabled, let rank = queueRank {
                 Text("#\(rank)")
                     .font(.system(size: 9.5, weight: .bold, design: .rounded))
                     .foregroundStyle(.white)
@@ -119,17 +119,19 @@ struct ClipImageGridTile: View {
         .overlay(alignment: .topTrailing) {
             if isHovered {
                 HStack(spacing: 4) {
-                    Button {
-                        onExtractOCR(true)
-                    } label: {
-                        Image(systemName: "text.viewfinder")
-                            .font(.system(size: 9.5, weight: .semibold))
-                            .foregroundStyle(Color.white)
-                            .frame(width: 21, height: 21)
-                            .background(Circle().fill(Color.accentColor.opacity(0.88)))
+                    if !ClipboardStore.shared.minimalModeEnabled {
+                        Button {
+                            onExtractOCR(true)
+                        } label: {
+                            Image(systemName: "text.viewfinder")
+                                .font(.system(size: 9.5, weight: .semibold))
+                                .foregroundStyle(Color.white)
+                                .frame(width: 21, height: 21)
+                                .background(Circle().fill(Color.accentColor.opacity(0.88)))
+                        }
+                        .buttonStyle(.plain)
+                        .help("提取图中文字并键入（⇧↵）")
                     }
-                    .buttonStyle(.plain)
-                    .help("提取图中文字并键入（⇧↵）")
 
                     Button(action: onTogglePin) {
                         Image(systemName: item.isPinned ? "pin.slash.fill" : "pin.fill")
@@ -281,7 +283,8 @@ struct ImageHoverPreviewLayer: View {
                             .stroke(Color.black.opacity(0.10), lineWidth: 0.5)
                     )
                     .overlay(alignment: .bottomTrailing) {
-                        if let ocr = item.ocrText?.trimmingCharacters(in: .whitespacesAndNewlines), !ocr.isEmpty {
+                        if !ClipboardStore.shared.minimalModeEnabled,
+                           let ocr = item.ocrText?.trimmingCharacters(in: .whitespacesAndNewlines), !ocr.isEmpty {
                             HStack(spacing: 4.5) {
                                 Image(systemName: "text.viewfinder")
                                     .font(.system(size: 10.5, weight: .semibold))

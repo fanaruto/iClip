@@ -61,11 +61,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
 
         #if ICLIP_EDITION_FLOW
-        ClipboardStore.shared.$pasteQueueIDs
+        Publishers.CombineLatest(ClipboardStore.shared.$pasteQueueIDs, ClipboardStore.shared.$minimalModeEnabled)
             .receive(on: RunLoop.main)
-            .sink { [weak self] queueIDs in
+            .sink { [weak self] queueIDs, minimal in
                 guard let btn = self?.statusItem.button else { return }
-                btn.title = queueIDs.isEmpty ? "" : " \(queueIDs.count)"
+                btn.title = (minimal || queueIDs.isEmpty) ? "" : " \(queueIDs.count)"
             }
             .store(in: &cancellables)
 
@@ -142,6 +142,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(switchRoleItem)
 
         let store = ClipboardStore.shared
+        let minimalItem = NSMenuItem(
+            title: "极简纯净模式（基础功能版）",
+            action: #selector(menuToggleMinimalMode),
+            keyEquivalent: ""
+        )
+        minimalItem.state = store.minimalModeEnabled ? .on : .off
+        minimalItem.target = self
+        menu.addItem(minimalItem)
+
         let pauseTitle = store.isPaused ? "恢复剪贴板记录" : "暂停剪贴板记录"
         let pauseItem = NSMenuItem(title: pauseTitle, action: #selector(menuTogglePause), keyEquivalent: "")
         pauseItem.target = self
@@ -174,6 +183,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         UpdateManager.shared.checkForUpdates(targetEdition: ClipboardStore.shared.targetRoleEdition, silent: false)
     }
 
+    @objc private func menuToggleMinimalMode() {
+        ClipboardStore.shared.toggleMinimalMode()
+    }
+
     @objc private func menuTogglePause() {
         ClipboardStore.shared.isPaused.toggle()
     }
@@ -197,7 +210,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #if ICLIP_EDITION_FLOW
         HotKeyManager.shared.registerQueuePopHotKey(shortcut: ClipboardStore.shared.queuePopShortcut) { [weak self] in
             Task { @MainActor [weak self] in
-                guard let self else { return }
+                guard let self, !ClipboardStore.shared.minimalModeEnabled else { return }
                 if self.panelController.isVisible {
                     self.panelController.hide(restoreFocus: true)
                 }

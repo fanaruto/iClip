@@ -78,6 +78,15 @@ enum MergeJoinStyle: String, CaseIterable, Identifiable {
 }
 #endif
 
+#if ICLIP_EDITION_FLOW
+private final class FinanceActionsBox {
+    let actions: [FinanceQuickAction]
+    init(_ actions: [FinanceQuickAction]) {
+        self.actions = actions
+    }
+}
+#endif
+
 /// 剪贴板核心管理与持久化服务（支持极客开发版 / 心流办公版编译期隔离与跨版本无损存储）
 @MainActor
 final class ClipboardStore: ObservableObject {
@@ -92,6 +101,10 @@ final class ClipboardStore: ObservableObject {
     /// 是否已完成首次角色版本确认引导
     @Published var hasConfirmedRoleEdition: Bool {
         didSet { UserDefaults.standard.set(hasConfirmedRoleEdition, forKey: "hasConfirmedRoleEdition") }
+    }
+    /// 极简纯净模式（基础功能版）：开启后隐藏全部行业进阶栏与徽标，并静默停止后台 OCR/语义扫描
+    @Published var minimalModeEnabled: Bool {
+        didSet { UserDefaults.standard.set(minimalModeEnabled, forKey: "minimalModeEnabled") }
     }
 
     @Published var surfaceStyle: PanelSurfaceStyle {
@@ -172,6 +185,8 @@ final class ClipboardStore: ObservableObject {
     private let fileIconCache = NSCache<NSString, NSImage>()
     #if !ICLIP_EDITION_FLOW
     private let semanticCache = NSCache<NSString, SemanticSnapshotBox>()
+    #else
+    private let financeCache = NSCache<NSString, FinanceActionsBox>()
     #endif
     private var inFlightThumbnails = Set<String>()
     private var inFlightPreviews = Set<String>()
@@ -209,6 +224,7 @@ final class ClipboardStore: ObservableObject {
             self.targetRoleEdition = installed
         }
         self.hasConfirmedRoleEdition = UserDefaults.standard.bool(forKey: "hasConfirmedRoleEdition")
+        self.minimalModeEnabled = UserDefaults.standard.bool(forKey: "minimalModeEnabled")
 
         self.autoPasteEnabled = UserDefaults.standard.object(forKey: "autoPasteEnabled") as? Bool ?? true
         let savedStyle = UserDefaults.standard.string(forKey: "panelSurfaceStyle") ?? PanelSurfaceStyle.liquidGlass.rawValue
@@ -245,6 +261,7 @@ final class ClipboardStore: ObservableObject {
             self.queuePopShortcut = .defaultQueueShortcut
         }
         self.queueAutoTabEnabled = UserDefaults.standard.object(forKey: "queueAutoTabEnabled") as? Bool ?? false
+        self.financeCache.countLimit = 256
         #endif
 
         let savedMax = UserDefaults.standard.integer(forKey: "maxHistoryCount")
@@ -281,8 +298,15 @@ final class ClipboardStore: ObservableObject {
         loadHistory()
         startMonitoring()
         #if ICLIP_EDITION_FLOW
-        scheduleLegacyOCRBackfill()
+        if !minimalModeEnabled {
+            scheduleLegacyOCRBackfill()
+        }
         #endif
+    }
+
+    func toggleMinimalMode() {
+        minimalModeEnabled.toggle()
+        showToast(minimalModeEnabled ? "已开启极简纯净模式（基础功能版）" : "已恢复「\(AppRoleEdition.installed.title)」进阶功能")
     }
 
     // MARK: - 角色选择与差异化 OTA 通道联动
@@ -387,8 +411,10 @@ final class ClipboardStore: ObservableObject {
         prewarmThumbnails(for: visibleItems, limit: 18)
         prewarmPreviewImages(for: visibleItems, limit: 6)
         #if !ICLIP_EDITION_FLOW
-        for item in visibleItems.prefix(24) where item.type == .text || item.type == .link {
-            _ = semanticSnapshot(for: item)
+        if !minimalModeEnabled {
+            for item in visibleItems.prefix(24) where item.type == .text || item.type == .link {
+                _ = semanticSnapshot(for: item)
+            }
         }
         #endif
     }
@@ -511,7 +537,9 @@ final class ClipboardStore: ObservableObject {
                         )
                         self.insertOrPromote(item)
                         #if ICLIP_EDITION_FLOW
-                        self.scheduleBackgroundOCR(forItemID: item.id, fileURL: fileURL)
+                        if !self.minimalModeEnabled {
+                            self.scheduleBackgroundOCR(forItemID: item.id, fileURL: fileURL)
+                        }
                         #endif
                     }
                 }
@@ -527,7 +555,7 @@ final class ClipboardStore: ObservableObject {
             var text = rawText
             let isLink = isValidWebURL(trimmed)
             #if !ICLIP_EDITION_FLOW
-            if isLink && autoCleanTrackingURL, let cleaned = SemanticEngine.cleanTrackingURL(trimmed) {
+            if !minimalModeEnabled && isLink && autoCleanTrackingURL, let cleaned = SemanticEngine.cleanTrackingURL(trimmed) {
                 text = cleaned
                 pasteboard.clearContents()
                 pasteboard.setString(cleaned, forType: .string)
@@ -563,7 +591,7 @@ final class ClipboardStore: ObservableObject {
         }
 
         #if ICLIP_EDITION_FLOW
-        if isQueueModeActive && !pasteQueueIDs.contains(finalID) {
+        if !minimalModeEnabled && isQueueModeActive && !pasteQueueIDs.contains(finalID) {
             pasteQueueIDs.append(finalID)
         }
         #else
@@ -599,26 +627,28 @@ final class ClipboardStore: ObservableObject {
         onBeforePaste: (() -> Void)? = nil
     ) {
         #if !ICLIP_EDITION_FLOW
-        if !forceRawSecret,
-           let rawTemplate = item.text,
-           SnippetTemplateEngine.containsPlaceholders(rawTemplate) {
-            let context = latestNonTemplateText(excluding: item.id)
-            let rendered = SnippetTemplateEngine.render(template: rawTemplate, latestContextText: context)
-            pasteCustomString(
-                rendered,
-                sourceItem: item,
-                toast: "已展开动态模板并键入",
-                shouldAutoPaste: shouldAutoPaste,
-                onBeforePaste: onBeforePaste
-            )
-            return
-        }
-
-        if autoRedactOnPaste && !forceRawSecret {
-            let snap = semanticSnapshot(for: item)
-            if let secAction = snap.actions.first(where: { $0.isSecurityAction }) {
-                applyTransformAction(secAction, for: item, shouldAutoPaste: shouldAutoPaste, onBeforePaste: onBeforePaste)
+        if !minimalModeEnabled {
+            if !forceRawSecret,
+               let rawTemplate = item.text,
+               SnippetTemplateEngine.containsPlaceholders(rawTemplate) {
+                let context = latestNonTemplateText(excluding: item.id)
+                let rendered = SnippetTemplateEngine.render(template: rawTemplate, latestContextText: context)
+                pasteCustomString(
+                    rendered,
+                    sourceItem: item,
+                    toast: "已展开动态模板并键入",
+                    shouldAutoPaste: shouldAutoPaste,
+                    onBeforePaste: onBeforePaste
+                )
                 return
+            }
+
+            if autoRedactOnPaste && !forceRawSecret {
+                let snap = semanticSnapshot(for: item)
+                if let secAction = snap.actions.first(where: { $0.isSecurityAction }) {
+                    applyTransformAction(secAction, for: item, shouldAutoPaste: shouldAutoPaste, onBeforePaste: onBeforePaste)
+                    return
+                }
             }
         }
         #else
@@ -722,7 +752,7 @@ final class ClipboardStore: ObservableObject {
 
     #if !ICLIP_EDITION_FLOW
     func semanticSnapshot(for item: ClipItem) -> SemanticSnapshot {
-        guard item.type == .text || item.type == .link else { return .empty }
+        guard !minimalModeEnabled, (item.type == .text || item.type == .link) else { return .empty }
         let key = item.contentHash as NSString
         if let cached = semanticCache.object(forKey: key) {
             return cached.snapshot
@@ -806,6 +836,44 @@ final class ClipboardStore: ObservableObject {
     // MARK: - 心流办公版专属能力（顺序队列 + 离线实况识图 + 多选合并 + 场景分组）
 
     #if ICLIP_EDITION_FLOW
+    func financeActions(for item: ClipItem) -> [FinanceQuickAction] {
+        guard !minimalModeEnabled, item.type == .text, let raw = item.text else { return [] }
+        let key = item.contentHash as NSString
+        if let cached = financeCache.object(forKey: key) {
+            return cached.actions
+        }
+        let analyzed = FinanceNumberEngine.analyze(raw)
+        financeCache.setObject(FinanceActionsBox(analyzed), forKey: key)
+        return analyzed
+    }
+
+    func applyFinanceAction(
+        _ action: FinanceQuickAction,
+        for item: ClipItem,
+        shouldAutoPaste: Bool = true,
+        onBeforePaste: (() -> Void)? = nil
+    ) {
+        pasteboard.clearContents()
+        pasteboard.setString(action.resultText, forType: .string)
+        ignoreNextChangeCount = pasteboard.changeCount
+        lastChangeCount = pasteboard.changeCount
+
+        if let idx = items.firstIndex(where: { $0.id == item.id }) {
+            items[idx].createdAt = Date()
+            items = sortItems(items)
+            saveHistory()
+        }
+
+        onBeforePaste?()
+        refreshAccessibilityStatus()
+        if shouldAutoPaste && autoPasteEnabled && isAccessibilityGranted {
+            Self.schedulePasteWhenTargetReady()
+            showToast(action.toastText)
+        } else {
+            showToast("\(action.toastText)（已复制）")
+        }
+    }
+
     func setPinCategory(_ category: PinCategory?, for item: ClipItem) {
         guard let idx = items.firstIndex(where: { $0.id == item.id }) else { return }
         items[idx].isPinned = true

@@ -7,6 +7,7 @@ struct ClipCardView: View {
     let item: ClipItem
     let index: Int
     let isSelected: Bool
+    let minimalMode: Bool
     let queueRank: Int?
     let mergeRank: Int?
     let surfaceStyle: PanelSurfaceStyle
@@ -17,6 +18,7 @@ struct ClipCardView: View {
     let onToggleQueue: () -> Void
     let onToggleMerge: () -> Void
     let onExtractOCR: (Bool) -> Void
+    let onApplyFinanceAction: (FinanceQuickAction, Bool) -> Void
     let onTogglePin: () -> Void
     let onSelectPinCategory: (PinCategory?) -> Void
     let onEditAlias: () -> Void
@@ -25,67 +27,107 @@ struct ClipCardView: View {
     @State private var isHovered: Bool = false
     @State private var asyncThumbnail: NSImage? = nil
 
+    private var financeActions: [FinanceQuickAction] {
+        minimalMode ? [] : ClipboardStore.shared.financeActions(for: item)
+    }
+
     var body: some View {
-        HStack(alignment: .center, spacing: 12) {
-            leadingThumbnail
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .center, spacing: 12) {
+                leadingThumbnail
 
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(alignment: .top, spacing: 6) {
-                    Text(item.primaryTitle)
-                        .font(.system(size: 13.5, weight: .medium))
-                        .foregroundStyle(isSelected ? Color.white : Color.primary)
-                        .lineLimit(2)
-                        .multilineTextAlignment(.leading)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(alignment: .top, spacing: 6) {
+                        Text(minimalMode ? item.rawContentPreview : item.primaryTitle)
+                            .font(.system(size: 13.5, weight: .medium))
+                            .foregroundStyle(isSelected ? Color.white : Color.primary)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.leading)
+                            .frame(maxWidth: .infinity, alignment: .leading)
 
-                    if isHovered {
-                        hoverActions
-                            .transition(.opacity.combined(with: .scale(scale: 0.92)))
-                    } else if let mRank = mergeRank {
-                        mergeBadge(rank: mRank)
-                    } else if let rank = queueRank {
-                        queueBadge(rank: rank)
-                    } else if index < 9 {
-                        shortcutBadge
-                    }
-                }
-
-                HStack(spacing: 6) {
-                    if item.isPinned {
-                        Image(systemName: "pin.fill")
-                            .font(.system(size: 9.5, weight: .semibold))
-                            .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.orange)
-                    }
-
-                    if let cat = item.pinCategory {
-                        HStack(spacing: 3.5) {
-                            Circle()
-                                .fill(isSelected ? Color.white : cat.dotColor)
-                                .frame(width: 6, height: 6)
-                            Text(cat.title)
-                                .font(.system(size: 10, weight: .semibold))
-                                .foregroundStyle(isSelected ? Color.white.opacity(0.95) : cat.dotColor)
+                        if isHovered {
+                            hoverActions
+                                .transition(.opacity.combined(with: .scale(scale: 0.92)))
+                        } else if !minimalMode, let mRank = mergeRank {
+                            mergeBadge(rank: mRank)
+                        } else if !minimalMode, let rank = queueRank {
+                            queueBadge(rank: rank)
+                        } else if index < 9 {
+                            shortcutBadge
                         }
-                        Text("·")
                     }
 
-                    Text(item.subtitleInfo)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+                    HStack(spacing: 6) {
+                        if item.isPinned {
+                            Image(systemName: "pin.fill")
+                                .font(.system(size: 9.5, weight: .semibold))
+                                .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.orange)
+                        }
 
-                    if let appName = item.sourceAppName, !appName.isEmpty {
-                        Text("·")
-                        Text(appName)
+                        if !minimalMode, let cat = item.pinCategory {
+                            HStack(spacing: 3.5) {
+                                Circle()
+                                    .fill(isSelected ? Color.white : cat.dotColor)
+                                    .frame(width: 6, height: 6)
+                                Text(cat.title)
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundStyle(isSelected ? Color.white.opacity(0.95) : cat.dotColor)
+                            }
+                            Text("·")
+                        }
+
+                        Text(item.subtitleInfo)
                             .lineLimit(1)
+                            .truncationMode(.middle)
+
+                        if let appName = item.sourceAppName, !appName.isEmpty {
+                            Text("·")
+                            Text(appName)
+                                .lineLimit(1)
+                        }
+
+                        Spacer(minLength: 4)
+
+                        Text(item.relativeTimeText)
+                            .monospacedDigit()
                     }
-
-                    Spacer(minLength: 4)
-
-                    Text(item.relativeTimeText)
-                        .monospacedDigit()
+                    .font(.system(size: 11, weight: .regular))
+                    .foregroundStyle(isSelected ? Color.white.opacity(0.82) : Color.secondary)
                 }
-                .font(.system(size: 11, weight: .regular))
-                .foregroundStyle(isSelected ? Color.white.opacity(0.82) : Color.secondary)
+            }
+
+            if !minimalMode && (isSelected || isHovered) && !financeActions.isEmpty {
+                HStack(spacing: 6) {
+                    ForEach(Array(financeActions.enumerated()), id: \.element.id) { idx, action in
+                        Button {
+                            onApplyFinanceAction(action, true)
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: action.symbolName)
+                                    .font(.system(size: 10, weight: .semibold))
+                                Text(action.title)
+                                    .font(.system(size: 11, weight: .medium))
+                                    .lineLimit(1)
+                                if idx == 0 {
+                                    Text("⇧↵")
+                                        .font(.system(size: 9.5, weight: .semibold))
+                                        .opacity(0.75)
+                                }
+                            }
+                            .foregroundStyle(isSelected ? Color.white : Color.primary.opacity(0.88))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3.5)
+                            .background(
+                                Capsule()
+                                    .fill(isSelected ? Color.white.opacity(0.20) : Color.primary.opacity(0.075))
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.leading, 54)
+                .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
         .padding(.horizontal, 12)
@@ -106,7 +148,7 @@ struct ClipCardView: View {
             onPaste(false)
         }
         .onTapGesture(count: 1) {
-            if NSEvent.modifierFlags.contains(.command) {
+            if !minimalMode && NSEvent.modifierFlags.contains(.command) {
                 onToggleMerge()
             } else {
                 onSelect()
@@ -230,31 +272,33 @@ struct ClipCardView: View {
 
     private var hoverActions: some View {
         HStack(spacing: 5) {
-            Button(action: onToggleMerge) {
-                Image(systemName: mergeRank != nil ? "checkmark.square.fill" : "square.stack")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(isSelected ? Color.white : (mergeRank != nil ? Color.green : Color.secondary))
-                    .frame(width: 24, height: 24)
-                    .background(
-                        Circle()
-                            .fill(isSelected ? Color.white.opacity(0.22) : Color.primary.opacity(0.07))
-                    )
-            }
-            .buttonStyle(.plain)
-            .help(mergeRank != nil ? "取消勾选合并" : "勾选加入合并粘贴（⌘单击 / ⌘M）")
+            if !minimalMode {
+                Button(action: onToggleMerge) {
+                    Image(systemName: mergeRank != nil ? "checkmark.square.fill" : "square.stack")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(isSelected ? Color.white : (mergeRank != nil ? Color.green : Color.secondary))
+                        .frame(width: 24, height: 24)
+                        .background(
+                            Circle()
+                                .fill(isSelected ? Color.white.opacity(0.22) : Color.primary.opacity(0.07))
+                        )
+                }
+                .buttonStyle(.plain)
+                .help(mergeRank != nil ? "取消勾选合并" : "勾选加入合并粘贴（⌘单击 / ⌘M）")
 
-            Button(action: onToggleQueue) {
-                Image(systemName: queueRank != nil ? "checkmark.circle.fill" : "plus.circle")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(isSelected ? Color.white : (queueRank != nil ? Color.accentColor : Color.secondary))
-                    .frame(width: 24, height: 24)
-                    .background(
-                        Circle()
-                            .fill(isSelected ? Color.white.opacity(0.22) : Color.primary.opacity(0.07))
-                    )
+                Button(action: onToggleQueue) {
+                    Image(systemName: queueRank != nil ? "checkmark.circle.fill" : "plus.circle")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(isSelected ? Color.white : (queueRank != nil ? Color.accentColor : Color.secondary))
+                        .frame(width: 24, height: 24)
+                        .background(
+                            Circle()
+                                .fill(isSelected ? Color.white.opacity(0.22) : Color.primary.opacity(0.07))
+                        )
+                }
+                .buttonStyle(.plain)
+                .help(queueRank != nil ? "移出顺序粘贴队列" : "加入顺序粘贴队列（⌘K）")
             }
-            .buttonStyle(.plain)
-            .help(queueRank != nil ? "移出顺序粘贴队列" : "加入顺序粘贴队列（⌘K）")
 
             Button(action: onTogglePin) {
                 Image(systemName: item.isPinned ? "pin.slash.fill" : "pin")
@@ -338,21 +382,32 @@ struct ClipCardView: View {
             onCopyOnly(false)
         }
 
-        Button(queueRank != nil ? "移出顺序队列（⌘K）" : "加入顺序队列（⌘K）") {
-            onToggleQueue()
-        }
-
-        Button(mergeRank != nil ? "取消合并勾选（⌘M）" : "勾选加入合并粘贴（⌘M）") {
-            onToggleMerge()
-        }
-
-        if item.type == .image {
-            Divider()
-            Button("提取图中文字并键入（⇧↵）") {
-                onExtractOCR(true)
+        if !minimalMode {
+            if !financeActions.isEmpty {
+                Divider()
+                ForEach(financeActions) { action in
+                    Button("财务转换：\(action.title)") {
+                        onApplyFinanceAction(action, true)
+                    }
+                }
             }
-            Button("仅复制图中文字") {
-                onExtractOCR(false)
+
+            Button(queueRank != nil ? "移出顺序队列（⌘K）" : "加入顺序队列（⌘K）") {
+                onToggleQueue()
+            }
+
+            Button(mergeRank != nil ? "取消合并勾选（⌘M）" : "勾选加入合并粘贴（⌘M）") {
+                onToggleMerge()
+            }
+
+            if item.type == .image {
+                Divider()
+                Button("提取图中文字并键入（⇧↵）") {
+                    onExtractOCR(true)
+                }
+                Button("仅复制图中文字") {
+                    onExtractOCR(false)
+                }
             }
         }
 
@@ -381,28 +436,30 @@ struct ClipCardView: View {
             onTogglePin()
         }
 
-        Menu("归入收藏分组") {
-            ForEach(PinCategory.allCases) { cat in
-                Button {
-                    onSelectPinCategory(cat)
-                } label: {
-                    if item.pinCategory == cat {
-                        Text("✓ \(cat.title)")
-                    } else {
-                        Text(cat.title)
+        if !minimalMode {
+            Menu("归入收藏分组") {
+                ForEach(PinCategory.allCases) { cat in
+                    Button {
+                        onSelectPinCategory(cat)
+                    } label: {
+                        if item.pinCategory == cat {
+                            Text("✓ \(cat.title)")
+                        } else {
+                            Text(cat.title)
+                        }
+                    }
+                }
+                if item.pinCategory != nil {
+                    Divider()
+                    Button("移除分组标签") {
+                        onSelectPinCategory(nil)
                     }
                 }
             }
-            if item.pinCategory != nil {
-                Divider()
-                Button("移除分组标签") {
-                    onSelectPinCategory(nil)
-                }
-            }
-        }
 
-        Button(item.customAlias != nil ? "修改备注标题..." : "设置备注标题（如：公司税号）...") {
-            onEditAlias()
+            Button(item.customAlias != nil ? "修改备注标题..." : "设置备注标题（如：公司税号）...") {
+                onEditAlias()
+            }
         }
 
         Button("删除", role: .destructive) {

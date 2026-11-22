@@ -18,11 +18,17 @@ struct RoleOnboardingBanner: View {
                 Button {
                     withAnimation(.easeOut(duration: 0.16)) {
                         store.hasConfirmedRoleEdition = true
+                        store.minimalModeEnabled = true
+                        store.showToast("已开启极简纯净模式（基础功能版）")
                     }
                 } label: {
-                    Text("继续使用\(installed.title)")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
+                    HStack(spacing: 3) {
+                        Image(systemName: "leaf.fill")
+                            .font(.system(size: 10))
+                        Text("使用极简基础版")
+                    }
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Color.green)
                 }
                 .buttonStyle(.plain)
             }
@@ -173,60 +179,84 @@ struct RoleAndOTASettingsSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                ForEach(AppRoleEdition.allCases) { edition in
-                    let isSelected = (store.targetRoleEdition == edition)
-                    let isInstalled = (installed == edition)
-
-                    Button {
-                        withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
-                            store.selectRoleEdition(edition)
-                        }
-                    } label: {
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack(spacing: 5) {
-                                Image(systemName: edition.symbolName)
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundStyle(isSelected ? edition.accentTint : .secondary)
-
-                                Text(edition.title)
-                                    .font(.system(size: 12.5, weight: .semibold))
-                                    .foregroundStyle(.primary)
-
-                                Spacer(minLength: 0)
-
-                                if isInstalled {
-                                    Text("运行中")
-                                        .font(.system(size: 9.5, weight: .bold))
-                                        .foregroundStyle(Color.green)
-                                        .padding(.horizontal, 5.5)
-                                        .padding(.vertical, 1.5)
-                                        .background(Capsule().fill(Color.green.opacity(0.14)))
-                                }
-                            }
-
-                            Text(edition.subtitle)
-                                .font(.system(size: 10.5))
-                                .foregroundStyle(.secondary)
-                                .lineLimit(2)
-                                .fixedSize(horizontal: false, vertical: true)
-
-                            Text("OTA 通道：\(edition.expectedAssetName)")
-                                .font(.system(size: 9.5, design: .monospaced))
-                                .foregroundStyle(.secondary.opacity(0.8))
-                        }
-                        .padding(9)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(
-                            RoundedRectangle(cornerRadius: 11, style: .continuous)
-                                .fill(isSelected ? edition.accentTint.opacity(0.11) : Color.primary.opacity(0.04))
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 11, style: .continuous)
-                                .strokeBorder(isSelected ? edition.accentTint.opacity(0.8) : Color.clear, lineWidth: 1.2)
-                        )
+            // 置顶：极简纯净模式（基础功能版）一键总开关
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "leaf.fill")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(store.minimalModeEnabled ? Color.green : .secondary)
+                        Text("极简纯净模式（基础功能版）")
+                            .font(.system(size: 13.5, weight: .semibold))
                     }
-                    .buttonStyle(.plain)
+                    Text("关闭全部行业增强栏、后台 OCR 与语义扫描，仅保留纯粹复制粘贴（⌘E）")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Toggle("", isOn: $store.minimalModeEnabled.animation(.spring(response: 0.24, dampingFraction: 0.86)))
+                    .toggleStyle(.switch)
+                    .labelsHidden()
+            }
+
+            if !store.minimalModeEnabled {
+                Divider().opacity(0.35)
+
+                HStack(spacing: 8) {
+                    ForEach(AppRoleEdition.allCases) { edition in
+                        let isSelected = (store.targetRoleEdition == edition)
+                        let isInstalled = (installed == edition)
+
+                        Button {
+                            withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
+                                store.selectRoleEdition(edition)
+                            }
+                        } label: {
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack(spacing: 5) {
+                                    Image(systemName: edition.symbolName)
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundStyle(isSelected ? edition.accentTint : .secondary)
+
+                                    Text(edition.title)
+                                        .font(.system(size: 12.5, weight: .semibold))
+                                        .foregroundStyle(.primary)
+
+                                    Spacer(minLength: 0)
+
+                                    if isInstalled {
+                                        Text("运行中")
+                                            .font(.system(size: 9.5, weight: .bold))
+                                            .foregroundStyle(Color.green)
+                                            .padding(.horizontal, 5.5)
+                                            .padding(.vertical, 1.5)
+                                            .background(Capsule().fill(Color.green.opacity(0.14)))
+                                    }
+                                }
+
+                                Text(edition.subtitle)
+                                    .font(.system(size: 10.5))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                                    .fixedSize(horizontal: false, vertical: true)
+
+                                Text("OTA 通道：\(edition.expectedAssetName)")
+                                    .font(.system(size: 9.5, design: .monospaced))
+                                    .foregroundStyle(.secondary.opacity(0.8))
+                            }
+                            .padding(9)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(
+                                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                                    .fill(isSelected ? edition.accentTint.opacity(0.11) : Color.primary.opacity(0.04))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                                    .strokeBorder(isSelected ? edition.accentTint.opacity(0.8) : Color.clear, lineWidth: 1.2)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
                 }
             }
 

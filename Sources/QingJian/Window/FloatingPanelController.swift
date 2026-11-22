@@ -437,25 +437,31 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             return nil
         }
 
+        // ⌘E (keyCode 14)：一键切换极简纯净模式（基础功能版）
+        if flags == .command, event.keyCode == 14 {
+            store.toggleMinimalMode()
+            return nil
+        }
+
         if flags == .command, event.keyCode == 51 {
             rootView.deleteSelected()
             return nil
         }
 
         // ⌘K (keyCode 40)：加入 / 移出顺序粘贴队列
-        if flags == .command, event.keyCode == 40 {
+        if !store.minimalModeEnabled, flags == .command, event.keyCode == 40 {
             rootView.toggleQueueForSelected()
             return nil
         }
 
         // ⌘M (keyCode 46)：勾选 / 取消勾选加入合并粘贴篮
-        if flags == .command, event.keyCode == 46 {
+        if !store.minimalModeEnabled, flags == .command, event.keyCode == 46 {
             rootView.toggleMergeForSelected()
             return nil
         }
 
         // ⇥ Tab (keyCode 48)：队列非空时直接按 FIFO 顺序吐出队首第一项
-        if flags.isEmpty, event.keyCode == 48 {
+        if !store.minimalModeEnabled, flags.isEmpty, event.keyCode == 48 {
             if rootView.dequeueAndPasteFromQueue() {
                 return nil
             }
@@ -911,8 +917,8 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         }
 
         // ⌘Y (keyCode 16) 随时切换 QuickLook 对照速览；搜索框为空时按 Space (keyCode 49) 同样触发 QuickLook
-        if (flags == .command && event.keyCode == 16) ||
-           (flags.isEmpty && event.keyCode == 49 && nav.searchText.isEmpty) {
+        if !store.minimalModeEnabled && ((flags == .command && event.keyCode == 16) ||
+           (flags.isEmpty && event.keyCode == 49 && nav.searchText.isEmpty)) {
             if let fieldEditor = panel.firstResponder as? NSTextView, fieldEditor.hasMarkedText() {
                 return event
             }
@@ -927,8 +933,14 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             return nil
         }
 
-        if flags == .control, let chars = event.charactersIgnoringModifiers, let digit = Int(chars), (1...3).contains(digit) {
+        if !store.minimalModeEnabled, flags == .control, let chars = event.charactersIgnoringModifiers, let digit = Int(chars), (1...3).contains(digit) {
             rootView.pasteTransformAtIndexForSelected(digit - 1)
+            return nil
+        }
+
+        // ⌘E (keyCode 14)：一键切换极简纯净模式（基础功能版）
+        if flags == .command, event.keyCode == 14 {
+            store.toggleMinimalMode()
             return nil
         }
 
