@@ -340,7 +340,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let symbol: String
         switch phase {
         case .approaching, .engaged:
-            symbol = "hurricane"
+            symbol = "sparkles"
         case .devouring:
             symbol = "checkmark.circle.fill"
         case .hidden:

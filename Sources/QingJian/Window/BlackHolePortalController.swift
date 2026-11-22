@@ -1,12 +1,13 @@
 import AppKit
 import SwiftUI
 
-/// 顶部菜单栏 Logo「黑洞奇点吞噬」引力场控制器
+/// 顶部菜单栏 Logo「Apple Intelligence New Siri 流体虹吸球」引力场控制器
 ///
-/// 当用户拖拽任意外部文字、链接、图片或文件移向屏幕顶部菜单栏 iClip 图标时：
-/// 1. 自动在顶部 Logo 处唤醒深邃的「黑洞事件视界」与多层旋转吸积盘流光；
-/// 2. 拖拽进入视界时引力场扩张加速、粒子向奇点坠落，并触发触控板引力对齐震感；
-/// 3. 松手瞬间上演螺旋坍缩吞噬 + 引力冲击波扩散动效，直接完成剪贴板复制与历史收录。
+/// 采用 Apple New Siri / Apple Intelligence 标志性的多色流体丝带（Cyan / Indigo / Magenta / Coral）
+/// 与 macOS 26 Liquid Glass 光学球体设计：
+/// 1. 靠近顶部菜单栏 Logo 时，无文字干扰的 New Siri 液态虹彩球从菜单栏下方丝滑绽放；
+/// 2. 拖拽进入球体时，四色极光色带加速向中心视界内卷汇聚、高光呼吸增强，伴随触控板清脆对齐震感；
+/// 3. 松手瞬间，流体色带向心坍缩成一道纯净的虹彩奇点闪光并向上收归入菜单栏图标，完成复制与入库。
 @MainActor
 final class BlackHolePortalController {
     static let shared = BlackHolePortalController()
@@ -19,10 +20,10 @@ final class BlackHolePortalController {
     }
 
     private var panel: NSPanel?
-    private var hostingView: NSHostingView<BlackHoleVortexView>?
+    private var hostingView: NSHostingView<SiriLiquidOrbView>?
     private var dropView: BlackHoleDropReceiverView?
     private var dismissWorkItem: DispatchWorkItem?
-    private let portalSize = NSSize(width: 148, height: 148)
+    private let portalSize = NSSize(width: 132, height: 132)
 
     private(set) var phase: Phase = .hidden
     var onPhaseChanged: ((Phase) -> Void)?
@@ -30,7 +31,7 @@ final class BlackHolePortalController {
 
     private init() {}
 
-    /// 当外部拖拽靠近顶部菜单栏 Logo 引力圈时唤醒黑洞
+    /// 当外部拖拽靠近顶部菜单栏 Logo 引力圈时唤醒 New Siri 流体球
     func showApproaching(anchorRect: NSRect) {
         guard phase != .devouring else { return }
         dismissWorkItem?.cancel()
@@ -43,14 +44,14 @@ final class BlackHolePortalController {
             panel.alphaValue = 0
             panel.orderFrontRegardless()
             NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.18
+                ctx.duration = 0.22
                 ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
                 panel.animator().alphaValue = 1
             }
         }
     }
 
-    /// 拖拽直接进入顶部 Logo 或黑洞视界核心：锁定高能吸积状态
+    /// 拖拽直接进入顶部 Logo 或流体球：锁定高能向心虹吸状态
     func engage(anchorRect: NSRect?) {
         guard phase != .devouring else { return }
         dismissWorkItem?.cancel()
@@ -70,13 +71,13 @@ final class BlackHolePortalController {
         }
     }
 
-    /// 拖拽离开黑洞视界但仍在引力圈内，或彻底移出
+    /// 拖拽离开球体核心但仍在引力圈内，或彻底移出
     func disengageToApproachingOrDismiss(mouseLocation: NSPoint, anchorRect: NSRect?) {
         guard phase != .devouring, phase != .hidden else { return }
         if let anchorRect {
             let center = NSPoint(x: anchorRect.midX, y: anchorRect.midY)
             let dist = hypot(mouseLocation.x - center.x, mouseLocation.y - center.y)
-            if dist < 128 {
+            if dist < 125 {
                 setPhase(.approaching)
                 return
             }
@@ -84,7 +85,7 @@ final class BlackHolePortalController {
         dismiss()
     }
 
-    /// 松手触发奇点吞噬坍缩动效
+    /// 松手触发向心虹吸坍缩动效
     func triggerDevour() {
         dismissWorkItem?.cancel()
         ensurePanel()
@@ -97,21 +98,21 @@ final class BlackHolePortalController {
             Task { @MainActor [weak self] in
                 guard let self, let panel = self.panel else { return }
                 NSAnimationContext.runAnimationGroup { ctx in
-                    ctx.duration = 0.18
+                    ctx.duration = 0.20
                     ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
                     panel.animator().alphaValue = 0
                 }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) { [weak self] in
                     self?.panel?.orderOut(nil)
                     self?.setPhase(.hidden)
                 }
             }
         }
         dismissWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.42, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.36, execute: work)
     }
 
-    /// 平滑收起黑洞引力场
+    /// 平滑收起
     func dismiss() {
         guard phase != .hidden, phase != .devouring else { return }
         dismissWorkItem?.cancel()
@@ -119,7 +120,7 @@ final class BlackHolePortalController {
         guard let panel, panel.isVisible else { return }
 
         NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.16
+            ctx.duration = 0.18
             ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
             panel.animator().alphaValue = 0
         }
@@ -130,12 +131,12 @@ final class BlackHolePortalController {
             }
         }
         dismissWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.20, execute: work)
     }
 
     private func setPhase(_ newPhase: Phase) {
         phase = newPhase
-        hostingView?.rootView = BlackHoleVortexView(phase: newPhase)
+        hostingView?.rootView = SiriLiquidOrbView(phase: newPhase)
         onPhaseChanged?(newPhase)
     }
 
@@ -146,8 +147,7 @@ final class BlackHolePortalController {
 
         var originX = anchorRect.midX - portalSize.width / 2
         originX = max(frame.minX + 8, min(originX, frame.maxX - portalSize.width - 8))
-        // 紧贴顶部菜单栏图标正下方展开黑洞视界，同时向上覆盖菜单栏图标热区
-        let originY = min(frame.maxY - portalSize.height - 2, anchorRect.minY - portalSize.height + 26)
+        let originY = min(frame.maxY - portalSize.height - 2, anchorRect.minY - portalSize.height + 24)
         panel.setFrameOrigin(NSPoint(x: originX, y: originY))
     }
 
@@ -168,7 +168,7 @@ final class BlackHolePortalController {
         p.hasShadow = false
         p.hidesOnDeactivate = false
 
-        let root = BlackHoleVortexView(phase: .approaching)
+        let root = SiriLiquidOrbView(phase: .approaching)
         let hosting = NSHostingView(rootView: root)
         hosting.frame = rect
         hosting.autoresizingMask = [.width, .height]
@@ -200,7 +200,7 @@ final class BlackHolePortalController {
     }
 }
 
-/// 承载黑洞视界拖放捕获的 AppKit 视图
+/// 承载拖放捕获的 AppKit 视图
 private final class BlackHoleDropReceiverView: NSView {
     var onDragEntered: (() -> Void)?
     var onDragExited: (() -> Void)?
@@ -246,193 +246,236 @@ private final class BlackHoleDropReceiverView: NSView {
     }
 }
 
-/// 黑洞事件视界、旋转吸积盘与奇点吞噬动效视图
-private struct BlackHoleVortexView: View {
+/// Apple Intelligence New Siri 风格：多层流体极光丝带 + 液态玻璃球面折射 + 向心虹吸坍缩
+private struct SiriLiquidOrbView: View {
     let phase: BlackHolePortalController.Phase
 
-    @State private var spinAngle: Double = 0
-    @State private var innerSpinAngle: Double = 0
-    @State private var pulseScale: CGFloat = 1.0
-    @State private var shockwaveScale: CGFloat = 0.25
-    @State private var shockwaveOpacity: Double = 0.0
-    @State private var devouredCheckOpacity: Double = 0.0
+    @State private var devourCollapse: CGFloat = 1.0
+    @State private var devourFlashScale: CGFloat = 0.2
+    @State private var devourFlashOpacity: Double = 0.0
+    @State private var devourOffsetY: CGFloat = 0
 
     private var isEngaged: Bool { phase == .engaged }
     private var isDevouring: Bool { phase == .devouring }
 
+    // Apple Intelligence 官方标志性四色极光色板
+    private let siriCyan = Color(red: 0.22, green: 0.78, blue: 1.00)
+    private let siriIndigo = Color(red: 0.42, green: 0.34, blue: 0.98)
+    private let siriMagenta = Color(red: 1.00, green: 0.22, blue: 0.56)
+    private let siriCoral = Color(red: 1.00, green: 0.56, blue: 0.24)
+
     var body: some View {
-        ZStack {
-            // 1. 外围深空引力场暗晕（把背景柔和压暗，衬托黑洞视界）
-            Circle()
-                .fill(
-                    RadialGradient(
-                        colors: [
-                            Color.black.opacity(isEngaged ? 0.92 : 0.78),
-                            Color(red: 0.07, green: 0.05, blue: 0.16).opacity(isEngaged ? 0.68 : 0.45),
-                            Color.clear
-                        ],
-                        center: .center,
-                        startRadius: 8,
-                        endRadius: 68
-                    )
-                )
-                .frame(width: 136, height: 136)
-                .scaleEffect(isDevouring ? 0.15 : (isEngaged ? 1.08 : 0.88))
+        TimelineView(.animation) { timeline in
+            let t = timeline.date.timeIntervalSinceReferenceDate
+            let speed = isEngaged ? 2.4 : 1.15
+            let angle1 = t * 68 * speed
+            let angle2 = -t * 54 * speed
+            let angle3 = t * 82 * speed
+            let breathe = 1.0 + 0.045 * sin(t * (isEngaged ? 6.5 : 3.2))
 
-            // 2. 外层吸积盘螺旋流光（紫罗兰 -> 电光蓝 -> 亮青）
-            Circle()
-                .strokeBorder(
-                    AngularGradient(
-                        gradient: Gradient(colors: [
-                            Color(red: 0.42, green: 0.22, blue: 0.98).opacity(0.15),
-                            Color(red: 0.20, green: 0.62, blue: 1.0).opacity(0.92),
-                            Color(red: 0.55, green: 0.92, blue: 1.0).opacity(0.98),
-                            Color(red: 0.62, green: 0.28, blue: 0.98).opacity(0.85),
-                            Color(red: 0.42, green: 0.22, blue: 0.98).opacity(0.15)
-                        ]),
-                        center: .center
-                    ),
-                    style: StrokeStyle(lineWidth: isEngaged ? 9 : 6, lineCap: .round)
-                )
-                .frame(width: 86, height: 86)
-                .blur(radius: 1.8)
-                .rotationEffect(.degrees(spinAngle))
-                .scaleEffect(isDevouring ? 0.05 : (isEngaged ? 1.06 * pulseScale : 0.86))
-
-            // 3. 吸入粒子星环（反向旋转交错产生引力漩涡感）
-            ForEach(0..<6, id: \.self) { idx in
+            ZStack {
+                // 1. 外围 Apple Intelligence 柔和环境虹彩呼吸光晕（Siri Aura）
                 Circle()
-                    .fill(idx.isMultiple(of: 2) ? Color.cyan : Color.white)
-                    .frame(width: isEngaged ? 4.5 : 3.2, height: isEngaged ? 4.5 : 3.2)
-                    .shadow(color: Color.cyan, radius: 4)
-                    .offset(y: isDevouring ? -2 : (isEngaged ? -34 : -42))
-                    .rotationEffect(.degrees(Double(idx) * 60 + innerSpinAngle))
-                    .opacity(isDevouring ? 0.0 : (isEngaged ? 0.95 : 0.65))
-            }
+                    .fill(
+                        AngularGradient(
+                            gradient: Gradient(colors: [
+                                siriCyan.opacity(0.55),
+                                siriIndigo.opacity(0.60),
+                                siriMagenta.opacity(0.58),
+                                siriCoral.opacity(0.50),
+                                siriCyan.opacity(0.55)
+                            ]),
+                            center: .center
+                        )
+                    )
+                    .frame(width: isEngaged ? 96 : 82, height: isEngaged ? 96 : 82)
+                    .rotationEffect(.degrees(angle1))
+                    .blur(radius: isEngaged ? 16 : 13)
+                    .opacity(isDevouring ? 0.0 : (isEngaged ? 0.92 : 0.68))
 
-            // 4. 内层光子环（Photon Ring：紧贴黑洞边缘的高亮折射白环）
-            Circle()
-                .strokeBorder(
-                    AngularGradient(
-                        gradient: Gradient(colors: [
-                            Color.white.opacity(0.95),
-                            Color.cyan.opacity(0.75),
-                            Color.purple.opacity(0.85),
-                            Color.white.opacity(0.95)
-                        ]),
-                        center: .center
-                    ),
-                    lineWidth: isEngaged ? 2.6 : 1.8
-                )
-                .frame(width: 52, height: 52)
-                .shadow(color: Color.cyan.opacity(0.8), radius: isEngaged ? 8 : 4)
-                .rotationEffect(.degrees(-innerSpinAngle))
-                .scaleEffect(isDevouring ? 0.02 : (isEngaged ? 0.96 : 0.84))
+                // 2. 液态玻璃球体基底（深邃半透明暗晶 + 多层交织流体极光瓣）
+                ZStack {
+                    // 深空暗晶底（衬托极光丝带的通透发光感，同时形成中心引力深渊）
+                    Circle()
+                        .fill(
+                            RadialGradient(
+                                colors: [
+                                    Color(red: 0.03, green: 0.03, blue: 0.07).opacity(0.95),
+                                    Color(red: 0.06, green: 0.05, blue: 0.14).opacity(0.88)
+                                ],
+                                center: .center,
+                                startRadius: 2,
+                                endRadius: 36
+                            )
+                        )
 
-            // 5. 中心黑洞事件视界（Event Horizon：绝对纯黑奇点）
-            Circle()
-                .fill(Color.black)
-                .frame(width: 46, height: 46)
-                .shadow(color: Color.black, radius: 10)
+                    // 流体丝带层 A（青蓝 -> 靛紫 偏心变形柔光瓣）
+                    Ellipse()
+                        .fill(
+                            LinearGradient(
+                                colors: [siriCyan.opacity(0.95), siriIndigo.opacity(0.85), .clear],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .frame(width: 58, height: 40)
+                        .offset(x: isEngaged ? 4 : 8, y: isEngaged ? -4 : -7)
+                        .rotationEffect(.degrees(angle1))
+                        .blur(radius: 7)
+                        .blendMode(.plusLighter)
+
+                    // 流体丝带层 B（洋红 -> 暖橙 反向交织柔光瓣）
+                    Ellipse()
+                        .fill(
+                            LinearGradient(
+                                colors: [siriMagenta.opacity(0.92), siriCoral.opacity(0.82), .clear],
+                                startPoint: .bottomTrailing,
+                                endPoint: .topLeading
+                            )
+                        )
+                        .frame(width: 56, height: 38)
+                        .offset(x: isEngaged ? -4 : -8, y: isEngaged ? 4 : 7)
+                        .rotationEffect(.degrees(angle2))
+                        .blur(radius: 7)
+                        .blendMode(.plusLighter)
+
+                    // 流体丝带层 C（Siri 标志性高光白芯流带，悬停锁定时向球心收束提亮）
+                    Ellipse()
+                        .fill(
+                            RadialGradient(
+                                colors: [
+                                    Color.white.opacity(isEngaged ? 0.92 : 0.65),
+                                    siriCyan.opacity(0.70),
+                                    .clear
+                                ],
+                                center: .center,
+                                startRadius: 1,
+                                endRadius: 24
+                            )
+                        )
+                        .frame(width: isEngaged ? 42 : 48, height: isEngaged ? 26 : 32)
+                        .rotationEffect(.degrees(angle3))
+                        .blur(radius: 4.5)
+                        .blendMode(.plusLighter)
+
+                    // 中心深邃视界引力核（悬停时产生向内坍缩的深邃黑洞透镜感）
+                    Circle()
+                        .fill(
+                            RadialGradient(
+                                colors: [
+                                    Color.black.opacity(isEngaged ? 0.88 : 0.72),
+                                    Color.black.opacity(0.25),
+                                    Color.clear
+                                ],
+                                center: .center,
+                                startRadius: 1,
+                                endRadius: isEngaged ? 20 : 16
+                            )
+                        )
+                        .frame(width: 40, height: 40)
+
+                    // 液态玻璃球面顶部高光反射（Apple 玻璃球体标志性弧面反光）
+                    Circle()
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    Color.white.opacity(0.42),
+                                    Color.white.opacity(0.06),
+                                    Color.clear
+                                ],
+                                startPoint: .top,
+                                endPoint: .center
+                            )
+                        )
+                        .padding(1.5)
+                }
+                .frame(width: isEngaged ? 74 : 64, height: isEngaged ? 74 : 64)
+                .clipShape(Circle())
+                // 3. 球体边缘 Liquid Glass 四色流光折射环
                 .overlay(
                     Circle()
-                        .strokeBorder(Color.white.opacity(isEngaged ? 0.35 : 0.18), lineWidth: 0.8)
+                        .strokeBorder(
+                            AngularGradient(
+                                gradient: Gradient(colors: [
+                                    Color.white.opacity(0.95),
+                                    siriCyan.opacity(0.90),
+                                    siriMagenta.opacity(0.92),
+                                    siriCoral.opacity(0.88),
+                                    siriIndigo.opacity(0.90),
+                                    Color.white.opacity(0.95)
+                                ]),
+                                center: .center
+                            ),
+                            lineWidth: isEngaged ? 2.2 : 1.5
+                        )
+                        .rotationEffect(.degrees(angle1 * 0.8))
                 )
-                .scaleEffect(isDevouring ? 0.01 : (isEngaged ? 1.04 : 0.85))
+                .scaleEffect(breathe * devourCollapse)
+                .offset(y: devourOffsetY)
 
-            // 6. 奇点中心引力图标 / 吞噬完成星芒
-            if isDevouring {
-                Circle()
-                    .strokeBorder(Color.cyan.opacity(shockwaveOpacity), lineWidth: 3)
-                    .frame(width: 110, height: 110)
-                    .scaleEffect(shockwaveScale)
+                // 4. 松手吞噬瞬间：向心坍缩后的虹彩奇点星芒脉冲
+                if isDevouring {
+                    Circle()
+                        .strokeBorder(
+                            AngularGradient(
+                                gradient: Gradient(colors: [siriCyan, siriMagenta, siriCoral, siriIndigo, siriCyan]),
+                                center: .center
+                            ),
+                            lineWidth: 2.5
+                        )
+                        .frame(width: 76, height: 76)
+                        .blur(radius: 1.5)
+                        .scaleEffect(devourFlashScale)
+                        .opacity(devourFlashOpacity)
 
-                Image(systemName: "checkmark.circle.fill")
-                    .font(.system(size: 28, weight: .bold))
-                    .foregroundStyle(
-                        LinearGradient(
-                            colors: [Color.green, Color.cyan],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
+                    Circle()
+                        .fill(
+                            RadialGradient(
+                                colors: [.white, siriCyan.opacity(0.8), .clear],
+                                center: .center,
+                                startRadius: 1,
+                                endRadius: 22
+                            )
                         )
-                    )
-                    .shadow(color: Color.cyan.opacity(0.8), radius: 10)
-                    .opacity(devouredCheckOpacity)
-                    .scaleEffect(devouredCheckOpacity > 0 ? 1.05 : 0.4)
-            } else {
-                Image(systemName: isEngaged ? "hurricane" : "tornado")
-                    .font(.system(size: isEngaged ? 19 : 16, weight: .bold))
-                    .foregroundStyle(
-                        LinearGradient(
-                            colors: [Color.white, Color.cyan.opacity(0.9)],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    )
-                    .rotationEffect(.degrees(spinAngle * 1.4))
-                    .scaleEffect(isEngaged ? 1.12 : 0.92)
-            }
-
-            // 7. 底部引力提示微标
-            if !isDevouring {
-                VStack {
-                    Spacer()
-                    Text(isEngaged ? "松手吞噬复制" : "黑洞引力捕获")
-                        .font(.system(size: 10.5, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 3)
-                        .background(
-                            Capsule()
-                                .fill(Color.black.opacity(0.76))
-                                .overlay(
-                                    Capsule()
-                                        .strokeBorder(Color.cyan.opacity(isEngaged ? 0.75 : 0.4), lineWidth: 0.8)
-                                )
-                        )
-                        .shadow(color: Color.black.opacity(0.35), radius: 4, y: 2)
-                        .padding(.bottom, 6)
+                        .frame(width: 44, height: 44)
+                        .scaleEffect(devourFlashScale * 0.85)
+                        .opacity(devourFlashOpacity)
+                        .blendMode(.plusLighter)
                 }
             }
         }
-        .frame(width: 148, height: 148)
-        .animation(.spring(response: 0.26, dampingFraction: 0.78), value: phase)
+        .frame(width: 132, height: 132)
+        .animation(.spring(response: 0.28, dampingFraction: 0.76), value: phase)
         .onAppear {
-            startContinuousSpin()
             if phase == .devouring {
-                runDevourCollapseAnimation()
+                runDevourCollapse()
             }
         }
         .onChange(of: phase) { _, newPhase in
             if newPhase == .devouring {
-                runDevourCollapseAnimation()
+                runDevourCollapse()
+            } else {
+                devourCollapse = 1.0
+                devourOffsetY = 0
             }
         }
     }
 
-    private func startContinuousSpin() {
-        withAnimation(.linear(duration: 2.2).repeatForever(autoreverses: false)) {
-            spinAngle = 360
-        }
-        withAnimation(.linear(duration: 1.4).repeatForever(autoreverses: false)) {
-            innerSpinAngle = 360
-        }
-        withAnimation(.easeInOut(duration: 0.65).repeatForever(autoreverses: true)) {
-            pulseScale = 1.07
-        }
-    }
+    private func runDevourCollapse() {
+        devourCollapse = 1.08
+        devourOffsetY = 0
+        devourFlashScale = 0.35
+        devourFlashOpacity = 1.0
 
-    private func runDevourCollapseAnimation() {
-        shockwaveScale = 0.25
-        shockwaveOpacity = 0.95
-        devouredCheckOpacity = 0.0
-
+        // 球体极速向心坍缩并向上吸入菜单栏 Logo
+        withAnimation(.easeIn(duration: 0.24)) {
+            devourCollapse = 0.02
+            devourOffsetY = -28
+        }
+        // 坍缩同时荡开一圈柔和的 Apple Intelligence 四色虹彩涟漪
         withAnimation(.easeOut(duration: 0.32)) {
-            shockwaveScale = 1.18
-            shockwaveOpacity = 0.0
-        }
-        withAnimation(.spring(response: 0.24, dampingFraction: 0.68).delay(0.10)) {
-            devouredCheckOpacity = 1.0
+            devourFlashScale = 1.22
+            devourFlashOpacity = 0.0
         }
     }
 }
