@@ -866,4 +866,34 @@ final class CoreFeatureTests: XCTestCase {
         _ = engine.adoptUserSuggestion("开启追加复制", in: .shared)
         XCTAssertTrue(engine.copyAppendEnabled)
     }
+
+    #if !ICLIP_EDITION_FLOW
+    // MARK: - 24. JWT 本地零上传 Base64URL 解码与 exp 过期诊断测试
+
+    func testJWTOfflineBase64URLDecodeAndExpirationCheck() throws {
+        // Header: {"alg":"HS256","typ":"JWT"}
+        // Payload: {"sub":"u_42","role":"admin","exp":1893456000} (2030-01-01)
+        let headerB64 = Data(#"{"alg":"HS256","typ":"JWT"}"#.utf8).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+        let payloadB64 = Data(#"{"sub":"u_42","role":"admin","exp":1893456000}"#.utf8).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+        let token = "Bearer \(headerB64).\(payloadB64).fake_signature_1234567890"
+
+        let validRef = Date(timeIntervalSince1970: 1_700_000_000)
+        let decodedValid = try XCTUnwrap(SemanticEngine.decodeJWTInspection(token, referenceDate: validRef))
+        XCTAssertTrue(decodedValid.contains("（有效）"))
+        XCTAssertTrue(decodedValid.contains("\"u_42\""))
+
+        let expiredRef = Date(timeIntervalSince1970: 2_000_000_000)
+        let decodedExpired = try XCTUnwrap(SemanticEngine.decodeJWTInspection(token, referenceDate: expiredRef))
+        XCTAssertTrue(decodedExpired.contains("（已过期）"))
+
+        // 验证 SemanticEngine.analyze 同时保留首位「脱敏粘贴」安全动作与「解码 JWT」动作
+        let clip = ClipItem(type: .text, text: token, contentHash: "text:jwt")
+        let snap = SemanticEngine.analyze(clip)
+        XCTAssertEqual(snap.primaryKind, .sensitiveSecret)
+        XCTAssertEqual(snap.actions.first?.id, "redact-secrets")
+        XCTAssertTrue(snap.actions.contains(where: { $0.id == "jwt-decode" }))
+    }
+    #endif
 }

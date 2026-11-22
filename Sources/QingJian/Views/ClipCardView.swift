@@ -463,7 +463,7 @@ struct ClipCardView: View {
             onPaste(false)
         }
 
-        Button("仅复制到剪贴板") {
+        Button("仅复制到剪贴板（⌘C）") {
             onCopyOnly(false)
         }
 
@@ -519,18 +519,18 @@ struct ClipCardView: View {
         }
 
         if item.type == .file {
-            Button("键入文件路径（纯文本）") {
+            Button("键入文件路径（纯文本 · ⌥⌘C）") {
                 onPaste(true)
             }
             if let first = item.filePaths?.first {
-                Button("在访达中显示") {
+                Button("在访达中显示（⌘O）") {
                     NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: first)])
                 }
             }
         }
 
         if item.type == .link, ClipboardStore.shared.resolvedBrowserURL(for: item) != nil {
-            Button("在浏览器中打开") {
+            Button("在浏览器中打开（⌘O）") {
                 ClipboardStore.shared.openLinkInBrowser(item)
             }
         }
@@ -1000,7 +1000,7 @@ struct ClipCardView: View {
             onPaste(false)
         }
 
-        Button("仅复制到剪贴板") {
+        Button("仅复制到剪贴板（⌘C）") {
             onCopyOnly(false)
         }
 
@@ -1030,18 +1030,18 @@ struct ClipCardView: View {
         }
 
         if item.type == .file {
-            Button("键入文件路径（纯文本）") {
+            Button("键入文件路径（纯文本 · ⌥⌘C）") {
                 onPaste(true)
             }
             if let first = item.filePaths?.first {
-                Button("在访达中显示") {
+                Button("在访达中显示（⌘O）") {
                     NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: first)])
                 }
             }
         }
 
         if item.type == .link, ClipboardStore.shared.resolvedBrowserURL(for: item) != nil {
-            Button("在浏览器中打开") {
+            Button("在浏览器中打开（⌘O）") {
                 ClipboardStore.shared.openLinkInBrowser(item)
             }
         }

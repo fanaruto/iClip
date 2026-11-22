@@ -88,7 +88,7 @@ enum SemanticKind: String, Equatable {
         case "@meet", "@meeting", "@srt", "@会议", "@纪要": return .meetingTranscript
         case "@rmb", "@money", "@sum", "@金额", "@大写": return .financeAmount
         case "@pdf", "@typo", "@排版", "@断行": return .pdfTypography
-        case "@secret", "@key", "@env", "@脱敏", "@密钥": return .sensitiveSecret
+        case "@secret", "@key", "@env", "@jwt", "@脱敏", "@密钥": return .sensitiveSecret
         case "@url", "@clean", "@净链": return .dirtyURL
         case "@curl", "@http": return .curlCommand
         case "@color", "@hex", "@rgb", "@颜色": return .colorCode
@@ -322,6 +322,16 @@ enum SemanticEngine {
                             toastText: "已完成密钥 + 内网IP/邮箱/手机全量脱敏"
                         ))
                     }
+                }
+                if let jwtDecoded = decodeJWTInspection(trimmed) {
+                    actions.append(TransformAction(
+                        id: "jwt-decode",
+                        title: "解码 JWT",
+                        symbolName: "person.text.rectangle",
+                        isSecurityAction: false,
+                        resultText: jwtDecoded,
+                        toastText: "已离线解码 JWT 载荷并键入"
+                    ))
                 }
             }
         } else if hasPII && trimmed.count >= 11 {
@@ -821,6 +831,81 @@ enum SemanticEngine {
         var cleaned = components
         cleaned.queryItems = filtered.isEmpty ? nil : filtered
         return cleaned.string
+    }
+
+    // MARK: - JWT 离线零上传解码审查（支持裸 eyJ... 与 Bearer eyJ...，自动解析 exp/iat 时间戳）
+
+    static func decodeJWTInspection(_ input: String, referenceDate: Date = Date()) -> String? {
+        var candidate = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        if candidate.lowercased().hasPrefix("bearer ") {
+            candidate = String(candidate.dropFirst(7)).trimmingCharacters(in: .whitespaces)
+        }
+        guard candidate.count >= 24,
+              candidate.count <= 8_192,
+              !candidate.contains(" "),
+              !candidate.contains("\n") else {
+            return nil
+        }
+
+        let parts = candidate.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 3,
+              parts[0].hasPrefix("eyJ"),
+              parts[1].hasPrefix("ey") else {
+            return nil
+        }
+
+        guard let headerData = decodeBase64URL(String(parts[0])),
+              let payloadData = decodeBase64URL(String(parts[1])),
+              let headerObj = try? JSONSerialization.jsonObject(with: headerData),
+              let payloadObj = try? JSONSerialization.jsonObject(with: payloadData),
+              let headerPretty = try? JSONSerialization.data(withJSONObject: headerObj, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]),
+              let payloadPretty = try? JSONSerialization.data(withJSONObject: payloadObj, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]),
+              let headerStr = String(data: headerPretty, encoding: .utf8),
+              let payloadStr = String(data: payloadPretty, encoding: .utf8) else {
+            return nil
+        }
+
+        var summaryLines: [String] = []
+        if let dict = payloadObj as? [String: Any] {
+            if let expVal = numericEpochSeconds(from: dict["exp"]) {
+                let expDate = Date(timeIntervalSince1970: expVal)
+                let status = expDate > referenceDate ? "有效" : "已过期"
+                summaryLines.append("// 过期时间 (exp): \(isoFormatter.string(from: expDate))（\(status)）")
+            }
+            if let iatVal = numericEpochSeconds(from: dict["iat"]) {
+                let iatDate = Date(timeIntervalSince1970: iatVal)
+                summaryLines.append("// 签发时间 (iat): \(isoFormatter.string(from: iatDate))")
+            }
+        }
+
+        var blocks: [String] = []
+        if !summaryLines.isEmpty {
+            blocks.append(summaryLines.joined(separator: "\n"))
+        }
+        blocks.append("// Header\n\(headerStr)")
+        blocks.append("// Payload\n\(payloadStr)")
+        return blocks.joined(separator: "\n\n")
+    }
+
+    private static func decodeBase64URL(_ segment: String) -> Data? {
+        var base64 = segment
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let remainder = base64.count % 4
+        if remainder > 0 {
+            base64 += String(repeating: "=", count: 4 - remainder)
+        }
+        return Data(base64Encoded: base64)
+    }
+
+    private static func numericEpochSeconds(from raw: Any?) -> TimeInterval? {
+        if let d = raw as? Double { return d > 10_000_000_000 ? d / 1000.0 : d }
+        if let i = raw as? Int { return Double(i) > 10_000_000_000 ? Double(i) / 1000.0 : Double(i) }
+        if let n = raw as? NSNumber {
+            let d = n.doubleValue
+            return d > 10_000_000_000 ? d / 1000.0 : d
+        }
+        return nil
     }
 
     // MARK: - 颜色解析与格式化

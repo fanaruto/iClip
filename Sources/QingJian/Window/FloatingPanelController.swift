@@ -247,6 +247,12 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         rootView.appendSelectedToClipboard()
     }
 
+    /// 检查当前聚焦输入框/预览框是否存在用户手动拖选的局部文本（存在时放行系统原生 ⌘C 局部拷贝）
+    private var editorHasSelectedText: Bool {
+        guard let tv = panel?.firstResponder as? NSTextView else { return false }
+        return tv.selectedRange().length > 0
+    }
+
     /// 弹出面板（鼠标旁直觉位置 + 原生窗口级轻柔滑入 + 内部卡片错峰浮现）
     func show(anchorRect: NSRect? = nil) {
         ActionSparkController.shared.dismissImmediately()
@@ -490,6 +496,14 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             if flags == .command, event.keyCode == 14, rootView.enterQuickLookEditMode() {
                 return nil
             }
+            if flags == .command, event.keyCode == 8, !editorHasSelectedText {
+                _ = rootView.copySelectedOnly(plainPathOrText: false)
+                return nil
+            }
+            if flags == .command, event.keyCode == 31 {
+                _ = rootView.openSelectedExternally()
+                return nil
+            }
             if event.keyCode == 123 || event.keyCode == 124 {
                 rootView.stepQuickLookTab(delta: event.keyCode == 123 ? -1 : 1)
                 return nil
@@ -542,6 +556,26 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         // ⇧⌘C (keyCode 8)：将当前选中条目换行追加至系统剪贴板末尾（免切窗连环续接）
         if !store.minimalModeEnabled, flags == [.command, .shift], event.keyCode == 8 {
             rootView.appendSelectedToClipboard()
+            return nil
+        }
+
+        // ⌘C (keyCode 8)：搜索框无选中文本时，仅复制当前选中卡片到系统剪贴板（不自动发送 ⌘V 粘贴）
+        if flags == .command, event.keyCode == 8, !editorHasSelectedText {
+            if rootView.copySelectedOnly(plainPathOrText: false), !store.alwaysOnTop {
+                hide(restoreFocus: true)
+            }
+            return nil
+        }
+
+        // ⌥⌘C (keyCode 8)：对齐 Finder 拷贝路径肌肉记忆，将文件/原图复制为本地纯文本路径
+        if flags == [.command, .option], event.keyCode == 8 {
+            _ = rootView.copySelectedOnly(plainPathOrText: true)
+            return nil
+        }
+
+        // ⌘O (keyCode 31)：链接直接在浏览器打开，文件与本地原图直接在访达中高亮定位
+        if flags == .command, event.keyCode == 31 {
+            _ = rootView.openSelectedExternally()
             return nil
         }
 
@@ -895,6 +929,12 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         rootView.appendSelectedToClipboard()
     }
 
+    /// 检查当前聚焦输入框/预览框是否存在用户手动拖选的局部文本（存在时放行系统原生 ⌘C 局部拷贝）
+    private var editorHasSelectedText: Bool {
+        guard let tv = panel?.firstResponder as? NSTextView else { return false }
+        return tv.selectedRange().length > 0
+    }
+
     /// 弹出面板（鼠标旁直觉位置 + 原生窗口级轻柔滑入 + 内部卡片错峰浮现）
     func show(anchorRect: NSRect? = nil) {
         ActionSparkController.shared.dismissImmediately()
@@ -1125,6 +1165,14 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             if flags == .command, event.keyCode == 14, rootView.enterQuickLookEditMode() {
                 return nil
             }
+            if flags == .command, event.keyCode == 8, !editorHasSelectedText {
+                _ = rootView.copySelectedOnly(plainPathOrText: false)
+                return nil
+            }
+            if flags == .command, event.keyCode == 31 {
+                _ = rootView.openSelectedExternally()
+                return nil
+            }
             if event.keyCode == 123 || event.keyCode == 124 {
                 rootView.stepQuickLookTab(delta: event.keyCode == 123 ? -1 : 1)
                 return nil
@@ -1175,6 +1223,26 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         // ⇧⌘C (keyCode 8)：将当前选中条目换行追加至系统剪贴板末尾（免切窗连环续接）
         if !store.minimalModeEnabled, flags == [.command, .shift], event.keyCode == 8 {
             rootView.appendSelectedToClipboard()
+            return nil
+        }
+
+        // ⌘C (keyCode 8)：搜索框无选中文本时，仅复制当前选中卡片到系统剪贴板（不自动发送 ⌘V 粘贴）
+        if flags == .command, event.keyCode == 8, !editorHasSelectedText {
+            if rootView.copySelectedOnly(plainPathOrText: false), !store.alwaysOnTop {
+                hide(restoreFocus: true)
+            }
+            return nil
+        }
+
+        // ⌥⌘C (keyCode 8)：对齐 Finder 拷贝路径肌肉记忆，将文件/原图复制为本地纯文本路径
+        if flags == [.command, .option], event.keyCode == 8 {
+            _ = rootView.copySelectedOnly(plainPathOrText: true)
+            return nil
+        }
+
+        // ⌘O (keyCode 31)：链接直接在浏览器打开，文件与本地原图直接在访达中高亮定位
+        if flags == .command, event.keyCode == 31 {
+            _ = rootView.openSelectedExternally()
             return nil
         }
 

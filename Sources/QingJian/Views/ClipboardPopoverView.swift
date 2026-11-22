@@ -1999,6 +1999,46 @@ struct ClipboardPopoverView: View {
         store.appendItemToCurrentClipboard(filteredItems[nav.selectedIndex])
     }
 
+    func copySelectedOnly(plainPathOrText: Bool) -> Bool {
+        guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return false }
+        let item = filteredItems[nav.selectedIndex]
+        if nav.showQuickLook && !plainPathOrText {
+            let tabs = QuickLookTabBuilder.buildTabs(for: item, store: store)
+            if !tabs.isEmpty {
+                let idx = min(max(nav.quickLookTabIndex, 0), tabs.count - 1)
+                let chosen = tabs[idx]
+                nav.isQuickLookEditing = false
+                nav.showQuickLook = false
+                switch chosen.payload {
+                case .image:
+                    store.copyAndOptionallyPaste(item, plainTextOnly: false, shouldAutoPaste: false, onBeforePaste: nil)
+                    store.showToast("已复制图片")
+                case .text(let text):
+                    store.pasteCustomString(text, sourceItem: item, toast: "已复制预览内容", shouldAutoPaste: false, onBeforePaste: nil)
+                }
+                return true
+            }
+        }
+        if plainPathOrText {
+            store.copyPlainPathOrText(item)
+        } else {
+            store.copyAndOptionallyPaste(item, plainTextOnly: false, shouldAutoPaste: false, onBeforePaste: nil)
+            store.showToast("✓ 已复制到剪贴板")
+        }
+        return true
+    }
+
+    @discardableResult
+    func openSelectedExternally() -> Bool {
+        guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return false }
+        let item = filteredItems[nav.selectedIndex]
+        if nav.showQuickLook {
+            nav.isQuickLookEditing = false
+            nav.showQuickLook = false
+        }
+        return store.openItemExternally(item)
+    }
+
     func cancelAliasEdit() {
         aliasEditingItem = nil
         nav.isEditingAlias = false
@@ -4040,6 +4080,46 @@ struct ClipboardPopoverView: View {
     func appendSelectedToClipboard() {
         guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return }
         store.appendItemToCurrentClipboard(filteredItems[nav.selectedIndex])
+    }
+
+    func copySelectedOnly(plainPathOrText: Bool) -> Bool {
+        guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return false }
+        let item = filteredItems[nav.selectedIndex]
+        if nav.showQuickLook && !plainPathOrText {
+            let tabs = QuickLookTabBuilder.buildTabs(for: item, store: store)
+            if !tabs.isEmpty {
+                let idx = min(max(nav.quickLookTabIndex, 0), tabs.count - 1)
+                let chosen = tabs[idx]
+                nav.isQuickLookEditing = false
+                nav.showQuickLook = false
+                switch chosen.payload {
+                case .image:
+                    store.copyAndOptionallyPaste(item, plainTextOnly: false, shouldAutoPaste: false, onBeforePaste: nil)
+                    store.showToast("已复制图片")
+                case .text(let text):
+                    store.pasteCustomString(text, sourceItem: item, toast: "已复制预览内容", shouldAutoPaste: false, onBeforePaste: nil)
+                }
+                return true
+            }
+        }
+        if plainPathOrText {
+            store.copyPlainPathOrText(item)
+        } else {
+            store.copyAndOptionallyPaste(item, plainTextOnly: false, shouldAutoPaste: false, onBeforePaste: nil)
+            store.showToast("✓ 已复制到剪贴板")
+        }
+        return true
+    }
+
+    @discardableResult
+    func openSelectedExternally() -> Bool {
+        guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return false }
+        let item = filteredItems[nav.selectedIndex]
+        if nav.showQuickLook {
+            nav.isQuickLookEditing = false
+            nav.showQuickLook = false
+        }
+        return store.openItemExternally(item)
     }
 
     func cancelAliasEdit() {

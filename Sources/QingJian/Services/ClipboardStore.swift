@@ -1503,6 +1503,58 @@ final class ClipboardStore: ObservableObject {
         onAfterOpenExternalURL?()
     }
 
+    /// 全键盘 ⌘O 直达打开：链接在默认浏览器打开，文件与本地原图直接在访达中高亮定位
+    @discardableResult
+    func openItemExternally(_ item: ClipItem) -> Bool {
+        switch item.type {
+        case .link:
+            guard resolvedBrowserURL(for: item) != nil else {
+                showToast("无效的链接地址")
+                return false
+            }
+            openLinkInBrowser(item)
+            return true
+
+        case .file:
+            guard let paths = item.filePaths, !paths.isEmpty else { return false }
+            let urls = paths.map { URL(fileURLWithPath: $0) }
+            TactileFeedbackEngine.shared.perform(.openLink)
+            NSWorkspace.shared.activateFileViewerSelecting(urls)
+            onAfterOpenExternalURL?()
+            return true
+
+        case .image:
+            guard let url = imageURL(for: item) else { return false }
+            TactileFeedbackEngine.shared.perform(.openLink)
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+            onAfterOpenExternalURL?()
+            return true
+
+        case .text:
+            let trimmed = (item.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if Self.isValidWebURL(trimmed) {
+                openLinkInBrowser(item)
+                return true
+            }
+            showToast("当前条目非网页链接或本地文件")
+            return false
+        }
+    }
+
+    /// 面板内按 ⌥⌘C（对齐 Finder 拷贝路径直觉）：文件与图片复制本地路径，链接与文本复制纯文本
+    func copyPlainPathOrText(_ item: ClipItem) {
+        if item.type == .image, let url = imageURL(for: item) {
+            pasteboard.clearContents()
+            pasteboard.setString(url.path, forType: .string)
+            ignoreNextChangeCount = pasteboard.changeCount
+            lastChangeCount = pasteboard.changeCount
+            TactileFeedbackEngine.shared.performNavigationStepHaptic()
+            showToast("已复制图片本地路径")
+            return
+        }
+        copyAndOptionallyPaste(item, plainTextOnly: true, shouldAutoPaste: false, onBeforePaste: nil)
+    }
+
     /// 针对一次性验证码条目在粘贴后启动 30 秒无痕清理倒计时（极简模式或已固定记录绝不误删）
     func scheduleOTPAutoExpireIfNeeded(for item: ClipItem, delaySeconds: TimeInterval = 30.0) {
         guard !minimalModeEnabled,
