@@ -7,13 +7,19 @@ struct HotKeyShortcut: Codable, Equatable {
     let keyCode: UInt32
     let carbonModifiers: UInt32
 
-    /// 默认快捷键：Option + V
+    /// 默认主面板呼出快捷键：Option + V
     static let defaultShortcut = HotKeyShortcut(
         keyCode: UInt32(kVK_ANSI_V),
         carbonModifiers: UInt32(optionKey)
     )
 
-    /// 供界面显示的苹果标准符号串（例如 "⌥ V"、"⇧ ⌘ V"）
+    /// 默认免开面板顺序出队快捷键：Control + Option + V
+    static let defaultQueueShortcut = HotKeyShortcut(
+        keyCode: UInt32(kVK_ANSI_V),
+        carbonModifiers: UInt32(controlKey | optionKey)
+    )
+
+    /// 供界面显示的苹果标准符号串（例如 "⌥ V"、"⌃ ⌥ V"）
     var displayString: String {
         var parts: [String] = []
         if (carbonModifiers & UInt32(controlKey)) != 0 { parts.append("⌃") }
@@ -65,22 +71,24 @@ struct HotKeyShortcut: Codable, Equatable {
     }
 }
 
-/// 基于 Carbon 的可热更新全局快捷键管理
+/// 基于 Carbon 的多通道可热更新全局快捷键管理（ID 1: 呼出主面板；ID 2: 免开面板顺序出队）
 final class HotKeyManager {
     static let shared = HotKeyManager()
 
-    private var hotKeyRef: EventHotKeyRef?
+    private var toggleHotKeyRef: EventHotKeyRef?
+    private var queueHotKeyRef: EventHotKeyRef?
     private var eventHandlerRef: EventHandlerRef?
-    private var onTrigger: (() -> Void)?
+
+    private var onToggleTrigger: (() -> Void)?
+    private var onQueueTrigger: (() -> Void)?
+
     private var currentShortcut: HotKeyShortcut = .defaultShortcut
+    private var currentQueueShortcut: HotKeyShortcut = .defaultQueueShortcut
 
     private init() {}
 
-    @discardableResult
-    func registerToggleHotKey(shortcut: HotKeyShortcut = .defaultShortcut, action: @escaping () -> Void) -> Bool {
-        unregister()
-        self.onTrigger = action
-        self.currentShortcut = shortcut
+    private func ensureEventHandlerInstalled() -> Bool {
+        if eventHandlerRef != nil { return true }
 
         var eventSpec = EventTypeSpec(
             eventClass: OSType(kEventClassKeyboard),
@@ -90,11 +98,27 @@ final class HotKeyManager {
         let selfPtr = Unmanaged.passUnretained(self).toOpaque()
         let status = InstallEventHandler(
             GetApplicationEventTarget(),
-            { _, _, userData -> OSStatus in
-                guard let userData = userData else { return noErr }
+            { _, eventRef, userData -> OSStatus in
+                guard let userData, let eventRef else { return noErr }
                 let manager = Unmanaged<HotKeyManager>.fromOpaque(userData).takeUnretainedValue()
+                var hkID = EventHotKeyID()
+                let err = GetEventParameter(
+                    eventRef,
+                    EventParamName(kEventParamDirectObject),
+                    EventParamType(typeEventHotKeyID),
+                    nil,
+                    MemoryLayout<EventHotKeyID>.size,
+                    nil,
+                    &hkID
+                )
+                guard err == noErr else { return noErr }
+                let id = hkID.id
                 DispatchQueue.main.async {
-                    manager.onTrigger?()
+                    if id == 1 {
+                        manager.onToggleTrigger?()
+                    } else if id == 2 {
+                        manager.onQueueTrigger?()
+                    }
                 }
                 return noErr
             },
@@ -103,8 +127,19 @@ final class HotKeyManager {
             selfPtr,
             &eventHandlerRef
         )
+        return status == noErr
+    }
 
-        guard status == noErr else { return false }
+    @discardableResult
+    func registerToggleHotKey(shortcut: HotKeyShortcut = .defaultShortcut, action: @escaping () -> Void) -> Bool {
+        self.onToggleTrigger = action
+        self.currentShortcut = shortcut
+        guard ensureEventHandlerInstalled() else { return false }
+
+        if let ref = toggleHotKeyRef {
+            UnregisterEventHotKey(ref)
+            toggleHotKeyRef = nil
+        }
 
         let hotKeyID = EventHotKeyID(signature: OSType(0x514A434C), id: 1)
         let regStatus = RegisterEventHotKey(
@@ -113,38 +148,78 @@ final class HotKeyManager {
             hotKeyID,
             GetApplicationEventTarget(),
             0,
-            &hotKeyRef
+            &toggleHotKeyRef
         )
         return regStatus == noErr
     }
 
-    /// 热更新快捷键（保留已有回调）
+    @discardableResult
+    func registerQueuePopHotKey(shortcut: HotKeyShortcut = .defaultQueueShortcut, action: @escaping () -> Void) -> Bool {
+        self.onQueueTrigger = action
+        self.currentQueueShortcut = shortcut
+        guard ensureEventHandlerInstalled() else { return false }
+
+        if let ref = queueHotKeyRef {
+            UnregisterEventHotKey(ref)
+            queueHotKeyRef = nil
+        }
+
+        let hotKeyID = EventHotKeyID(signature: OSType(0x514A434C), id: 2)
+        let regStatus = RegisterEventHotKey(
+            shortcut.keyCode,
+            shortcut.carbonModifiers,
+            hotKeyID,
+            GetApplicationEventTarget(),
+            0,
+            &queueHotKeyRef
+        )
+        return regStatus == noErr
+    }
+
     @discardableResult
     func updateShortcut(_ shortcut: HotKeyShortcut) -> Bool {
-        guard let action = onTrigger else {
+        guard let action = onToggleTrigger else {
             currentShortcut = shortcut
             return true
         }
         return registerToggleHotKey(shortcut: shortcut, action: action)
     }
 
+    @discardableResult
+    func updateQueueShortcut(_ shortcut: HotKeyShortcut) -> Bool {
+        guard let action = onQueueTrigger else {
+            currentQueueShortcut = shortcut
+            return true
+        }
+        return registerQueuePopHotKey(shortcut: shortcut, action: action)
+    }
+
     /// 录制新快捷键前临时挂起全局拦截
     func suspendForRecording() {
-        if let ref = hotKeyRef {
+        if let ref = toggleHotKeyRef {
             UnregisterEventHotKey(ref)
-            hotKeyRef = nil
+            toggleHotKeyRef = nil
+        }
+        if let ref = queueHotKeyRef {
+            UnregisterEventHotKey(ref)
+            queueHotKeyRef = nil
         }
     }
 
-    /// 取消录制后恢复当前快捷键
+    /// 取消或结束录制后恢复当前双通道快捷键
     func resumeAfterRecording() {
         _ = updateShortcut(currentShortcut)
+        _ = updateQueueShortcut(currentQueueShortcut)
     }
 
     func unregister() {
-        if let ref = hotKeyRef {
+        if let ref = toggleHotKeyRef {
             UnregisterEventHotKey(ref)
-            hotKeyRef = nil
+            toggleHotKeyRef = nil
+        }
+        if let ref = queueHotKeyRef {
+            UnregisterEventHotKey(ref)
+            queueHotKeyRef = nil
         }
         if let handler = eventHandlerRef {
             RemoveEventHandler(handler)

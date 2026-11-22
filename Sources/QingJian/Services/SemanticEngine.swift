@@ -1,0 +1,949 @@
+#if !ICLIP_EDITION_FLOW
+import Foundation
+import AppKit
+
+/// 剪贴板文本语义分类标签
+enum SemanticKind: String, Equatable {
+    case dynamicTemplate
+    case sensitiveSecret
+    case dirtyURL
+    case curlCommand
+    case colorCode
+    case json
+    case timestamp
+    case multilineList
+    case base64
+    case identifierCase
+
+    var badgeTitle: String {
+        switch self {
+        case .dynamicTemplate: return "动态模板"
+        case .sensitiveSecret: return "含敏感凭据"
+        case .dirtyURL: return "含追踪参数"
+        case .curlCommand: return "cURL 请求"
+        case .colorCode: return "颜色色值"
+        case .json: return "JSON"
+        case .timestamp: return "时间戳"
+        case .multilineList: return "多行数据列"
+        case .base64: return "Base64"
+        case .identifierCase: return "标识符"
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .dynamicTemplate: return "wand.and.stars"
+        case .sensitiveSecret: return "lock.shield.fill"
+        case .dirtyURL: return "sparkles"
+        case .curlCommand: return "terminal.fill"
+        case .colorCode: return "paintpalette.fill"
+        case .json: return "curlybraces"
+        case .timestamp: return "clock.badge.checkmark"
+        case .multilineList: return "list.bullet.rectangle"
+        case .base64: return "lock.open.rotation"
+        case .identifierCase: return "textformat.abc"
+        }
+    }
+
+    var tintColor: NSColor {
+        switch self {
+        case .dynamicTemplate: return .systemIndigo
+        case .sensitiveSecret: return .systemOrange
+        case .dirtyURL: return .systemTeal
+        case .curlCommand: return .systemGreen
+        case .colorCode: return .systemPink
+        case .json: return .systemPurple
+        case .timestamp: return .systemCyan
+        case .multilineList: return .systemMint
+        case .base64: return .systemIndigo
+        case .identifierCase: return .systemBlue
+        }
+    }
+
+    /// 支持在搜索框用 @tpl / @json / @secret / @color / @url / @curl / @list / @time / @b64 / @id 快速过滤
+    static func fromSearchToken(_ token: String) -> SemanticKind? {
+        switch token.lowercased() {
+        case "@tpl", "@snippet", "@模板": return .dynamicTemplate
+        case "@secret", "@key", "@env", "@脱敏", "@密钥": return .sensitiveSecret
+        case "@url", "@clean", "@净链": return .dirtyURL
+        case "@curl", "@http": return .curlCommand
+        case "@color", "@hex", "@rgb", "@颜色": return .colorCode
+        case "@json": return .json
+        case "@time", "@ts", "@时间": return .timestamp
+        case "@list", "@sql", "@in", "@列表": return .multilineList
+        case "@base64", "@b64": return .base64
+        case "@id", "@case", "@驼峰": return .identifierCase
+        default: return nil
+        }
+    }
+}
+
+/// 单项可执行瞬时变换动作（支持惰性求值闭包，避免超大文本在列表嗅探阶段产生冗余内存拷贝）
+struct TransformAction: Identifiable, Equatable {
+    let id: String
+    let title: String
+    let symbolName: String
+    let isSecurityAction: Bool
+    private let eagerText: String?
+    private let lazyBuilder: (@Sendable () -> String)?
+    let toastText: String
+
+    init(
+        id: String,
+        title: String,
+        symbolName: String,
+        isSecurityAction: Bool,
+        resultText: String,
+        toastText: String
+    ) {
+        self.id = id
+        self.title = title
+        self.symbolName = symbolName
+        self.isSecurityAction = isSecurityAction
+        self.eagerText = resultText
+        self.lazyBuilder = nil
+        self.toastText = toastText
+    }
+
+    init(
+        id: String,
+        title: String,
+        symbolName: String,
+        isSecurityAction: Bool,
+        toastText: String,
+        lazyResult: @escaping @Sendable () -> String
+    ) {
+        self.id = id
+        self.title = title
+        self.symbolName = symbolName
+        self.isSecurityAction = isSecurityAction
+        self.eagerText = nil
+        self.lazyBuilder = lazyResult
+        self.toastText = toastText
+    }
+
+    var resultText: String {
+        if let eagerText { return eagerText }
+        return lazyBuilder?() ?? ""
+    }
+
+    static func == (lhs: TransformAction, rhs: TransformAction) -> Bool {
+        lhs.id == rhs.id && lhs.title == rhs.title && lhs.isSecurityAction == rhs.isSecurityAction
+    }
+}
+
+/// 单条记录的语义分析快照（轻量缓存，避免滚动重复计算）
+struct SemanticSnapshot: Equatable {
+    let primaryKind: SemanticKind?
+    let parsedColorRGBA: (r: Double, g: Double, b: Double, a: Double)?
+    let actions: [TransformAction]
+
+    static let empty = SemanticSnapshot(primaryKind: nil, parsedColorRGBA: nil, actions: [])
+
+    static func == (lhs: SemanticSnapshot, rhs: SemanticSnapshot) -> Bool {
+        lhs.primaryKind == rhs.primaryKind && lhs.actions == rhs.actions
+    }
+}
+
+/// 纯本地微秒级语义识别、格式转换与 AI 安全脱敏引擎
+enum SemanticEngine {
+    /// 最大嗅探字符数上限（8KB 头部足够覆盖所有请求头、配置块与日志首屏，保障 1MB+ 负载 < 0.3ms）
+    private static let maxInspectUTF16Count = 8_192
+
+    /// 常见营销与跨站追踪参数集合
+    private static let trackingQueryParams: Set<String> = [
+        "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "utm_id",
+        "spm", "spm_id_from", "vd_source", "from_source", "share_source", "share_medium",
+        "fbclid", "gclid", "dclid", "msclkid", "twclid", "igshid", "igsh",
+        "mc_cid", "mc_eid", "_hsenc", "_hsmi", "mkt_tok", "yclid", "si"
+    ]
+
+    /// 预编译安全脱敏正则规则（附带 O(1) 前置子串门控，未包含特征前缀时直接跳过正则引擎）
+    private static let secretPatterns: [(name: String, fastHints: [String], regex: NSRegularExpression, replacement: String)] = {
+        let specs: [(String, [String], String, String)] = [
+            // OpenAI / Anthropic / DeepSeek 等 sk- 密钥
+            ("API Key", ["sk-"], #"sk-[A-Za-z0-9_\-]{18,}"#, "sk-***REDACTED***"),
+            // Stripe Live / Webhook 密钥
+            ("Stripe Key", ["sk_live_", "rk_live_", "whsec_"], #"(?:sk_live|rk_live|whsec)_[A-Za-z0-9]{16,}"#, "stripe_***REDACTED***"),
+            // GitHub Personal / Fine-grained / OAuth Token
+            ("GitHub Token", ["ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"], #"(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{24,}|github_pat_[A-Za-z0-9_]{30,}"#, "gh_***REDACTED***"),
+            // AWS Access Key ID
+            ("AWS Key", ["AKIA"], #"AKIA[0-9A-Z]{16}"#, "AKIA***REDACTED***"),
+            // Slack Token
+            ("Slack Token", ["xox"], #"xox[baprs]-[A-Za-z0-9\-]{16,}"#, "xox-***REDACTED***"),
+            // Google API Key
+            ("Google Key", ["AIza"], #"AIza[0-9A-Za-z\-_]{35}"#, "AIza***REDACTED***"),
+            // JWT Token (eyJ...)
+            ("JWT", ["eyJ"], #"eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}"#, "eyJ***JWT_REDACTED***"),
+            // Authorization Bearer Token
+            ("Bearer", ["Bearer", "bearer", "BEARER"], #"(?i)(Bearer\s+)[A-Za-z0-9\-._~+/]{20,}=*"#, "$1***REDACTED***"),
+            // 数据库连接串中的密码 scheme://user:password@host
+            ("URI Password", ["://"], #"([a-zA-Z][a-zA-Z0-9+.\-]*://[^:\s/@]+:)([^@\s]+)(@)"#, "$1***REDACTED***$3"),
+            // .env / YAML / 配置文件敏感键值对（保留键名，掩码真实密钥值）
+            ("Env Secret", ["=", ":"], ##"(?im)^(\s*(?:export\s+)?[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY|AUTH_TOKEN|CLIENT_SECRET)[A-Z0-9_]*\s*[:=]\s*['"]?)([^\s'"#]{6,})(['"]?)"##, "$1***REDACTED***$3")
+        ]
+        return specs.compactMap { name, hints, pattern, replacement in
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+            return (name, hints, regex, replacement)
+        }
+    }()
+
+    private static let hexColorRegex = try! NSRegularExpression(pattern: #"^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$"#)
+    private static let privateIPv4Regex = try! NSRegularExpression(
+        pattern: #"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3})\b"#
+    )
+    private static let emailRegex = try! NSRegularExpression(
+        pattern: #"\b([A-Za-z0-9._%+\-])([A-Za-z0-9._%+\-]*)(@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})\b"#
+    )
+    private static let cnPhoneRegex = try! NSRegularExpression(
+        pattern: #"(?<!\d)(1[3-9]\d)\d{4}(\d{4})(?!\d)"#
+    )
+    private static let rgbColorRegex = try! NSRegularExpression(
+        pattern: #"^rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})(?:\s*,\s*([0-9]*\.?[0-9]+))?\s*\)$"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let isoFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "zh_CN")
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return f
+    }()
+
+    // MARK: - 主入口：生成语义快照
+
+    static func analyze(_ item: ClipItem) -> SemanticSnapshot {
+        guard item.type == .text || item.type == .link,
+              let raw = item.text, !raw.isEmpty else {
+            return .empty
+        }
+
+        let inspectSlice: String
+        if raw.utf16.count > maxInspectUTF16Count {
+            let idx = raw.utf16.index(raw.utf16.startIndex, offsetBy: maxInspectUTF16Count)
+            inspectSlice = String(raw[..<idx])
+        } else {
+            inspectSlice = raw
+        }
+
+        let trimmed = inspectSlice.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return .empty }
+
+        var actions: [TransformAction] = []
+        var primaryKind: SemanticKind? = nil
+        var parsedColor: (r: Double, g: Double, b: Double, a: Double)? = nil
+
+        // 0. 动态模板 Snippet 识别（支持 {{clip}} / {{clip_redacted}} / {{date}} / {{uuid}} 等实时求值）
+        if SnippetTemplateEngine.containsPlaceholders(inspectSlice) {
+            primaryKind = .dynamicTemplate
+        }
+
+        // 1. 最高优：敏感凭据检测与一键 AI 脱敏（超大文本采用惰性求值，嗅探阶段 0 额外内存拷贝）
+        let hasSecret = containsSensitiveSecret(in: inspectSlice)
+        let hasPII = containsPIIOrPrivateIP(in: inspectSlice)
+        let isLargePayload = raw.utf16.count > 16_384
+        if hasSecret {
+            primaryKind = .sensitiveSecret
+            if isLargePayload {
+                actions.append(TransformAction(
+                    id: "redact-secrets",
+                    title: "脱敏粘贴",
+                    symbolName: "lock.shield",
+                    isSecurityAction: true,
+                    toastText: "已安全掩码敏感凭据并键入",
+                    lazyResult: { redactSecrets(in: raw) }
+                ))
+                if hasPII {
+                    actions.append(TransformAction(
+                        id: "redact-deep",
+                        title: "深度脱敏(含IP/隐私)",
+                        symbolName: "eye.slash.fill",
+                        isSecurityAction: true,
+                        toastText: "已完成密钥 + 内网IP/邮箱/手机全量脱敏",
+                        lazyResult: { redactPIIAndPrivateIP(in: redactSecrets(in: raw)) }
+                    ))
+                }
+            } else {
+                let redacted = redactSecrets(in: raw)
+                if redacted != raw {
+                    actions.append(TransformAction(
+                        id: "redact-secrets",
+                        title: "脱敏粘贴",
+                        symbolName: "lock.shield",
+                        isSecurityAction: true,
+                        resultText: redacted,
+                        toastText: "已安全掩码敏感凭据并键入"
+                    ))
+                }
+                if hasPII {
+                    let deepRedacted = redactPIIAndPrivateIP(in: redacted)
+                    if deepRedacted != redacted {
+                        actions.append(TransformAction(
+                            id: "redact-deep",
+                            title: "深度脱敏(含IP/隐私)",
+                            symbolName: "eye.slash.fill",
+                            isSecurityAction: true,
+                            resultText: deepRedacted,
+                            toastText: "已完成密钥 + 内网IP/邮箱/手机全量脱敏"
+                        ))
+                    }
+                }
+            }
+        } else if hasPII && trimmed.count >= 11 {
+            primaryKind = .sensitiveSecret
+            if isLargePayload {
+                actions.append(TransformAction(
+                    id: "redact-pii",
+                    title: "隐私掩码(IP/邮箱/号)",
+                    symbolName: "eye.slash",
+                    isSecurityAction: true,
+                    toastText: "已掩码内网 IP / 邮箱 / 手机号并键入",
+                    lazyResult: { redactPIIAndPrivateIP(in: raw) }
+                ))
+            } else {
+                let deepRedacted = redactPIIAndPrivateIP(in: raw)
+                if deepRedacted != raw {
+                    actions.append(TransformAction(
+                        id: "redact-pii",
+                        title: "隐私掩码(IP/邮箱/号)",
+                        symbolName: "eye.slash",
+                        isSecurityAction: true,
+                        resultText: deepRedacted,
+                        toastText: "已掩码内网 IP / 邮箱 / 手机号并键入"
+                    ))
+                }
+            }
+        }
+
+        // 2. cURL 命令识别与提取 URL / 转 JS fetch()
+        if trimmed.lowercased().hasPrefix("curl ") || trimmed.lowercased().hasPrefix("curl\t") {
+            if primaryKind == nil { primaryKind = .curlCommand }
+            if let extractedURL = extractURLFromCurl(raw) {
+                actions.append(TransformAction(
+                    id: "curl-url",
+                    title: "提取 URL",
+                    symbolName: "link",
+                    isSecurityAction: false,
+                    resultText: extractedURL,
+                    toastText: "已提取 cURL 中的请求地址"
+                ))
+            }
+            if let fetchCode = convertCurlToFetch(raw) {
+                actions.append(TransformAction(
+                    id: "curl-fetch",
+                    title: "转 fetch()",
+                    symbolName: "chevron.left.forwardslash.chevron.right",
+                    isSecurityAction: false,
+                    resultText: fetchCode,
+                    toastText: "已将 cURL 转换为 JS fetch 代码"
+                ))
+            }
+        }
+
+        // 3. 链接追踪参数净链检测
+        if trimmed.count < 4096, !trimmed.contains("\n"), let cleaned = cleanTrackingURL(trimmed) {
+            if primaryKind == nil { primaryKind = .dirtyURL }
+            actions.append(TransformAction(
+                id: "clean-url",
+                title: "净链粘贴",
+                symbolName: "sparkles",
+                isSecurityAction: false,
+                resultText: cleaned,
+                toastText: "已剥离追踪参数并键入纯净链接"
+            ))
+        }
+
+        // 3. 颜色色值解析（HEX / RGB）
+        if trimmed.count <= 48, let rgba = parseColor(trimmed) {
+            if primaryKind == nil { primaryKind = .colorCode }
+            parsedColor = rgba
+            let hex = formatHex(rgba)
+            let rgb = formatRGB(rgba)
+            let swiftColor = formatSwiftUIColor(rgba)
+            if hex.caseInsensitiveCompare(trimmed) != .orderedSame {
+                actions.append(TransformAction(
+                    id: "color-hex",
+                    title: hex,
+                    symbolName: "number",
+                    isSecurityAction: false,
+                    resultText: hex,
+                    toastText: "已转换色值为 \(hex)"
+                ))
+            }
+            if rgb.caseInsensitiveCompare(trimmed) != .orderedSame {
+                actions.append(TransformAction(
+                    id: "color-rgb",
+                    title: "转 RGB",
+                    symbolName: "eyedropper",
+                    isSecurityAction: false,
+                    resultText: rgb,
+                    toastText: "已转换为 \(rgb)"
+                ))
+            }
+            actions.append(TransformAction(
+                id: "color-swiftui",
+                title: "SwiftUI",
+                symbolName: "swift",
+                isSecurityAction: false,
+                resultText: swiftColor,
+                toastText: "已转换为 SwiftUI Color"
+            ))
+        }
+
+        // 4. JSON 检测与格式化 / 压缩（仅在尺寸适中时解析）
+        if raw.utf16.count <= 65_536,
+           ((trimmed.hasPrefix("{") && trimmed.hasSuffix("}")) || (trimmed.hasPrefix("[") && trimmed.hasSuffix("]"))),
+           let data = trimmed.data(using: .utf8),
+           let jsonObj = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) {
+            if primaryKind == nil { primaryKind = .json }
+            let isMultiline = trimmed.contains("\n")
+            if !isMultiline,
+               let prettyData = try? JSONSerialization.data(withJSONObject: jsonObj, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]),
+               let prettyStr = String(data: prettyData, encoding: .utf8) {
+                actions.append(TransformAction(
+                    id: "json-pretty",
+                    title: "格式化 JSON",
+                    symbolName: "curlybraces",
+                    isSecurityAction: false,
+                    resultText: prettyStr,
+                    toastText: "已美化 JSON 并键入"
+                ))
+            } else if let compactData = try? JSONSerialization.data(withJSONObject: jsonObj, options: [.sortedKeys, .withoutEscapingSlashes]),
+                      let compactStr = String(data: compactData, encoding: .utf8) {
+                actions.append(TransformAction(
+                    id: "json-minify",
+                    title: "压缩单行",
+                    symbolName: "arrow.right.and.line.vertical.and.arrow.left",
+                    isSecurityAction: false,
+                    resultText: compactStr,
+                    toastText: "已压缩为单行 JSON"
+                ))
+                if let prettyData = try? JSONSerialization.data(withJSONObject: jsonObj, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]),
+                   let prettyStr = String(data: prettyData, encoding: .utf8),
+                   prettyStr != trimmed {
+                    actions.append(TransformAction(
+                        id: "json-pretty",
+                        title: "重排缩进",
+                        symbolName: "curlybraces",
+                        isSecurityAction: false,
+                        resultText: prettyStr,
+                        toastText: "已规范化 JSON 缩进"
+                    ))
+                }
+            }
+        }
+
+        // 5. Unix 时间戳检测（秒级 10 位 / 毫秒级 13 位）
+        if (trimmed.count == 10 || trimmed.count == 13),
+           trimmed.allSatisfy(\.isNumber),
+           let rawVal = Double(trimmed) {
+            let seconds = (trimmed.count == 13) ? (rawVal / 1000.0) : rawVal
+            // 2001-09-09 ~ 2100-01-01 合理区间
+            if seconds >= 1_000_000_000 && seconds <= 4_102_444_800 {
+                if primaryKind == nil { primaryKind = .timestamp }
+                let date = Date(timeIntervalSince1970: seconds)
+                let formatted = isoFormatter.string(from: date)
+                let iso8601 = ISO8601DateFormatter().string(from: date)
+                actions.append(TransformAction(
+                    id: "ts-local",
+                    title: formatted,
+                    symbolName: "clock",
+                    isSecurityAction: false,
+                    resultText: formatted,
+                    toastText: "已转换时间戳为 \(formatted)"
+                ))
+                actions.append(TransformAction(
+                    id: "ts-iso",
+                    title: "ISO8601",
+                    symbolName: "globe",
+                    isSecurityAction: false,
+                    resultText: iso8601,
+                    toastText: "已转换为 ISO8601 时间"
+                ))
+            }
+        }
+
+        // 6. Base64 可读文本解码检测
+        if primaryKind == nil,
+           trimmed.count >= 12, trimmed.count <= 4096,
+           trimmed.count % 4 == 0,
+           !trimmed.contains(" "), !trimmed.contains("\n"),
+           trimmed.range(of: #"^[A-Za-z0-9+/]+={0,2}$"#, options: .regularExpression) != nil,
+           let decodedData = Data(base64Encoded: trimmed),
+           let decodedStr = String(data: decodedData, encoding: .utf8) {
+            let cleanDecoded = decodedStr.trimmingCharacters(in: .whitespacesAndNewlines)
+            if cleanDecoded.count >= 3, isMostlyPrintableText(cleanDecoded) {
+                primaryKind = .base64
+                actions.append(TransformAction(
+                    id: "base64-decode",
+                    title: "Base64 解码",
+                    symbolName: "lock.open",
+                    isSecurityAction: false,
+                    resultText: decodedStr,
+                    toastText: "已解码 Base64 文本并键入"
+                ))
+            }
+        }
+
+        // 7. 多行数据列转换（一键转 SQL IN 子句 / JSON 数组 / 逗号分隔）或深层代码去公共缩进
+        if raw.utf16.count <= 32_768 && trimmed.contains("\n") && primaryKind != .json && primaryKind != .curlCommand {
+            let rawLines = raw.components(separatedBy: .newlines)
+            let cleanItems = rawLines
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+
+            // 判断是否为整齐的 ID / 词条数据列（2~500 行，每行 ≤ 96 字符且不含典型代码花括号分号）
+            let looksLikeColumn = cleanItems.count >= 2 && cleanItems.count <= 500 && cleanItems.allSatisfy { line in
+                line.count <= 96 && !line.contains("{") && !line.contains("}") && !line.hasSuffix(";")
+            }
+
+            if looksLikeColumn {
+                if primaryKind == nil { primaryKind = .multilineList }
+                let sqlIn = buildSQLInClause(cleanItems)
+                actions.append(TransformAction(
+                    id: "list-sql-in",
+                    title: "SQL IN (...)",
+                    symbolName: "cylinder.split.1x2",
+                    isSecurityAction: false,
+                    resultText: sqlIn,
+                    toastText: "已将 \(cleanItems.count) 行转换为 SQL IN 子句"
+                ))
+                if let jsonData = try? JSONSerialization.data(withJSONObject: cleanItems, options: [.withoutEscapingSlashes]),
+                   let jsonArr = String(data: jsonData, encoding: .utf8) {
+                    actions.append(TransformAction(
+                        id: "list-json-arr",
+                        title: "JSON 数组",
+                        symbolName: "curlybraces.square",
+                        isSecurityAction: false,
+                        resultText: jsonArr,
+                        toastText: "已转换为 JSON 数组"
+                    ))
+                }
+                actions.append(TransformAction(
+                    id: "list-csv",
+                    title: "逗号单行",
+                    symbolName: "line.3.horizontal.decrease",
+                    isSecurityAction: false,
+                    resultText: cleanItems.joined(separator: ", "),
+                    toastText: "已合并为逗号分隔单行"
+                ))
+            } else if let dedented = stripCommonLeadingIndent(raw) {
+                actions.append(TransformAction(
+                    id: "code-dedent",
+                    title: "去除公共缩进",
+                    symbolName: "decrease.indent",
+                    isSecurityAction: false,
+                    resultText: dedented,
+                    toastText: "已对齐并清除多余前导缩进"
+                ))
+            }
+        }
+
+        // 8. 编程标识符命名风格互转（snake_case / camelCase / kebab-case）
+        if primaryKind == nil,
+           trimmed.count >= 4, trimmed.count <= 80,
+           !trimmed.contains(" "), !trimmed.contains("\n"), !trimmed.contains("/"), !trimmed.contains(".") {
+            let words = splitIdentifierWords(trimmed)
+            if words.count >= 2 {
+                primaryKind = .identifierCase
+                let camel = toCamelCase(words)
+                let snake = words.map { $0.lowercased() }.joined(separator: "_")
+                let upperSnake = words.map { $0.uppercased() }.joined(separator: "_")
+                if camel != trimmed {
+                    actions.append(TransformAction(
+                        id: "case-camel",
+                        title: camel,
+                        symbolName: "textformat",
+                        isSecurityAction: false,
+                        resultText: camel,
+                        toastText: "已转为驼峰 \(camel)"
+                    ))
+                }
+                if snake != trimmed {
+                    actions.append(TransformAction(
+                        id: "case-snake",
+                        title: snake,
+                        symbolName: "minus",
+                        isSecurityAction: false,
+                        resultText: snake,
+                        toastText: "已转为下划线 \(snake)"
+                    ))
+                }
+                if upperSnake != trimmed && actions.count < 3 {
+                    actions.append(TransformAction(
+                        id: "case-const",
+                        title: "UPPER_CASE",
+                        symbolName: "textformat.size.larger",
+                        isSecurityAction: false,
+                        resultText: upperSnake,
+                        toastText: "已转为常量命名"
+                    ))
+                }
+            }
+        }
+
+        return SemanticSnapshot(
+            primaryKind: primaryKind,
+            parsedColorRGBA: parsedColor,
+            actions: Array(actions.prefix(3))
+        )
+    }
+
+    // MARK: - 具体转换与脱敏实现
+
+    static func containsSensitiveSecret(in text: String) -> Bool {
+        if text.contains("-----BEGIN ") && text.contains("PRIVATE KEY-----") {
+            return true
+        }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        for item in secretPatterns {
+            guard item.fastHints.contains(where: { text.contains($0) }) else { continue }
+            if item.regex.firstMatch(in: text, options: [], range: range) != nil {
+                return true
+            }
+        }
+        return false
+    }
+
+    static func redactSecrets(in text: String) -> String {
+        var result = text
+        if result.contains("-----BEGIN ") && result.contains("PRIVATE KEY-----"),
+           let pemRegex = try? NSRegularExpression(
+               pattern: #"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----"#
+           ) {
+            let fullRange = NSRange(result.startIndex..<result.endIndex, in: result)
+            result = pemRegex.stringByReplacingMatches(
+                in: result,
+                options: [],
+                range: fullRange,
+                withTemplate: "-----BEGIN PRIVATE KEY-----\n[REDACTED_BY_iCLIP]\n-----END PRIVATE KEY-----"
+            )
+        }
+        for item in secretPatterns {
+            let fullRange = NSRange(result.startIndex..<result.endIndex, in: result)
+            result = item.regex.stringByReplacingMatches(
+                in: result,
+                options: [],
+                range: fullRange,
+                withTemplate: item.replacement
+            )
+        }
+        return result
+    }
+
+    static func containsPIIOrPrivateIP(in text: String) -> Bool {
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        if text.contains("@"), emailRegex.firstMatch(in: text, options: [], range: range) != nil {
+            return true
+        }
+        if (text.contains("10.") || text.contains("192.168.") || text.contains("172.")),
+           privateIPv4Regex.firstMatch(in: text, options: [], range: range) != nil {
+            return true
+        }
+        if text.contains("1"), cnPhoneRegex.firstMatch(in: text, options: [], range: range) != nil {
+            return true
+        }
+        return false
+    }
+
+    static func redactPIIAndPrivateIP(in text: String) -> String {
+        var result = text
+        var range = NSRange(result.startIndex..<result.endIndex, in: result)
+        result = privateIPv4Regex.stringByReplacingMatches(in: result, options: [], range: range, withTemplate: "*.*.*.*")
+        range = NSRange(result.startIndex..<result.endIndex, in: result)
+        result = emailRegex.stringByReplacingMatches(in: result, options: [], range: range, withTemplate: "$1***$3")
+        range = NSRange(result.startIndex..<result.endIndex, in: result)
+        result = cnPhoneRegex.stringByReplacingMatches(in: result, options: [], range: range, withTemplate: "$1****$2")
+        return result
+    }
+
+    /// 剥离营销追踪参数；若原链接不含追踪参数则返回 nil
+    static func cleanTrackingURL(_ raw: String) -> String? {
+        guard let components = URLComponents(string: raw),
+              let scheme = components.scheme?.lowercased(),
+              (scheme == "http" || scheme == "https"),
+              let queryItems = components.queryItems, !queryItems.isEmpty else {
+            return nil
+        }
+
+        let filtered = queryItems.filter { item in
+            let key = item.name.lowercased()
+            if trackingQueryParams.contains(key) || key.hasPrefix("utm_") {
+                return false
+            }
+            return true
+        }
+
+        guard filtered.count < queryItems.count else { return nil }
+        var cleaned = components
+        cleaned.queryItems = filtered.isEmpty ? nil : filtered
+        return cleaned.string
+    }
+
+    // MARK: - 颜色解析与格式化
+
+    private static func parseColor(_ input: String) -> (r: Double, g: Double, b: Double, a: Double)? {
+        let nsRange = NSRange(input.startIndex..<input.endIndex, in: input)
+        if let match = hexColorRegex.firstMatch(in: input, options: [], range: nsRange),
+           let hexRange = Range(match.range(at: 1), in: input) {
+            let hex = String(input[hexRange])
+            var value: UInt64 = 0
+            guard Scanner(string: hex).scanHexInt64(&value) else { return nil }
+            switch hex.count {
+            case 3:
+                let r = Double((value >> 8) & 0xF) / 15.0
+                let g = Double((value >> 4) & 0xF) / 15.0
+                let b = Double(value & 0xF) / 15.0
+                return (r, g, b, 1.0)
+            case 6:
+                let r = Double((value >> 16) & 0xFF) / 255.0
+                let g = Double((value >> 8) & 0xFF) / 255.0
+                let b = Double(value & 0xFF) / 255.0
+                return (r, g, b, 1.0)
+            case 8:
+                let r = Double((value >> 24) & 0xFF) / 255.0
+                let g = Double((value >> 16) & 0xFF) / 255.0
+                let b = Double((value >> 8) & 0xFF) / 255.0
+                let a = Double(value & 0xFF) / 255.0
+                return (r, g, b, a)
+            default:
+                return nil
+            }
+        }
+
+        if let match = rgbColorRegex.firstMatch(in: input, options: [], range: nsRange),
+           let rR = Range(match.range(at: 1), in: input),
+           let gR = Range(match.range(at: 2), in: input),
+           let bR = Range(match.range(at: 3), in: input),
+           let rInt = Int(input[rR]), let gInt = Int(input[gR]), let bInt = Int(input[bR]),
+           (0...255).contains(rInt), (0...255).contains(gInt), (0...255).contains(bInt) {
+            var alpha = 1.0
+            if match.range(at: 4).location != NSNotFound,
+               let aR = Range(match.range(at: 4), in: input),
+               let parsedA = Double(input[aR]) {
+                alpha = min(max(parsedA, 0.0), 1.0)
+            }
+            return (Double(rInt) / 255.0, Double(gInt) / 255.0, Double(bInt) / 255.0, alpha)
+        }
+        return nil
+    }
+
+    private static func formatHex(_ c: (r: Double, g: Double, b: Double, a: Double)) -> String {
+        let r = Int(round(c.r * 255))
+        let g = Int(round(c.g * 255))
+        let b = Int(round(c.b * 255))
+        if c.a < 0.995 {
+            let a = Int(round(c.a * 255))
+            return String(format: "#%02X%02X%02X%02X", r, g, b, a)
+        }
+        return String(format: "#%02X%02X%02X", r, g, b)
+    }
+
+    private static func formatRGB(_ c: (r: Double, g: Double, b: Double, a: Double)) -> String {
+        let r = Int(round(c.r * 255))
+        let g = Int(round(c.g * 255))
+        let b = Int(round(c.b * 255))
+        if c.a < 0.995 {
+            return String(format: "rgba(%d, %d, %d, %.2f)", r, g, b, c.a)
+        }
+        return "rgb(\(r), \(g), \(b))"
+    }
+
+    private static func formatSwiftUIColor(_ c: (r: Double, g: Double, b: Double, a: Double)) -> String {
+        if c.a < 0.995 {
+            return String(format: "Color(red: %.3f, green: %.3f, blue: %.3f, opacity: %.2f)", c.r, c.g, c.b, c.a)
+        }
+        return String(format: "Color(red: %.3f, green: %.3f, blue: %.3f)", c.r, c.g, c.b)
+    }
+
+    // MARK: - 辅助工具
+
+    private static func isMostlyPrintableText(_ s: String) -> Bool {
+        var printable = 0
+        var total = 0
+        for scalar in s.unicodeScalars {
+            total += 1
+            if scalar == "\n" || scalar == "\r" || scalar == "\t" || (scalar.value >= 0x20 && scalar.value != 0x7F) {
+                printable += 1
+            }
+        }
+        return total > 0 && Double(printable) / Double(total) > 0.92
+    }
+
+    private static func splitIdentifierWords(_ input: String) -> [String] {
+        guard input.range(of: #"^[A-Za-z][A-Za-z0-9_\-]*$"#, options: .regularExpression) != nil else {
+            return []
+        }
+        if input.contains("_") {
+            return input.split(separator: "_").map(String.init).filter { !$0.isEmpty }
+        }
+        if input.contains("-") {
+            return input.split(separator: "-").map(String.init).filter { !$0.isEmpty }
+        }
+        // camelCase / PascalCase 拆分
+        var words: [String] = []
+        var current = ""
+        for ch in input {
+            if ch.isUppercase && !current.isEmpty && current.last?.isLowercase == true {
+                words.append(current)
+                current = String(ch)
+            } else {
+                current.append(ch)
+            }
+        }
+        if !current.isEmpty { words.append(current) }
+        return words.count >= 2 ? words : []
+    }
+
+    private static func toCamelCase(_ words: [String]) -> String {
+        guard let first = words.first else { return "" }
+        let rest = words.dropFirst().map { word -> String in
+            let lower = word.lowercased()
+            return lower.prefix(1).uppercased() + lower.dropFirst()
+        }
+        return ([first.lowercased()] + rest).joined()
+    }
+
+    // MARK: - cURL 解析、SQL IN 构造与代码缩进清洗
+
+    private static func extractURLFromCurl(_ curl: String) -> String? {
+        let pattern = #"https?://[^\s'"\\]+"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: curl, options: [], range: NSRange(curl.startIndex..<curl.endIndex, in: curl)),
+              let range = Range(match.range, in: curl) else {
+            return nil
+        }
+        return String(curl[range])
+    }
+
+    private static func convertCurlToFetch(_ curl: String) -> String? {
+        let unfolded = curl.replacingOccurrences(of: "\\\n", with: " ").replacingOccurrences(of: "\\\r\n", with: " ")
+        guard let url = extractURLFromCurl(unfolded) else { return nil }
+
+        var method: String? = nil
+        if let mRegex = try? NSRegularExpression(pattern: #"(?:-X|--request)\s+['"]?([A-Z]+)['"]?"#),
+           let m = mRegex.firstMatch(in: unfolded, options: [], range: NSRange(unfolded.startIndex..<unfolded.endIndex, in: unfolded)),
+           let r = Range(m.range(at: 1), in: unfolded) {
+            method = String(unfolded[r])
+        }
+
+        var headers: [(String, String)] = []
+        if let hRegex = try? NSRegularExpression(pattern: #"(?:-H|--header)\s+(['"])(.*?)\1"#) {
+            let matches = hRegex.matches(in: unfolded, options: [], range: NSRange(unfolded.startIndex..<unfolded.endIndex, in: unfolded))
+            for match in matches {
+                if let r = Range(match.range(at: 2), in: unfolded) {
+                    let rawHeader = String(unfolded[r])
+                    let parts = rawHeader.split(separator: ":", maxSplits: 1)
+                    if parts.count == 2 {
+                        let k = parts[0].trimmingCharacters(in: .whitespaces)
+                        let v = parts[1].trimmingCharacters(in: .whitespaces)
+                        headers.append((k, v))
+                    }
+                }
+            }
+        }
+
+        var bodyData: String? = nil
+        if let dRegex = try? NSRegularExpression(pattern: #"(?:--data-raw|--data-binary|--data|-d)\s+(['"])([\s\S]*?)\1"#),
+           let m = dRegex.firstMatch(in: unfolded, options: [], range: NSRange(unfolded.startIndex..<unfolded.endIndex, in: unfolded)),
+           let r = Range(m.range(at: 2), in: unfolded) {
+            bodyData = String(unfolded[r])
+        }
+
+        let finalMethod = method ?? (bodyData != nil ? "POST" : "GET")
+        var lines: [String] = []
+        lines.append("const response = await fetch(\"\(url)\", {")
+        lines.append("  method: \"\(finalMethod)\",")
+        if !headers.isEmpty {
+            lines.append("  headers: {")
+            for (k, v) in headers {
+                let escapedV = v.replacingOccurrences(of: "\"", with: "\\\"")
+                lines.append("    \"\(k)\": \"\(escapedV)\",")
+            }
+            lines.append("  },")
+        }
+        if let bodyData {
+            let escapedBody = bodyData.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "`", with: "\\`")
+            lines.append("  body: `\(escapedBody)`")
+        }
+        lines.append("});")
+        return lines.joined(separator: "\n")
+    }
+
+    private static func buildSQLInClause(_ items: [String]) -> String {
+        let allNumeric = items.allSatisfy { Int64($0) != nil }
+        if allNumeric {
+            return "(\(items.joined(separator: ", ")))"
+        }
+        let quoted = items.map { item -> String in
+            let escaped = item.replacingOccurrences(of: "'", with: "''")
+            return "'\(escaped)'"
+        }
+        return "(\(quoted.joined(separator: ", ")))"
+    }
+
+    private static func stripCommonLeadingIndent(_ raw: String) -> String? {
+        let lines = raw.components(separatedBy: "\n")
+        let nonEmpty = lines.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        guard nonEmpty.count >= 2 else { return nil }
+
+        let minIndent = nonEmpty.map { line -> Int in
+            var count = 0
+            for ch in line {
+                if ch == " " { count += 1 }
+                else if ch == "\t" { count += 4 }
+                else { break }
+            }
+            return count
+        }.min() ?? 0
+
+        guard minIndent >= 4 else { return nil }
+        let stripped = lines.map { line -> String in
+            guard !line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return "" }
+            var removed = 0
+            var idx = line.startIndex
+            while idx < line.endIndex && removed < minIndent {
+                let ch = line[idx]
+                if ch == " " {
+                    removed += 1
+                    idx = line.index(after: idx)
+                } else if ch == "\t" {
+                    removed += 4
+                    idx = line.index(after: idx)
+                } else {
+                    break
+                }
+            }
+            return String(line[idx...])
+        }.joined(separator: "\n")
+
+        return stripped != raw ? stripped : nil
+    }
+
+    // MARK: - 1MB 超长负载性能基准自检（--bench-semantic）
+
+    static func runMicroBenchmark() -> String {
+        let oneMBLog = "ERROR [2026-11-22] Authorization: Bearer sk-proj-1234567890abcdefghijklmnop client=192.168.1.88 "
+            + String(repeating: "stacktrace_frame_line_padding_0123456789abcdef ", count: 22_000)
+        let largeItem = ClipItem(type: .text, text: oneMBLog, contentHash: "bench:1mb")
+        let jsonItem = ClipItem(type: .text, text: #"{"user":"alice","id":1024,"roles":["admin","dev"]}"#, contentHash: "bench:json")
+        let dirtyURLItem = ClipItem(type: .link, text: "https://webfooo.com/post/1?utm_source=x&spm=101.202&id=7", contentHash: "bench:url")
+
+        let iterations = 100
+        let start = CFAbsoluteTimeGetCurrent()
+        for _ in 0..<iterations {
+            _ = analyze(largeItem)
+        }
+        let avg1MBMs = ((CFAbsoluteTimeGetCurrent() - start) / Double(iterations)) * 1000.0
+
+        let startSmall = CFAbsoluteTimeGetCurrent()
+        for _ in 0..<iterations {
+            _ = analyze(jsonItem)
+            _ = analyze(dirtyURLItem)
+        }
+        let avgSmallMs = ((CFAbsoluteTimeGetCurrent() - startSmall) / Double(iterations * 2)) * 1000.0
+
+        return String(format: "1MB 超长日志嗅探平均耗时: %.3f ms (目标 < 0.300 ms) | 常规 JSON/URL 平均耗时: %.4f ms", avg1MBMs, avgSmallMs)
+    }
+}
+#endif

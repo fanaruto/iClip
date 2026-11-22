@@ -1,5 +1,34 @@
 import Foundation
 import AppKit
+import SwiftUI
+
+/// 收藏置顶的商务与办公场景分组标签（跨角色持久化保留，切换版本不丢失）
+enum PinCategory: String, Codable, CaseIterable, Identifiable {
+    case reply
+    case invoice
+    case contact
+    case template
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .reply: return "常用话术"
+        case .invoice: return "开票财务"
+        case .contact: return "地址名片"
+        case .template: return "合同模板"
+        }
+    }
+
+    var dotColor: Color {
+        switch self {
+        case .reply: return .blue
+        case .invoice: return .orange
+        case .contact: return .green
+        case .template: return .purple
+        }
+    }
+}
 
 /// 剪贴内容类型
 enum ClipContentType: String, Codable, CaseIterable, Identifiable {
@@ -63,7 +92,7 @@ enum ClipFilterTab: String, CaseIterable, Identifiable {
     }
 }
 
-/// 单条剪贴板记录
+/// 单条剪贴板记录（双角色共享超集持久化 Schema，确保通过 OTA 跨角色切换时历史与元数据 100% 无损）
 struct ClipItem: Identifiable, Codable, Equatable {
     let id: UUID
     let type: ClipContentType
@@ -71,11 +100,19 @@ struct ClipItem: Identifiable, Codable, Equatable {
     var imageFileName: String?
     var imageWidth: Int?
     var imageHeight: Int?
+    /// Apple Vision 离线识别出的图片内实况文本
+    var ocrText: String?
+    /// 是否已完成离线实况文本扫描
+    var ocrChecked: Bool?
     var filePaths: [String]?
     var contentHash: String
     var sourceAppName: String?
     var createdAt: Date
     var isPinned: Bool
+    /// 收藏分组场景（话术 / 开票 / 地址 / 模板）
+    var pinCategory: PinCategory?
+    /// 用户自定义备注标题（仅用于展示与检索，粘贴仍输出原文）
+    var customAlias: String?
 
     init(
         id: UUID = UUID(),
@@ -84,11 +121,15 @@ struct ClipItem: Identifiable, Codable, Equatable {
         imageFileName: String? = nil,
         imageWidth: Int? = nil,
         imageHeight: Int? = nil,
+        ocrText: String? = nil,
+        ocrChecked: Bool? = nil,
         filePaths: [String]? = nil,
         contentHash: String,
         sourceAppName: String? = nil,
         createdAt: Date = Date(),
-        isPinned: Bool = false
+        isPinned: Bool = false,
+        pinCategory: PinCategory? = nil,
+        customAlias: String? = nil
     ) {
         self.id = id
         self.type = type
@@ -96,15 +137,27 @@ struct ClipItem: Identifiable, Codable, Equatable {
         self.imageFileName = imageFileName
         self.imageWidth = imageWidth
         self.imageHeight = imageHeight
+        self.ocrText = ocrText
+        self.ocrChecked = ocrChecked
         self.filePaths = filePaths
         self.contentHash = contentHash
         self.sourceAppName = sourceAppName
         self.createdAt = createdAt
         self.isPinned = isPinned
+        self.pinCategory = pinCategory
+        self.customAlias = customAlias
     }
 
-    /// 标题/主要预览文案
+    /// 标题/主要预览文案（若有备注标题则优先展示备注名）
     var primaryTitle: String {
+        if let alias = customAlias?.trimmingCharacters(in: .whitespacesAndNewlines), !alias.isEmpty {
+            return alias
+        }
+        return rawContentPreview
+    }
+
+    /// 原始内容摘要预览
+    var rawContentPreview: String {
         switch type {
         case .text, .link:
             let trimmed = (text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -124,8 +177,12 @@ struct ClipItem: Identifiable, Codable, Equatable {
         }
     }
 
-    /// 辅助信息（字数、域名、文件目录等）
+    /// 辅助信息（字数、域名、实况文本摘要、文件目录等）
     var subtitleInfo: String {
+        if let alias = customAlias?.trimmingCharacters(in: .whitespacesAndNewlines), !alias.isEmpty {
+            let preview = rawContentPreview.replacingOccurrences(of: "\n", with: " ")
+            return preview.count > 28 ? String(preview.prefix(28)) + "…" : preview
+        }
         switch type {
         case .text:
             let count = text?.count ?? 0
@@ -138,6 +195,13 @@ struct ClipItem: Identifiable, Codable, Equatable {
             }
             return "网页链接"
         case .image:
+            #if ICLIP_EDITION_FLOW
+            if let ocr = ocrText?.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespacesAndNewlines),
+               !ocr.isEmpty {
+                let preview = ocr.count > 26 ? String(ocr.prefix(26)) + "…" : ocr
+                return "实况文本：\(preview)"
+            }
+            #endif
             return "PNG 图像"
         case .file:
             guard let first = filePaths?.first else { return "本地文件" }
@@ -177,6 +241,17 @@ struct ClipItem: Identifiable, Codable, Equatable {
         if let text = text, text.lowercased().contains(q) {
             return true
         }
+        if let alias = customAlias, alias.lowercased().contains(q) {
+            return true
+        }
+        if let cat = pinCategory, cat.title.lowercased().contains(q) {
+            return true
+        }
+        #if ICLIP_EDITION_FLOW
+        if let ocr = ocrText, ocr.lowercased().contains(q) {
+            return true
+        }
+        #endif
         if let paths = filePaths {
             for path in paths where path.lowercased().contains(q) {
                 return true

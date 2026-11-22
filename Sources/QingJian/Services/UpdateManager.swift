@@ -1,7 +1,9 @@
 import Foundation
 import AppKit
 
-/// 基于 GitHub Releases 的原生 OTA 更新管理器
+/// 基于 GitHub Releases 的角色感知多轨 OTA 更新与版本切换管理器
+/// - 同角色升级：极客开发版仅拉取 `iClip-Dev-macOS.zip`，心流办公版仅拉取 `iClip-Flow-macOS.zip`
+/// - 跨角色切换：当用户在设置或引导中选择另一角色时，支持同版本直接拉取目标角色专属包原子替换重启
 @MainActor
 final class UpdateManager: NSObject, ObservableObject {
     static let shared = UpdateManager()
@@ -10,6 +12,8 @@ final class UpdateManager: NSObject, ObservableObject {
         let version: String
         let tagName: String
         let notes: String
+        let edition: AppRoleEdition
+        let isEditionSwitch: Bool
         let assetName: String
         let assetSize: Int64
         let downloadURL: URL
@@ -19,7 +23,7 @@ final class UpdateManager: NSObject, ObservableObject {
     enum State: Equatable {
         case idle
         case checking
-        case upToDate(latestVersion: String)
+        case upToDate(latestVersion: String, edition: AppRoleEdition)
         case available(ReleaseInfo)
         case downloading(progress: Double, info: ReleaseInfo)
         case installing(info: ReleaseInfo)
@@ -30,14 +34,19 @@ final class UpdateManager: NSObject, ObservableObject {
 
     private let repoOwner = "fanaruto"
     private let repoName = "iClip"
-    private let expectedAssetName = "iClip-macOS.zip"
+    private let legacyAssetName = "iClip-macOS.zip"
 
+    private var checkRequestEpoch: Int = 0
     private var activeDownloadTask: URLSessionDownloadTask?
     private var activeSession: URLSession?
     private var downloadingInfo: ReleaseInfo?
 
     var currentVersion: String {
         (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0.0"
+    }
+
+    var installedEdition: AppRoleEdition {
+        AppRoleEdition.installed
     }
 
     var hasUpdateAvailable: Bool {
@@ -49,13 +58,21 @@ final class UpdateManager: NSObject, ObservableObject {
         super.init()
     }
 
-    /// 检查 GitHub 最新 Release
-    func checkForUpdates(silent: Bool = false) {
-        if case .checking = state { return }
-        if case .downloading = state { return }
+    /// 检查目标角色的 GitHub 最新 Release（支持同角色升级检查与跨角色专属包切换）
+    func checkForUpdates(targetEdition: AppRoleEdition? = nil, silent: Bool = false) {
         if case .installing = state { return }
+        if case .downloading = state {
+            if targetEdition == nil { return }
+            cancelDownload()
+        }
 
-        if !silent {
+        let desiredEdition = targetEdition ?? ClipboardStore.shared.targetRoleEdition
+        let isSwitchingEdition = (desiredEdition != installedEdition)
+
+        checkRequestEpoch &+= 1
+        let requestID = checkRequestEpoch
+
+        if !silent || isSwitchingEdition {
             state = .checking
         }
 
@@ -66,36 +83,66 @@ final class UpdateManager: NSObject, ObservableObject {
 
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-        request.setValue("QingJian/\(currentVersion)", forHTTPHeaderField: "User-Agent")
+        request.setValue("iClip-\(installedEdition.rawValue)/\(currentVersion)", forHTTPHeaderField: "User-Agent")
 
         Task {
             do {
                 let (data, response) = try await URLSession.shared.data(for: request)
+                guard requestID == self.checkRequestEpoch else { return }
+
                 guard let http = response as? HTTPURLResponse else {
-                    if !silent { state = .failed("网络响应异常") }
+                    if !silent || isSwitchingEdition { state = .failed("网络响应异常") }
                     return
                 }
                 if http.statusCode == 404 {
-                    if !silent { state = .upToDate(latestVersion: currentVersion) }
+                    if !silent { state = .upToDate(latestVersion: currentVersion, edition: installedEdition) }
                     return
                 }
                 guard (200..<300).contains(http.statusCode) else {
-                    if !silent { state = .failed("检查失败（HTTP \(http.statusCode)）") }
+                    if !silent || isSwitchingEdition { state = .failed("检查失败（HTTP \(http.statusCode)）") }
                     return
                 }
 
                 let decoded = try JSONDecoder().decode(GitHubReleaseDTO.self, from: data)
                 let latestVer = Self.normalizeVersion(decoded.tagName)
-                guard Self.isVersion(latestVer, newerThan: currentVersion) else {
-                    if !silent { state = .upToDate(latestVersion: latestVer) }
+                let expectedAsset = desiredEdition.expectedAssetName
+
+                if isSwitchingEdition {
+                    // 跨角色切换：严格匹配目标角色专属安装包，禁止回退到其他角色的压缩包
+                    guard let roleAsset = decoded.assets.first(where: { $0.name == expectedAsset }),
+                          let downloadURL = URL(string: roleAsset.browserDownloadURL),
+                          let htmlURL = URL(string: decoded.htmlURL) else {
+                        state = .failed("GitHub Release v\(latestVer) 尚未上传「\(desiredEdition.title)」专属包（\(expectedAsset)）")
+                        return
+                    }
+
+                    let info = ReleaseInfo(
+                        version: latestVer,
+                        tagName: decoded.tagName,
+                        notes: (decoded.body ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+                        edition: desiredEdition,
+                        isEditionSwitch: true,
+                        assetName: roleAsset.name,
+                        assetSize: roleAsset.size,
+                        downloadURL: downloadURL,
+                        htmlURL: htmlURL
+                    )
+                    state = .available(info)
                     return
                 }
 
-                guard let asset = decoded.assets.first(where: { $0.name == expectedAssetName })
-                        ?? decoded.assets.first(where: { $0.name.hasSuffix(".zip") }),
+                // 同角色常规版本升级检查
+                guard Self.isVersion(latestVer, newerThan: currentVersion) else {
+                    if !silent { state = .upToDate(latestVersion: latestVer, edition: installedEdition) }
+                    return
+                }
+
+                // 优先下载当前角色专属包，仅在远端未分包时兼容通用包名
+                guard let asset = decoded.assets.first(where: { $0.name == expectedAsset })
+                        ?? decoded.assets.first(where: { $0.name == legacyAssetName }),
                       let downloadURL = URL(string: asset.browserDownloadURL),
                       let htmlURL = URL(string: decoded.htmlURL) else {
-                    if !silent { state = .failed("新版本 v\(latestVer) 尚未上传安装包") }
+                    if !silent { state = .failed("新版本 v\(latestVer) 尚未上传 \(expectedAsset)") }
                     return
                 }
 
@@ -103,6 +150,8 @@ final class UpdateManager: NSObject, ObservableObject {
                     version: latestVer,
                     tagName: decoded.tagName,
                     notes: (decoded.body ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+                    edition: desiredEdition,
+                    isEditionSwitch: false,
                     assetName: asset.name,
                     assetSize: asset.size,
                     downloadURL: downloadURL,
@@ -110,19 +159,20 @@ final class UpdateManager: NSObject, ObservableObject {
                 )
                 state = .available(info)
             } catch {
-                if !silent {
+                guard requestID == self.checkRequestEpoch else { return }
+                if !silent || isSwitchingEdition {
                     state = .failed("无法连接 GitHub，请稍后重试")
                 }
             }
         }
     }
 
-    /// 开始从 GitHub 下载并 OTA 安装更新
+    /// 开始从 GitHub 下载目标角色专属包并执行原子替换重启
     func startOTAUpdate() {
         guard case .available(let info) = state else { return }
 
         guard Bundle.main.bundleURL.pathExtension == "app" else {
-            state = .failed("当前为开发二进制运行，请通过 iClip.app 进行 OTA 更新")
+            state = .failed("当前为命令行裸二进制运行，请通过 iClip.app 执行 OTA 切换/更新")
             return
         }
 
@@ -136,7 +186,7 @@ final class UpdateManager: NSObject, ObservableObject {
         activeSession = session
 
         var request = URLRequest(url: info.downloadURL)
-        request.setValue("QingJian/\(currentVersion)", forHTTPHeaderField: "User-Agent")
+        request.setValue("iClip-\(installedEdition.rawValue)/\(currentVersion)", forHTTPHeaderField: "User-Agent")
         let task = session.downloadTask(with: request)
         activeDownloadTask = task
         task.resume()
@@ -173,7 +223,7 @@ final class UpdateManager: NSObject, ObservableObject {
                 try fm.copyItem(at: tempZipURL, to: copiedZip)
                 try? fm.removeItem(at: tempZipURL)
 
-                // 使用系统 ditto 解压，完整保留代码签名与符号链接
+                // 使用系统 ditto 解压，完整保留开发者证书代码签名与辅助功能 TCC 信任链
                 let unzip = Process()
                 unzip.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
                 unzip.arguments = ["-xk", copiedZip.path, extractDir.path]
@@ -183,7 +233,6 @@ final class UpdateManager: NSObject, ObservableObject {
                     throw OTAError.extractFailed
                 }
 
-                // 定位解压后的 .app
                 let extractedApps = (try? fm.contentsOfDirectory(at: extractDir, includingPropertiesForKeys: nil))?
                     .filter { $0.pathExtension == "app" } ?? []
                 guard let newAppURL = extractedApps.first,
@@ -192,7 +241,14 @@ final class UpdateManager: NSObject, ObservableObject {
                     throw OTAError.invalidAppBundle
                 }
 
-                // 写入独立脱离进程脚本：等旧进程退出 -> 原子替换 -> 清除隔离标记 -> 拉起新版
+                // 校验证书包内的角色标记是否与用户请求的目标角色一致（二次防呆校验）
+                if info.isEditionSwitch,
+                   let newPlist = NSDictionary(contentsOf: newAppURL.appendingPathComponent("Contents/Info.plist")),
+                   let bundledEdition = newPlist["IClipEdition"] as? String,
+                   bundledEdition != info.edition.rawValue {
+                    throw OTAError.editionMismatch
+                }
+
                 let scriptURL = stageDir.appendingPathComponent("apply_ota.sh")
                 let scriptContent = """
                 #!/bin/zsh
@@ -203,7 +259,6 @@ final class UpdateManager: NSObject, ObservableObject {
                 STAGE_DIR=\(Self.shellQuote(stageDir.path))
                 BACKUP_APP="${TARGET_APP}.ota-backup"
 
-                # 等待旧版退出（最多 8 秒）
                 for i in {1..40}; do
                   if ! kill -0 "$OLD_PID" 2>/dev/null; then
                     break
@@ -251,7 +306,7 @@ final class UpdateManager: NSObject, ObservableObject {
         }
     }
 
-    // MARK: - 语义化版本工具
+    // MARK: - 语义化版本工具（兼容带后缀 tag，如 1.8.0-rc1）
 
     private static func normalizeVersion(_ raw: String) -> String {
         raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -259,8 +314,14 @@ final class UpdateManager: NSObject, ObservableObject {
     }
 
     private static func isVersion(_ lhs: String, newerThan rhs: String) -> Bool {
-        let a = lhs.split(separator: ".").map { Int($0) ?? 0 }
-        let b = rhs.split(separator: ".").map { Int($0) ?? 0 }
+        let parseNumericSegments: (String) -> [Int] = { ver in
+            ver.split(separator: ".").map { seg in
+                let digits = seg.prefix(while: \.isNumber)
+                return Int(digits) ?? 0
+            }
+        }
+        let a = parseNumericSegments(lhs)
+        let b = parseNumericSegments(rhs)
         let count = max(a.count, b.count)
         for i in 0..<count {
             let av = i < a.count ? a[i] : 0
@@ -277,11 +338,13 @@ final class UpdateManager: NSObject, ObservableObject {
     enum OTAError: LocalizedError {
         case extractFailed
         case invalidAppBundle
+        case editionMismatch
 
         var errorDescription: String? {
             switch self {
             case .extractFailed: return "解压更新包失败"
             case .invalidAppBundle: return "更新包中未找到有效的应用文件"
+            case .editionMismatch: return "下载包的角色标识与所选角色不匹配，已安全中止替换"
             }
         }
     }
