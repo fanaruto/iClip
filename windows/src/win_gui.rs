@@ -114,7 +114,6 @@ enum HitAction {
 }
 
 struct WinAppState {
-    hwnd: HWND,
     store: ClipboardStore,
     visible: bool,
     previous_foreground: HWND,
@@ -198,7 +197,6 @@ pub fn run_windows_app() -> i32 {
         let store = ClipboardStore::new(ClipboardStore::default_app_data_dir());
         APP_STATE.with(|cell| {
             *cell.borrow_mut() = Some(WinAppState {
-                hwnd,
                 store,
                 visible: false,
                 previous_foreground: null_mut(),
@@ -316,7 +314,6 @@ pub fn run_windows_self_test() -> Result<(), String> {
 
         let cf_html = RegisterClipboardFormatW(to_wide("HTML Format").as_ptr());
         let mut state = WinAppState {
-            hwnd,
             store,
             visible: true,
             previous_foreground: null_mut(),
