@@ -807,6 +807,7 @@ final class ClipboardStore: ObservableObject {
             copyAppendTargetID = nil
             copyAppendSegmentCount = 1
 
+            let hasRichFormatting = RichTextPasteboardHelper.hasStrippableRichFormatting(types: types, plainText: rawText)
             var text = rawText
             let isLink = isValidWebURL(trimmed)
             var didAutoApplyRule = false
@@ -820,6 +821,14 @@ final class ClipboardStore: ObservableObject {
                 lastChangeCount = pasteboard.changeCount
                 didAutoApplyRule = true
                 showToast(autoApplied.rule.shortToast)
+            } else if !minimalModeEnabled,
+                      AdaptiveIntelligenceEngine.shared.shouldAutoStripRichFormatting(hasRichFormatting: hasRichFormatting, sourceApp: sourceApp) {
+                pasteboard.clearContents()
+                pasteboard.setString(text, forType: .string)
+                ignoreNextChangeCount = pasteboard.changeCount
+                lastChangeCount = pasteboard.changeCount
+                didAutoApplyRule = true
+                showToast(LearnedAutoRuleKind.stripRichTextFormatting.shortToast)
             }
             #if !ICLIP_EDITION_FLOW
             if !didAutoApplyRule && !minimalModeEnabled && isLink && autoCleanTrackingURL,
@@ -862,7 +871,12 @@ final class ClipboardStore: ObservableObject {
             copyAppendTargetID = items.first(where: { $0.contentHash == contentHash })?.id
             let reuseCount = AdaptiveIntelligenceEngine.shared.recordContentActivity(contentHash: contentHash)
             if !didAutoApplyRule, let latest = items.first(where: { $0.contentHash == contentHash }) {
-                ActionSparkController.shared.presentIfAppropriate(for: latest, reuseCount: reuseCount, in: self)
+                ActionSparkController.shared.presentIfAppropriate(
+                    for: latest,
+                    reuseCount: reuseCount,
+                    hasRichFormatting: hasRichFormatting,
+                    in: self
+                )
             }
         }
     }
@@ -1621,7 +1635,9 @@ final class ClipboardStore: ObservableObject {
                 }
             }
         case .image:
-            if let url = imageURL(for: item), let pngData = try? Data(contentsOf: url) {
+            if plainTextOnly, let url = imageURL(for: item) {
+                pasteboard.setString(url.path, forType: .string)
+            } else if let url = imageURL(for: item), let pngData = try? Data(contentsOf: url) {
                 pasteboard.setData(pngData, forType: .png)
             }
         case .file:

@@ -3,6 +3,7 @@ import AppKit
 
 /// 可由用户习惯自动晋升或通过建议直接开启的「复制即自动处理」契约规则
 enum LearnedAutoRuleKind: String, CaseIterable, Codable, Identifiable {
+    case stripRichTextFormatting
     case cleanTrackingURL
     case healPDFLineBreaks
     case applyPanguSpacing
@@ -15,6 +16,7 @@ enum LearnedAutoRuleKind: String, CaseIterable, Codable, Identifiable {
 
     var title: String {
         switch self {
+        case .stripRichTextFormatting: return "复制富文本自动剥离脏样式（智能保护表格）"
         case .cleanTrackingURL: return "复制链接自动剥离追踪尾巴"
         case .healPDFLineBreaks: return "复制 PDF 段落自动愈合断行"
         case .applyPanguSpacing: return "复制中英混排自动加盘古空格"
@@ -27,6 +29,7 @@ enum LearnedAutoRuleKind: String, CaseIterable, Codable, Identifiable {
 
     var shortToast: String {
         switch self {
+        case .stripRichTextFormatting: return "智能契约：已自动净化为纯文本"
         case .cleanTrackingURL: return "智能契约：已自动净链去追踪"
         case .healPDFLineBreaks: return "智能契约：已自动愈合 PDF 断行"
         case .applyPanguSpacing: return "智能契约：已自动优化中英间距"
@@ -40,6 +43,7 @@ enum LearnedAutoRuleKind: String, CaseIterable, Codable, Identifiable {
     /// 关联的手动动作 ID（当用户连续 3 次手动执行该动作时，主动提议晋升为全自动契约）
     static func fromActionID(_ actionID: String) -> LearnedAutoRuleKind? {
         switch actionID {
+        case "strip-rich-style": return .stripRichTextFormatting
         case "clean-url": return .cleanTrackingURL
         case "doc-pdf-heal": return .healPDFLineBreaks
         case "doc-pangu-space": return .applyPanguSpacing
@@ -490,12 +494,21 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
         return nil
     }
 
+    /// 判断本次复制是否命中「自动剥离富文本样式」契约（对用户设为免打扰的来源应用自动豁免保留原样式）
+    func shouldAutoStripRichFormatting(hasRichFormatting: Bool, sourceApp: String?) -> Bool {
+        guard hasRichFormatting, state.enabledAutoRules.contains(.stripRichTextFormatting) else {
+            return false
+        }
+        return !isSourceAppMuted(sourceApp)
+    }
+
     // MARK: - 4. 光标角「灵动微星标（Action Spark）」候选评估
 
     func evaluateSparkCandidate(
         for item: ClipItem,
         reuseCount: Int,
-        minimalMode: Bool
+        minimalMode: Bool,
+        hasRichFormatting: Bool = false
     ) -> AdaptiveSparkCandidate? {
         guard sparkEnabled, !minimalMode else { return nil }
         guard !isSourceAppMuted(item.sourceAppName) else { return nil }
@@ -572,6 +585,26 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
         case .text, .link:
             if let candidate = evaluateTextOrLinkCandidate(for: item) {
                 return candidate
+            }
+            if hasRichFormatting,
+               let plain = item.text, !plain.isEmpty,
+               !isCategoryCoolingDown("rich_text") {
+                let promo = promotableRuleIfEligible(forActionID: "strip-rich-style")
+                let preferred = isHabitPreferred(actionID: "strip-rich-style", sourceApp: item.sourceAppName)
+                return AdaptiveSparkCandidate(
+                    actionID: "strip-rich-style",
+                    categoryKey: "rich_text",
+                    sourceApp: item.sourceAppName,
+                    symbolName: "textformat",
+                    shortTitle: "净化为纯文本",
+                    badgeHint: preferred ? "习惯首选" : "去样式",
+                    promotableRule: promo,
+                    payload: .replaceClipboardText(
+                        text: plain,
+                        htmlTable: nil,
+                        toast: "已剥离富文本样式，直接 ⌘V 粘贴纯文本"
+                    )
+                )
             }
             // 若无格式转换命中，但该未收藏条目已被反复复制 ≥ 3 次，主动提示沉淀进收藏夹
             if !item.isPinned && reuseCount >= 3 {
@@ -832,6 +865,19 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
             adoptedEffects.append(!neg ? "已开启「复制二维码截图自动提取内容」" : "已关闭二维码自动提取")
         }
 
+        let richStyleKeys = ["纯文本", "去格式", "去样式", "剥离样式", "剥离格式", "清除格式", "pure paste", "富文本"]
+        if Self.containsAny(lower, richStyleKeys) {
+            let neg = Self.isClauseNegated(matching: richStyleKeys, in: clauses)
+            if neg && Self.containsAny(lower, ["提示", "不弹", "微星标"]) {
+                state.categoryDismissStreaks["rich_text"] = 6
+                scheduleSave()
+                adoptedEffects.append("已静默富文本去样式微星标提示")
+            } else {
+                setAutoRule(.stripRichTextFormatting, enabled: !neg)
+                adoptedEffects.append(!neg ? "已开启「复制富文本自动净化纯文本（保护表格）」" : "已关闭富文本自动去样式")
+            }
+        }
+
         // E. 动作默认顺位偏好调教（如“截图优先套样机”、“截图优先提取文字”、“JSON 优先压缩单行”、“金额默认转大写”）
         let mockupKeys = ["样机", "圆角阴影", "加壳"]
         let ocrPrefKeys = ["提取文字", "识图", "ocr", "图中文字"]
@@ -955,6 +1001,7 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
         if actionID.hasPrefix("doc-") { return "typography" }
         if actionID.hasPrefix("tbl-") { return "table" }
         if actionID.hasPrefix("redact-") { return "security" }
+        if actionID == "strip-rich-style" { return "rich_text" }
         if actionID == "img-qrcode" { return "qrcode" }
         if actionID.hasPrefix("img-") { return "image" }
         if actionID.hasPrefix("meet-") { return "meeting" }
@@ -1086,5 +1133,31 @@ enum URLTrackingCleaner {
         guard filtered.count < items.count else { return nil }
         comps.queryItems = filtered.isEmpty ? nil : filtered
         return comps.string
+    }
+}
+
+/// 富文本脏样式无损嗅探器：识别网页/IDE/文档夹带的 HTML/RTF 样式，同时严格保护电子表格分列结构
+enum RichTextPasteboardHelper {
+    private static let webArchiveType = NSPasteboard.PasteboardType("com.apple.webarchive")
+    private static let richTextTypes: Set<NSPasteboard.PasteboardType> = [
+        .html,
+        .rtf,
+        .rtfd,
+        NSPasteboard.PasteboardType("com.apple.webarchive")
+    ]
+
+    static func hasStrippableRichFormatting(
+        types: [NSPasteboard.PasteboardType],
+        plainText: String
+    ) -> Bool {
+        let trimmed = plainText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        if types.contains(.tabularText) || types.contains(.fileURL) {
+            return false
+        }
+        if trimmed.contains("\t") && (trimmed.contains("\n") || trimmed.contains("\r")) {
+            return false
+        }
+        return types.contains { richTextTypes.contains($0) }
     }
 }

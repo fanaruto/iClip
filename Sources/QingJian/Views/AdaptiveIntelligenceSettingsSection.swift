@@ -196,6 +196,7 @@ struct AdaptiveIntelligenceSettingsSection: View {
     @State private var showAutoRulesDetail: Bool = false
 
     private let quickPresets: [String] = [
+        "复制富文本自动净化纯文本",
         "复制链接自动剥离追踪尾巴",
         "复制 PDF 自动愈合断行",
         "在微信里不要弹微星标提示",

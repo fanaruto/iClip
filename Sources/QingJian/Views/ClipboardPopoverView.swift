@@ -1941,7 +1941,7 @@ struct ClipboardPopoverView: View {
         return true
     }
 
-    func pasteSelected() {
+    func pasteSelected(plainTextOnly: Bool = false) {
         if let suggestionPayload = QuickSuggestionCommandBanner.extractPayload(from: nav.searchText) {
             guard !suggestionPayload.isEmpty else { return }
             let outcome = AdaptiveIntelligenceEngine.shared.adoptUserSuggestion(suggestionPayload, in: store)
@@ -1966,17 +1966,17 @@ struct ClipboardPopoverView: View {
             nav.showQuickLook = false
             switch chosen.payload {
             case .image:
-                store.copyAndOptionallyPaste(item, plainTextOnly: false, shouldAutoPaste: true, onBeforePaste: onDismiss)
+                store.copyAndOptionallyPaste(item, plainTextOnly: plainTextOnly, shouldAutoPaste: true, onBeforePaste: onDismiss)
             case .text(let text):
                 if idx == 0 && item.type != .image {
-                    store.copyAndOptionallyPaste(item, plainTextOnly: false, shouldAutoPaste: true, onBeforePaste: onDismiss)
+                    store.copyAndOptionallyPaste(item, plainTextOnly: plainTextOnly, shouldAutoPaste: true, onBeforePaste: onDismiss)
                 } else {
                     store.pasteCustomString(text, sourceItem: item, toast: chosen.toast, shouldAutoPaste: true, onBeforePaste: onDismiss)
                 }
             }
             return
         }
-        store.copyAndOptionallyPaste(item, plainTextOnly: false, shouldAutoPaste: true, onBeforePaste: onDismiss)
+        store.copyAndOptionallyPaste(item, plainTextOnly: plainTextOnly, shouldAutoPaste: true, onBeforePaste: onDismiss)
     }
 
     func stepQuickLookTab(delta: Int) {
@@ -4105,7 +4105,7 @@ struct ClipboardPopoverView: View {
         }
         store.copyAndOptionallyPaste(
             item,
-            plainTextOnly: false,
+            plainTextOnly: forceRawSecret,
             shouldAutoPaste: true,
             forceRawSecret: forceRawSecret,
             onBeforePaste: onDismiss

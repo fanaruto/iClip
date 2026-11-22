@@ -158,14 +158,20 @@ final class ActionSparkController {
         }
     }
 
-    func presentIfAppropriate(for item: ClipItem, reuseCount: Int, in store: ClipboardStore) {
+    func presentIfAppropriate(
+        for item: ClipItem,
+        reuseCount: Int,
+        hasRichFormatting: Bool = false,
+        in store: ClipboardStore
+    ) {
         guard !(isMainPanelVisibleProvider?() ?? false) else { return }
         if ProcessInfo.processInfo.arguments.contains("--demo") { return }
 
         guard let candidate = AdaptiveIntelligenceEngine.shared.evaluateSparkCandidate(
             for: item,
             reuseCount: reuseCount,
-            minimalMode: store.minimalModeEnabled
+            minimalMode: store.minimalModeEnabled,
+            hasRichFormatting: hasRichFormatting
         ) else {
             doubleCopyMachine.clearActiveOffer()
             return

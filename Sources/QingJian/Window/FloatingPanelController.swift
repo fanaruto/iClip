@@ -695,6 +695,8 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             }
             if flags.contains(.shift) {
                 rootView.pasteSecondaryActionForSelected()
+            } else if flags.contains(.option) {
+                rootView.pasteSelected(plainTextOnly: true)
             } else {
                 rootView.pasteSelected()
             }

@@ -1086,4 +1086,54 @@ final class CoreFeatureTests: XCTestCase {
         let textSpark = try XCTUnwrap(engine.evaluateSparkCandidate(for: textShot, reuseCount: 1, minimalMode: false))
         XCTAssertEqual(textSpark.actionID, "img-ocr")
     }
+
+    // MARK: - 28. 内建 Pure Paste：富文本脏样式无损嗅探、电子表格分列保护与免打扰应用豁免测试
+
+    @MainActor
+    func testRichTextFormattingDetectionSpreadsheetGuardAndAutoPurePaste() throws {
+        // 1. 识别网页 HTML / IDE RTF 富文本，但严格保护 Excel/Numbers (.tabularText) 与 TSV 二维表格
+        XCTAssertTrue(RichTextPasteboardHelper.hasStrippableRichFormatting(
+            types: [.string, .html],
+            plainText: "这是一段来自网页带大字号红底的文字"
+        ))
+        XCTAssertTrue(RichTextPasteboardHelper.hasStrippableRichFormatting(
+            types: [.string, .rtf],
+            plainText: "let status = 200"
+        ))
+        XCTAssertFalse(RichTextPasteboardHelper.hasStrippableRichFormatting(
+            types: [.string],
+            plainText: "干净纯文本"
+        ))
+        XCTAssertFalse(RichTextPasteboardHelper.hasStrippableRichFormatting(
+            types: [.string, .html, .tabularText],
+            plainText: "姓名\t金额\n张三\t1200"
+        ))
+        XCTAssertFalse(RichTextPasteboardHelper.hasStrippableRichFormatting(
+            types: [.string, .html],
+            plainText: "季度\t营收\t利润\nQ1\t500\t120"
+        ))
+
+        // 2. 微星标在普通富文本复制时提供「净化为纯文本」，连续使用 2 次后解锁自动契约晋升
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("iclip-purepaste-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let engine = AdaptiveIntelligenceEngine(customDirectoryURL: tempDir)
+
+        let styledNote = ClipItem(type: .text, text: "明天下午三点产品评审", contentHash: "text:styled", sourceAppName: "Google Chrome")
+        XCTAssertNil(engine.evaluateSparkCandidate(for: styledNote, reuseCount: 1, minimalMode: false, hasRichFormatting: false))
+
+        let firstSpark = try XCTUnwrap(engine.evaluateSparkCandidate(for: styledNote, reuseCount: 1, minimalMode: false, hasRichFormatting: true))
+        XCTAssertEqual(firstSpark.actionID, "strip-rich-style")
+        XCTAssertNil(firstSpark.promotableRule)
+
+        engine.recordActionUsed(actionID: "strip-rich-style", sourceApp: "Google Chrome")
+        engine.recordActionUsed(actionID: "strip-rich-style", sourceApp: "Google Chrome")
+        let promotedSpark = try XCTUnwrap(engine.evaluateSparkCandidate(for: styledNote, reuseCount: 2, minimalMode: false, hasRichFormatting: true))
+        XCTAssertEqual(promotedSpark.promotableRule, .stripRichTextFormatting)
+
+        // 3. 自然语言开启「自动纯文本」后生效，且对设为免打扰的来源应用（如飞书）自动豁免保留原富文本
+        _ = engine.adoptUserSuggestion("开启自动纯文本，在飞书里不要弹提示", in: .shared)
+        XCTAssertTrue(engine.enabledAutoRules.contains(.stripRichTextFormatting))
+        XCTAssertTrue(engine.shouldAutoStripRichFormatting(hasRichFormatting: true, sourceApp: "Google Chrome"))
+        XCTAssertFalse(engine.shouldAutoStripRichFormatting(hasRichFormatting: true, sourceApp: "飞书"))
+    }
 }
