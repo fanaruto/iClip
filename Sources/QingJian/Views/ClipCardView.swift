@@ -43,25 +43,13 @@ struct ClipCardView: View {
                 leadingThumbnail
 
                 VStack(alignment: .leading, spacing: 4) {
-                    HStack(alignment: .top, spacing: 6) {
-                        Text(minimalMode ? item.rawContentPreview : item.primaryTitle)
-                            .font(.system(size: 13.5, weight: .medium))
-                            .foregroundStyle(isSelected ? Color.white : Color.primary)
-                            .lineLimit(2)
-                            .multilineTextAlignment(.leading)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-
-                        if isHovered {
-                            hoverActions
-                                .transition(.opacity.combined(with: .scale(scale: 0.92)))
-                        } else if !minimalMode, let mRank = mergeRank {
-                            mergeBadge(rank: mRank)
-                        } else if !minimalMode, let rank = queueRank {
-                            queueBadge(rank: rank)
-                        } else if index < 9 {
-                            shortcutBadge
-                        }
-                    }
+                    Text(minimalMode ? item.rawContentPreview : item.primaryTitle)
+                        .font(.system(size: 13.5, weight: .medium))
+                        .foregroundStyle(isSelected ? Color.white : Color.primary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.trailing, 36)
 
                     HStack(spacing: 6) {
                         if item.isPinned {
@@ -99,6 +87,19 @@ struct ClipCardView: View {
                     }
                     .font(.system(size: 11, weight: .regular))
                     .foregroundStyle(isSelected ? Color.white.opacity(0.82) : Color.secondary)
+                }
+                .overlay(alignment: .topTrailing) {
+                    if isHovered {
+                        hoverActions
+                            .offset(y: -2)
+                            .transition(.opacity.combined(with: .scale(scale: 0.92)))
+                    } else if !minimalMode, let mRank = mergeRank {
+                        mergeBadge(rank: mRank)
+                    } else if !minimalMode, let rank = queueRank {
+                        queueBadge(rank: rank)
+                    } else if index < 9 {
+                        shortcutBadge
+                    }
                 }
             }
 
@@ -280,60 +281,44 @@ struct ClipCardView: View {
     }
 
     private var hoverActions: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: 4) {
             if !minimalMode {
-                Button(action: onToggleMerge) {
-                    Image(systemName: mergeRank != nil ? "checkmark.square.fill" : "square.stack")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(isSelected ? Color.white : (mergeRank != nil ? Color.green : Color.secondary))
-                        .frame(width: 24, height: 24)
-                        .background(
-                            Circle()
-                                .fill(isSelected ? Color.white.opacity(0.22) : Color.primary.opacity(0.07))
-                        )
-                }
-                .buttonStyle(.plain)
-                .help(mergeRank != nil ? "取消勾选合并" : "勾选加入合并粘贴（⌘单击 / ⌘M）")
+                HoverActionCircleButton(
+                    symbolName: mergeRank != nil ? "checkmark.square.fill" : "square.stack",
+                    size: 22,
+                    iconSize: 10,
+                    kind: .standard(activeColor: mergeRank != nil ? .green : nil),
+                    helpText: mergeRank != nil ? "取消勾选合并" : "勾选加入合并粘贴（⌘单击 / ⌘M）",
+                    action: onToggleMerge
+                )
 
-                Button(action: onToggleQueue) {
-                    Image(systemName: queueRank != nil ? "checkmark.circle.fill" : "plus.circle")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(isSelected ? Color.white : (queueRank != nil ? Color.accentColor : Color.secondary))
-                        .frame(width: 24, height: 24)
-                        .background(
-                            Circle()
-                                .fill(isSelected ? Color.white.opacity(0.22) : Color.primary.opacity(0.07))
-                        )
-                }
-                .buttonStyle(.plain)
-                .help(queueRank != nil ? "移出顺序粘贴队列" : "加入顺序粘贴队列（⌘K）")
+                HoverActionCircleButton(
+                    symbolName: queueRank != nil ? "checkmark.circle.fill" : "plus.circle",
+                    size: 22,
+                    iconSize: 10,
+                    kind: .standard(activeColor: queueRank != nil ? .accentColor : nil),
+                    helpText: queueRank != nil ? "移出顺序粘贴队列" : "加入顺序粘贴队列（⌘K）",
+                    action: onToggleQueue
+                )
             }
 
-            Button(action: onTogglePin) {
-                Image(systemName: item.isPinned ? "star.fill" : "star")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(isSelected ? Color.white : (item.isPinned ? Color.orange : Color.secondary))
-                    .frame(width: 24, height: 24)
-                    .background(
-                        Circle()
-                            .fill(isSelected ? Color.white.opacity(0.22) : Color.primary.opacity(0.07))
-                    )
-            }
-            .buttonStyle(.plain)
-            .help(item.isPinned ? "取消收藏" : "收藏")
+            HoverActionCircleButton(
+                symbolName: item.isPinned ? "star.fill" : "star",
+                size: 22,
+                iconSize: 10,
+                kind: .star(isPinned: item.isPinned),
+                helpText: item.isPinned ? "取消收藏" : "收藏",
+                action: onTogglePin
+            )
 
-            Button(action: onDelete) {
-                Image(systemName: "trash")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(isSelected ? Color.white : Color.red.opacity(0.85))
-                    .frame(width: 24, height: 24)
-                    .background(
-                        Circle()
-                            .fill(isSelected ? Color.white.opacity(0.22) : Color.red.opacity(0.1))
-                    )
-            }
-            .buttonStyle(.plain)
-            .help("删除此条记录")
+            HoverActionCircleButton(
+                symbolName: "trash.fill",
+                size: 22,
+                iconSize: 10,
+                kind: .delete,
+                helpText: "删除此条记录",
+                action: onDelete
+            )
         }
     }
 
@@ -542,21 +527,13 @@ struct ClipCardView: View {
                 leadingThumbnail
 
                 VStack(alignment: .leading, spacing: 4) {
-                    HStack(alignment: .top, spacing: 6) {
-                        Text(item.primaryTitle)
-                            .font(.system(size: 13.5, weight: .medium))
-                            .foregroundStyle(isSelected ? Color.white : Color.primary)
-                            .lineLimit(2)
-                            .multilineTextAlignment(.leading)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-
-                        if isHovered {
-                            hoverActions
-                                .transition(.opacity.combined(with: .scale(scale: 0.92)))
-                        } else if index < 9 {
-                            shortcutBadge
-                        }
-                    }
+                    Text(item.primaryTitle)
+                        .font(.system(size: 13.5, weight: .medium))
+                        .foregroundStyle(isSelected ? Color.white : Color.primary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.trailing, 34)
 
                     HStack(spacing: 6) {
                         if item.isPinned {
@@ -593,6 +570,15 @@ struct ClipCardView: View {
                     }
                     .font(.system(size: 11, weight: .regular))
                     .foregroundStyle(isSelected ? Color.white.opacity(0.82) : Color.secondary)
+                }
+                .overlay(alignment: .topTrailing) {
+                    if isHovered {
+                        hoverActions
+                            .offset(y: -2)
+                            .transition(.opacity.combined(with: .scale(scale: 0.92)))
+                    } else if index < 9 {
+                        shortcutBadge
+                    }
                 }
             }
 
@@ -773,32 +759,24 @@ struct ClipCardView: View {
     }
 
     private var hoverActions: some View {
-        HStack(spacing: 5) {
-            Button(action: onTogglePin) {
-                Image(systemName: item.isPinned ? "star.fill" : "star")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(isSelected ? Color.white : (item.isPinned ? Color.orange : Color.secondary))
-                    .frame(width: 24, height: 24)
-                    .background(
-                        Circle()
-                            .fill(isSelected ? Color.white.opacity(0.22) : Color.primary.opacity(0.07))
-                    )
-            }
-            .buttonStyle(.plain)
-            .help(item.isPinned ? "取消收藏" : "收藏")
+        HStack(spacing: 4) {
+            HoverActionCircleButton(
+                symbolName: item.isPinned ? "star.fill" : "star",
+                size: 22,
+                iconSize: 10,
+                kind: .star(isPinned: item.isPinned),
+                helpText: item.isPinned ? "取消收藏" : "收藏",
+                action: onTogglePin
+            )
 
-            Button(action: onDelete) {
-                Image(systemName: "trash")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(isSelected ? Color.white : Color.red.opacity(0.85))
-                    .frame(width: 24, height: 24)
-                    .background(
-                        Circle()
-                            .fill(isSelected ? Color.white.opacity(0.22) : Color.red.opacity(0.1))
-                    )
-            }
-            .buttonStyle(.plain)
-            .help("删除此条记录")
+            HoverActionCircleButton(
+                symbolName: "trash.fill",
+                size: 22,
+                iconSize: 10,
+                kind: .delete,
+                helpText: "删除此条记录",
+                action: onDelete
+            )
         }
     }
 
@@ -925,3 +903,117 @@ struct ClipCardView: View {
     }
 }
 #endif
+
+// MARK: - 统一高对比悬停操作圆钮（带语义微动效与弹性按压反馈）
+
+enum HoverActionKind {
+    case star(isPinned: Bool)
+    case delete
+    case standard(activeColor: Color?)
+}
+
+private struct HoverActionSpringButtonStyle: ButtonStyle {
+    let isHovered: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.88 : (isHovered ? 1.14 : 1.0))
+            .offset(y: isHovered && !configuration.isPressed ? -0.5 : 0)
+            .animation(.spring(response: 0.24, dampingFraction: 0.58), value: isHovered)
+            .animation(.spring(response: 0.16, dampingFraction: 0.68), value: configuration.isPressed)
+    }
+}
+
+struct HoverActionCircleButton: View {
+    let symbolName: String
+    let size: CGFloat
+    let iconSize: CGFloat
+    let kind: HoverActionKind
+    let helpText: String
+    let action: () -> Void
+
+    @State private var isHovered: Bool = false
+
+    private var foregroundColor: Color {
+        switch kind {
+        case .star(let isPinned):
+            if isPinned {
+                return Color(red: 1.0, green: 0.72, blue: 0.16)
+            }
+            return isHovered ? Color(red: 1.0, green: 0.86, blue: 0.42) : .white
+        case .delete, .standard:
+            return .white
+        }
+    }
+
+    private var backgroundColor: Color {
+        switch kind {
+        case .star(let isPinned):
+            if isHovered {
+                return Color.black.opacity(isPinned ? 0.78 : 0.72)
+            }
+            return Color.black.opacity(0.58)
+        case .delete:
+            return isHovered ? Color.red.opacity(0.96) : Color.red.opacity(0.82)
+        case .standard(let activeColor):
+            if let activeColor {
+                return activeColor.opacity(isHovered ? 0.98 : 0.88)
+            }
+            return Color.black.opacity(isHovered ? 0.74 : 0.58)
+        }
+    }
+
+    private var glowColor: Color {
+        guard isHovered else { return .clear }
+        switch kind {
+        case .star:
+            return Color.orange.opacity(0.45)
+        case .delete:
+            return Color.red.opacity(0.52)
+        case .standard(let activeColor):
+            return (activeColor ?? Color.white).opacity(0.32)
+        }
+    }
+
+    private var iconRotation: Angle {
+        guard isHovered else { return .zero }
+        switch kind {
+        case .star:
+            return .degrees(16)
+        case .delete:
+            return .degrees(-10)
+        case .standard:
+            return .zero
+        }
+    }
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbolName)
+                .font(.system(size: iconSize, weight: .semibold))
+                .foregroundStyle(foregroundColor)
+                .rotationEffect(iconRotation)
+                .scaleEffect(isHovered ? 1.08 : 1.0)
+                .symbolEffect(.bounce, value: symbolName)
+                .frame(width: size, height: size)
+                .background(
+                    Circle()
+                        .fill(backgroundColor)
+                        .overlay(
+                            Circle()
+                                .strokeBorder(
+                                    Color.white.opacity(isHovered ? 0.34 : 0.0),
+                                    lineWidth: 0.75
+                                )
+                        )
+                )
+                .shadow(color: glowColor, radius: isHovered ? 5 : 0, y: isHovered ? 1.5 : 0)
+        }
+        .buttonStyle(HoverActionSpringButtonStyle(isHovered: isHovered))
+        .help(helpText)
+        .animation(.spring(response: 0.24, dampingFraction: 0.58), value: isHovered)
+        .onHover { hovering in
+            isHovered = hovering
+        }
+    }
+}

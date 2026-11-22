@@ -120,38 +120,33 @@ struct ClipImageGridTile: View {
             if isHovered {
                 HStack(spacing: 4) {
                     if !ClipboardStore.shared.minimalModeEnabled {
-                        Button {
-                            onExtractOCR(true)
-                        } label: {
-                            Image(systemName: "text.viewfinder")
-                                .font(.system(size: 9.5, weight: .semibold))
-                                .foregroundStyle(Color.white)
-                                .frame(width: 21, height: 21)
-                                .background(Circle().fill(Color.accentColor.opacity(0.88)))
-                        }
-                        .buttonStyle(.plain)
-                        .help("提取图中文字并键入（⇧↵）")
+                        HoverActionCircleButton(
+                            symbolName: "text.viewfinder",
+                            size: 21,
+                            iconSize: 9.5,
+                            kind: .standard(activeColor: .accentColor),
+                            helpText: "提取图中文字并键入（⇧↵）",
+                            action: { onExtractOCR(true) }
+                        )
                     }
 
-                    Button(action: onTogglePin) {
-                        Image(systemName: item.isPinned ? "star.fill" : "star")
-                            .font(.system(size: 9.5, weight: .semibold))
-                            .foregroundStyle(item.isPinned ? Color.orange : Color.white)
-                            .frame(width: 21, height: 21)
-                            .background(Circle().fill(Color.black.opacity(0.58)))
-                    }
-                    .buttonStyle(.plain)
-                    .help(item.isPinned ? "取消收藏" : "收藏")
+                    HoverActionCircleButton(
+                        symbolName: item.isPinned ? "star.fill" : "star",
+                        size: 21,
+                        iconSize: 9.5,
+                        kind: .star(isPinned: item.isPinned),
+                        helpText: item.isPinned ? "取消收藏" : "收藏",
+                        action: onTogglePin
+                    )
 
-                    Button(action: onDelete) {
-                        Image(systemName: "trash.fill")
-                            .font(.system(size: 9.5, weight: .semibold))
-                            .foregroundStyle(Color.white)
-                            .frame(width: 21, height: 21)
-                            .background(Circle().fill(Color.red.opacity(0.82)))
-                    }
-                    .buttonStyle(.plain)
-                    .help("删除图片")
+                    HoverActionCircleButton(
+                        symbolName: "trash.fill",
+                        size: 21,
+                        iconSize: 9.5,
+                        kind: .delete,
+                        helpText: "删除图片",
+                        action: onDelete
+                    )
                 }
                 .padding(5)
                 .transition(.opacity.combined(with: .scale(scale: 0.88)))
@@ -537,25 +532,23 @@ struct ClipImageGridTile: View {
         .overlay(alignment: .topTrailing) {
             if isHovered {
                 HStack(spacing: 4) {
-                    Button(action: onTogglePin) {
-                        Image(systemName: item.isPinned ? "star.fill" : "star")
-                            .font(.system(size: 9.5, weight: .semibold))
-                            .foregroundStyle(item.isPinned ? Color.orange : Color.white)
-                            .frame(width: 21, height: 21)
-                            .background(Circle().fill(Color.black.opacity(0.58)))
-                    }
-                    .buttonStyle(.plain)
-                    .help(item.isPinned ? "取消收藏" : "收藏")
+                    HoverActionCircleButton(
+                        symbolName: item.isPinned ? "star.fill" : "star",
+                        size: 21,
+                        iconSize: 9.5,
+                        kind: .star(isPinned: item.isPinned),
+                        helpText: item.isPinned ? "取消收藏" : "收藏",
+                        action: onTogglePin
+                    )
 
-                    Button(action: onDelete) {
-                        Image(systemName: "trash.fill")
-                            .font(.system(size: 9.5, weight: .semibold))
-                            .foregroundStyle(Color.white)
-                            .frame(width: 21, height: 21)
-                            .background(Circle().fill(Color.red.opacity(0.82)))
-                    }
-                    .buttonStyle(.plain)
-                    .help("删除图片")
+                    HoverActionCircleButton(
+                        symbolName: "trash.fill",
+                        size: 21,
+                        iconSize: 9.5,
+                        kind: .delete,
+                        helpText: "删除图片",
+                        action: onDelete
+                    )
                 }
                 .padding(5)
                 .transition(.opacity.combined(with: .scale(scale: 0.88)))
