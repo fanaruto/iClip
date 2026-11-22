@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import Combine
 import ImageIO
 import CryptoKit
 import ApplicationServices
@@ -105,6 +106,10 @@ final class ClipboardStore: ObservableObject {
     /// 极简纯净模式（基础功能版）：开启后隐藏全部行业进阶栏与徽标，并静默停止后台 OCR/语义扫描
     @Published var minimalModeEnabled: Bool {
         didSet { UserDefaults.standard.set(minimalModeEnabled, forKey: "minimalModeEnabled") }
+    }
+    /// 窗口「始终在前（Always on Top）」：开启后悬浮面板固定置顶，切窗口或连续粘贴均不自动收起（⌘P）
+    @Published var alwaysOnTop: Bool {
+        didSet { UserDefaults.standard.set(alwaysOnTop, forKey: "alwaysOnTop") }
     }
 
     @Published var surfaceStyle: PanelSurfaceStyle {
@@ -215,6 +220,7 @@ final class ClipboardStore: ObservableObject {
     private var appearanceSaveWorkItem: DispatchWorkItem?
     private var cacheTrimWorkItem: DispatchWorkItem?
     private var pendingOTPExpirationTasks: [UUID: DispatchWorkItem] = [:]
+    private var adaptiveCancellable: AnyCancellable?
     private let diskQueue = DispatchQueue(label: "com.qingjian.clipboard.disk", qos: .utility)
 
     private let appSupportURL: URL
@@ -245,6 +251,7 @@ final class ClipboardStore: ObservableObject {
         }
         self.hasConfirmedRoleEdition = UserDefaults.standard.bool(forKey: "hasConfirmedRoleEdition")
         self.minimalModeEnabled = UserDefaults.standard.bool(forKey: "minimalModeEnabled")
+        self.alwaysOnTop = UserDefaults.standard.bool(forKey: "alwaysOnTop")
 
         self.autoPasteEnabled = UserDefaults.standard.object(forKey: "autoPasteEnabled") as? Bool ?? true
         self.soundEffectsEnabled = UserDefaults.standard.object(forKey: TactileFeedbackEngine.soundEnabledDefaultsKey) as? Bool ?? true
@@ -306,6 +313,18 @@ final class ClipboardStore: ObservableObject {
         previewCache.totalCostLimit = 36 * 1024 * 1024
         fileIconCache.countLimit = 128
 
+        adaptiveCancellable = AdaptiveIntelligenceEngine.shared.$revision
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                #if !ICLIP_EDITION_FLOW
+                self.semanticCache.removeAllObjects()
+                #else
+                self.financeCache.removeAllObjects()
+                #endif
+            }
+
         NotificationCenter.default.addObserver(
             forName: NSApplication.didBecomeActiveNotification,
             object: nil,
@@ -353,8 +372,61 @@ final class ClipboardStore: ObservableObject {
 
     func toggleMinimalMode() {
         minimalModeEnabled.toggle()
+        if minimalModeEnabled {
+            ActionSparkController.shared.dismissImmediately()
+        }
         TactileFeedbackEngine.shared.perform(.tabSwitch)
         showToast(minimalModeEnabled ? "已开启极简纯净模式（基础功能版）" : "已恢复「\(AppRoleEdition.installed.title)」进阶功能")
+    }
+
+    /// 切换窗口「始终在前（Always on Top）」（⌘P）
+    func toggleAlwaysOnTop() {
+        alwaysOnTop.toggle()
+        TactileFeedbackEngine.shared.perform(alwaysOnTop ? .favoriteOn : .favoriteOff)
+        showToast(alwaysOnTop ? "已钉住窗口：始终在前（⌘P 取消）" : "已取消窗口始终在前")
+    }
+
+    /// 执行来自光标角「灵动微星标（Action Spark）」的一键动作（转换结果写入剪贴板，供用户随时 ⌘V 粘贴）
+    func executeSparkCandidate(_ candidate: AdaptiveSparkCandidate) {
+        switch candidate.payload {
+        case .replaceClipboardText(let text, let htmlTable, _):
+            pasteboard.clearContents()
+            pasteboard.setString(text, forType: .string)
+            if let htmlTable {
+                pasteboard.setString(text, forType: .tabularText)
+                pasteboard.setString(htmlTable, forType: .html)
+            }
+            ignoreNextChangeCount = pasteboard.changeCount
+            lastChangeCount = pasteboard.changeCount
+            TactileFeedbackEngine.shared.perform(.magicTransform)
+
+        case .compressImage(let itemID):
+            if let target = items.first(where: { $0.id == itemID }) {
+                TactileFeedbackEngine.shared.perform(.magicTransform)
+                pasteCompressedJPEG(for: target, shouldAutoPaste: false, onBeforePaste: nil)
+            }
+
+        case .mockupImage(let itemID):
+            if let target = items.first(where: { $0.id == itemID }) {
+                TactileFeedbackEngine.shared.perform(.magicTransform)
+                pasteAppleMockupImage(for: target, shouldAutoPaste: false, onBeforePaste: nil)
+            }
+
+        case .extractImageOCR(let itemID):
+            #if ICLIP_EDITION_FLOW
+            if let target = items.first(where: { $0.id == itemID }) {
+                TactileFeedbackEngine.shared.perform(.magicTransform)
+                pasteExtractedOCRText(for: target, shouldAutoPaste: false, onBeforePaste: nil)
+            }
+            #else
+            _ = itemID
+            #endif
+
+        case .pinFrequentItem(let itemID):
+            if let target = items.first(where: { $0.id == itemID }), !target.isPinned {
+                togglePin(target)
+            }
+        }
     }
 
     // MARK: - 角色选择与差异化 OTA 通道联动
@@ -530,13 +602,18 @@ final class ClipboardStore: ObservableObject {
            ]) as? [URL], !fileURLs.isEmpty {
             let paths = fileURLs.map { $0.path }
             let hash = Self.sha256(paths.joined(separator: "\n"))
+            let contentHash = "file:\(hash)"
             let item = ClipItem(
                 type: .file,
                 filePaths: paths,
-                contentHash: "file:\(hash)",
+                contentHash: contentHash,
                 sourceAppName: sourceApp
             )
             insertOrPromote(item)
+            let reuseCount = AdaptiveIntelligenceEngine.shared.recordContentActivity(contentHash: contentHash)
+            if let latest = items.first(where: { $0.contentHash == contentHash }) {
+                ActionSparkController.shared.presentIfAppropriate(for: latest, reuseCount: reuseCount, in: self)
+            }
             return
         }
 
@@ -575,6 +652,8 @@ final class ClipboardStore: ObservableObject {
                             self.items.insert(existing, at: 0)
                             self.items = self.sortItems(self.items)
                             self.saveHistory()
+                            let reuseCount = AdaptiveIntelligenceEngine.shared.recordContentActivity(contentHash: contentHash)
+                            ActionSparkController.shared.presentIfAppropriate(for: existing, reuseCount: reuseCount, in: self)
                             return true
                         }
                         return false
@@ -605,6 +684,14 @@ final class ClipboardStore: ObservableObject {
                             sourceAppName: sourceApp
                         )
                         self.insertOrPromote(item)
+                        let reuseCount = AdaptiveIntelligenceEngine.shared.recordContentActivity(contentHash: contentHash)
+                        if !self.minimalModeEnabled,
+                           AdaptiveIntelligenceEngine.shared.enabledAutoRules.contains(.compressLargeImage),
+                           pngData.count > 1_500_000 {
+                            self.pasteCompressedJPEG(for: item, shouldAutoPaste: false, onBeforePaste: nil)
+                        } else {
+                            ActionSparkController.shared.presentIfAppropriate(for: item, reuseCount: reuseCount, in: self)
+                        }
                         #if ICLIP_EDITION_FLOW
                         if !self.minimalModeEnabled {
                             self.scheduleBackgroundOCR(forItemID: item.id, fileURL: fileURL)
@@ -623,24 +710,44 @@ final class ClipboardStore: ObservableObject {
 
             var text = rawText
             let isLink = isValidWebURL(trimmed)
+            var didAutoApplyRule = false
+
+            if !minimalModeEnabled,
+               let autoApplied = AdaptiveIntelligenceEngine.shared.applyLearnedAutoTextRuleIfEnabled(rawText: text, isLink: isLink) {
+                text = autoApplied.text
+                pasteboard.clearContents()
+                pasteboard.setString(text, forType: .string)
+                ignoreNextChangeCount = pasteboard.changeCount
+                lastChangeCount = pasteboard.changeCount
+                didAutoApplyRule = true
+                showToast(autoApplied.rule.shortToast)
+            }
             #if !ICLIP_EDITION_FLOW
-            if !minimalModeEnabled && isLink && autoCleanTrackingURL, let cleaned = SemanticEngine.cleanTrackingURL(trimmed) {
+            if !didAutoApplyRule && !minimalModeEnabled && isLink && autoCleanTrackingURL,
+               let cleaned = SemanticEngine.cleanTrackingURL(trimmed) {
                 text = cleaned
                 pasteboard.clearContents()
                 pasteboard.setString(cleaned, forType: .string)
                 ignoreNextChangeCount = pasteboard.changeCount
                 lastChangeCount = pasteboard.changeCount
+                didAutoApplyRule = true
             }
             #endif
 
+            let finalIsLink = isValidWebURL(text.trimmingCharacters(in: .whitespacesAndNewlines))
             let hash = Self.sha256(text)
+            let contentHash = "\(finalIsLink ? "link" : "text"):\(hash)"
             let item = ClipItem(
-                type: isLink ? .link : .text,
+                type: finalIsLink ? .link : .text,
                 text: text,
-                contentHash: "\(isLink ? "link" : "text"):\(hash)",
+                contentHash: contentHash,
                 sourceAppName: sourceApp
             )
             insertOrPromote(item)
+            let reuseCount = AdaptiveIntelligenceEngine.shared.recordContentActivity(contentHash: contentHash)
+            if !didAutoApplyRule, let latest = items.first(where: { $0.contentHash == contentHash }) {
+                ActionSparkController.shared.presentIfAppropriate(for: latest, reuseCount: reuseCount, in: self)
+            }
         }
     }
 
@@ -1205,6 +1312,7 @@ final class ClipboardStore: ObservableObject {
         #endif
 
         writeToPasteboard(item, plainTextOnly: plainTextOnly)
+        AdaptiveIntelligenceEngine.shared.recordContentActivity(contentHash: item.contentHash)
         TactileFeedbackEngine.shared.perform(.pasteCommit)
 
         if let idx = items.firstIndex(where: { $0.id == item.id }) {
@@ -1413,13 +1521,23 @@ final class ClipboardStore: ObservableObject {
     #if !ICLIP_EDITION_FLOW
     func semanticSnapshot(for item: ClipItem) -> SemanticSnapshot {
         guard !minimalModeEnabled, (item.type == .text || item.type == .link) else { return .empty }
-        let key = item.contentHash as NSString
-        if let cached = semanticCache.object(forKey: key) {
+        let cacheKey = "\(item.contentHash)|\(item.sourceAppName ?? "")" as NSString
+        if let cached = semanticCache.object(forKey: cacheKey) {
             return cached.snapshot
         }
         let analyzed = SemanticEngine.analyze(item)
-        semanticCache.setObject(SemanticSnapshotBox(analyzed), forKey: key)
-        return analyzed
+        let rankedActions = AdaptiveIntelligenceEngine.shared.rankActions(
+            analyzed.actions,
+            idOf: \.id,
+            sourceApp: item.sourceAppName
+        )
+        let personalized = SemanticSnapshot(
+            primaryKind: analyzed.primaryKind,
+            parsedColorRGBA: analyzed.parsedColorRGBA,
+            actions: rankedActions
+        )
+        semanticCache.setObject(SemanticSnapshotBox(personalized), forKey: cacheKey)
+        return personalized
     }
 
     func applyTransformAction(
@@ -1428,6 +1546,10 @@ final class ClipboardStore: ObservableObject {
         shouldAutoPaste: Bool = true,
         onBeforePaste: (() -> Void)? = nil
     ) {
+        AdaptiveIntelligenceEngine.shared.recordActionUsed(
+            actionID: action.id,
+            sourceApp: item.sourceAppName
+        )
         let htmlPayload = (action.id == "tbl-md-to-excel") ? TableBridgeEngine.toHTMLTable(fromTSV: action.resultText) : nil
         pasteCustomString(
             action.resultText,
@@ -1513,8 +1635,8 @@ final class ClipboardStore: ObservableObject {
     #if ICLIP_EDITION_FLOW
     func financeActions(for item: ClipItem) -> [FinanceQuickAction] {
         guard !minimalModeEnabled, item.type == .text, let raw = item.text else { return [] }
-        let key = item.contentHash as NSString
-        if let cached = financeCache.object(forKey: key) {
+        let cacheKey = "\(item.contentHash)|\(item.sourceAppName ?? "")" as NSString
+        if let cached = financeCache.object(forKey: cacheKey) {
             return cached.actions
         }
         var analyzed = MeetingAndEphemeralEngine.analyze(raw)
@@ -1530,8 +1652,13 @@ final class ClipboardStore: ObservableObject {
         if analyzed.isEmpty {
             analyzed = DocumentTypographyEngine.analyze(raw)
         }
-        financeCache.setObject(FinanceActionsBox(analyzed), forKey: key)
-        return analyzed
+        let ranked = AdaptiveIntelligenceEngine.shared.rankActions(
+            analyzed,
+            idOf: \.id,
+            sourceApp: item.sourceAppName
+        )
+        financeCache.setObject(FinanceActionsBox(ranked), forKey: cacheKey)
+        return ranked
     }
 
     func applyFinanceAction(
@@ -1540,6 +1667,10 @@ final class ClipboardStore: ObservableObject {
         shouldAutoPaste: Bool = true,
         onBeforePaste: (() -> Void)? = nil
     ) {
+        AdaptiveIntelligenceEngine.shared.recordActionUsed(
+            actionID: action.id,
+            sourceApp: item.sourceAppName
+        )
         pasteboard.clearContents()
         pasteboard.setString(action.resultText, forType: .string)
         if action.id == "tbl-md-to-excel", let html = TableBridgeEngine.toHTMLTable(fromTSV: action.resultText) {
@@ -1803,6 +1934,9 @@ final class ClipboardStore: ObservableObject {
         shouldAutoPaste: Bool = true,
         onBeforePaste: (() -> Void)? = nil
     ) {
+        if shouldAutoPaste {
+            AdaptiveIntelligenceEngine.shared.recordActionUsed(actionID: "img-ocr", categoryKey: "image", sourceApp: item.sourceAppName)
+        }
         if let existingOCR = item.ocrText?.trimmingCharacters(in: .whitespacesAndNewlines), !existingOCR.isEmpty {
             commitPlainStringPaste(existingOCR, shouldAutoPaste: shouldAutoPaste, onBeforePaste: onBeforePaste)
             return
@@ -1855,6 +1989,9 @@ final class ClipboardStore: ObservableObject {
         shouldAutoPaste: Bool = true,
         onBeforePaste: (() -> Void)? = nil
     ) {
+        if shouldAutoPaste {
+            AdaptiveIntelligenceEngine.shared.recordActionUsed(actionID: "img-compress", categoryKey: "image", sourceApp: item.sourceAppName)
+        }
         guard let url = imageURL(for: item),
               let origSize = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) else {
             showToast("未找到原始截图文件")
@@ -1898,6 +2035,9 @@ final class ClipboardStore: ObservableObject {
         shouldAutoPaste: Bool = true,
         onBeforePaste: (() -> Void)? = nil
     ) {
+        if shouldAutoPaste {
+            AdaptiveIntelligenceEngine.shared.recordActionUsed(actionID: "img-mockup", categoryKey: "image", sourceApp: item.sourceAppName)
+        }
         guard let url = imageURL(for: item) else {
             showToast("未找到原始截图文件")
             return

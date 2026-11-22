@@ -142,6 +142,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(switchRoleItem)
 
         let store = ClipboardStore.shared
+        let alwaysOnTopItem = NSMenuItem(
+            title: "窗口始终在前",
+            action: #selector(menuToggleAlwaysOnTop),
+            keyEquivalent: "p"
+        )
+        alwaysOnTopItem.state = store.alwaysOnTop ? .on : .off
+        alwaysOnTopItem.target = self
+        menu.addItem(alwaysOnTopItem)
+
         let minimalItem = NSMenuItem(
             title: "极简纯净模式（基础功能版）",
             action: #selector(menuToggleMinimalMode),
@@ -181,6 +190,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         showFromStatusItem()
         panelController.nav.showSettings = true
         UpdateManager.shared.checkForUpdates(targetEdition: ClipboardStore.shared.targetRoleEdition, silent: false)
+    }
+
+    @objc private func menuToggleAlwaysOnTop() {
+        ClipboardStore.shared.toggleAlwaysOnTop()
     }
 
     @objc private func menuToggleMinimalMode() {

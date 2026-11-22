@@ -36,6 +36,36 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         super.init()
         setupPanel()
         observeSurfaceStyle()
+        observeExternalActiveApp()
+        ActionSparkController.shared.isMainPanelVisibleProvider = { [weak self] in
+            self?.isVisible ?? false
+        }
+    }
+
+    private func observeExternalActiveApp() {
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            let activated = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            Task { @MainActor [weak self] in
+                guard let self,
+                      let app = activated,
+                      app.bundleIdentifier != Bundle.main.bundleIdentifier else {
+                    return
+                }
+                self.previousApp = app
+            }
+        }
+    }
+
+    private func handleDismissForPaste() {
+        if store.alwaysOnTop {
+            previousApp?.activate()
+        } else {
+            hide(restoreFocus: true)
+        }
     }
 
     private func setupPanel() {
@@ -48,7 +78,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             defer: false
         )
         p.isFloatingPanel = true
-        p.level = .floating
+        p.level = store.alwaysOnTop ? .statusBar : .floating
         p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
         p.isOpaque = false
         p.backgroundColor = .clear
@@ -64,7 +94,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             store: store,
             nav: nav,
             onDismiss: { [weak self] in
-                self?.hide(restoreFocus: true)
+                self?.handleDismissForPaste()
             },
             onQuit: {
                 NSApp.terminate(nil)
@@ -83,7 +113,8 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
 
         self.panel = p
         store.onAfterOpenExternalURL = { [weak self] in
-            self?.hide(restoreFocus: false)
+            guard let self, !self.store.alwaysOnTop else { return }
+            self.hide(restoreFocus: false)
         }
         surfaceHost.onDragTargetedChanged = { [weak self] targeted in
             guard let self else { return }
@@ -169,6 +200,14 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
                 self?.updateLiquidGlassInPlace(appearance: appearance, maskOpacity: opacity)
             }
             .store(in: &cancellables)
+
+        store.$alwaysOnTop
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] pinned in
+                self?.panel?.level = pinned ? .statusBar : .floating
+            }
+            .store(in: &cancellables)
     }
 
     /// 按苹果官方 Liquid Glass 分层规范挂载原生材质根容器（底层柔焦隔断 + 顶层 NSGlassEffectView 光学壳体）
@@ -202,6 +241,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
 
     /// 弹出面板（鼠标旁直觉位置 + 原生窗口级轻柔滑入 + 内部卡片错峰浮现）
     func show(anchorRect: NSRect? = nil) {
+        ActionSparkController.shared.dismissImmediately()
         hideWorkItem?.cancel()
         hideWorkItem = nil
 
@@ -313,7 +353,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     // MARK: - 失焦自动隐藏
 
     func windowDidResignKey(_ notification: Notification) {
-        if nav.suppressAutoHide || nav.isRecordingHotKey || nav.isRecordingQueueHotKey {
+        if store.alwaysOnTop || nav.suppressAutoHide || nav.isRecordingHotKey || nav.isRecordingQueueHotKey {
             return
         }
         hide(restoreFocus: false)
@@ -419,6 +459,12 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         // ⌘E (keyCode 14)：一键切换极简纯净模式（基础功能版）
         if flags == .command, event.keyCode == 14 {
             store.toggleMinimalMode()
+            return nil
+        }
+
+        // ⌘P (keyCode 35)：一键切换窗口「始终在前（Always on Top）」
+        if flags == .command, event.keyCode == 35 {
+            store.toggleAlwaysOnTop()
             return nil
         }
 
@@ -532,6 +578,36 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         super.init()
         setupPanel()
         observeSurfaceStyle()
+        observeExternalActiveApp()
+        ActionSparkController.shared.isMainPanelVisibleProvider = { [weak self] in
+            self?.isVisible ?? false
+        }
+    }
+
+    private func observeExternalActiveApp() {
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            let activated = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            Task { @MainActor [weak self] in
+                guard let self,
+                      let app = activated,
+                      app.bundleIdentifier != Bundle.main.bundleIdentifier else {
+                    return
+                }
+                self.previousApp = app
+            }
+        }
+    }
+
+    private func handleDismissForPaste() {
+        if store.alwaysOnTop {
+            previousApp?.activate()
+        } else {
+            hide(restoreFocus: true)
+        }
     }
 
     private func setupPanel() {
@@ -544,7 +620,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             defer: false
         )
         p.isFloatingPanel = true
-        p.level = .floating
+        p.level = store.alwaysOnTop ? .statusBar : .floating
         p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
         p.isOpaque = false
         p.backgroundColor = .clear
@@ -560,7 +636,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             store: store,
             nav: nav,
             onDismiss: { [weak self] in
-                self?.hide(restoreFocus: true)
+                self?.handleDismissForPaste()
             },
             onQuit: {
                 NSApp.terminate(nil)
@@ -579,7 +655,8 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
 
         self.panel = p
         store.onAfterOpenExternalURL = { [weak self] in
-            self?.hide(restoreFocus: false)
+            guard let self, !self.store.alwaysOnTop else { return }
+            self.hide(restoreFocus: false)
         }
         surfaceHost.onDragTargetedChanged = { [weak self] targeted in
             guard let self else { return }
@@ -665,6 +742,14 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
                 self?.updateLiquidGlassInPlace(appearance: appearance, maskOpacity: opacity)
             }
             .store(in: &cancellables)
+
+        store.$alwaysOnTop
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] pinned in
+                self?.panel?.level = pinned ? .statusBar : .floating
+            }
+            .store(in: &cancellables)
     }
 
     /// 按苹果官方 Liquid Glass 分层规范挂载原生材质根容器（底层柔焦隔断 + 顶层 NSGlassEffectView 光学壳体）
@@ -698,6 +783,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
 
     /// 弹出面板（鼠标旁直觉位置 + 原生窗口级轻柔滑入 + 内部卡片错峰浮现）
     func show(anchorRect: NSRect? = nil) {
+        ActionSparkController.shared.dismissImmediately()
         hideWorkItem?.cancel()
         hideWorkItem = nil
 
@@ -809,7 +895,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     // MARK: - 失焦自动隐藏
 
     func windowDidResignKey(_ notification: Notification) {
-        if nav.suppressAutoHide || nav.isRecordingHotKey {
+        if store.alwaysOnTop || nav.suppressAutoHide || nav.isRecordingHotKey {
             return
         }
         hide(restoreFocus: false)
@@ -919,6 +1005,12 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         // ⌘E (keyCode 14)：一键切换极简纯净模式（基础功能版）
         if flags == .command, event.keyCode == 14 {
             store.toggleMinimalMode()
+            return nil
+        }
+
+        // ⌘P (keyCode 35)：一键切换窗口「始终在前（Always on Top）」
+        if flags == .command, event.keyCode == 35 {
+            store.toggleAlwaysOnTop()
             return nil
         }
 

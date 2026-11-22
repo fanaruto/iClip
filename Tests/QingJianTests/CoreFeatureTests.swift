@@ -571,4 +571,85 @@ final class CoreFeatureTests: XCTestCase {
         ctrl.dismiss()
         XCTAssertFalse(ctrl.isActive)
     }
+
+    // MARK: - 16. 自适应心智引擎：上下文习惯排序、晋升契约、忽略退避与高频复用记忆测试
+
+    @MainActor
+    func testAdaptiveIntelligenceLearningRankingAndAutoPromotion() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("iclip-adaptive-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let engine = AdaptiveIntelligenceEngine(customDirectoryURL: tempDir)
+
+        // 1. 模拟在 Cursor 中用户连续 2 次选择「压缩单行 JSON」，验证该来源应用下自动置顶且解锁「设为自动」契约检查
+        let actions = ["json-pretty", "json-minify"]
+        XCTAssertEqual(engine.rankActions(actions, idOf: { $0 }, sourceApp: "Cursor"), ["json-pretty", "json-minify"])
+
+        engine.recordActionUsed(actionID: "json-minify", sourceApp: "Cursor")
+        engine.recordActionUsed(actionID: "json-minify", sourceApp: "Cursor")
+        XCTAssertEqual(engine.rankActions(actions, idOf: { $0 }, sourceApp: "Cursor"), ["json-minify", "json-pretty"])
+        XCTAssertTrue(engine.isHabitPreferred(actionID: "json-minify", sourceApp: "Cursor"))
+
+        // 2. 验证连续采纳 clean-url 后在微星标候选中点亮「设为自动（promotableRule）」
+        engine.recordActionUsed(actionID: "clean-url", sourceApp: "Safari")
+        engine.recordActionUsed(actionID: "clean-url", sourceApp: "Safari")
+        let dirtyLink = ClipItem(
+            type: .link,
+            text: "https://webfooo.com/p?id=1&utm_source=x&utm_medium=social",
+            contentHash: "link:dirty-test",
+            sourceAppName: "Safari"
+        )
+        let spark = try XCTUnwrap(engine.evaluateSparkCandidate(for: dirtyLink, reuseCount: 1, minimalMode: false))
+        XCTAssertEqual(spark.actionID, "clean-url")
+        XCTAssertEqual(spark.promotableRule, .cleanTrackingURL)
+
+        // 3. 验证用户连续点击 2 次 × 显式关闭某类推荐后自动习得退避静默
+        engine.recordSparkExplicitDismiss(actionID: "clean-url", categoryKey: "url_tracking", sourceApp: "Safari")
+        engine.recordSparkExplicitDismiss(actionID: "clean-url", categoryKey: "url_tracking", sourceApp: "Safari")
+        XCTAssertNil(engine.evaluateSparkCandidate(for: dirtyLink, reuseCount: 1, minimalMode: false))
+
+        // 4. 验证未收藏普通条目复用达到 3 次时触发「一键收藏」高粘性推荐
+        let plainNote = ClipItem(type: .text, text: "公司统一开票抬头：上海怀道科技有限公司", contentHash: "text:company-title")
+        _ = engine.recordContentActivity(contentHash: plainNote.contentHash)
+        _ = engine.recordContentActivity(contentHash: plainNote.contentHash)
+        let thirdCount = engine.recordContentActivity(contentHash: plainNote.contentHash)
+        XCTAssertEqual(thirdCount, 3)
+        let pinSpark = try XCTUnwrap(engine.evaluateSparkCandidate(for: plainNote, reuseCount: thirdCount, minimalMode: false))
+        XCTAssertEqual(pinSpark.actionID, "habit-pin-frequent")
+    }
+
+    // MARK: - 17. 自然语言建议即时采纳与窗口始终在前状态测试
+
+    @MainActor
+    func testUserSuggestionNaturalLanguageAdoptionAndAlwaysOnTop() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("iclip-suggest-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let engine = AdaptiveIntelligenceEngine(customDirectoryURL: tempDir)
+        let store = ClipboardStore.shared
+        let prevAlwaysOnTop = store.alwaysOnTop
+        defer { store.alwaysOnTop = prevAlwaysOnTop }
+
+        // 1. 自然语言开启「始终在前」与「微信免打扰」
+        let r1 = engine.adoptUserSuggestion("开启窗口始终在前，并且在微信里不要弹提示", in: store)
+        XCTAssertTrue(r1.adoptedImmediately)
+        XCTAssertTrue(store.alwaysOnTop)
+        XCTAssertTrue(engine.isSourceAppMuted("微信"))
+
+        // 2. 自然语言开启「复制 PDF 自动愈合断行」并验证自动契约即时净化生效
+        let r2 = engine.adoptUserSuggestion("以后复制 PDF 断行自动愈合段落", in: store)
+        XCTAssertTrue(r2.adoptedImmediately)
+        XCTAssertTrue(engine.enabledAutoRules.contains(.healPDFLineBreaks))
+
+        let brokenPDF = "Artificial intelligence is transforming modern soft-\nware engineering workflows across every industry."
+        let healed = try XCTUnwrap(engine.applyLearnedAutoTextRuleIfEnabled(rawText: brokenPDF, isLink: false))
+        XCTAssertEqual(healed.rule, .healPDFLineBreaks)
+        XCTAssertTrue(healed.text.contains("software engineering"))
+
+        // 3. 开放式新需求自动沉淀至自省进化队列
+        let r3 = engine.adoptUserSuggestion("希望后续增加按颜色色相筛选历史色值的功能", in: store)
+        XCTAssertFalse(r3.adoptedImmediately)
+        XCTAssertEqual(r3.record.status, .queuedForEvolution)
+        XCTAssertEqual(engine.suggestions.count, 3)
+    }
 }

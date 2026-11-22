@@ -56,6 +56,7 @@ final class PanelNavigationModel: ObservableObject {
     }
 
     private func rebuildCache(items: [ClipItem], tab: ClipFilterTab, pinCat: PinCategory?, query: String) {
+        let effectiveQuery = (QuickSuggestionCommandBanner.extractPayload(from: query) != nil) ? "" : query
         let filtered = items.filter { item in
             let tabMatches: Bool
             switch tab {
@@ -71,7 +72,7 @@ final class PanelNavigationModel: ObservableObject {
             case .image: tabMatches = item.type == .image
             case .file: tabMatches = item.type == .file
             }
-            return tabMatches && item.matches(query: query)
+            return tabMatches && item.matches(query: effectiveQuery)
         }
 
         var rows: [ClipDisplayRow] = []
@@ -179,6 +180,17 @@ struct ClipboardPopoverView: View {
                     filterBar
                         .padding(.horizontal, 14)
                         .padding(.bottom, 8)
+
+                    if QuickSuggestionCommandBanner.extractPayload(from: nav.searchText) != nil {
+                        QuickSuggestionCommandBanner(rawQuery: nav.searchText) { payload in
+                            let outcome = AdaptiveIntelligenceEngine.shared.adoptUserSuggestion(payload, in: store)
+                            nav.searchText = ""
+                            store.showToast(outcome.message)
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.bottom, 8)
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                    }
 
                     if !store.minimalModeEnabled && nav.selectedTab == .pinned {
                         pinCategoryBar
@@ -437,6 +449,9 @@ struct ClipboardPopoverView: View {
                 .accessibilityLabel(store.isQueueModeActive ? "关闭顺序粘贴队列采集" : "开启顺序粘贴队列采集")
                 .help(store.isQueueModeActive ? "关闭顺序队列采集" : "开启顺序粘贴队列（解决多字段来回切窗填表）")
                 }
+
+                // 窗口始终在前一键固定圆钮（⌘P）
+                AlwaysOnTopPinButton(store: store, glassPalette: glassPalette)
 
                 // 极简纯净模式（基础功能版）一键切换圆钮（⌘E）
                 Button {
@@ -1069,6 +1084,13 @@ struct ClipboardPopoverView: View {
                     }
                 }
 
+                // 自适应心智学习与自然语言建议采纳中心
+                if !store.minimalModeEnabled {
+                    settingsGroup(title: "自适应心智与建议采纳") {
+                        AdaptiveIntelligenceSettingsSection(store: store)
+                    }
+                }
+
                 // 外观材质分组（苹果官方液态玻璃 / 毛玻璃，支持官方透明/着色档位与蒙版浓度无级调节）
                 settingsGroup(title: "外观与边缘材质") {
                     HStack {
@@ -1139,8 +1161,24 @@ struct ClipboardPopoverView: View {
                     }
                 }
 
-                // 通用与快捷键分组（开机自启 + 自定义全局快捷键）
+                // 通用与快捷键分组（始终在前 + 开机自启 + 自定义全局快捷键）
                 settingsGroup(title: "通用与快捷键") {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("窗口始终在前（⌘P）")
+                                .font(.system(size: 13.5, weight: .medium))
+                            Text("固定面板置顶，切窗口与连续粘贴时不自动收起")
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Toggle("", isOn: $store.alwaysOnTop)
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+                    }
+
+                    Divider().opacity(0.35)
+
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("开机自动启动")
@@ -1774,6 +1812,13 @@ struct ClipboardPopoverView: View {
     }
 
     func pasteSelected() {
+        if let suggestionPayload = QuickSuggestionCommandBanner.extractPayload(from: nav.searchText) {
+            guard !suggestionPayload.isEmpty else { return }
+            let outcome = AdaptiveIntelligenceEngine.shared.adoptUserSuggestion(suggestionPayload, in: store)
+            nav.searchText = ""
+            store.showToast(outcome.message)
+            return
+        }
         guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return }
         let item = filteredItems[nav.selectedIndex]
         store.copyAndOptionallyPaste(item, plainTextOnly: false, shouldAutoPaste: true, onBeforePaste: onDismiss)
@@ -2011,7 +2056,9 @@ final class PanelNavigationModel: ObservableObject {
 
     private func rebuildCache(items: [ClipItem], tab: ClipFilterTab, query: String) {
         // 解析可选的 @语义 速筛前缀（例如 "@json user" 或 "@secret"）
-        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedQuery = (QuickSuggestionCommandBanner.extractPayload(from: query) != nil)
+            ? ""
+            : query.trimmingCharacters(in: .whitespacesAndNewlines)
         var requiredSemantic: SemanticKind? = nil
         var textQuery = trimmedQuery
         if trimmedQuery.hasPrefix("@") {
@@ -2146,7 +2193,16 @@ struct ClipboardPopoverView: View {
                         .padding(.horizontal, 14)
                         .padding(.bottom, nav.searchText.trimmingCharacters(in: .whitespaces).hasPrefix("@") ? 6 : 10)
 
-                    if !store.minimalModeEnabled && nav.searchText.trimmingCharacters(in: .whitespaces).hasPrefix("@") {
+                    if QuickSuggestionCommandBanner.extractPayload(from: nav.searchText) != nil {
+                        QuickSuggestionCommandBanner(rawQuery: nav.searchText) { payload in
+                            let outcome = AdaptiveIntelligenceEngine.shared.adoptUserSuggestion(payload, in: store)
+                            nav.searchText = ""
+                            store.showToast(outcome.message)
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.bottom, 8)
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                    } else if !store.minimalModeEnabled && nav.searchText.trimmingCharacters(in: .whitespaces).hasPrefix("@") {
                         semanticTokenHintBar
                             .padding(.horizontal, 14)
                             .padding(.bottom, 8)
@@ -2376,6 +2432,9 @@ struct ClipboardPopoverView: View {
                     Capsule()
                         .strokeBorder(glassPalette.controlCapsuleStroke, lineWidth: 0.75)
                 }
+
+                // 窗口始终在前一键固定圆钮（⌘P）
+                AlwaysOnTopPinButton(store: store, glassPalette: glassPalette)
 
                 // 极简纯净模式（基础功能版）一键切换圆钮（⌘E）
                 Button {
@@ -2874,6 +2933,13 @@ struct ClipboardPopoverView: View {
                     }
                 }
 
+                // 自适应心智学习与自然语言建议采纳中心
+                if !store.minimalModeEnabled {
+                    settingsGroup(title: "自适应心智与建议采纳") {
+                        AdaptiveIntelligenceSettingsSection(store: store)
+                    }
+                }
+
                 // 外观材质分组（苹果官方液态玻璃 / 毛玻璃，支持官方透明/着色档位与蒙版浓度无级调节）
                 settingsGroup(title: "外观与边缘材质") {
                     HStack {
@@ -2944,8 +3010,24 @@ struct ClipboardPopoverView: View {
                     }
                 }
 
-                // 通用与快捷键分组（开机自启 + 自定义全局快捷键）
+                // 通用与快捷键分组（始终在前 + 开机自启 + 自定义全局快捷键）
                 settingsGroup(title: "通用与快捷键") {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("窗口始终在前（⌘P）")
+                                .font(.system(size: 13.5, weight: .medium))
+                            Text("固定面板置顶，切窗口与连续粘贴时不自动收起")
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Toggle("", isOn: $store.alwaysOnTop)
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+                    }
+
+                    Divider().opacity(0.35)
+
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("开机自动启动")
@@ -3526,6 +3608,13 @@ struct ClipboardPopoverView: View {
     }
 
     func pasteSelected(forceRawSecret: Bool = false) {
+        if let suggestionPayload = QuickSuggestionCommandBanner.extractPayload(from: nav.searchText) {
+            guard !suggestionPayload.isEmpty else { return }
+            let outcome = AdaptiveIntelligenceEngine.shared.adoptUserSuggestion(suggestionPayload, in: store)
+            nav.searchText = ""
+            store.showToast(outcome.message)
+            return
+        }
         guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return }
         let item = filteredItems[nav.selectedIndex]
         if nav.showQuickLook {
