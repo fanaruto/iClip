@@ -75,7 +75,9 @@ final class PanelNavigationModel: ObservableObject {
 
     private func rebuildCache(items: [ClipItem], tab: ClipFilterTab, pinCat: PinCategory?, query: String) {
         let resolvedStore = storeRef ?? .shared
-        let effectiveQuery = (QuickSuggestionCommandBanner.extractPayload(from: query) != nil) ? "" : query
+        let isCommandInput = (QuickSuggestionCommandBanner.extractPayload(from: query) != nil)
+            || (QuickCaptureParser.parse(from: query) != nil)
+        let effectiveQuery = isCommandInput ? "" : query
         let rawMatched = items.filter { item in
             let tabMatches: Bool
             switch tab {
@@ -230,6 +232,23 @@ struct ClipboardPopoverView: View {
                             nav.searchText = ""
                             store.showToast(outcome.message)
                         }
+                        .padding(.horizontal, 14)
+                        .padding(.bottom, 8)
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                    } else if let capture = QuickCaptureParser.parse(from: nav.searchText) {
+                        QuickCaptureCommandBanner(
+                            intent: capture,
+                            onCommitDefault: {
+                                guard !capture.isEmptyBody else { return }
+                                store.captureQuickNote(body: capture.bodyText, alias: capture.customAlias, pin: capture.defaultPin)
+                                nav.searchText = ""
+                            },
+                            onCommitForcePin: {
+                                guard !capture.isEmptyBody else { return }
+                                store.captureQuickNote(body: capture.bodyText, alias: capture.customAlias, pin: true)
+                                nav.searchText = ""
+                            }
+                        )
                         .padding(.horizontal, 14)
                         .padding(.bottom, 8)
                         .transition(.opacity.combined(with: .move(edge: .top)))
@@ -1034,11 +1053,41 @@ struct ClipboardPopoverView: View {
             Text(nav.searchText.isEmpty ? "暂无剪贴记录" : "未找到匹配的内容")
                 .font(.system(size: 14, weight: .medium))
                 .foregroundStyle(.primary.opacity(0.8))
-            Text(nav.searchText.isEmpty ? "复制文本、链接、图片或文件后将自动出现在这里" : "试试更换关键词或切换上方分类")
+            Text(nav.searchText.isEmpty ? "复制文本、链接、图片或文件后将自动出现在这里" : "试试更换关键词，或将上方输入直接沉淀为新剪贴记录")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 36)
+
+            let trimmedSearch = nav.searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedSearch.isEmpty && !trimmedSearch.hasPrefix("@") {
+                HStack(spacing: 8) {
+                    Button {
+                        _ = commitEmptySearchCaptureIfApplicable(forcePin: false)
+                    } label: {
+                        Text("存为新记录 ⌘↵")
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 11)
+                            .padding(.vertical, 5.5)
+                            .background(Capsule().fill(Color.accentColor))
+                    }
+                    .buttonStyle(.plain)
+
+                    Button {
+                        _ = commitEmptySearchCaptureIfApplicable(forcePin: true)
+                    } label: {
+                        Text("直接收藏 ⇧⌘↵")
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundStyle(Color.orange)
+                            .padding(.horizontal, 11)
+                            .padding(.vertical, 5.5)
+                            .background(Capsule().fill(Color.orange.opacity(0.14)))
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.top, 4)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -1949,6 +1998,12 @@ struct ClipboardPopoverView: View {
             store.showToast(outcome.message)
             return
         }
+        if let capture = QuickCaptureParser.parse(from: nav.searchText) {
+            guard !capture.isEmptyBody else { return }
+            store.captureQuickNote(body: capture.bodyText, alias: capture.customAlias, pin: capture.defaultPin)
+            nav.searchText = ""
+            return
+        }
         if (filteredItems.isEmpty || nav.searchText.trimmingCharacters(in: .whitespaces).hasPrefix("=")),
            let math = InstantMathEvaluator.evaluate(nav.searchText) {
             nav.searchText = ""
@@ -2039,6 +2094,18 @@ struct ClipboardPopoverView: View {
         beginAliasEdit(for: filteredItems[nav.selectedIndex])
     }
 
+    @discardableResult
+    func commitEmptySearchCaptureIfApplicable(forcePin: Bool) -> Bool {
+        guard filteredItems.isEmpty else { return false }
+        let trimmed = nav.searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !trimmed.hasPrefix("@") else { return false }
+        let (alias, body) = QuickCaptureParser.splitAliasAndBody(trimmed)
+        guard !body.isEmpty else { return false }
+        store.captureQuickNote(body: body, alias: alias, pin: forcePin || (alias != nil))
+        nav.searchText = ""
+        return true
+    }
+
     func appendSelectedToClipboard() {
         guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return }
         store.appendItemToCurrentClipboard(filteredItems[nav.selectedIndex])
@@ -2093,6 +2160,12 @@ struct ClipboardPopoverView: View {
     }
 
     func pasteSecondaryActionForSelected() {
+        if let capture = QuickCaptureParser.parse(from: nav.searchText) {
+            guard !capture.isEmptyBody else { return }
+            store.captureQuickNote(body: capture.bodyText, alias: capture.customAlias, pin: true)
+            nav.searchText = ""
+            return
+        }
         if (filteredItems.isEmpty || nav.searchText.trimmingCharacters(in: .whitespaces).hasPrefix("=")),
            let math = InstantMathEvaluator.evaluate(nav.searchText),
            let rmb = math.rmbUppercase {
@@ -2354,7 +2427,9 @@ final class PanelNavigationModel: ObservableObject {
 
     private func rebuildCache(items: [ClipItem], tab: ClipFilterTab, query: String) {
         // 解析可选的 @语义 速筛前缀（例如 "@json user" 或 "@secret"）
-        let trimmedQuery = (QuickSuggestionCommandBanner.extractPayload(from: query) != nil)
+        let isCommandInput = (QuickSuggestionCommandBanner.extractPayload(from: query) != nil)
+            || (QuickCaptureParser.parse(from: query) != nil)
+        let trimmedQuery = isCommandInput
             ? ""
             : query.trimmingCharacters(in: .whitespacesAndNewlines)
         var requiredSemantic: SemanticKind? = nil
@@ -2523,6 +2598,23 @@ struct ClipboardPopoverView: View {
                             nav.searchText = ""
                             store.showToast(outcome.message)
                         }
+                        .padding(.horizontal, 14)
+                        .padding(.bottom, 8)
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                    } else if let capture = QuickCaptureParser.parse(from: nav.searchText) {
+                        QuickCaptureCommandBanner(
+                            intent: capture,
+                            onCommitDefault: {
+                                guard !capture.isEmptyBody else { return }
+                                store.captureQuickNote(body: capture.bodyText, alias: capture.customAlias, pin: capture.defaultPin)
+                                nav.searchText = ""
+                            },
+                            onCommitForcePin: {
+                                guard !capture.isEmptyBody else { return }
+                                store.captureQuickNote(body: capture.bodyText, alias: capture.customAlias, pin: true)
+                                nav.searchText = ""
+                            }
+                        )
                         .padding(.horizontal, 14)
                         .padding(.bottom, 8)
                         .transition(.opacity.combined(with: .move(edge: .top)))
@@ -3267,11 +3359,41 @@ struct ClipboardPopoverView: View {
             Text(nav.searchText.isEmpty ? "暂无剪贴记录" : "未找到匹配的内容")
                 .font(.system(size: 14, weight: .medium))
                 .foregroundStyle(.primary.opacity(0.8))
-            Text(nav.searchText.isEmpty ? "复制文本、链接、图片或文件后将自动出现在这里" : "试试更换关键词或切换上方分类")
+            Text(nav.searchText.isEmpty ? "复制文本、链接、图片或文件后将自动出现在这里" : "试试更换关键词，或将上方输入直接沉淀为新剪贴记录")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 36)
+
+            let trimmedSearch = nav.searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedSearch.isEmpty && !trimmedSearch.hasPrefix("@") {
+                HStack(spacing: 8) {
+                    Button {
+                        _ = commitEmptySearchCaptureIfApplicable(forcePin: false)
+                    } label: {
+                        Text("存为新记录 ⌘↵")
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 11)
+                            .padding(.vertical, 5.5)
+                            .background(Capsule().fill(Color.accentColor))
+                    }
+                    .buttonStyle(.plain)
+
+                    Button {
+                        _ = commitEmptySearchCaptureIfApplicable(forcePin: true)
+                    } label: {
+                        Text("直接收藏 ⇧⌘↵")
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundStyle(Color.orange)
+                            .padding(.horizontal, 11)
+                            .padding(.vertical, 5.5)
+                            .background(Capsule().fill(Color.orange.opacity(0.14)))
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.top, 4)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -4071,6 +4193,12 @@ struct ClipboardPopoverView: View {
             store.showToast(outcome.message)
             return
         }
+        if let capture = QuickCaptureParser.parse(from: nav.searchText) {
+            guard !capture.isEmptyBody else { return }
+            store.captureQuickNote(body: capture.bodyText, alias: capture.customAlias, pin: capture.defaultPin)
+            nav.searchText = ""
+            return
+        }
         if (filteredItems.isEmpty || nav.searchText.trimmingCharacters(in: .whitespaces).hasPrefix("=")),
            let math = InstantMathEvaluator.evaluate(nav.searchText) {
             nav.searchText = ""
@@ -4172,6 +4300,18 @@ struct ClipboardPopoverView: View {
         beginAliasEdit(for: filteredItems[nav.selectedIndex])
     }
 
+    @discardableResult
+    func commitEmptySearchCaptureIfApplicable(forcePin: Bool) -> Bool {
+        guard filteredItems.isEmpty else { return false }
+        let trimmed = nav.searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !trimmed.hasPrefix("@") else { return false }
+        let (alias, body) = QuickCaptureParser.splitAliasAndBody(trimmed)
+        guard !body.isEmpty else { return false }
+        store.captureQuickNote(body: body, alias: alias, pin: forcePin || (alias != nil))
+        nav.searchText = ""
+        return true
+    }
+
     func appendSelectedToClipboard() {
         guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return }
         store.appendItemToCurrentClipboard(filteredItems[nav.selectedIndex])
@@ -4234,6 +4374,12 @@ struct ClipboardPopoverView: View {
     }
 
     func pasteSmartTransformedSelected() {
+        if let capture = QuickCaptureParser.parse(from: nav.searchText) {
+            guard !capture.isEmptyBody else { return }
+            store.captureQuickNote(body: capture.bodyText, alias: capture.customAlias, pin: true)
+            nav.searchText = ""
+            return
+        }
         if (filteredItems.isEmpty || nav.searchText.trimmingCharacters(in: .whitespaces).hasPrefix("=")),
            let math = InstantMathEvaluator.evaluate(nav.searchText),
            let rmb = math.rmbUppercase {

@@ -1136,4 +1136,48 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertTrue(engine.shouldAutoStripRichFormatting(hasRichFormatting: true, sourceApp: "Google Chrome"))
         XCTAssertFalse(engine.shouldAutoStripRichFormatting(hasRichFormatting: true, sourceApp: "飞书"))
     }
+
+    // MARK: - 29. 一行闪念速记（`> 备注 :: 正文`）零歧义解析与双角色动态模板（`{{date}} {{weekday}}`）测试
+
+    func testQuickCaptureParserAndCrossRoleSnippetTemplateEngine() throws {
+        // 1. 闪念速记与「备注 :: 正文」一步收藏拆解
+        let c1 = try XCTUnwrap(QuickCaptureParser.parse(from: "> 下午4点找财务领发票"))
+        XCTAssertNil(c1.customAlias)
+        XCTAssertEqual(c1.bodyText, "下午4点找财务领发票")
+        XCTAssertFalse(c1.defaultPin)
+
+        let c2 = try XCTUnwrap(QuickCaptureParser.parse(from: "> 总部税号 :: 91310000MA1K88888X"))
+        XCTAssertEqual(c2.customAlias, "总部税号")
+        XCTAssertEqual(c2.bodyText, "91310000MA1K88888X")
+        XCTAssertTrue(c2.defaultPin)
+
+        let c3 = try XCTUnwrap(QuickCaptureParser.parse(from: "@新建 客服话术：：您好 {{clip}}，今日（{{date}} {{weekday}}）已为您寄出"))
+        XCTAssertEqual(c3.customAlias, "客服话术")
+        XCTAssertTrue(c3.defaultPin)
+
+        // 2. 边界防误伤：区号手机号、代码 >= 符号与既有 @pin/@json 筛选词绝不误判为速记指令
+        XCTAssertNil(QuickCaptureParser.parse(from: "+8613800138000"))
+        XCTAssertNil(QuickCaptureParser.parse(from: "a >= b"))
+        XCTAssertNil(QuickCaptureParser.parse(from: ">= 100"))
+        XCTAssertNil(QuickCaptureParser.parse(from: "@pin"))
+        XCTAssertNil(QuickCaptureParser.parse(from: "@json"))
+
+        // 3. 双角色全量动态模板插值（含 {{date}}、{{weekday}}、{{clip}} 与 {{clip_redacted}}）
+        var comps = DateComponents()
+        comps.year = 2026
+        comps.month = 11
+        comps.day = 23
+        comps.hour = 9
+        comps.minute = 30
+        comps.second = 0
+        let fixedMonday = try XCTUnwrap(Calendar(identifier: .gregorian).date(from: comps))
+
+        XCTAssertTrue(SnippetTemplateEngine.containsPlaceholders(c3.bodyText))
+        let rendered = SnippetTemplateEngine.render(
+            template: c3.bodyText,
+            latestContextText: "王先生",
+            referenceDate: fixedMonday
+        )
+        XCTAssertEqual(rendered, "您好 王先生，今日（2026-11-23 星期一）已为您寄出")
+    }
 }

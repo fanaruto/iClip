@@ -693,6 +693,10 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             if flags.contains(.command), rootView.mergePasteIfActive() {
                 return nil
             }
+            if flags.contains(.command),
+               rootView.commitEmptySearchCaptureIfApplicable(forcePin: flags.contains(.shift)) {
+                return nil
+            }
             if flags.contains(.shift) {
                 rootView.pasteSecondaryActionForSelected()
             } else if flags.contains(.option) {
@@ -1375,6 +1379,10 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         if event.keyCode == 36 || event.keyCode == 76 {
             if let fieldEditor = panel.firstResponder as? NSTextView, fieldEditor.hasMarkedText() {
                 return event
+            }
+            if flags.contains(.command),
+               rootView.commitEmptySearchCaptureIfApplicable(forcePin: flags.contains(.shift)) {
+                return nil
             }
             if flags.contains(.shift) {
                 rootView.pasteSmartTransformedSelected()

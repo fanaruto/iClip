@@ -1436,33 +1436,29 @@ final class ClipboardStore: ObservableObject {
         forceRawSecret: Bool = false,
         onBeforePaste: (() -> Void)? = nil
     ) {
+        if !minimalModeEnabled && !plainTextOnly && !forceRawSecret,
+           let rawTemplate = item.text,
+           SnippetTemplateEngine.containsPlaceholders(rawTemplate) {
+            let context = latestNonTemplateText(excluding: item.id)
+            let rendered = SnippetTemplateEngine.render(template: rawTemplate, latestContextText: context)
+            pasteCustomString(
+                rendered,
+                sourceItem: item,
+                toast: "已展开动态模板并键入",
+                shouldAutoPaste: shouldAutoPaste,
+                onBeforePaste: onBeforePaste
+            )
+            return
+        }
+
         #if !ICLIP_EDITION_FLOW
-        if !minimalModeEnabled {
-            if !forceRawSecret,
-               let rawTemplate = item.text,
-               SnippetTemplateEngine.containsPlaceholders(rawTemplate) {
-                let context = latestNonTemplateText(excluding: item.id)
-                let rendered = SnippetTemplateEngine.render(template: rawTemplate, latestContextText: context)
-                pasteCustomString(
-                    rendered,
-                    sourceItem: item,
-                    toast: "已展开动态模板并键入",
-                    shouldAutoPaste: shouldAutoPaste,
-                    onBeforePaste: onBeforePaste
-                )
+        if !minimalModeEnabled && autoRedactOnPaste && !forceRawSecret {
+            let snap = semanticSnapshot(for: item)
+            if let secAction = snap.actions.first(where: { $0.isSecurityAction }) {
+                applyTransformAction(secAction, for: item, shouldAutoPaste: shouldAutoPaste, onBeforePaste: onBeforePaste)
                 return
             }
-
-            if autoRedactOnPaste && !forceRawSecret {
-                let snap = semanticSnapshot(for: item)
-                if let secAction = snap.actions.first(where: { $0.isSecurityAction }) {
-                    applyTransformAction(secAction, for: item, shouldAutoPaste: shouldAutoPaste, onBeforePaste: onBeforePaste)
-                    return
-                }
-            }
         }
-        #else
-        _ = forceRawSecret
         #endif
 
         writeToPasteboard(item, plainTextOnly: plainTextOnly)
@@ -1868,6 +1864,13 @@ final class ClipboardStore: ObservableObject {
         )
     }
 
+    func addPinnedTemplate(_ content: String) {
+        captureQuickNote(body: content, alias: nil, pin: true)
+    }
+    #endif
+
+    // MARK: - 双角色共享：一行闪念速记、动态模板求值、自定义串键入与备注别名
+
     func latestNonTemplateText(excluding itemID: UUID) -> String? {
         for candidate in items where candidate.id != itemID {
             if let t = candidate.text, !SnippetTemplateEngine.containsPlaceholders(t) {
@@ -1880,28 +1883,71 @@ final class ClipboardStore: ObservableObject {
         return nil
     }
 
-    func addPinnedTemplate(_ content: String) {
-        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        let hash = Self.sha256(trimmed)
+    /// 将用户在搜索框输入的速记或模板一步写入系统剪贴板并收录（支持同时绑定备注别名与直接收藏）
+    @discardableResult
+    func captureQuickNote(body: String, alias: String?, pin: Bool) -> Bool {
+        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+
+        let cleanAlias: String? = {
+            guard let a = alias?.trimmingCharacters(in: .whitespacesAndNewlines), !a.isEmpty else { return nil }
+            return a
+        }()
+        let isTemplate = SnippetTemplateEngine.containsPlaceholders(trimmed)
+        let isLink = !isTemplate && isValidWebURL(trimmed)
+        let prefix = isTemplate ? "tpl" : (isLink ? "link" : "text")
+        let contentHash = "\(prefix):\(Self.sha256(trimmed))"
+
+        let newID = UUID()
+        let clipboardValue = isTemplate
+            ? SnippetTemplateEngine.render(template: trimmed, latestContextText: latestNonTemplateText(excluding: newID))
+            : trimmed
+
+        pasteboard.clearContents()
+        pasteboard.setString(clipboardValue, forType: .string)
+        if isLink {
+            pasteboard.setString(clipboardValue, forType: .URL)
+        }
+        ignoreNextChangeCount = pasteboard.changeCount
+        lastChangeCount = pasteboard.changeCount
+
         let newItem = ClipItem(
-            type: .text,
+            id: newID,
+            type: isLink ? .link : .text,
             text: trimmed,
-            contentHash: "tpl:\(hash)",
-            sourceAppName: "iClip 模板",
-            isPinned: true
+            contentHash: contentHash,
+            sourceAppName: isTemplate ? "iClip 模板" : "iClip 速记",
+            isPinned: pin,
+            pinCategory: (pin && isTemplate) ? .template : nil,
+            customAlias: cleanAlias
         )
         insertOrPromote(newItem)
-        if let idx = items.firstIndex(where: { $0.contentHash == newItem.contentHash }) {
-            items[idx].isPinned = true
+        if let idx = items.firstIndex(where: { $0.contentHash == contentHash }) {
+            if pin {
+                items[idx].isPinned = true
+                if isTemplate && items[idx].pinCategory == nil {
+                    items[idx].pinCategory = .template
+                }
+            }
+            if let cleanAlias {
+                items[idx].customAlias = cleanAlias
+            }
             items = sortItems(items)
             saveHistory()
         }
-        showToast("已保存并收藏动态模板")
-    }
-    #endif
 
-    // MARK: - 双角色共享：自定义串键入、备注别名（⌘R）与原位微调回写（⌘S）
+        TactileFeedbackEngine.shared.perform(pin ? .favoriteOn : .pasteCommit)
+        if pin {
+            if let cleanAlias {
+                showToast("已收藏「\(cleanAlias)」并复制到剪贴板")
+            } else {
+                showToast(isTemplate ? "已保存并收藏动态模板" : "已存入收藏并复制到剪贴板")
+            }
+        } else {
+            showToast("已存入剪贴板与历史顶部")
+        }
+        return true
+    }
 
     func pasteCustomString(
         _ text: String,
