@@ -1182,6 +1182,22 @@ struct ClipboardPopoverView: View {
                             .labelsHidden()
                     }
 
+                    Divider().opacity(0.35)
+
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("验证码粘贴后自动无痕销毁")
+                                .font(.system(size: 13.5, weight: .medium))
+                            Text("粘贴短信/邮件一次性验证码 30 秒后自动从历史移除")
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Toggle("", isOn: $store.autoExpireOTP)
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+                    }
+
                     Divider().opacity(0.4)
 
                     HStack(spacing: 8) {
@@ -2637,6 +2653,22 @@ struct ClipboardPopoverView: View {
                         }
                         Spacer()
                         Toggle("", isOn: $store.autoRedactOnPaste)
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+                    }
+
+                    Divider().opacity(0.35)
+
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("验证码粘贴后自动无痕销毁")
+                                .font(.system(size: 13.5, weight: .medium))
+                            Text("粘贴短信/邮件一次性验证码 30 秒后自动从历史移除")
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Toggle("", isOn: $store.autoExpireOTP)
                             .toggleStyle(.switch)
                             .labelsHidden()
                     }

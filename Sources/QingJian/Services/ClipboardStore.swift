@@ -122,6 +122,10 @@ final class ClipboardStore: ObservableObject {
     @Published var autoPasteEnabled: Bool {
         didSet { UserDefaults.standard.set(autoPasteEnabled, forKey: "autoPasteEnabled") }
     }
+    /// 一次性验证码（OTP）粘贴后 30 秒自动无痕销毁（极简模式或已固定条目不生效）
+    @Published var autoExpireOTP: Bool {
+        didSet { UserDefaults.standard.set(autoExpireOTP, forKey: "autoExpireOTP") }
+    }
     @Published private(set) var launchAtLoginEnabled: Bool = false
     @Published var hotKeyShortcut: HotKeyShortcut {
         didSet {
@@ -195,6 +199,7 @@ final class ClipboardStore: ObservableObject {
     private var saveWorkItem: DispatchWorkItem?
     private var appearanceSaveWorkItem: DispatchWorkItem?
     private var cacheTrimWorkItem: DispatchWorkItem?
+    private var pendingOTPExpirationTasks: [UUID: DispatchWorkItem] = [:]
     private let diskQueue = DispatchQueue(label: "com.qingjian.clipboard.disk", qos: .utility)
 
     private let appSupportURL: URL
@@ -227,6 +232,7 @@ final class ClipboardStore: ObservableObject {
         self.minimalModeEnabled = UserDefaults.standard.bool(forKey: "minimalModeEnabled")
 
         self.autoPasteEnabled = UserDefaults.standard.object(forKey: "autoPasteEnabled") as? Bool ?? true
+        self.autoExpireOTP = UserDefaults.standard.object(forKey: "autoExpireOTP") as? Bool ?? true
         let savedStyle = UserDefaults.standard.string(forKey: "panelSurfaceStyle") ?? PanelSurfaceStyle.liquidGlass.rawValue
         if savedStyle == "clearGlass" {
             self.surfaceStyle = .liquidGlass
@@ -664,6 +670,7 @@ final class ClipboardStore: ObservableObject {
         }
 
         onBeforePaste?()
+        scheduleOTPAutoExpireIfNeeded(for: item)
 
         refreshAccessibilityStatus()
         if shouldAutoPaste && autoPasteEnabled && isAccessibilityGranted {
@@ -671,6 +678,35 @@ final class ClipboardStore: ObservableObject {
         } else {
             showToast(plainTextOnly ? "已复制纯文本" : "已复制到剪贴板")
         }
+    }
+
+    /// 针对一次性验证码条目在粘贴后启动 30 秒无痕清理倒计时（极简模式或已固定记录绝不误删）
+    func scheduleOTPAutoExpireIfNeeded(for item: ClipItem, delaySeconds: TimeInterval = 30.0) {
+        guard !minimalModeEnabled,
+              autoExpireOTP,
+              !item.isPinned,
+              item.type == .text,
+              let raw = item.text,
+              MeetingAndEphemeralEngine.isOTPMessage(raw) else {
+            return
+        }
+
+        let targetID = item.id
+        pendingOTPExpirationTasks[targetID]?.cancel()
+
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.pendingOTPExpirationTasks.removeValue(forKey: targetID)
+            guard !self.minimalModeEnabled,
+                  self.autoExpireOTP,
+                  let current = self.items.first(where: { $0.id == targetID }),
+                  !current.isPinned else {
+                return
+            }
+            self.delete(current)
+        }
+        pendingOTPExpirationTasks[targetID] = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delaySeconds, execute: work)
     }
 
     private func writeToPasteboard(_ item: ClipItem, plainTextOnly: Bool) {
@@ -704,7 +740,10 @@ final class ClipboardStore: ObservableObject {
         guard let idx = items.firstIndex(where: { $0.id == item.id }) else { return }
         items[idx].isPinned.toggle()
         let pinned = items[idx].isPinned
-        if !pinned {
+        if pinned {
+            pendingOTPExpirationTasks[item.id]?.cancel()
+            pendingOTPExpirationTasks.removeValue(forKey: item.id)
+        } else {
             items[idx].pinCategory = nil
         }
         items = sortItems(items)
@@ -713,6 +752,8 @@ final class ClipboardStore: ObservableObject {
     }
 
     func delete(_ item: ClipItem) {
+        pendingOTPExpirationTasks[item.id]?.cancel()
+        pendingOTPExpirationTasks.removeValue(forKey: item.id)
         guard let idx = items.firstIndex(where: { $0.id == item.id }) else { return }
         let removed = items.remove(at: idx)
         #if ICLIP_EDITION_FLOW
@@ -835,6 +876,7 @@ final class ClipboardStore: ObservableObject {
         }
 
         onBeforePaste?()
+        scheduleOTPAutoExpireIfNeeded(for: sourceItem)
 
         refreshAccessibilityStatus()
         if shouldAutoPaste && autoPasteEnabled && isAccessibilityGranted {
@@ -855,7 +897,10 @@ final class ClipboardStore: ObservableObject {
         if let cached = financeCache.object(forKey: key) {
             return cached.actions
         }
-        var analyzed = ComplianceCodeEngine.analyze(raw)
+        var analyzed = MeetingAndEphemeralEngine.analyze(raw)
+        if analyzed.isEmpty {
+            analyzed = ComplianceCodeEngine.analyze(raw)
+        }
         if analyzed.isEmpty {
             analyzed = TableBridgeEngine.analyze(raw)
         }
@@ -891,6 +936,7 @@ final class ClipboardStore: ObservableObject {
         }
 
         onBeforePaste?()
+        scheduleOTPAutoExpireIfNeeded(for: item)
         refreshAccessibilityStatus()
         if shouldAutoPaste && autoPasteEnabled && isAccessibilityGranted {
             Self.schedulePasteWhenTargetReady()

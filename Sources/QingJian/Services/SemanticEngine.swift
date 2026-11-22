@@ -6,6 +6,8 @@ import AppKit
 enum SemanticKind: String, Equatable {
     case dynamicTemplate
     case sensitiveSecret
+    case ephemeralOTP
+    case meetingTranscript
     case dirtyURL
     case curlCommand
     case colorCode
@@ -22,6 +24,8 @@ enum SemanticKind: String, Equatable {
         switch self {
         case .dynamicTemplate: return "动态模板"
         case .sensitiveSecret: return "含敏感凭据"
+        case .ephemeralOTP: return "验证码"
+        case .meetingTranscript: return "会议逐字稿"
         case .dirtyURL: return "含追踪参数"
         case .curlCommand: return "cURL 请求"
         case .colorCode: return "颜色色值"
@@ -40,6 +44,8 @@ enum SemanticKind: String, Equatable {
         switch self {
         case .dynamicTemplate: return "wand.and.stars"
         case .sensitiveSecret: return "lock.shield.fill"
+        case .ephemeralOTP: return "key.horizontal.fill"
+        case .meetingTranscript: return "waveform.and.mic"
         case .dirtyURL: return "sparkles"
         case .curlCommand: return "terminal.fill"
         case .colorCode: return "paintpalette.fill"
@@ -58,6 +64,8 @@ enum SemanticKind: String, Equatable {
         switch self {
         case .dynamicTemplate: return .systemIndigo
         case .sensitiveSecret: return .systemOrange
+        case .ephemeralOTP: return .systemMint
+        case .meetingTranscript: return .systemIndigo
         case .dirtyURL: return .systemTeal
         case .curlCommand: return .systemGreen
         case .colorCode: return .systemPink
@@ -72,10 +80,12 @@ enum SemanticKind: String, Equatable {
         }
     }
 
-    /// 支持在搜索框用 @tpl / @rmb / @sum / @json / @secret / @color / @url / @curl / @list / @time / @b64 / @id 快速过滤
+    /// 支持在搜索框用 @otp / @meet / @tpl / @rmb / @json / @secret / @color / @url / @curl / @list / @time / @b64 / @id 快速过滤
     static func fromSearchToken(_ token: String) -> SemanticKind? {
         switch token.lowercased() {
         case "@tpl", "@snippet", "@模板": return .dynamicTemplate
+        case "@otp", "@code", "@验证码": return .ephemeralOTP
+        case "@meet", "@meeting", "@srt", "@会议", "@纪要": return .meetingTranscript
         case "@rmb", "@money", "@sum", "@金额", "@大写": return .financeAmount
         case "@pdf", "@typo", "@排版", "@断行": return .pdfTypography
         case "@secret", "@key", "@env", "@脱敏", "@密钥": return .sensitiveSecret
@@ -253,12 +263,28 @@ enum SemanticEngine {
             primaryKind = .dynamicTemplate
         }
 
+        // 0.5 一次性短信/邮件验证码（OTP）极速提取（排在首位，按 ⇧↵ 直接贴纯数字验证码）
+        if primaryKind == nil,
+           raw.utf16.count <= 400,
+           let otp = MeetingAndEphemeralEngine.extractVerificationCode(from: trimmed),
+           otp != trimmed {
+            primaryKind = .ephemeralOTP
+            actions.append(TransformAction(
+                id: "otp-extract-code",
+                title: "验证码 \(otp)",
+                symbolName: "key.horizontal.fill",
+                isSecurityAction: false,
+                resultText: otp,
+                toastText: "已提取纯验证码 \(otp) 并键入"
+            ))
+        }
+
         // 1. 最高优：敏感凭据检测与一键 AI 脱敏（超大文本采用惰性求值，嗅探阶段 0 额外内存拷贝）
         let hasSecret = containsSensitiveSecret(in: inspectSlice)
         let hasPII = containsPIIOrPrivateIP(in: inspectSlice)
         let isLargePayload = raw.utf16.count > 16_384
         if hasSecret {
-            primaryKind = .sensitiveSecret
+            if primaryKind != .ephemeralOTP { primaryKind = .sensitiveSecret }
             if isLargePayload {
                 actions.append(TransformAction(
                     id: "redact-secrets",
@@ -305,7 +331,7 @@ enum SemanticEngine {
                 }
             }
         } else if hasPII && trimmed.count >= 11 {
-            primaryKind = .sensitiveSecret
+            if primaryKind != .ephemeralOTP { primaryKind = .sensitiveSecret }
             if isLargePayload {
                 actions.append(TransformAction(
                     id: "redact-pii",
@@ -491,6 +517,24 @@ enum SemanticEngine {
                         isSecurityAction: ca.id.contains("mask"),
                         resultText: ca.resultText,
                         toastText: ca.toastText
+                    ))
+                }
+            }
+        }
+
+        // 5.3 会议逐字稿 / SRT 字幕时间轴剥离与发言人纪要合并
+        if primaryKind == nil && raw.utf16.count <= 65_536 && raw.contains("\n") {
+            let meetActions = MeetingAndEphemeralEngine.analyze(raw)
+            if !meetActions.isEmpty {
+                primaryKind = .meetingTranscript
+                for ma in meetActions {
+                    actions.append(TransformAction(
+                        id: ma.id,
+                        title: ma.title,
+                        symbolName: ma.symbolName,
+                        isSecurityAction: false,
+                        resultText: ma.resultText,
+                        toastText: ma.toastText
                     ))
                 }
             }

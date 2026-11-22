@@ -280,7 +280,72 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertTrue(cardActions.contains(where: { $0.id == "comp-card-mask" }))
     }
 
-    // MARK: - 5. 语义脱敏、净链与动态模板回归测试
+    // MARK: - 9. 一次性验证码（OTP）抗干扰提取与会议逐字稿时间轴清洗测试
+
+    func testOTPExtractionAndNoiseImmunity() {
+        // 含尾号、日期、金额、分钟数多重数字干扰的银行验证码短信
+        let bankSMS = "【招商银行】您尾号8899的储蓄卡于2026-11-22消费¥1280.50元，动态验证码为 654321，请在5分钟内完成验证。"
+        XCTAssertEqual(MeetingAndEphemeralEngine.extractVerificationCode(from: bankSMS), "654321")
+
+        // 验证码在前、英文关键词在后
+        let openaiSMS = "[OpenAI] 918273 is your security code. Expires in 10 minutes."
+        XCTAssertEqual(MeetingAndEphemeralEngine.extractVerificationCode(from: openaiSMS), "918273")
+
+        // 关键词与验证码中间隔着产品名
+        let appleSMS = "Your verification code for Apple ID is 739104. Do not share it with anyone."
+        XCTAssertEqual(MeetingAndEphemeralEngine.extractVerificationCode(from: appleSMS), "739104")
+
+        // 字母+数字混合网盘提取码
+        let shareCode = "通过网盘分享的文件，提取码：G7k9，24小时内有效"
+        XCTAssertEqual(MeetingAndEphemeralEngine.extractVerificationCode(from: shareCode), "G7k9")
+
+        // 防误判：纯 6 位股票代码、普通会议通知、不含数字的验证码提示均不误触发
+        XCTAssertNil(MeetingAndEphemeralEngine.extractVerificationCode(from: "600519"))
+        XCTAssertNil(MeetingAndEphemeralEngine.extractVerificationCode(from: "今天下午 14:30 在 1002 会议室讨论方案"))
+        XCTAssertNil(MeetingAndEphemeralEngine.extractVerificationCode(from: "请先获取短信验证码后再登录系统"))
+    }
+
+    func testMeetingTranscriptCleaningAndLogExclusion() throws {
+        // 1. 飞书妙记 / 腾讯会议格式（含同一发言人连续碎片合并）
+        let feishuTranscript = """
+        张总监 00:01:12
+        今天我们对齐一下大客户合同交付排期
+        张总监 00:01:19
+        重点看下第三条违约金比例。
+        李律师 00:01:35
+        建议违约金上限控制在合同总额的 20% 以内。
+        """
+        let res = try XCTUnwrap(MeetingAndEphemeralEngine.cleanMeetingTranscript(feishuTranscript))
+        XCTAssertEqual(res.removedTimestampCount, 3)
+        XCTAssertEqual(res.plainBody, "今天我们对齐一下大客户合同交付排期，重点看下第三条违约金比例。建议违约金上限控制在合同总额的 20% 以内。")
+        XCTAssertEqual(
+            res.speakerMergedDialogue,
+            "张总监：今天我们对齐一下大客户合同交付排期，重点看下第三条违约金比例。\n李律师：建议违约金上限控制在合同总额的 20% 以内。"
+        )
+
+        // 2. SRT 双语/视频字幕块剥离序号与时间轴
+        let srtBlock = """
+        1
+        00:00:01,200 --> 00:00:04,500
+        大家好，欢迎来到新品演示。
+
+        2
+        00:00:04,800 --> 00:00:08,150
+        今天发布极简与全能兼备的新版本。
+        """
+        let srtRes = try XCTUnwrap(MeetingAndEphemeralEngine.cleanMeetingTranscript(srtBlock))
+        XCTAssertEqual(srtRes.plainBody, "大家好，欢迎来到新品演示。今天发布极简与全能兼备的新版本。")
+        XCTAssertNil(srtRes.speakerMergedDialogue)
+
+        // 3. 服务器运维日志严禁误判为会议逐字稿
+        let serverLogs = """
+        [10:12:01] [ERROR] Redis connection timeout pid=4821
+        [10:12:05] [WARN] Retrying upstream connection
+        """
+        XCTAssertNil(MeetingAndEphemeralEngine.cleanMeetingTranscript(serverLogs))
+    }
+
+    // MARK: - 10. 语义脱敏、净链与动态模板回归测试
 
     #if !ICLIP_EDITION_FLOW
     func testSemanticRedactionAndTemplateInterpolation() {
