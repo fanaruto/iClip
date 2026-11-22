@@ -182,6 +182,56 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertTrue(TableBridgeEngine.analyze(tabIndentedCode).isEmpty)
     }
 
+    // MARK: - 7. 图像工坊透明通道防黑底瘦身与圆角样机渲染测试
+
+    func testImageStudioCompressionAndMockupRendering() throws {
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("iclip-studio-test-\(UUID().uuidString).png")
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+
+        // 生成一张 400x300 全透明背景 + 中心蓝色块测试 PNG
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        guard let ctx = CGContext(
+            data: nil,
+            width: 400,
+            height: 300,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            XCTFail("Failed to create test CGContext")
+            return
+        }
+        ctx.clear(CGRect(x: 0, y: 0, width: 400, height: 300))
+        ctx.setFillColor(CGColor(red: 0.1, green: 0.4, blue: 0.9, alpha: 1.0))
+        ctx.fill(CGRect(x: 100, y: 80, width: 200, height: 140))
+
+        guard let cgImg = ctx.makeImage() else {
+            XCTFail("Failed to make test CGImage")
+            return
+        }
+        let rep = NSBitmapImageRep(cgImage: cgImg)
+        let pngData = try XCTUnwrap(rep.representation(using: .png, properties: [:]))
+        try pngData.write(to: tempURL)
+
+        // 1. 验证 JPEG 瘦身成功且左上角原透明区域被垫为纯白（RGB > 245，绝不变纯黑）
+        let jpegRes = try XCTUnwrap(ImageStudioEngine.compressToLightweightJPEG(at: tempURL))
+        XCTAssertGreaterThan(jpegRes.byteCount, 100)
+        let decodedJPEG = try XCTUnwrap(NSBitmapImageRep(data: jpegRes.data))
+        XCTAssertEqual(decodedJPEG.pixelsWide, 400)
+        XCTAssertEqual(decodedJPEG.pixelsHigh, 300)
+        let cornerColor = try XCTUnwrap(decodedJPEG.colorAt(x: 5, y: 5)?.usingColorSpace(.sRGB))
+        XCTAssertGreaterThan(cornerColor.redComponent, 0.95)
+        XCTAssertGreaterThan(cornerColor.greenComponent, 0.95)
+        XCTAssertGreaterThan(cornerColor.blueComponent, 0.95)
+
+        // 2. 验证圆角阴影样机加壳输出尺寸精确加上了四周留白（400 + 40*2 = 480, 300 + 40*2 = 380）
+        let mockupRes = try XCTUnwrap(ImageStudioEngine.renderAppleMockupFrame(at: tempURL))
+        let decodedMockup = try XCTUnwrap(NSBitmapImageRep(data: mockupRes.data))
+        XCTAssertEqual(decodedMockup.pixelsWide, 480)
+        XCTAssertEqual(decodedMockup.pixelsHigh, 380)
+    }
+
     // MARK: - 5. 语义脱敏、净链与动态模板回归测试
 
     #if !ICLIP_EDITION_FLOW

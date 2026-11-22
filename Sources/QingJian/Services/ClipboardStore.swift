@@ -1175,6 +1175,84 @@ final class ClipboardStore: ObservableObject {
 
     // MARK: - 零阻塞图片与文件图标缓存
 
+    /// 后台硬件压缩截图为轻量 JPEG 并键入（解决工单/后台 2MB 上传限制，自动垫白底防透明变黑）
+    func pasteCompressedJPEG(
+        for item: ClipItem,
+        shouldAutoPaste: Bool = true,
+        onBeforePaste: (() -> Void)? = nil
+    ) {
+        guard let url = imageURL(for: item),
+              let origSize = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) else {
+            showToast("未找到原始截图文件")
+            return
+        }
+
+        Task.detached(priority: .userInitiated) { [weak self] in
+            guard let result = ImageStudioEngine.compressToLightweightJPEG(at: url) else {
+                await MainActor.run { self?.showToast("图片瘦身转换失败") }
+                return
+            }
+            let savedRatio = origSize > 0 ? max(0, Int(round((1.0 - Double(result.byteCount) / Double(origSize)) * 100))) : 0
+            let kb = max(1, result.byteCount / 1024)
+
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.pasteboard.clearContents()
+                self.pasteboard.setData(result.data, forType: result.utType)
+                if let nsImg = NSImage(data: result.data), let tiff = nsImg.tiffRepresentation {
+                    self.pasteboard.setData(tiff, forType: .tiff)
+                }
+                self.ignoreNextChangeCount = self.pasteboard.changeCount
+                self.lastChangeCount = self.pasteboard.changeCount
+
+                onBeforePaste?()
+                self.refreshAccessibilityStatus()
+                let msg = savedRatio > 5 ? "已瘦身 \(savedRatio)%（\(kb) KB）" : "已转为轻量 JPEG（\(kb) KB）"
+                if shouldAutoPaste && self.autoPasteEnabled && self.isAccessibilityGranted {
+                    Self.schedulePasteWhenTargetReady()
+                    self.showToast("\(msg)并键入")
+                } else {
+                    self.showToast("\(msg)到剪贴板")
+                }
+            }
+        }
+    }
+
+    /// 后台硬件渲染苹果风柔光圆角阴影样机衬底并键入
+    func pasteAppleMockupImage(
+        for item: ClipItem,
+        shouldAutoPaste: Bool = true,
+        onBeforePaste: (() -> Void)? = nil
+    ) {
+        guard let url = imageURL(for: item) else {
+            showToast("未找到原始截图文件")
+            return
+        }
+
+        Task.detached(priority: .userInitiated) { [weak self] in
+            guard let result = ImageStudioEngine.renderAppleMockupFrame(at: url) else {
+                await MainActor.run { self?.showToast("样机衬底生成失败") }
+                return
+            }
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.pasteboard.clearContents()
+                self.pasteboard.setData(result.data, forType: .png)
+                self.ignoreNextChangeCount = self.pasteboard.changeCount
+                self.lastChangeCount = self.pasteboard.changeCount
+
+                onBeforePaste?()
+                self.refreshAccessibilityStatus()
+                if shouldAutoPaste && self.autoPasteEnabled && self.isAccessibilityGranted {
+                    Self.schedulePasteWhenTargetReady()
+                    self.showToast("已生成圆角阴影样机图并键入")
+                } else {
+                    self.showToast("已生成圆角阴影样机图到剪贴板")
+                }
+            }
+        }
+    }
+
     func imageURL(for item: ClipItem) -> URL? {
         guard let name = item.imageFileName else { return nil }
         return imagesDirectoryURL.appendingPathComponent(name)

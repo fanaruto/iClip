@@ -382,6 +382,16 @@ struct ClipCardView: View {
             onCopyOnly(false)
         }
 
+        if !ClipboardStore.shared.minimalModeEnabled && item.type == .image {
+            Divider()
+            Button("复制轻量瘦身图（JPEG）") {
+                ClipboardStore.shared.pasteCompressedJPEG(for: item, shouldAutoPaste: false)
+            }
+            Button("复制圆角阴影样机图（PNG）") {
+                ClipboardStore.shared.pasteAppleMockupImage(for: item, shouldAutoPaste: false)
+            }
+        }
+
         if !minimalMode {
             if !financeActions.isEmpty {
                 Divider()
@@ -807,6 +817,16 @@ struct ClipCardView: View {
 
         Button("仅复制到剪贴板") {
             onCopyOnly(false)
+        }
+
+        if !ClipboardStore.shared.minimalModeEnabled && item.type == .image {
+            Divider()
+            Button("复制轻量瘦身图（JPEG）") {
+                ClipboardStore.shared.pasteCompressedJPEG(for: item, shouldAutoPaste: false)
+            }
+            Button("复制圆角阴影样机图（PNG）") {
+                ClipboardStore.shared.pasteAppleMockupImage(for: item, shouldAutoPaste: false)
+            }
         }
 
         if !semantic.actions.isEmpty {

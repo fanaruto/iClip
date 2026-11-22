@@ -211,6 +211,15 @@ struct ClipImageGridTile: View {
             Button("仅复制到剪贴板") {
                 onCopyOnly()
             }
+            if !ClipboardStore.shared.minimalModeEnabled {
+                Divider()
+                Button("轻量瘦身粘贴（转 JPEG 省 80%+ 体积）") {
+                    ClipboardStore.shared.pasteCompressedJPEG(for: item, shouldAutoPaste: false)
+                }
+                Button("圆角阴影加壳（生成苹果风样机图）") {
+                    ClipboardStore.shared.pasteAppleMockupImage(for: item, shouldAutoPaste: false)
+                }
+            }
             Divider()
             Button("提取图中文字并键入（⇧↵）") {
                 onExtractOCR(true)
@@ -580,6 +589,15 @@ struct ClipImageGridTile: View {
             }
             Button("仅复制到剪贴板") {
                 onCopyOnly()
+            }
+            if !ClipboardStore.shared.minimalModeEnabled {
+                Divider()
+                Button("轻量瘦身粘贴（转 JPEG 省 80%+ 体积）") {
+                    ClipboardStore.shared.pasteCompressedJPEG(for: item, shouldAutoPaste: false)
+                }
+                Button("圆角阴影加壳（生成苹果风样机图）") {
+                    ClipboardStore.shared.pasteAppleMockupImage(for: item, shouldAutoPaste: false)
+                }
             }
             Button(item.isPinned ? "取消固定" : "固定到顶部") {
                 onTogglePin()
