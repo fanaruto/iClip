@@ -86,10 +86,10 @@ struct CoreHighlightsOverlay: View {
                     )
 
                     highlightRow(
-                        symbol: "sparkles",
+                        symbol: "sparkles.rectangle.stack",
                         gradient: [.purple, .pink, .orange],
-                        title: "顶部 Siri 虹吸球",
-                        detail: "无需唤出面板，将内容拖向屏幕顶部菜单栏图标即可瞬间吸入收藏。"
+                        title: "官方级液态玻璃",
+                        detail: "原生 26pt 连续 R 角与光学透镜折射，深浅双外观下文字始终锐利清晰。"
                     )
 
                     highlightRow(

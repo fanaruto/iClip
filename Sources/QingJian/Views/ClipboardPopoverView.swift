@@ -1055,7 +1055,7 @@ struct ClipboardPopoverView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("查看 3 大核心功能亮点")
                                 .font(.system(size: 13.5, weight: .medium))
-                            Text("双向自由拖拽、顶部 Siri 虹吸球与全键盘瞬时流转")
+                            Text("双向自由拖拽、官方级液态玻璃与全键盘瞬时流转")
                                 .font(.system(size: 11.5))
                                 .foregroundStyle(.secondary)
                         }
@@ -2860,7 +2860,7 @@ struct ClipboardPopoverView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("查看 3 大核心功能亮点")
                                 .font(.system(size: 13.5, weight: .medium))
-                            Text("双向自由拖拽、顶部 Siri 虹吸球与全键盘瞬时流转")
+                            Text("双向自由拖拽、官方级液态玻璃与全键盘瞬时流转")
                                 .font(.system(size: 11.5))
                                 .foregroundStyle(.secondary)
                         }
