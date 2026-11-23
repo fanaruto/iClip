@@ -130,6 +130,7 @@ final class PanelNavigationModel: ObservableObject {
         let isCommandInput = (QuickSuggestionCommandBanner.extractPayload(from: query) != nil)
             || (QuickCaptureParser.parse(from: query) != nil)
             || (SecurePasswordGenerator.evaluate(query) != nil)
+            || SecretCapsuleMessenger.isCapsuleCommandPrefix(query)
         let effectiveQuery = isCommandInput ? "" : query
         let rawMatched = items.filter { item in
             let tabMatches: Bool
@@ -614,6 +615,22 @@ struct ClipboardPopoverView: View {
             .padding(.horizontal, 14)
             .padding(.bottom, 8)
             .transition(.opacity.combined(with: .move(edge: .top)))
+        } else if let capsuleState = currentSecretCapsuleState {
+            SecretCapsuleCardView(
+                state: capsuleState,
+                onCommitPrimary: {
+                    _ = commitSecretCapsuleAction(forcePin: false)
+                },
+                onCommitPinDecrypted: {
+                    if case .unlockDecrypted = capsuleState {
+                        return { _ = commitSecretCapsuleAction(forcePin: true) }
+                    }
+                    return nil
+                }()
+            )
+            .padding(.horizontal, 14)
+            .padding(.bottom, 8)
+            .transition(.opacity.combined(with: .move(edge: .top)))
         } else if SecurityPostureAudit.isAuditQuery(nav.searchText) {
             SecurityAuditCardView(
                 report: store.securityPostureReport,
@@ -918,6 +935,46 @@ struct ClipboardPopoverView: View {
             )
         }
         .frame(height: 34)
+    }
+
+    private var currentSecretCapsuleState: SecretCapsuleMessenger.CommandState? {
+        let selectedItem = (nav.selectedIndex >= 0 && nav.selectedIndex < filteredItems.count) ? filteredItems[nav.selectedIndex] : nil
+        return SecretCapsuleMessenger.evaluateCommand(
+            query: nav.searchText,
+            latestPlainCandidate: store.latestPlainTextForCapsuleLock,
+            latestCapsuleCandidate: store.latestCapsuleText(prioritizing: selectedItem)
+        )
+    }
+
+    private func commitSecretCapsuleAction(forcePin: Bool) -> Bool {
+        guard let state = currentSecretCapsuleState else { return false }
+        switch state {
+        case .lockReady(let passphrase, let plainSource, _):
+            nav.searchText = ""
+            store.pasteLockedCapsuleEnvelope(plainText: plainSource, passphrase: passphrase, shouldAutoPaste: true, onBeforePaste: onDismiss)
+            return true
+        case .unlockDecrypted(let decryptedPlain):
+            nav.searchText = ""
+            if forcePin {
+                store.captureQuickNote(body: decryptedPlain, alias: "已解锁机密信封", pin: true)
+                onDismiss()
+            } else {
+                store.pasteEphemeralSecret(
+                    decryptedPlain,
+                    toast: "已无痕键入解锁明文（不写入历史 · 30s 后自动擦除）",
+                    scrubDelaySeconds: 30.0,
+                    shouldAutoPaste: true,
+                    onBeforePaste: onDismiss
+                )
+            }
+            return true
+        case .lockAwaitingInput(let hint):
+            store.showToast(hint)
+            return true
+        case .unlockPending(let hasTarget, _):
+            store.showToast(hasTarget ? "请输入正确的解锁口令" : "未在剪贴历史中找到 ICLPMSG1 密文信封")
+            return true
+        }
     }
 
     private var isSensitiveAuditQuery: Bool {
@@ -2462,6 +2519,9 @@ struct ClipboardPopoverView: View {
         if nav.selectedTab == .todo && filteredItems.isEmpty && commitEmptySearchCaptureIfApplicable(forcePin: false) {
             return
         }
+        if commitSecretCapsuleAction(forcePin: false) {
+            return
+        }
         if let pwGen = SecurePasswordGenerator.evaluate(nav.searchText) {
             nav.searchText = ""
             store.pasteEphemeralSecret(pwGen.secretValue, toast: pwGen.ephemeralToast, shouldAutoPaste: true, onBeforePaste: onDismiss)
@@ -2644,6 +2704,9 @@ struct ClipboardPopoverView: View {
                 store.captureQuickNote(body: capture.bodyText, alias: capture.customAlias, pin: true)
             }
             nav.searchText = ""
+            return
+        }
+        if commitSecretCapsuleAction(forcePin: true) {
             return
         }
         if let pwGen = SecurePasswordGenerator.evaluate(nav.searchText) {
@@ -3016,6 +3079,7 @@ final class PanelNavigationModel: ObservableObject {
         let isCommandInput = (QuickSuggestionCommandBanner.extractPayload(from: query) != nil)
             || (QuickCaptureParser.parse(from: query) != nil)
             || (SecurePasswordGenerator.evaluate(query) != nil)
+            || SecretCapsuleMessenger.isCapsuleCommandPrefix(query)
         let trimmedQuery = isCommandInput
             ? ""
             : query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -3498,6 +3562,22 @@ struct ClipboardPopoverView: View {
             .padding(.horizontal, 14)
             .padding(.bottom, 8)
             .transition(.opacity.combined(with: .move(edge: .top)))
+        } else if let capsuleState = currentSecretCapsuleState {
+            SecretCapsuleCardView(
+                state: capsuleState,
+                onCommitPrimary: {
+                    _ = commitSecretCapsuleAction(forcePin: false)
+                },
+                onCommitPinDecrypted: {
+                    if case .unlockDecrypted = capsuleState {
+                        return { _ = commitSecretCapsuleAction(forcePin: true) }
+                    }
+                    return nil
+                }()
+            )
+            .padding(.horizontal, 14)
+            .padding(.bottom, 8)
+            .transition(.opacity.combined(with: .move(edge: .top)))
         } else if SecurityPostureAudit.isAuditQuery(nav.searchText) {
             SecurityAuditCardView(
                 report: store.securityPostureReport,
@@ -3776,6 +3856,46 @@ struct ClipboardPopoverView: View {
             )
         }
         .frame(height: 34)
+    }
+
+    private var currentSecretCapsuleState: SecretCapsuleMessenger.CommandState? {
+        let selectedItem = (nav.selectedIndex >= 0 && nav.selectedIndex < filteredItems.count) ? filteredItems[nav.selectedIndex] : nil
+        return SecretCapsuleMessenger.evaluateCommand(
+            query: nav.searchText,
+            latestPlainCandidate: store.latestPlainTextForCapsuleLock,
+            latestCapsuleCandidate: store.latestCapsuleText(prioritizing: selectedItem)
+        )
+    }
+
+    private func commitSecretCapsuleAction(forcePin: Bool) -> Bool {
+        guard let state = currentSecretCapsuleState else { return false }
+        switch state {
+        case .lockReady(let passphrase, let plainSource, _):
+            nav.searchText = ""
+            store.pasteLockedCapsuleEnvelope(plainText: plainSource, passphrase: passphrase, shouldAutoPaste: true, onBeforePaste: onDismiss)
+            return true
+        case .unlockDecrypted(let decryptedPlain):
+            nav.searchText = ""
+            if forcePin {
+                store.captureQuickNote(body: decryptedPlain, alias: "已解锁机密信封", pin: true)
+                onDismiss()
+            } else {
+                store.pasteEphemeralSecret(
+                    decryptedPlain,
+                    toast: "已无痕键入解锁明文（不写入历史 · 30s 后自动擦除）",
+                    scrubDelaySeconds: 30.0,
+                    shouldAutoPaste: true,
+                    onBeforePaste: onDismiss
+                )
+            }
+            return true
+        case .lockAwaitingInput(let hint):
+            store.showToast(hint)
+            return true
+        case .unlockPending(let hasTarget, _):
+            store.showToast(hasTarget ? "请输入正确的解锁口令" : "未在剪贴历史中找到 ICLPMSG1 密文信封")
+            return true
+        }
     }
 
     private var isSensitiveAuditQuery: Bool {
@@ -5166,6 +5286,9 @@ struct ClipboardPopoverView: View {
         if nav.selectedTab == .todo && filteredItems.isEmpty && commitEmptySearchCaptureIfApplicable(forcePin: false) {
             return
         }
+        if commitSecretCapsuleAction(forcePin: false) {
+            return
+        }
         if let pwGen = SecurePasswordGenerator.evaluate(nav.searchText) {
             nav.searchText = ""
             store.pasteEphemeralSecret(pwGen.secretValue, toast: pwGen.ephemeralToast, shouldAutoPaste: true, onBeforePaste: onDismiss)
@@ -5367,6 +5490,9 @@ struct ClipboardPopoverView: View {
                 store.captureQuickNote(body: capture.bodyText, alias: capture.customAlias, pin: true)
             }
             nav.searchText = ""
+            return
+        }
+        if commitSecretCapsuleAction(forcePin: true) {
             return
         }
         if let pwGen = SecurePasswordGenerator.evaluate(nav.searchText) {

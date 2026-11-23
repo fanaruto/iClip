@@ -667,8 +667,9 @@ final class ClipboardStore: ObservableObject {
                 pasteboard.setString(text, forType: .tabularText)
                 pasteboard.setString(htmlTable, forType: .html)
             }
-            ignoreNextChangeCount = pasteboard.changeCount
-            lastChangeCount = pasteboard.changeCount
+            let forceSecret = (candidate.actionID == "img-totp-code")
+            let scrubSec: TimeInterval = forceSecret ? 30.0 : 45.0
+            commitOutboundPasteboardGuard(for: text, forceProtected: forceSecret, isPinnedSource: false, scrubDelay: scrubSec)
             TactileFeedbackEngine.shared.perform(.magicTransform)
 
         case .compressImage(let itemID):
@@ -1268,16 +1269,14 @@ final class ClipboardStore: ObservableObject {
                 text = autoApplied.text
                 pasteboard.clearContents()
                 pasteboard.setString(text, forType: .string)
-                ignoreNextChangeCount = pasteboard.changeCount
-                lastChangeCount = pasteboard.changeCount
+                commitOutboundPasteboardGuard(for: text, forceProtected: false, isPinnedSource: false)
                 didAutoApplyRule = true
                 showToast(autoApplied.rule.shortToast)
             } else if !minimalModeEnabled,
                       AdaptiveIntelligenceEngine.shared.shouldAutoStripRichFormatting(hasRichFormatting: hasRichFormatting, sourceApp: sourceApp) {
                 pasteboard.clearContents()
                 pasteboard.setString(text, forType: .string)
-                ignoreNextChangeCount = pasteboard.changeCount
-                lastChangeCount = pasteboard.changeCount
+                commitOutboundPasteboardGuard(for: text, forceProtected: false, isPinnedSource: false)
                 didAutoApplyRule = true
                 showToast(LearnedAutoRuleKind.stripRichTextFormatting.shortToast)
             }
@@ -1287,8 +1286,7 @@ final class ClipboardStore: ObservableObject {
                 text = cleaned
                 pasteboard.clearContents()
                 pasteboard.setString(cleaned, forType: .string)
-                ignoreNextChangeCount = pasteboard.changeCount
-                lastChangeCount = pasteboard.changeCount
+                commitOutboundPasteboardGuard(for: cleaned, forceProtected: false, isPinnedSource: false)
                 didAutoApplyRule = true
             }
             #endif
@@ -1587,9 +1585,10 @@ final class ClipboardStore: ObservableObject {
             #endif
             pasteboard.clearContents()
             pasteboard.setString(finalLink, forType: .string)
-            pasteboard.setString(finalLink, forType: .URL)
-            ignoreNextChangeCount = pasteboard.changeCount
-            lastChangeCount = pasteboard.changeCount
+            if SensitiveCredentialVeil.classify(finalLink) == nil {
+                pasteboard.setString(finalLink, forType: .URL)
+            }
+            commitOutboundPasteboardGuard(for: finalLink, forceProtected: false, isPinnedSource: false)
 
             let hash = Self.sha256(finalLink)
             let item = ClipItem(
@@ -1618,11 +1617,10 @@ final class ClipboardStore: ObservableObject {
 
             pasteboard.clearContents()
             pasteboard.setString(finalText, forType: .string)
-            if isLink {
+            if isLink && SensitiveCredentialVeil.classify(finalText) == nil {
                 pasteboard.setString(finalText, forType: .URL)
             }
-            ignoreNextChangeCount = pasteboard.changeCount
-            lastChangeCount = pasteboard.changeCount
+            commitOutboundPasteboardGuard(for: finalText, forceProtected: false, isPinnedSource: false)
 
             let hash = Self.sha256(finalText)
             let item = ClipItem(
@@ -2065,9 +2063,13 @@ final class ClipboardStore: ObservableObject {
                 openLinkInBrowser(item)
                 return true
             }
-            // 支持混排分享口令 / 群聊消息内嵌网页链接直接按 ⌘O 在浏览器打开（严格通过协议白名单）
+            // 支持混排分享口令 / 群聊消息内嵌网页链接直接按 ⌘O 在浏览器打开（严格通过协议白名单与同形异义钓鱼拦截）
             if let embeddedURLString = URLTrackingCleaner.extractFirstCleanedWebURL(from: trimmed),
                let embeddedURL = OutboundLinkSafety.validatedBrowserURL(from: embeddedURLString) {
+                if FileAndLinkSecurityGuard.inspectLinkRisk(embeddedURLString) == .homographPhishing {
+                    showToast("已拦截同形异义伪装钓鱼域名，请核对真实地址", duration: 3.6)
+                    return false
+                }
                 TactileFeedbackEngine.shared.perform(.openLink)
                 NSWorkspace.shared.open(embeddedURL)
                 onAfterOpenExternalURL?()
@@ -2478,6 +2480,48 @@ final class ClipboardStore: ObservableObject {
             showToast(toast)
         } else {
             showToast("\(toast)（已复制）")
+        }
+    }
+
+    var latestPlainTextForCapsuleLock: String? {
+        items.first(where: { item in
+            guard let t = item.text?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty else { return false }
+            return !SecretCapsuleMessenger.containsCapsule(t)
+        })?.text
+    }
+
+    func latestCapsuleText(prioritizing selectedItem: ClipItem? = nil) -> String? {
+        if let sel = selectedItem, let t = sel.text, SecretCapsuleMessenger.containsCapsule(t) {
+            return t
+        }
+        return items.first(where: { SecretCapsuleMessenger.containsCapsule($0.text) })?.text
+    }
+
+    /// 将端到端加锁后的 `ICLPMSG1:` 密文信封直接键入外部聊天/邮件窗口（明文绝不写入历史库）
+    func pasteLockedCapsuleEnvelope(
+        plainText: String,
+        passphrase: String,
+        shouldAutoPaste: Bool = true,
+        onBeforePaste: (() -> Void)? = nil
+    ) {
+        guard let envelope = SecretCapsuleMessenger.sealCapsule(plainText: plainText, passphrase: passphrase) else {
+            showToast("加密失败：请检查口令与正文")
+            return
+        }
+        pasteboard.clearContents()
+        pasteboard.setString(envelope, forType: .string)
+        let written = pasteboard.changeCount
+        ignoreNextChangeCount = written
+        lastChangeCount = written
+
+        TactileFeedbackEngine.shared.perform(.magicTransform)
+        onBeforePaste?()
+        refreshAccessibilityStatus()
+        if shouldAutoPaste && autoPasteEnabled && isAccessibilityGranted {
+            Self.schedulePasteWhenTargetReady()
+            showToast("已生成端到端加密信封并键入（对方输入口令即可解锁）")
+        } else {
+            showToast("已复制端到端加密信封到剪贴板")
         }
     }
 
@@ -3759,6 +3803,10 @@ final class ClipboardStore: ObservableObject {
     func openImageQRCodeURLIfAvailable(_ item: ClipItem) {
         guard let qr = item.qrCodePayload?.trimmingCharacters(in: .whitespacesAndNewlines),
               let url = OutboundLinkSafety.validatedBrowserURL(from: qr) else {
+            return
+        }
+        if FileAndLinkSecurityGuard.inspectLinkRisk(qr) == .homographPhishing {
+            showToast("已拦截二维码中的同形异义伪装钓鱼域名", duration: 3.6)
             return
         }
         TactileFeedbackEngine.shared.perform(.openLink)

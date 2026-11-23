@@ -201,6 +201,110 @@ struct SecurityAuditCardView: View {
     }
 }
 
+/// 搜索框 `@锁` / `@解锁` 零知识端到端密文信封卡片（Mac/Win 互通加锁外发，离线口令无痕解锁不落盘）
+struct SecretCapsuleCardView: View {
+    let state: SecretCapsuleMessenger.CommandState
+    let onCommitPrimary: () -> Void
+    let onCommitPinDecrypted: (() -> Void)?
+
+    var body: some View {
+        let (symbol, tint, title, subtitle, primaryLabel): (String, Color, String, String, String?) = {
+            switch state {
+            case .lockReady(_, let src, let isInline):
+                let preview = src.replacingOccurrences(of: "\n", with: " ")
+                let veiled = SensitiveCredentialVeil.veiledPreview(for: preview)
+                let srcDesc = isInline ? "内联正文" : "首条剪贴"
+                return (
+                    "lock.doc.fill",
+                    .accentColor,
+                    "端到端加密（\(srcDesc)）：\(veiled)",
+                    "SHA256-CTR + HMAC 防篡改信封 · Mac/Win 互通 · 明文不入库",
+                    "发送密文 ↵"
+                )
+            case .lockAwaitingInput(let hint):
+                return ("lock.fill", .secondary, "零知识口令密文信封", hint, nil)
+            case .unlockDecrypted(let plain):
+                let single = plain.replacingOccurrences(of: "\n", with: " ")
+                return (
+                    "lock.open.fill",
+                    .green,
+                    single,
+                    "✓ HMAC 校验通过 · 无痕键入不落盘 · 30s 自动擦除剪贴板",
+                    "无痕键入 ↵"
+                )
+            case .unlockPending(let hasTarget, let attempted):
+                if !hasTarget {
+                    return ("envelope.badge.shield.half.filled", .secondary, "未在剪贴历史中发现 ICLPMSG1 密文信封", "先在微信/飞书复制对方发来的密文，再输入 @解锁 口令", nil)
+                }
+                return (
+                    "key.horizontal.fill",
+                    attempted ? .orange : .accentColor,
+                    attempted ? "等待正确口令解锁密文信封…" : "检测到端到端加密信封 · 请输入解锁口令",
+                    "离线零联网解密 · 口令匹配即刻显影（明文绝不写入磁盘）",
+                    nil
+                )
+            }
+        }()
+
+        HStack(spacing: 10) {
+            Image(systemName: symbol)
+                .font(.system(size: 12.5, weight: .bold))
+                .foregroundStyle(tint)
+                .frame(width: 28, height: 28)
+                .background(Circle().fill(tint.opacity(0.15)))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+
+                Text(subtitle)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 4)
+
+            if let onPin = onCommitPinDecrypted {
+                Button(action: onPin) {
+                    Text("收藏 ⇧↵")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(tint)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Capsule().fill(tint.opacity(0.14)))
+                }
+                .buttonStyle(.plain)
+            }
+
+            if let primaryLabel {
+                Button(action: onCommitPrimary) {
+                    Text(primaryLabel)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 4.5)
+                        .background(Capsule().fill(tint))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 11)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .fill(tint.opacity(0.09))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .strokeBorder(tint.opacity(0.25), lineWidth: 0.65)
+        )
+    }
+}
+
 /// 顶栏「始终在前（Always on Top · ⌘P）」32×32 原生玻璃图钉圆钮（锁死外框尺寸，零布局抖动）
 struct AlwaysOnTopPinButton: View {
     @ObservedObject var store: ClipboardStore

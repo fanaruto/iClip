@@ -180,6 +180,10 @@ enum HitAction {
         secret: String,
         toast: String,
     },
+    CommitLockedCapsule {
+        plain: String,
+        passphrase: String,
+    },
     PinGeneratedSecret {
         secret: String,
         alias: String,
@@ -2001,6 +2005,7 @@ unsafe fn handle_clipboard_update(hwnd: HWND) {
         if let Some(mut raw_text) = read_unicode_text_from_clipboard(hwnd) {
             if !raw_text.trim().is_empty() {
                 let mut rewrite_clipboard_text: Option<String> = None;
+                let mut rewrite_scrub_ms: Option<u32> = None;
                 let mut feedback_toast: Option<String> = None;
 
                 APP_STATE.with(|cell| {
@@ -2031,16 +2036,29 @@ unsafe fn handle_clipboard_update(hwnd: HWND) {
                         st.last_copy_at_ms = now_ms;
 
                         if is_double_copy {
-                            let acts = st.store.rank_actions_for_context(
-                                &ClipItem::new_text(raw_text.clone(), source_app.clone()),
-                                st.active_target_app_name.as_deref(),
-                                analyze_text_actions(&raw_text, false),
-                            );
+                            let acts: Vec<QuickAction> = st
+                                .store
+                                .rank_actions_for_context(
+                                    &ClipItem::new_text(raw_text.clone(), source_app.clone()),
+                                    st.active_target_app_name.as_deref(),
+                                    analyze_text_actions(&raw_text, false),
+                                )
+                                .into_iter()
+                                .filter(|a| a.id != "todo-split-checklist")
+                                .collect();
                             if let Some(top_act) = acts.first() {
-                                raw_text = top_act.result_text.clone();
-                                rewrite_clipboard_text = Some(raw_text.clone());
-                                feedback_toast =
-                                    Some(format!("双按复制智变：{}", top_act.toast_text));
+                                if top_act.id == "totp-live-code" {
+                                    // 保留原始 otpauth:// 入库，剪贴板仅无痕替换为 6 位动态码并 30s 自动擦除
+                                    rewrite_clipboard_text = Some(top_act.result_text.clone());
+                                    rewrite_scrub_ms = Some(30_000);
+                                    feedback_toast =
+                                        Some(format!("双按复制智变：{}", top_act.toast_text));
+                                } else {
+                                    raw_text = top_act.result_text.clone();
+                                    rewrite_clipboard_text = Some(raw_text.clone());
+                                    feedback_toast =
+                                        Some(format!("双按复制智变：{}", top_act.toast_text));
+                                }
                             } else if has_html && !from_ide {
                                 rewrite_clipboard_text = Some(raw_text.clone());
                                 feedback_toast = Some("双按复制：已剥离富文本脏样式".to_string());
@@ -2080,12 +2098,41 @@ unsafe fn handle_clipboard_update(hwnd: HWND) {
                 });
 
                 if let Some(clean_out) = rewrite_clipboard_text {
-                    APP_STATE.with(|c| {
-                        if let Some(st) = c.borrow_mut().as_mut() {
-                            st.ignore_next_clipboard_seq = true;
-                        }
+                    let is_sens = rewrite_scrub_ms.is_some()
+                        || iclip_core::security::classify_sensitive_text(&clean_out).is_some();
+                    let (rw_guard, scrub_delay) = APP_STATE.with(|c| {
+                        let mut b = c.borrow_mut();
+                        let Some(st) = b.as_mut() else {
+                            return (WinClipboardLocalOnlyGuard::default(), None);
+                        };
+                        st.ignore_next_clipboard_seq = true;
+                        let delay = if let Some(explicit_ms) = rewrite_scrub_ms {
+                            Some(explicit_ms)
+                        } else if is_sens && st.store.config.auto_clear_concealed_clipboard {
+                            Some(45_000)
+                        } else {
+                            None
+                        };
+                        (
+                            WinClipboardLocalOnlyGuard {
+                                block_cloud_and_history: is_sens,
+                                cf_excl: st.cf_exclude_monitor,
+                                cf_can_hist: st.cf_can_include_history,
+                                cf_can_cloud: st.cf_can_upload_cloud,
+                            },
+                            delay,
+                        )
                     });
-                    let _ = write_text_and_html_to_clipboard(hwnd, &clean_out, None);
+                    let _ = write_text_and_html_to_clipboard_ext(hwnd, &clean_out, None, rw_guard);
+                    if let Some(ms) = scrub_delay {
+                        let seq = GetClipboardSequenceNumber();
+                        APP_STATE.with(|c| {
+                            if let Some(st) = c.borrow_mut().as_mut() {
+                                st.scrub_expected_seq_num = seq;
+                            }
+                        });
+                        SetTimer(hwnd, TIMER_ID_CONCEALED_SCRUB, ms, None);
+                    }
                 }
                 if let Some(msg) = feedback_toast {
                     set_toast(hwnd, msg);
@@ -4113,6 +4160,176 @@ fn layout_and_draw_main_view(
                     secret: pw_cand.secret_value,
                     toast: pw_cand.ephemeral_toast,
                 },
+            });
+            cur_y += bh + s(8);
+        } else if let Some(cap_cmd) = iclip_core::security::evaluate_secret_capsule_command(
+            &st.search_query,
+            st.store.latest_plain_for_capsule_lock(),
+            st.store.latest_capsule_text(None),
+        ) {
+            let bh = s(48);
+            let (badge_txt, accent, headline, subline, btn_label, primary_hit) = match &cap_cmd {
+                iclip_core::security::SecretCapsuleCommand::LockReady {
+                    passphrase,
+                    plain_source,
+                    is_inline_body,
+                } => {
+                    let veiled = iclip_core::security::veiled_preview(plain_source);
+                    let src_lbl = if *is_inline_body {
+                        "内联正文"
+                    } else {
+                        "首条剪贴"
+                    };
+                    (
+                        "LK",
+                        palette.cobalt,
+                        format!("端到端加密（{src_lbl}）：{veiled}"),
+                        "SHA256-CTR + HMAC 防篡改信封 · Mac/Win 互通 · 明文不入库".to_string(),
+                        Some("发送密文 ↵"),
+                        Some(HitAction::CommitLockedCapsule {
+                            plain: plain_source.clone(),
+                            passphrase: passphrase.clone(),
+                        }),
+                    )
+                }
+                iclip_core::security::SecretCapsuleCommand::LockAwaitingInput { hint } => (
+                    "LK",
+                    palette.text_secondary,
+                    "零知识口令密文信封".to_string(),
+                    hint.clone(),
+                    None,
+                    None,
+                ),
+                iclip_core::security::SecretCapsuleCommand::UnlockDecrypted { decrypted_plain } => {
+                    let single = decrypted_plain.replace('\r', "").replace('\n', " ");
+                    (
+                        "OK",
+                        Color4::rgb(32, 178, 92),
+                        single,
+                        "✓ HMAC 校验通过 · 无痕键入不落盘 · 30s擦除 (⇧↵收藏)".to_string(),
+                        Some("无痕键入 ↵"),
+                        Some(HitAction::CommitEphemeralSecret {
+                            secret: decrypted_plain.clone(),
+                            toast: "已无痕键入解锁明文（不写入历史 · 30s后自动擦除）".to_string(),
+                        }),
+                    )
+                }
+                iclip_core::security::SecretCapsuleCommand::UnlockPending {
+                    has_target_capsule,
+                    attempted_passphrase,
+                } => {
+                    if !has_target_capsule {
+                        (
+                            "LK",
+                            palette.text_secondary,
+                            "未在剪贴历史中发现 ICLPMSG1 密文信封".to_string(),
+                            "先在微信/飞书复制对方发来的密文，再输入 @解锁 口令".to_string(),
+                            None,
+                            None,
+                        )
+                    } else {
+                        (
+                            "KY",
+                            if *attempted_passphrase {
+                                Color4::rgb(245, 146, 28)
+                            } else {
+                                palette.cobalt
+                            },
+                            if *attempted_passphrase {
+                                "等待正确口令解锁密文信封…".to_string()
+                            } else {
+                                "检测到端到端加密信封 · 请输入解锁口令".to_string()
+                            },
+                            "离线零联网解密 · 口令匹配即刻显影（明文绝不写入磁盘）".to_string(),
+                            None,
+                            None,
+                        )
+                    }
+                }
+            };
+
+            canvas.fill_round_rect(pad, cur_y, track_w, bh, sf(13.0), accent.with_alpha(24));
+            canvas.stroke_round_rect(
+                pad,
+                cur_y,
+                track_w,
+                bh,
+                sf(13.0),
+                sf(0.75),
+                accent.with_alpha(64),
+            );
+            let ic_cx = (pad + s(24)) as f32;
+            let ic_cy = (cur_y + bh / 2) as f32;
+            canvas.fill_circle(ic_cx, ic_cy, sf(13.0), accent.with_alpha(36));
+            texts.push(TextDrawCmd {
+                text: badge_txt.to_string(),
+                rect: RECT {
+                    left: pad + s(11),
+                    top: cur_y,
+                    right: pad + s(37),
+                    bottom: cur_y + bh,
+                },
+                color: accent,
+                font_kind: FontKind::BadgeBold,
+                flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            });
+
+            let mut text_right = w - pad - s(12);
+            if let Some(lbl) = btn_label {
+                let btn_w = s(78);
+                let btn_h = s(24);
+                let btn_x = w - pad - btn_w - s(10);
+                let btn_y = cur_y + (bh - btn_h) / 2;
+                canvas.fill_round_rect(btn_x, btn_y, btn_w, btn_h, sf(12.0), accent);
+                texts.push(TextDrawCmd {
+                    text: lbl.to_string(),
+                    rect: RECT {
+                        left: btn_x,
+                        top: btn_y,
+                        right: btn_x + btn_w,
+                        bottom: btn_y + btn_h,
+                    },
+                    color: Color4::rgb(255, 255, 255),
+                    font_kind: FontKind::BadgeBold,
+                    flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                });
+                text_right = btn_x - s(8);
+                if let Some(hit) = primary_hit {
+                    st.hit_regions.push(HitRegion {
+                        rect: RECT {
+                            left: pad,
+                            top: cur_y,
+                            right: w - pad,
+                            bottom: cur_y + bh,
+                        },
+                        interactive_cursor: true,
+                        action: hit,
+                    });
+                }
+            }
+            texts.push(TextDrawCmd {
+                text: headline,
+                rect: RECT {
+                    left: pad + s(44),
+                    top: cur_y + s(5),
+                    right: text_right,
+                    bottom: cur_y + s(26),
+                },
+                color: palette.text_primary,
+                font_kind: FontKind::Headline,
+                flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+            });
+            texts.push(TextDrawCmd {
+                text: subline,
+                rect: RECT {
+                    left: pad + s(44),
+                    top: cur_y + s(25),
+                    right: text_right,
+                    bottom: cur_y + bh - s(4),
+                },
+                color: palette.text_secondary,
+                font_kind: FontKind::Meta,
+                flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
             });
             cur_y += bh + s(8);
         } else if iclip_core::security::is_security_audit_query(&st.search_query) {
@@ -7786,6 +8003,22 @@ unsafe fn handle_left_click(hwnd: HWND, x: i32, y: i32, is_double: bool) {
         HitAction::CommitEphemeralSecret { secret, toast } => {
             commit_ephemeral_secret_paste(hwnd, &secret, toast);
         }
+        HitAction::CommitLockedCapsule { plain, passphrase } => {
+            let env_opt = APP_STATE.with(|c| {
+                let b = c.borrow();
+                let st = b.as_ref()?;
+                iclip_core::security::seal_secret_capsule(&plain, &passphrase, &st.store.data_dir)
+            });
+            if let Some(env_str) = env_opt {
+                commit_direct_text_paste(
+                    hwnd,
+                    &env_str,
+                    "已生成端到端加密信封并键入（对方输入口令即可解锁）".to_string(),
+                );
+            } else {
+                set_toast(hwnd, "加密失败：请检查口令与正文".to_string());
+            }
+        }
         HitAction::PinGeneratedSecret { secret, alias } => {
             let new_idx = APP_STATE.with(|c| {
                 let mut b = c.borrow_mut();
@@ -8765,6 +8998,89 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32) {
         }
         if parse_quick_capture(&query_snapshot).is_some() {
             commit_quick_capture_from_search(hwnd);
+            return;
+        }
+        let cap_cmd_opt = APP_STATE.with(|c| {
+            let b = c.borrow();
+            let st = b.as_ref()?;
+            let filtered = st.store.filtered_indices_ext(
+                st.selected_tab,
+                st.selected_pin_category,
+                &st.search_query,
+                st.active_target_app_name.as_deref(),
+            );
+            let sel_store_idx = filtered.get(st.selected_visible_pos).copied();
+            let data_dir = st.store.data_dir.clone();
+            let cmd = iclip_core::security::evaluate_secret_capsule_command(
+                &query_snapshot,
+                st.store.latest_plain_for_capsule_lock(),
+                st.store.latest_capsule_text(sel_store_idx),
+            )?;
+            Some((cmd, data_dir))
+        });
+        if let Some((cap_cmd, data_dir)) = cap_cmd_opt {
+            match cap_cmd {
+                iclip_core::security::SecretCapsuleCommand::LockReady {
+                    passphrase,
+                    plain_source,
+                    ..
+                } => {
+                    if let Some(env_str) = iclip_core::security::seal_secret_capsule(
+                        &plain_source,
+                        &passphrase,
+                        &data_dir,
+                    ) {
+                        commit_direct_text_paste(
+                            hwnd,
+                            &env_str,
+                            "已生成端到端加密信封并键入（对方输入口令即可解锁）".to_string(),
+                        );
+                    }
+                }
+                iclip_core::security::SecretCapsuleCommand::UnlockDecrypted { decrypted_plain } => {
+                    if shift_down {
+                        let new_idx = APP_STATE.with(|c| {
+                            let mut b = c.borrow_mut();
+                            let st = b.as_mut()?;
+                            let intent = iclip_core::intelligence::QuickCaptureIntent {
+                                alias: Some("已解锁机密信封".to_string()),
+                                body: decrypted_plain.clone(),
+                                default_pin: true,
+                                default_todo: false,
+                            };
+                            let id = st.store.capture_quick_note(&intent)?;
+                            st.search_query.clear();
+                            st.store.items.iter().position(|i| i.id == id)
+                        });
+                        if let Some(idx) = new_idx {
+                            commit_paste_item_by_index(hwnd, idx, false);
+                        }
+                    } else {
+                        commit_ephemeral_secret_paste_with_delay(
+                            hwnd,
+                            &decrypted_plain,
+                            "已无痕键入解锁明文（不写入历史 · 30s后自动擦除）".to_string(),
+                            30_000,
+                        );
+                    }
+                }
+                iclip_core::security::SecretCapsuleCommand::LockAwaitingInput { hint } => {
+                    set_toast(hwnd, hint);
+                }
+                iclip_core::security::SecretCapsuleCommand::UnlockPending {
+                    has_target_capsule,
+                    ..
+                } => {
+                    set_toast(
+                        hwnd,
+                        if has_target_capsule {
+                            "请输入正确的解锁口令".to_string()
+                        } else {
+                            "未在剪贴历史中找到 ICLPMSG1 密文信封".to_string()
+                        },
+                    );
+                }
+            }
             return;
         }
         if let Some(pw_cand) = iclip_core::security::evaluate_secure_password_query(&query_snapshot)

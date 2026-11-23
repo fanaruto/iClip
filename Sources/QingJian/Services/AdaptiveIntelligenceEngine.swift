@@ -611,6 +611,22 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
             if let qr = item.qrCodePayload?.trimmingCharacters(in: .whitespacesAndNewlines),
                !qr.isEmpty,
                !isCategoryCoolingDown("qrcode") {
+                if let totp = TOTPAuthenticator.evaluate(uri: qr) {
+                    return AdaptiveSparkCandidate(
+                        actionID: "img-totp-code",
+                        categoryKey: "qrcode",
+                        sourceApp: item.sourceAppName,
+                        symbolName: "key.viewfinder",
+                        shortTitle: "动态码 \(totp.formattedCode)",
+                        badgeHint: "2FA 直出",
+                        promotableRule: nil,
+                        payload: .replaceClipboardText(
+                            text: totp.code,
+                            htmlTable: nil,
+                            toast: "已算出 2FA 动态码 \(totp.formattedCode)（30s后自动擦除）"
+                        )
+                    )
+                }
                 let isWeb = ClipboardStore.isValidWebURL(qr)
                 let promo = promotableRuleIfEligible(forActionID: "img-qrcode")
                 return AdaptiveSparkCandidate(
@@ -1385,8 +1401,10 @@ enum URLTrackingCleaner {
                         var end = idx + schemeLen
                         while end < count {
                             let v = scalars[end].value
-                            // 遇到空白、控制符、非 ASCII 字符（所有中文与全角标点）或引号尖括号立即终止
-                            if v <= 0x20 || v >= 0x7F { break }
+                            // 允许拉丁扩展与希腊/西里尔同形异义字符进入主机候选（供防钓鱼引擎精准拦截），
+                            // 遇到空白、控制符、中日韩文字、全角标点、零宽/Bidi 控制符或引号尖括号立即终止
+                            let isConfusableIDNScalar = (v >= 0x00C0 && v <= 0x052F)
+                            if v <= 0x20 || (v >= 0x7F && !isConfusableIDNScalar) { break }
                             if v == 0x22 || v == 0x27 || v == 0x3C || v == 0x3E || v == 0x60 || v == 0x5C || v == 0x7B || v == 0x7D || v == 0x7C || v == 0x5E {
                                 break
                             }
@@ -1529,13 +1547,26 @@ enum URLTrackingCleaner {
 
     private static func isValidExtractedWebURL(_ string: String) -> Bool {
         guard !string.contains(" "), !string.contains("\n") else { return false }
-        guard let comps = URLComponents(string: string),
-              let scheme = comps.scheme?.lowercased(),
-              (scheme == "http" || scheme == "https"),
-              let host = comps.host, !host.isEmpty else {
+        if let comps = URLComponents(string: string),
+           let scheme = comps.scheme?.lowercased(),
+           (scheme == "http" || scheme == "https"),
+           let host = comps.host, !host.isEmpty {
+            return host.contains(".") || host == "localhost"
+        }
+        let lower = string.lowercased()
+        let afterScheme: Substring
+        if lower.hasPrefix("https://") {
+            afterScheme = string.dropFirst(8)
+        } else if lower.hasPrefix("http://") {
+            afterScheme = string.dropFirst(7)
+        } else {
             return false
         }
-        return host.contains(".") || host == "localhost"
+        let authority = afterScheme.prefix(while: { $0 != "/" && $0 != "?" && $0 != "#" })
+        let hostPort = authority.split(separator: "@").last ?? Substring()
+        let host = hostPort.split(separator: ":").first ?? Substring()
+        guard !host.isEmpty else { return false }
+        return host.contains(".") || host.lowercased() == "localhost"
     }
 }
 

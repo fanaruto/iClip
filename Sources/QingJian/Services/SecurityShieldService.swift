@@ -1310,38 +1310,49 @@ enum FileAndLinkSecurityGuard {
         let candidate = (trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://"))
             ? trimmed
             : ("https://" + trimmed)
+        let lowerPrefix = String(candidate.prefix(10)).lowercased()
+        let afterSchemeSub: Substring = lowerPrefix.hasPrefix("https://")
+            ? candidate.dropFirst(8)
+            : (lowerPrefix.hasPrefix("http://") ? candidate.dropFirst(7) : Substring(candidate))
+        let rawAuthority = afterSchemeSub.prefix(while: { $0 != "/" && $0 != "?" && $0 != "#" })
+        let rawHostPort = rawAuthority.split(separator: "@").last ?? Substring()
+        let rawHost = (rawHostPort.split(separator: ":").first ?? Substring()).lowercased()
+
         let parsed = URL(string: candidate)
             ?? candidate.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed).flatMap(URL.init(string:))
-        guard let url = parsed, let host = url.host?.lowercased(), !host.isEmpty else {
+        let host = (parsed?.host?.lowercased()).flatMap { $0.isEmpty ? nil : $0 } ?? rawHost
+        guard !host.isEmpty, host.contains(".") else {
             return nil
         }
 
         // 1. Punycode `xn--` 同形异义字编码预警
-        if host.contains("xn--") {
+        if host.contains("xn--") || rawHost.contains("xn--") {
             return .homographPhishing
         }
 
         // 2. 同一域名标签内混排 ASCII 拉丁字母与西里尔/希腊视觉同形字母（如 `аррӏе.com`）
-        for label in host.split(separator: ".") {
-            var hasASCIIAlpha = false
-            var hasConfusableScript = false
-            for sc in label.unicodeScalars {
-                let v = sc.value
-                if (v >= 97 && v <= 122) || (v >= 65 && v <= 90) {
-                    hasASCIIAlpha = true
-                } else if (v >= 0x0370 && v <= 0x052F) {
-                    // Greek / Cyrillic 区间
-                    hasConfusableScript = true
+        for hostCandidate in [rawHost, host] where !hostCandidate.isEmpty {
+            for label in hostCandidate.split(separator: ".") {
+                var hasASCIIAlpha = false
+                var hasConfusableScript = false
+                for sc in label.unicodeScalars {
+                    let v = sc.value
+                    if (v >= 97 && v <= 122) || (v >= 65 && v <= 90) {
+                        hasASCIIAlpha = true
+                    } else if v >= 0x0370 && v <= 0x052F {
+                        // Greek / Cyrillic 区间
+                        hasConfusableScript = true
+                    }
                 }
-            }
-            if hasASCIIAlpha && hasConfusableScript {
-                return .homographPhishing
+                if hasASCIIAlpha && hasConfusableScript {
+                    return .homographPhishing
+                }
             }
         }
 
         // 3. 非可信主机的高危可执行脚本/安装器直链预警
         let isTrusted = trustedDownloadHosts.contains { host == $0 || host.hasSuffix("." + $0) }
-        if !isTrusted {
+        if !isTrusted, let url = parsed {
             let pathExt = url.pathExtension.lowercased()
             if dangerousExecExtensions.contains(pathExt) {
                 return .executableDownload
@@ -1845,5 +1856,130 @@ enum SecurityPostureAudit {
         default:
             return false
         }
+    }
+}
+
+/// 9. 零知识端到端认证加密密文信封（`@锁 口令` 加锁外发 / `@解锁 口令` 无痕阅后即焚，macOS ↔ Windows 100% 字节级互解）
+enum SecretCapsuleMessenger {
+    static let tokenPrefix = "ICLPMSG1:"
+    private static let capsuleExtractRegex = try! NSRegularExpression(
+        pattern: #"ICLPMSG1:([A-Za-z0-9_-]{80,})"#
+    )
+
+    enum CommandState: Equatable {
+        case lockReady(passphrase: String, plainSource: String, isInlineBody: Bool)
+        case lockAwaitingInput(hint: String)
+        case unlockDecrypted(decryptedPlain: String)
+        case unlockPending(hasTargetCapsule: Bool, attemptedPassphrase: Bool)
+    }
+
+    static func containsCapsule(_ text: String?) -> Bool {
+        guard let s = text, s.contains(tokenPrefix) else { return false }
+        let r = NSRange(s.startIndex..<s.endIndex, in: s)
+        return capsuleExtractRegex.firstMatch(in: s, range: r) != nil
+    }
+
+    static func isCapsuleCommandPrefix(_ query: String) -> Bool {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard trimmed.hasPrefix("@") else { return false }
+        for p in ["@锁", "@加密", "@lock", "@解锁", "@解密", "@unlock"] {
+            if trimmed == p || trimmed.hasPrefix(p + " ") || trimmed.hasPrefix(p + "\t") {
+                return true
+            }
+        }
+        return false
+    }
+
+    static func sealCapsule(plainText: String, passphrase: String) -> String? {
+        let pw = passphrase.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !plainText.isEmpty, !pw.isEmpty, plainText.utf8.count <= 65_536 else { return nil }
+        guard let sealed = LocalVaultCrypto.sealArchiveWithPassphrase(Data(plainText.utf8), passphrase: pw) else {
+            return nil
+        }
+        let b64url = sealed.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        return "🔒[iClip密文·口令解锁] \(tokenPrefix)\(b64url)"
+    }
+
+    static func openCapsule(in rawEnvelope: String, passphrase: String) -> String? {
+        let pw = passphrase.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !pw.isEmpty, rawEnvelope.contains(tokenPrefix) else { return nil }
+        let r = NSRange(rawEnvelope.startIndex..<rawEnvelope.endIndex, in: rawEnvelope)
+        guard let m = capsuleExtractRegex.firstMatch(in: rawEnvelope, range: r),
+              let b64Range = Range(m.range(at: 1), in: rawEnvelope) else {
+            return nil
+        }
+        var std = String(rawEnvelope[b64Range])
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let rem = std.count % 4
+        if rem > 0 {
+            std.append(String(repeating: "=", count: 4 - rem))
+        }
+        guard let cipherData = Data(base64Encoded: std),
+              let plainData = LocalVaultCrypto.openEncryptedArchive(cipherData, passphrase: pw),
+              let plainStr = String(data: plainData, encoding: .utf8) else {
+            return nil
+        }
+        return plainStr
+    }
+
+    static func evaluateCommand(
+        query: String,
+        latestPlainCandidate: String?,
+        latestCapsuleCandidate: String?
+    ) -> CommandState? {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("@") else { return nil }
+        let lower = trimmed.lowercased()
+
+        let lockPrefixes = ["@锁", "@加密", "@lock"]
+        for p in lockPrefixes {
+            if lower == p || lower.hasPrefix(p + " ") || lower.hasPrefix(p + "\t") {
+                let rest = String(trimmed.dropFirst(p.count)).trimmingCharacters(in: .whitespaces)
+                if rest.isEmpty {
+                    return .lockAwaitingInput(hint: "输入口令加密首条剪贴（如 @锁 8866）或 @锁 8866 :: 正文")
+                }
+                for sep in ["::", "：："] {
+                    if let range = rest.range(of: sep) {
+                        let pw = String(rest[..<range.lowerBound]).trimmingCharacters(in: .whitespaces)
+                        let body = String(rest[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !pw.isEmpty else {
+                            return .lockAwaitingInput(hint: "请在 \(sep) 左侧填写加密口令")
+                        }
+                        guard !body.isEmpty else {
+                            return .lockAwaitingInput(hint: "请在 \(sep) 右侧输入要端到端加锁的机密正文")
+                        }
+                        return .lockReady(passphrase: pw, plainSource: body, isInlineBody: true)
+                    }
+                }
+                if let fallback = latestPlainCandidate?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !fallback.isEmpty {
+                    return .lockReady(passphrase: rest, plainSource: fallback, isInlineBody: false)
+                }
+                return .lockAwaitingInput(hint: "当前无可用纯文本剪贴，可使用 @锁 \(rest) :: 机密正文")
+            }
+        }
+
+        let unlockPrefixes = ["@解锁", "@解密", "@unlock"]
+        for p in unlockPrefixes {
+            if lower == p || lower.hasPrefix(p + " ") || lower.hasPrefix(p + "\t") {
+                let pw = String(trimmed.dropFirst(p.count)).trimmingCharacters(in: .whitespaces)
+                guard let cap = latestCapsuleCandidate, containsCapsule(cap) else {
+                    return .unlockPending(hasTargetCapsule: false, attemptedPassphrase: !pw.isEmpty)
+                }
+                if pw.isEmpty {
+                    return .unlockPending(hasTargetCapsule: true, attemptedPassphrase: false)
+                }
+                if let plain = openCapsule(in: cap, passphrase: pw) {
+                    return .unlockDecrypted(decryptedPlain: plain)
+                }
+                return .unlockPending(hasTargetCapsule: true, attemptedPassphrase: true)
+            }
+        }
+
+        return nil
     }
 }

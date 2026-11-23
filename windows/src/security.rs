@@ -2332,3 +2332,157 @@ pub fn is_security_audit_query(raw: &str) -> bool {
         "@安全" | "@体检" | "@隐私体检" | "@shield" | "@audit"
     )
 }
+
+// ============================================================================
+// 10. 零知识端到端认证加密密文信封（`@锁 口令` 加锁外发 / `@解锁 口令` 无痕阅后即焚，与 macOS `ICLPMSG1:` 100% 字节级互解）
+// ============================================================================
+
+pub const SECRET_CAPSULE_PREFIX: &str = "ICLPMSG1:";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SecretCapsuleCommand {
+    LockReady {
+        passphrase: String,
+        plain_source: String,
+        is_inline_body: bool,
+    },
+    LockAwaitingInput {
+        hint: String,
+    },
+    UnlockDecrypted {
+        decrypted_plain: String,
+    },
+    UnlockPending {
+        has_target_capsule: bool,
+        attempted_passphrase: bool,
+    },
+}
+
+pub fn contains_secret_capsule(raw: Option<&str>) -> bool {
+    let Some(s) = raw else { return false };
+    if !s.contains(SECRET_CAPSULE_PREFIX) {
+        return false;
+    }
+    static CAP_RE: OnceLock<Regex> = OnceLock::new();
+    let re = CAP_RE.get_or_init(|| Regex::new(r"ICLPMSG1:([A-Za-z0-9_-]{80,})").unwrap());
+    re.is_match(s)
+}
+
+pub fn seal_secret_capsule(plain_text: &str, passphrase: &str, seed_dir: &Path) -> Option<String> {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+
+    let pw = passphrase.trim();
+    if plain_text.is_empty() || pw.is_empty() || plain_text.len() > 65_536 {
+        return None;
+    }
+    let sealed = seal_archive_with_passphrase(plain_text.as_bytes(), pw, seed_dir);
+    let b64 = URL_SAFE_NO_PAD.encode(&sealed);
+    Some(format!(
+        "🔒[iClip密文·口令解锁] {SECRET_CAPSULE_PREFIX}{b64}"
+    ))
+}
+
+pub fn open_secret_capsule(raw_envelope: &str, passphrase: &str) -> Option<String> {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+
+    let pw = passphrase.trim();
+    if pw.is_empty() || !raw_envelope.contains(SECRET_CAPSULE_PREFIX) {
+        return None;
+    }
+    static CAP_RE: OnceLock<Regex> = OnceLock::new();
+    let re = CAP_RE.get_or_init(|| Regex::new(r"ICLPMSG1:([A-Za-z0-9_-]{80,})").unwrap());
+    let caps = re.captures(raw_envelope)?;
+    let b64_part = caps.get(1)?.as_str();
+    let cipher_bytes = URL_SAFE_NO_PAD.decode(b64_part).ok()?;
+    let plain_bytes = open_encrypted_archive_bytes(&cipher_bytes, pw)?;
+    String::from_utf8(plain_bytes).ok()
+}
+
+pub fn evaluate_secret_capsule_command(
+    query: &str,
+    latest_plain_candidate: Option<&str>,
+    latest_capsule_candidate: Option<&str>,
+) -> Option<SecretCapsuleCommand> {
+    let trimmed = query.trim();
+    if !trimmed.starts_with('@') {
+        return None;
+    }
+    let lower = trimmed.to_lowercase();
+
+    for p in ["@锁", "@加密", "@lock"] {
+        if lower == p || lower.starts_with(&format!("{p} ")) || lower.starts_with(&format!("{p}\t"))
+        {
+            let rest = trimmed[p.len()..].trim();
+            if rest.is_empty() {
+                return Some(SecretCapsuleCommand::LockAwaitingInput {
+                    hint: "输入口令加密首条剪贴（如 @锁 8866）或 @锁 8866 :: 正文".to_string(),
+                });
+            }
+            for sep in ["::", "：："] {
+                if let Some((left, right)) = rest.split_once(sep) {
+                    let pw = left.trim();
+                    let body = right.trim();
+                    if pw.is_empty() {
+                        return Some(SecretCapsuleCommand::LockAwaitingInput {
+                            hint: format!("请在 {sep} 左侧填写加密口令"),
+                        });
+                    }
+                    if body.is_empty() {
+                        return Some(SecretCapsuleCommand::LockAwaitingInput {
+                            hint: format!("请在 {sep} 右侧输入要端到端加锁的机密正文"),
+                        });
+                    }
+                    return Some(SecretCapsuleCommand::LockReady {
+                        passphrase: pw.to_string(),
+                        plain_source: body.to_string(),
+                        is_inline_body: true,
+                    });
+                }
+            }
+            if let Some(fb) = latest_plain_candidate
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                return Some(SecretCapsuleCommand::LockReady {
+                    passphrase: rest.to_string(),
+                    plain_source: fb.to_string(),
+                    is_inline_body: false,
+                });
+            }
+            return Some(SecretCapsuleCommand::LockAwaitingInput {
+                hint: format!("当前无可用纯文本剪贴，可使用 @锁 {rest} :: 机密正文"),
+            });
+        }
+    }
+
+    for p in ["@解锁", "@解密", "@unlock"] {
+        if lower == p || lower.starts_with(&format!("{p} ")) || lower.starts_with(&format!("{p}\t"))
+        {
+            let pw = trimmed[p.len()..].trim();
+            let Some(cap) = latest_capsule_candidate.filter(|c| contains_secret_capsule(Some(c)))
+            else {
+                return Some(SecretCapsuleCommand::UnlockPending {
+                    has_target_capsule: false,
+                    attempted_passphrase: !pw.is_empty(),
+                });
+            };
+            if pw.is_empty() {
+                return Some(SecretCapsuleCommand::UnlockPending {
+                    has_target_capsule: true,
+                    attempted_passphrase: false,
+                });
+            }
+            if let Some(plain) = open_secret_capsule(cap, pw) {
+                return Some(SecretCapsuleCommand::UnlockDecrypted {
+                    decrypted_plain: plain,
+                });
+            }
+            return Some(SecretCapsuleCommand::UnlockPending {
+                has_target_capsule: true,
+                attempted_passphrase: true,
+            });
+        }
+    }
+
+    None
+}

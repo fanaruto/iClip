@@ -2496,4 +2496,64 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertTrue(wgItem.matches(query: "@体检"))
         XCTAssertTrue(wgItem.matches(query: "@安全"))
     }
+
+    // MARK: - 51. 零知识端到端密文信封（`@锁` / `@解锁` 跨平台互解与防篡改）、2FA 二维码微星标直出与混排钓鱼拦截测试
+
+    @MainActor
+    func testZeroKnowledgeSecretCapsuleCrossOSAnd2FASparkAndEmbeddedPhishingGuard() throws {
+        // 1. 验证 `@锁` 生成端到端认证密文信封、`@解锁` 无损还原、错误口令拒绝与 1 字节篡改 HMAC 拦截
+        let secretBody = "服务器 root 口令：Prod#2026_UltraSecret! 🚀"
+        let envelope = try XCTUnwrap(SecretCapsuleMessenger.sealCapsule(plainText: secretBody, passphrase: "8866"))
+        XCTAssertTrue(SecretCapsuleMessenger.containsCapsule(envelope))
+        XCTAssertFalse(envelope.contains("Prod#2026"))
+
+        // 模拟混入微信群聊前缀依然精准提取解密
+        let chatWrapped = "【运维转发】请查收：\n\(envelope)\n收到请回复"
+        XCTAssertNil(SecretCapsuleMessenger.openCapsule(in: chatWrapped, passphrase: "wrong_pw"))
+        XCTAssertEqual(SecretCapsuleMessenger.openCapsule(in: chatWrapped, passphrase: "8866"), secretBody)
+
+        // 篡改密文末尾 1 个字符，HMAC-SHA256 必须当场拒绝
+        let tampered = String(envelope.dropLast()) + (envelope.hasSuffix("A") ? "B" : "A")
+        XCTAssertNil(SecretCapsuleMessenger.openCapsule(in: tampered, passphrase: "8866"))
+
+        // 验证 `@锁` / `@解锁` 命令状态机与 `@密文` 标签检索
+        let cmdLock = SecretCapsuleMessenger.evaluateCommand(
+            query: "@锁 9527",
+            latestPlainCandidate: secretBody,
+            latestCapsuleCandidate: nil
+        )
+        XCTAssertEqual(cmdLock, .lockReady(passphrase: "9527", plainSource: secretBody, isInlineBody: false))
+
+        let cmdUnlock = SecretCapsuleMessenger.evaluateCommand(
+            query: "@解锁 8866",
+            latestPlainCandidate: nil,
+            latestCapsuleCandidate: chatWrapped
+        )
+        XCTAssertEqual(cmdUnlock, .unlockDecrypted(decryptedPlain: secretBody))
+
+        let capItem = ClipItem(type: .text, text: chatWrapped, contentHash: "text:cap1")
+        XCTAssertTrue(capItem.matches(query: "@密文"))
+
+        // 2. 验证截取 2FA 绑定二维码时，微星标 `ActionSpark` 直接产出 6 位纯数字动态码而非暴露 `otpauth://` 根密钥
+        let qr2FA = "otpauth://totp/GitHub:alice?secret=JBSWY3DPEHPK3PXP&issuer=GitHub"
+        let qrItem = ClipItem(type: .image, imageFileName: "2fa.png", qrCodePayload: qr2FA, contentHash: "img:2fa")
+        if let spark = AdaptiveIntelligenceEngine.shared.evaluateSparkCandidate(for: qrItem, reuseCount: 1, minimalMode: false) {
+            XCTAssertEqual(spark.actionID, "img-totp-code")
+            if case .replaceClipboardText(let outText, _, _) = spark.payload {
+                XCTAssertEqual(outText.count, 6)
+                XCTAssertTrue(outText.allSatisfy(\.isNumber))
+                XCTAssertFalse(outText.contains("JBSWY3DPEHPK3PXP"))
+            } else {
+                XCTFail("Expected replaceClipboardText with 6-digit TOTP code")
+            }
+        }
+
+        // 3. 验证群聊混排文本内嵌同形异义西里尔钓鱼域名（`aрple.com` 及无空格粘连中文与 Punycode）被精准识别拦截
+        let embeddedPhish = "紧急通知：请登录https://a\u{0440}ple.com/security核验账号"
+        let extracted = try XCTUnwrap(URLTrackingCleaner.extractFirstCleanedWebURL(from: embeddedPhish))
+        XCTAssertEqual(extracted, "https://a\u{0440}ple.com/security")
+        XCTAssertEqual(FileAndLinkSecurityGuard.inspectLinkRisk(extracted), .homographPhishing)
+        let punyExtracted = try XCTUnwrap(URLTrackingCleaner.extractFirstCleanedWebURL(from: "请访问 https://xn--80ak6aa92e.com/security 升级"))
+        XCTAssertEqual(FileAndLinkSecurityGuard.inspectLinkRisk(punyExtracted), .homographPhishing)
+    }
 }

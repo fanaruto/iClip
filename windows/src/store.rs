@@ -751,7 +751,13 @@ impl ClipboardStore {
     ) -> Vec<usize> {
         let is_cmd = extract_suggestion_payload(query).is_some()
             || parse_quick_capture(query).is_some()
-            || crate::security::evaluate_secure_password_query(query).is_some();
+            || crate::security::evaluate_secure_password_query(query).is_some()
+            || crate::security::evaluate_secret_capsule_command(
+                query,
+                self.latest_plain_for_capsule_lock(),
+                self.latest_capsule_text(None),
+            )
+            .is_some();
         let effective_q = if is_cmd { "" } else { query.trim() };
 
         let mut matched: Vec<usize> = self
@@ -1435,6 +1441,34 @@ impl ClipboardStore {
             .iter()
             .filter(|it| Self::is_unpinned_security_or_poison_risk(it))
             .count()
+    }
+
+    pub fn latest_plain_for_capsule_lock(&self) -> Option<&str> {
+        self.items.iter().find_map(|it| {
+            let t = it.text.as_deref()?.trim();
+            if t.is_empty() || crate::security::contains_secret_capsule(Some(t)) {
+                None
+            } else {
+                it.text.as_deref()
+            }
+        })
+    }
+
+    pub fn latest_capsule_text<'a>(&'a self, preferred_idx: Option<usize>) -> Option<&'a str> {
+        if let Some(idx) = preferred_idx {
+            if let Some(it) = self.items.get(idx) {
+                if crate::security::contains_secret_capsule(it.text.as_deref()) {
+                    return it.text.as_deref();
+                }
+            }
+        }
+        self.items.iter().find_map(|it| {
+            if crate::security::contains_secret_capsule(it.text.as_deref()) {
+                it.text.as_deref()
+            } else {
+                None
+            }
+        })
     }
 
     /// 一键无痕清扫所有未收藏、非待办的敏感凭据、隐藏控制符投毒、钓鱼风险与粘贴即焚残留（收藏项永久豁免）

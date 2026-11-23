@@ -1452,4 +1452,71 @@ mod tests {
 
         let _ = fs::remove_dir_all(tmp_dir);
     }
+
+    #[test]
+    fn test_zero_knowledge_secret_capsule_cross_os_tamper_guard_and_locked_search() {
+        use crate::model::ClipItem;
+        use crate::security::{
+            contains_secret_capsule, evaluate_secret_capsule_command, open_secret_capsule,
+            seal_secret_capsule, SecretCapsuleCommand,
+        };
+
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "iclip-iter11-test-{}-{}",
+            std::process::id(),
+            crate::model::now_unix_secs()
+        ));
+        let _ = fs::create_dir_all(&tmp_dir);
+
+        let secret_msg = "核心数据库主口令：WinMac#2026_ZeroKnowledge! 🔐";
+        let envelope = seal_secret_capsule(secret_msg, "8866", &tmp_dir).unwrap();
+        assert!(contains_secret_capsule(Some(&envelope)));
+        assert!(!envelope.contains("WinMac#2026"));
+
+        let chat_wrapped = format!("【飞书私聊】\n{envelope}\n请用口令解锁");
+        assert_eq!(open_secret_capsule(&chat_wrapped, "0000"), None);
+        assert_eq!(
+            open_secret_capsule(&chat_wrapped, "8866").as_deref(),
+            Some(secret_msg)
+        );
+
+        // 篡改密文末尾 1 字节，常量时间 HMAC-SHA256 鉴权必须拒绝
+        let mut tampered = envelope.clone();
+        let replacement_ch = if tampered.ends_with('A') { 'B' } else { 'A' };
+        tampered.pop();
+        tampered.push(replacement_ch);
+        assert_eq!(open_secret_capsule(&tampered, "8866"), None);
+
+        // 验证 `@锁` / `@解锁` 命令解析与 `@密文` 检索
+        let lock_cmd = evaluate_secret_capsule_command("@锁 9527", Some(secret_msg), None);
+        assert_eq!(
+            lock_cmd,
+            Some(SecretCapsuleCommand::LockReady {
+                passphrase: "9527".to_string(),
+                plain_source: secret_msg.to_string(),
+                is_inline_body: false,
+            })
+        );
+        let unlock_cmd = evaluate_secret_capsule_command("@解锁 8866", None, Some(&chat_wrapped));
+        assert_eq!(
+            unlock_cmd,
+            Some(SecretCapsuleCommand::UnlockDecrypted {
+                decrypted_plain: secret_msg.to_string(),
+            })
+        );
+
+        let cap_item = ClipItem::new_text(chat_wrapped, None);
+        assert!(cap_item.matches_query("@密文"));
+
+        // 验证群聊无空格粘连中文内嵌西里尔同形钓鱼链接精准剥壳并命中拦截
+        let phish_msg = "紧急通知：请登录https://a\u{0440}ple.com/security核验账号";
+        let extracted_url = crate::intelligence::extract_clean_share_url(phish_msg).unwrap();
+        assert_eq!(extracted_url, "https://a\u{0440}ple.com/security");
+        assert_eq!(
+            crate::security::inspect_link_risk(&extracted_url),
+            Some(crate::security::LinkRiskKind::HomographPhishing)
+        );
+
+        let _ = fs::remove_dir_all(tmp_dir);
+    }
 }

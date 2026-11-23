@@ -54,6 +54,14 @@ pub fn extract_clean_share_url(raw: &str) -> Option<String> {
         if ch.is_whitespace() || ch.is_control() {
             break;
         }
+        // 遇到中日韩汉字、全角标点或口令粘连引号立即截断（保留拉丁扩展/西里尔/希腊供防钓鱼引擎识别拦截）
+        let cv = ch as u32;
+        if (0x2E80..=0x9FFF).contains(&cv)
+            || (0xF900..=0xFAFF).contains(&cv)
+            || (0xFE30..=0xFFEF).contains(&cv)
+        {
+            break;
+        }
         // 遇到中文标点或口令粘连引号立即截断
         if matches!(
             ch,

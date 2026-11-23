@@ -626,6 +626,8 @@ enum EpisodicQueryMatcher {
             if case .pastejackingOrBidi = item.detectedPoisonThreat { return true }
             if item.detectedLinkRisk != nil { return true }
             return item.detectedSensitiveKind != nil || item.isBurnAfterPaste
+        case "密文", "@密文", "@locked", "iclpmsg1":
+            return SecretCapsuleMessenger.containsCapsule(item.text)
         case "风险", "@风险", "@毒", "@poison", "poison":
             return item.detectedPoisonThreat != nil || item.detectedLinkRisk != nil
         case "即焚", "@即焚", "@burn", "burn":
@@ -664,6 +666,7 @@ enum EpisodicQueryMatcher {
              "webhook", "@webhook",
              "2fa", "@2fa", "totp", "@totp", "@动态码",
              "@安全", "@体检", "@隐私体检", "@shield", "@audit",
+             "密文", "@密文", "@locked", "iclpmsg1",
              "风险", "@风险", "@毒", "@poison", "poison",
              "即焚", "@即焚", "@burn", "burn":
             return true

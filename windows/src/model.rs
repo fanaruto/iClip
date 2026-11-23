@@ -613,6 +613,9 @@ impl ClipItem {
                 }
                 return self.detected_sensitive_kind().is_some() || self.is_burn_after_paste();
             }
+            "密文" | "@密文" | "@locked" | "iclpmsg1" => {
+                return crate::security::contains_secret_capsule(self.text.as_deref());
+            }
             "风险" | "@风险" | "@毒" | "@poison" | "poison" => {
                 return self.detected_poison_threat().is_some()
                     || self.detected_link_risk().is_some()
