@@ -2229,7 +2229,7 @@ fn item_supports_external_jump(item: &ClipItem) -> bool {
     }
 }
 
-fn item_quick_actions_for_ui(st: &AppState, item: &ClipItem) -> Vec<QuickAction> {
+fn item_quick_actions_for_ui(st: &WinAppState, item: &ClipItem) -> Vec<QuickAction> {
     if st.store.config.minimal_mode_enabled {
         return Vec::new();
     }
