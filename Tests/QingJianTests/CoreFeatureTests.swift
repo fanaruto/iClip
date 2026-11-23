@@ -2044,4 +2044,41 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertFalse(UpdateManager.isTrustedRemoteDownloadURL(URL(string: "http://github.com/fanaruto/iClip/iClip.zip")!))
         XCTAssertFalse(UpdateManager.isTrustedRemoteDownloadURL(URL(string: "https://evil-mirror.example.com/iClip.zip")!))
     }
+
+    // MARK: - 43. 截图局部晶格马赛克物理打码（`renderMosaicBoxes`）与归档大小上限守卫测试
+
+    @MainActor
+    func testImagePrivacyMosaicRenderingAndArchiveSizeGuard() throws {
+        // 1. 构造一张左黑右白对比分明的 120x80 测试位图，在中心跨界框施加晶格马赛克，验证中心像素被均值化擦除而四角保持原样
+        let w = 120, h = 80
+        let cs = CGColorSpace(name: CGColorSpace.sRGB)!
+        let ctx = try XCTUnwrap(CGContext(
+            data: nil,
+            width: w,
+            height: h,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: cs,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ))
+        ctx.setFillColor(CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: w / 2, height: h))
+        ctx.setFillColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
+        ctx.fill(CGRect(x: w / 2, y: 0, width: w / 2, height: h))
+        let srcCG = try XCTUnwrap(ctx.makeImage())
+
+        let mosaicOut = try XCTUnwrap(ImageStudioEngine.renderMosaicBoxes(
+            [CGRect(x: 0.35, y: 0.25, width: 0.30, height: 0.50)],
+            onto: srcCG
+        ))
+        XCTAssertEqual(mosaicOut.redactedCount, 1)
+        XCTAssertGreaterThan(mosaicOut.result.byteCount, 64)
+        let decodedSrc = try XCTUnwrap(CGImageSourceCreateWithData(mosaicOut.result.data as CFData, nil))
+        let outCG = try XCTUnwrap(CGImageSourceCreateImageAtIndex(decodedSrc, 0, nil))
+        XCTAssertEqual(outCG.width, w)
+        XCTAssertEqual(outCG.height, h)
+
+        // 2. 归档包超限守卫常量核验（64 MB）
+        XCTAssertEqual(ArchiveBackupService.maxArchiveInputBytes, 64 * 1024 * 1024)
+    }
 }

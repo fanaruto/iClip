@@ -389,6 +389,11 @@ struct ClipboardPopoverView: View {
                             .padding(.horizontal, 14)
                             .padding(.bottom, 8)
                             .transition(.opacity.combined(with: .move(edge: .top)))
+                    } else if !store.minimalModeEnabled && isSensitiveAuditQuery && store.unpinnedSensitiveCount > 0 {
+                        sensitiveAuditSummaryBar
+                            .padding(.horizontal, 14)
+                            .padding(.bottom, 8)
+                            .transition(.opacity.combined(with: .move(edge: .top)))
                     }
 
                     if !store.minimalModeEnabled && nav.selectedTab == .pinned {
@@ -833,6 +838,49 @@ struct ClipboardPopoverView: View {
             )
         }
         .frame(height: 34)
+    }
+
+    private var isSensitiveAuditQuery: Bool {
+        let q = nav.searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let auditTokens = ["@敏感", "@密钥", "@隐私", "@secret", "敏感", "@即焚", "@burn"]
+        return auditTokens.contains { q == $0 || q.hasPrefix($0 + " ") || q.hasSuffix(" " + $0) }
+    }
+
+    private var sensitiveAuditSummaryBar: some View {
+        let count = store.unpinnedSensitiveCount
+        return HStack(spacing: 6) {
+            Image(systemName: "lock.shield.fill")
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(Color.orange)
+
+            Text("检出 \(count) 条未收藏敏感凭据")
+                .font(.system(size: 11, weight: .semibold))
+                .monospacedDigit()
+                .foregroundStyle(Color.primary.opacity(0.88))
+
+            Text("· 收藏项永久保护")
+                .font(.system(size: 10.5))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+
+            Spacer(minLength: 4)
+
+            Button {
+                withAnimation(.spring(response: 0.24, dampingFraction: 0.85)) {
+                    _ = store.sweepAllUnpinnedSensitiveItems()
+                    clampSelection()
+                }
+            } label: {
+                Text("一键无痕清扫")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(Color.orange)
+                    .padding(.horizontal, 8.5)
+                    .padding(.vertical, 3.5)
+                    .background(Capsule().fill(Color.orange.opacity(0.13)))
+            }
+            .buttonStyle(.plain)
+            .help("彻底清除所有未收藏、非待办的敏感密钥、身份证与即焚残留（收藏项不受影响）")
+        }
     }
 
     private var todoSummaryBar: some View {
@@ -3138,6 +3186,11 @@ struct ClipboardPopoverView: View {
                             .padding(.horizontal, 14)
                             .padding(.bottom, 8)
                             .transition(.opacity.combined(with: .move(edge: .top)))
+                    } else if !store.minimalModeEnabled && isSensitiveAuditQuery && store.unpinnedSensitiveCount > 0 {
+                        sensitiveAuditSummaryBar
+                            .padding(.horizontal, 14)
+                            .padding(.bottom, 8)
+                            .transition(.opacity.combined(with: .move(edge: .top)))
                     }
 
                     if !store.minimalModeEnabled && nav.selectedTab == .pinned {
@@ -3536,6 +3589,49 @@ struct ClipboardPopoverView: View {
             )
         }
         .frame(height: 34)
+    }
+
+    private var isSensitiveAuditQuery: Bool {
+        let q = nav.searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let auditTokens = ["@敏感", "@密钥", "@隐私", "@secret", "敏感", "@即焚", "@burn"]
+        return auditTokens.contains { q == $0 || q.hasPrefix($0 + " ") || q.hasSuffix(" " + $0) }
+    }
+
+    private var sensitiveAuditSummaryBar: some View {
+        let count = store.unpinnedSensitiveCount
+        return HStack(spacing: 6) {
+            Image(systemName: "lock.shield.fill")
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(Color.orange)
+
+            Text("检出 \(count) 条未收藏敏感凭据")
+                .font(.system(size: 11, weight: .semibold))
+                .monospacedDigit()
+                .foregroundStyle(Color.primary.opacity(0.88))
+
+            Text("· 收藏项永久保护")
+                .font(.system(size: 10.5))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+
+            Spacer(minLength: 4)
+
+            Button {
+                withAnimation(.spring(response: 0.24, dampingFraction: 0.85)) {
+                    _ = store.sweepAllUnpinnedSensitiveItems()
+                    clampSelection()
+                }
+            } label: {
+                Text("一键无痕清扫")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(Color.orange)
+                    .padding(.horizontal, 8.5)
+                    .padding(.vertical, 3.5)
+                    .background(Capsule().fill(Color.orange.opacity(0.13)))
+            }
+            .buttonStyle(.plain)
+            .help("彻底清除所有未收藏、非待办的敏感密钥、身份证与即焚残留（收藏项不受影响）")
+        }
     }
 
     private var todoSummaryBar: some View {

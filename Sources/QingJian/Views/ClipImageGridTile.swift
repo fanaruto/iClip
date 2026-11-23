@@ -39,10 +39,29 @@ struct ClipImageGridTile: View {
             Color.clear
                 .overlay {
                     if let nsImage = ClipboardStore.shared.cachedThumbnail(for: item) ?? asyncThumbnail {
+                        let veilImg = ClipboardStore.shared.maskSensitivePreviews && !isSelected && !isHovered && item.detectedSensitiveKind != nil
                         Image(nsImage: nsImage)
                             .resizable()
                             .interpolation(.high)
                             .scaledToFill()
+                            .blur(radius: veilImg ? 11 : 0)
+                            .overlay {
+                                if veilImg {
+                                    ZStack {
+                                        Color.black.opacity(0.24)
+                                        HStack(spacing: 3.5) {
+                                            Image(systemName: "lock.shield.fill")
+                                                .font(.system(size: 10, weight: .semibold))
+                                            Text("隐私雾化")
+                                                .font(.system(size: 10, weight: .semibold))
+                                        }
+                                        .foregroundStyle(.white)
+                                        .padding(.horizontal, 7)
+                                        .padding(.vertical, 3)
+                                        .background(Capsule().fill(Color.black.opacity(0.54)))
+                                    }
+                                }
+                            }
                     } else {
                         ZStack {
                             Color.primary.opacity(0.06)
@@ -303,6 +322,12 @@ struct ClipImageGridTile: View {
             }
             if !ClipboardStore.shared.minimalModeEnabled {
                 Divider()
+                Button("隐私智能打码粘贴（自动遮盖号/码/密钥）") {
+                    ClipboardStore.shared.pastePrivacyRedactedImage(for: item, shouldAutoPaste: true)
+                }
+                Button("复制隐私打码图（PNG）") {
+                    ClipboardStore.shared.pastePrivacyRedactedImage(for: item, shouldAutoPaste: false)
+                }
                 Button("轻量瘦身粘贴（转 JPEG 省 80%+ 体积）") {
                     ClipboardStore.shared.pasteCompressedJPEG(for: item, shouldAutoPaste: false)
                 }
@@ -566,10 +591,29 @@ struct ClipImageGridTile: View {
             Color.clear
                 .overlay {
                     if let nsImage = ClipboardStore.shared.cachedThumbnail(for: item) ?? asyncThumbnail {
+                        let veilImg = ClipboardStore.shared.maskSensitivePreviews && !isSelected && !isHovered && item.detectedSensitiveKind != nil
                         Image(nsImage: nsImage)
                             .resizable()
                             .interpolation(.high)
                             .scaledToFill()
+                            .blur(radius: veilImg ? 11 : 0)
+                            .overlay {
+                                if veilImg {
+                                    ZStack {
+                                        Color.black.opacity(0.24)
+                                        HStack(spacing: 3.5) {
+                                            Image(systemName: "lock.shield.fill")
+                                                .font(.system(size: 10, weight: .semibold))
+                                            Text("隐私雾化")
+                                                .font(.system(size: 10, weight: .semibold))
+                                        }
+                                        .foregroundStyle(.white)
+                                        .padding(.horizontal, 7)
+                                        .padding(.vertical, 3)
+                                        .background(Capsule().fill(Color.black.opacity(0.54)))
+                                    }
+                                }
+                            }
                     } else {
                         ZStack {
                             Color.primary.opacity(0.06)
@@ -843,6 +887,12 @@ struct ClipImageGridTile: View {
                         }
                     }
                     Divider()
+                }
+                Button("隐私智能打码粘贴（自动遮盖号/码/密钥）") {
+                    ClipboardStore.shared.pastePrivacyRedactedImage(for: item, shouldAutoPaste: true)
+                }
+                Button("复制隐私打码图（PNG）") {
+                    ClipboardStore.shared.pastePrivacyRedactedImage(for: item, shouldAutoPaste: false)
                 }
                 Button("轻量瘦身粘贴（转 JPEG 省 80%+ 体积）") {
                     ClipboardStore.shared.pasteCompressedJPEG(for: item, shouldAutoPaste: false)

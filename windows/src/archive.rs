@@ -10,6 +10,8 @@ use std::path::Path;
 pub const ARCHIVE_FORMAT_ID: &str = "com.qingjian.iclip.archive";
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 const MAX_EMBEDDED_IMAGE_BYTES: usize = 12 * 1024 * 1024;
+pub const MAX_ARCHIVE_INPUT_BYTES: usize = 64 * 1024 * 1024;
+const MAX_ARCHIVE_ENTRIES: usize = 5_000;
 
 /// 与 macOS `ArchivedClipEntry` 100% 字节级兼容的跨平台收藏快照（Mac 导出的 .iclip 可直接在 Windows 导入，反之亦然）
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +66,8 @@ pub struct ArchiveImportSummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArchiveBackupError {
     NoPinnedItems,
+    ArchiveTooLarge,
+    PassphraseRequiredOrIncorrect,
     InvalidArchiveFormat,
     UnsupportedSchemaVersion(u32),
 }
@@ -72,6 +76,12 @@ impl ArchiveBackupError {
     pub fn message(&self) -> String {
         match self {
             Self::NoPinnedItems => "当前暂无已固定的收藏记录，请先固定常用话术或模板".to_string(),
+            Self::ArchiveTooLarge => {
+                "归档文件体积超过 64 MB 安全上限，已拦截加载以保护内存稳定".to_string()
+            }
+            Self::PassphraseRequiredOrIncorrect => {
+                "该归档受口令加密保护，口令缺失或不正确".to_string()
+            }
             Self::InvalidArchiveFormat => {
                 "无法解析该文件，请选择有效的 .iclip 归档或 Raycast / Maccy / CSV 常用语文件"
                     .to_string()
@@ -155,22 +165,53 @@ pub fn merge_archive_data_with_hint(
     images_dir: &Path,
     ext_hint: Option<&str>,
 ) -> Result<(Vec<ClipItem>, ArchiveImportSummary), ArchiveBackupError> {
-    let bundle: PinnedArchiveBundle = match serde_json::from_slice::<PinnedArchiveBundle>(data) {
-        Ok(b) if b.format == ARCHIVE_FORMAT_ID => b,
-        Ok(_) => return Err(ArchiveBackupError::InvalidArchiveFormat),
-        Err(_) => {
-            if let Some((cands, fmt_label)) =
-                crate::security::parse_external_competitor_data(data, ext_hint)
-            {
-                return Ok(merge_external_candidates(
-                    &cands,
-                    &fmt_label,
-                    existing_items,
-                ));
-            }
-            return Err(ArchiveBackupError::InvalidArchiveFormat);
+    merge_archive_data_full(data, existing_items, images_dir, None, ext_hint)
+}
+
+pub fn merge_archive_data_full(
+    data: &[u8],
+    existing_items: &[ClipItem],
+    images_dir: &Path,
+    passphrase: Option<&str>,
+    ext_hint: Option<&str>,
+) -> Result<(Vec<ClipItem>, ArchiveImportSummary), ArchiveBackupError> {
+    if data.len() > MAX_ARCHIVE_INPUT_BYTES {
+        return Err(ArchiveBackupError::ArchiveTooLarge);
+    }
+    let decrypted_buf: Option<Vec<u8>>;
+    let effective_data: &[u8] = if crate::security::is_encrypted_archive_bytes(data) {
+        let Some(pw) = passphrase.map(str::trim).filter(|s| !s.is_empty()) else {
+            return Err(ArchiveBackupError::PassphraseRequiredOrIncorrect);
+        };
+        let Some(opened) = crate::security::open_encrypted_archive_bytes(data, pw) else {
+            return Err(ArchiveBackupError::PassphraseRequiredOrIncorrect);
+        };
+        if opened.len() > MAX_ARCHIVE_INPUT_BYTES {
+            return Err(ArchiveBackupError::ArchiveTooLarge);
         }
+        decrypted_buf = Some(opened);
+        decrypted_buf.as_deref().unwrap()
+    } else {
+        data
     };
+
+    let bundle: PinnedArchiveBundle =
+        match serde_json::from_slice::<PinnedArchiveBundle>(effective_data) {
+            Ok(b) if b.format == ARCHIVE_FORMAT_ID => b,
+            Ok(_) => return Err(ArchiveBackupError::InvalidArchiveFormat),
+            Err(_) => {
+                if let Some((cands, fmt_label)) =
+                    crate::security::parse_external_competitor_data(effective_data, ext_hint)
+                {
+                    return Ok(merge_external_candidates(
+                        &cands,
+                        &fmt_label,
+                        existing_items,
+                    ));
+                }
+                return Err(ArchiveBackupError::InvalidArchiveFormat);
+            }
+        };
 
     if bundle.schema_version > CURRENT_SCHEMA_VERSION {
         return Err(ArchiveBackupError::UnsupportedSchemaVersion(
@@ -184,7 +225,7 @@ pub fn merge_archive_data_with_hint(
     let mut imported_new = 0usize;
     let mut updated_existing = 0usize;
 
-    for entry in &bundle.entries {
+    for entry in bundle.entries.iter().take(MAX_ARCHIVE_ENTRIES) {
         if let Some(existing) = working
             .iter_mut()
             .find(|it| it.content_hash == entry.content_hash)

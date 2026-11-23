@@ -8,6 +8,8 @@ use std::sync::{Mutex, OnceLock};
 
 pub const VAULT_MAGIC: &[u8; 8] = b"ICLPWIN1";
 pub const IMAGE_VAULT_MAGIC: &[u8; 8] = b"ICLPIMG1";
+pub const ARCHIVE_ENC_MAC_MAGIC: &[u8; 9] = b"ICLPARCH1";
+pub const ARCHIVE_ENC_WIN_MAGIC: &[u8; 9] = b"ICLPAWIN1";
 static NONCE_SEQ: AtomicU64 = AtomicU64::new(1);
 static KEY_CACHE: OnceLock<Mutex<Vec<(PathBuf, [u8; 32])>>> = OnceLock::new();
 
@@ -487,6 +489,93 @@ pub fn materialize_temp_preview_image(images_dir: &Path, file_name: &str) -> Opt
     let out_path = preview_dir.join(clean_name);
     fs::write(&out_path, plain).ok()?;
     Some(out_path)
+}
+
+// ============================================================================
+// 1.8 口令级归档认证加密（支持 `.iclip` 密码保护与跨平台加密归档识别）
+// ============================================================================
+
+fn derive_passphrase_key_32(passphrase: &str, salt: &[u8; 16]) -> [u8; 32] {
+    let mut h0 = Sha256::new();
+    h0.update(salt);
+    h0.update(passphrase.trim().as_bytes());
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&h0.finalize());
+
+    for round in 0u32..4096 {
+        let mut hm = Sha256::new();
+        hm.update(hash);
+        hm.update(salt);
+        hm.update(round.to_le_bytes());
+        hash.copy_from_slice(&hm.finalize());
+    }
+    hash
+}
+
+pub fn is_encrypted_archive_bytes(data: &[u8]) -> bool {
+    data.starts_with(ARCHIVE_ENC_WIN_MAGIC) || data.starts_with(ARCHIVE_ENC_MAC_MAGIC)
+}
+
+pub fn seal_archive_with_passphrase(plain: &[u8], passphrase: &str, seed_dir: &Path) -> Vec<u8> {
+    let trimmed = passphrase.trim();
+    if trimmed.is_empty() {
+        return plain.to_vec();
+    }
+    let ent = generate_entropy_32(seed_dir);
+    let mut salt = [0u8; 16];
+    let mut nonce = [0u8; 16];
+    salt.copy_from_slice(&ent[..16]);
+    nonce.copy_from_slice(&ent[16..32]);
+
+    let master = derive_passphrase_key_32(trimmed, &salt);
+    let (enc_key, mac_key) = derive_subkeys(&master, &nonce);
+    let mut ciphertext = plain.to_vec();
+    apply_sha256_ctr_stream(&enc_key, &nonce, &mut ciphertext);
+
+    let mut out = Vec::with_capacity(9 + 16 + 16 + ciphertext.len() + 32);
+    out.extend_from_slice(ARCHIVE_ENC_WIN_MAGIC);
+    out.extend_from_slice(&salt);
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(&ciphertext);
+
+    let tag = hmac_sha256(&mac_key, &out);
+    out.extend_from_slice(&tag);
+    out
+}
+
+pub fn open_encrypted_archive_bytes(data: &[u8], passphrase: &str) -> Option<Vec<u8>> {
+    if !data.starts_with(ARCHIVE_ENC_WIN_MAGIC) {
+        return None;
+    }
+    if data.len() < 9 + 16 + 16 + 32 {
+        return None;
+    }
+    let trimmed = passphrase.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let body_end = data.len() - 32;
+    let expected_tag = &data[body_end..];
+    let mut salt = [0u8; 16];
+    let mut nonce = [0u8; 16];
+    salt.copy_from_slice(&data[9..25]);
+    nonce.copy_from_slice(&data[25..41]);
+
+    let master = derive_passphrase_key_32(trimmed, &salt);
+    let (enc_key, mac_key) = derive_subkeys(&master, &nonce);
+    let computed_tag = hmac_sha256(&mac_key, &data[..body_end]);
+
+    let mut diff = 0u8;
+    for (a, b) in expected_tag.iter().zip(computed_tag.iter()) {
+        diff |= a ^ b;
+    }
+    if diff != 0 {
+        return None;
+    }
+
+    let mut plain = data[41..body_end].to_vec();
+    apply_sha256_ctr_stream(&enc_key, &nonce, &mut plain);
+    Some(plain)
 }
 
 // ============================================================================

@@ -84,6 +84,7 @@ struct ArchiveImportSummary: Equatable {
 /// 归档导入导出错误类型
 enum ArchiveBackupError: LocalizedError, Equatable {
     case noPinnedItems
+    case archiveTooLarge
     case invalidArchiveFormat
     case unsupportedSchemaVersion(Int)
     case passphraseRequiredOrIncorrect
@@ -92,6 +93,8 @@ enum ArchiveBackupError: LocalizedError, Equatable {
         switch self {
         case .noPinnedItems:
             return "当前暂无已收藏的记录，请先点击卡片收藏常用话术或模板"
+        case .archiveTooLarge:
+            return "归档文件体积超过 64 MB 安全上限，已拒绝加载以保护内存稳定"
         case .invalidArchiveFormat:
             return "无法解析该文件，请选择有效的 .iclip 归档或 Raycast / Maccy / CSV 常用语文件"
         case .unsupportedSchemaVersion(let ver):
@@ -106,6 +109,9 @@ enum ArchiveBackupError: LocalizedError, Equatable {
 enum ArchiveBackupService {
     /// 单张内嵌图片体积上限（12 MB），防止异常超大文件撑爆归档包
     private static let maxEmbeddedImageBytes = 12 * 1024 * 1024
+    /// 外部导入文件总体积硬上限（64 MB）与单包最大条目数（5,000 条），防御恶意 JSON 内存炸弹
+    static let maxArchiveInputBytes = 64 * 1024 * 1024
+    private static let maxArchiveEntryCount = 5_000
 
     /// 将当前历史列表中的所有 `isPinned == true` 记录打包编码为 `.iclip` Data
     static func exportPinnedArchiveData(
@@ -191,11 +197,17 @@ enum ArchiveBackupService {
         passphrase: String? = nil,
         fileExtensionHint: String? = nil
     ) throws -> (mergedItems: [ClipItem], summary: ArchiveImportSummary) {
+        guard data.count <= maxArchiveInputBytes else {
+            throw ArchiveBackupError.archiveTooLarge
+        }
         let effectiveData: Data
         if LocalVaultCrypto.isEncryptedArchive(data) {
             guard let pw = passphrase, !pw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                   let opened = LocalVaultCrypto.openEncryptedArchive(data, passphrase: pw) else {
                 throw ArchiveBackupError.passphraseRequiredOrIncorrect
+            }
+            guard opened.count <= maxArchiveInputBytes else {
+                throw ArchiveBackupError.archiveTooLarge
             }
             effectiveData = opened
         } else {
@@ -232,7 +244,7 @@ enum ArchiveBackupService {
         var importedNew = 0
         var updatedExisting = 0
 
-        for entry in bundle.entries {
+        for entry in bundle.entries.prefix(maxArchiveEntryCount) {
             if let existingIdx = working.firstIndex(where: { $0.contentHash == entry.contentHash }) {
                 var current = working[existingIdx]
                 var didChange = false

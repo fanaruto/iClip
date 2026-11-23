@@ -766,6 +766,55 @@ final class ClipboardStore: ObservableObject {
         return purged.count
     }
 
+    /// 当前历史库中未收藏、非待办的高敏凭据与粘贴即焚项总数（支撑 `@敏感` 体检栏）
+    var unpinnedSensitiveCount: Int {
+        items.reduce(0) { acc, item in
+            let isProtected = item.isPinned || item.isPendingTodo
+            if !isProtected && (item.detectedSensitiveKind != nil || item.isBurnAfterPaste) {
+                return acc + 1
+            }
+            return acc
+        }
+    }
+
+    /// 一键无痕清扫所有未收藏、非待办的敏感凭据与粘贴即焚残留（收藏项永久豁免）
+    @discardableResult
+    func sweepAllUnpinnedSensitiveItems() -> Int {
+        var kept: [ClipItem] = []
+        var removed: [ClipItem] = []
+        let currentPBString = pasteboard.string(forType: .string)
+
+        for item in items {
+            let isProtected = item.isPinned || item.isPendingTodo
+            if !isProtected && (item.detectedSensitiveKind != nil || item.isBurnAfterPaste) {
+                removed.append(item)
+            } else {
+                kept.append(item)
+            }
+        }
+        guard !removed.isEmpty else { return 0 }
+
+        items = kept
+        var shouldScrubPasteboard = false
+        for dead in removed {
+            pendingOTPExpirationTasks[dead.id]?.cancel()
+            pendingOTPExpirationTasks.removeValue(forKey: dead.id)
+            if let cur = currentPBString, let raw = dead.text, cur == raw {
+                shouldScrubPasteboard = true
+            }
+            deleteImageFileIfNeeded(for: dead)
+        }
+        if shouldScrubPasteboard {
+            pasteboard.clearContents()
+            ignoreNextChangeCount = pasteboard.changeCount
+            lastChangeCount = pasteboard.changeCount
+        }
+        saveHistory()
+        TactileFeedbackEngine.shared.perform(.magicTransform)
+        showToast("已无痕清扫 \(removed.count) 条未收藏敏感记录")
+        return removed.count
+    }
+
     /// 启动 5 秒后在后台低优串行队列静默加密存量明文图片并清理无主孤儿图片
     private func scheduleOrphanedImageCleanup() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
@@ -3339,17 +3388,22 @@ final class ClipboardStore: ObservableObject {
     }
 
     private func commitPlainStringPaste(_ text: String, isQRCode: Bool, shouldAutoPaste: Bool, onBeforePaste: (() -> Void)?) {
+        let shouldAutoRedactForAI = SensitiveCredentialVeil.isExternalAIOrChatApp(activeTargetAppName)
+            && SensitiveCredentialVeil.classify(text) != nil
+        let finalOut = shouldAutoRedactForAI ? SensitiveCredentialVeil.redactForExternalSharing(text) : text
+        let didRedact = (finalOut != text)
+
         pasteboard.clearContents()
-        pasteboard.setString(text, forType: .string)
-        if isQRCode && Self.isValidWebURL(text) {
-            pasteboard.setString(text, forType: .URL)
+        pasteboard.setString(finalOut, forType: .string)
+        if isQRCode && !didRedact && Self.isValidWebURL(finalOut) {
+            pasteboard.setString(finalOut, forType: .URL)
         }
         ignoreNextChangeCount = pasteboard.changeCount
         lastChangeCount = pasteboard.changeCount
 
         onBeforePaste?()
         refreshAccessibilityStatus()
-        let noun = isQRCode ? "图中二维码内容" : "图中文字"
+        let noun = didRedact ? "脱敏后图中内容" : (isQRCode ? "图中二维码内容" : "图中文字")
         if shouldAutoPaste && autoPasteEnabled && isAccessibilityGranted {
             Self.schedulePasteWhenTargetReady()
             showToast("已提取\(noun)并键入")
@@ -3439,6 +3493,50 @@ final class ClipboardStore: ObservableObject {
                     self.showToast("已生成圆角阴影样机图并键入")
                 } else {
                     self.showToast("已生成圆角阴影样机图到剪贴板")
+                }
+            }
+        }
+    }
+
+    /// 离线 Vision 坐标级智能隐私打码（自动遮盖截图中的二维码、身份证、银行卡、手机号、邮箱与密钥后键入）
+    func pastePrivacyRedactedImage(
+        for item: ClipItem,
+        shouldAutoPaste: Bool = true,
+        onBeforePaste: (() -> Void)? = nil
+    ) {
+        if shouldAutoPaste {
+            AdaptiveIntelligenceEngine.shared.recordActionUsed(actionID: "img-privacy-mosaic", categoryKey: "security", sourceApp: item.sourceAppName)
+        }
+        guard let url = imageURL(for: item) else {
+            showToast("未找到原始截图文件")
+            return
+        }
+
+        Task.detached(priority: .userInitiated) { [weak self] in
+            guard let outcome = ImageStudioEngine.redactSensitiveRegions(at: url) else {
+                await MainActor.run { [weak self] in self?.showToast("截图隐私扫描失败") }
+                return
+            }
+            if outcome.redactedCount == 0 {
+                await MainActor.run { [weak self] in self?.showToast("未在截图中检出敏感号码、密钥或二维码") }
+                return
+            }
+
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.pasteboard.clearContents()
+                self.pasteboard.setData(outcome.result.data, forType: .png)
+                self.ignoreNextChangeCount = self.pasteboard.changeCount
+                self.lastChangeCount = self.pasteboard.changeCount
+
+                TactileFeedbackEngine.shared.perform(.magicTransform)
+                onBeforePaste?()
+                self.refreshAccessibilityStatus()
+                if shouldAutoPaste && self.autoPasteEnabled && self.isAccessibilityGranted {
+                    Self.schedulePasteWhenTargetReady()
+                    self.showToast("已智能打码 \(outcome.redactedCount) 处隐私并键入")
+                } else {
+                    self.showToast("已智能打码 \(outcome.redactedCount) 处隐私到剪贴板")
                 }
             }
         }

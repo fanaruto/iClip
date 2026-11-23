@@ -1265,6 +1265,37 @@ impl ClipboardStore {
         count
     }
 
+    /// 统计当前库中未收藏、非待办的高敏凭据与粘贴即焚项总数（支撑 `@敏感` 体检汇总栏）
+    pub fn unpinned_sensitive_count(&self) -> usize {
+        self.items
+            .iter()
+            .filter(|it| {
+                !it.is_pinned
+                    && !it.is_pending_todo()
+                    && (it.detected_sensitive_kind().is_some() || it.is_burn_after_paste())
+            })
+            .count()
+    }
+
+    /// 一键无痕清扫所有未收藏、非待办的敏感凭据与粘贴即焚残留（收藏项永久豁免）
+    pub fn sweep_all_unpinned_sensitive(&mut self) -> usize {
+        let target_ids: Vec<String> = self
+            .items
+            .iter()
+            .filter(|it| {
+                !it.is_pinned
+                    && !it.is_pending_todo()
+                    && (it.detected_sensitive_kind().is_some() || it.is_burn_after_paste())
+            })
+            .map(|it| it.id.clone())
+            .collect();
+        let count = target_ids.len();
+        for id in target_ids {
+            self.delete_by_id_with_undo(&id, false);
+        }
+        count
+    }
+
     pub fn toggle_burn_after_paste(&mut self, item_id: &str) -> Option<bool> {
         let item = self.items.iter_mut().find(|it| it.id == item_id)?;
         let next = !item.is_burn_after_paste();

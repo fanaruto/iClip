@@ -3,6 +3,7 @@ import AppKit
 import CoreGraphics
 import ImageIO
 import UniformTypeIdentifiers
+import Vision
 
 /// 设计师、客服工单、自媒体创作者专属：剪贴板图片硬件加速瞬时瘦身与苹果风圆角样机加壳引擎
 enum ImageStudioEngine {
@@ -203,5 +204,205 @@ enum ImageStudioEngine {
                 byteCount: finalData.count
             )
         }
+    }
+
+    // MARK: - 离线 Vision 坐标级「截图隐私一键智能打码」（自动定位二维码 / 密钥 / 身份证 / 银行卡 / 手机 / 邮箱 / 密码值）
+
+    private static let imageInlineSecretRegexes: [(regex: NSRegularExpression, valueGroup: Int)] = [
+        (try! NSRegularExpression(pattern: #"\b(?:sk-(?:proj-|ant-|live_|test_)?[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{24,}|glpat-[A-Za-z0-9_-]{16,}|AIzaSy[A-Za-z0-9_-]{28,}|AKIA[0-9A-Z]{16})\b"#), 0),
+        (try! NSRegularExpression(pattern: #"(?<![0-9A-Za-z])[1-8]\d{5}(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[0-9Xx](?![0-9A-Za-z])"#), 0),
+        (try! NSRegularExpression(pattern: #"(?<![0-9A-Za-z])(?:62\d{14,17}|4\d{15}|5[1-5]\d{14}|3[47]\d{13})(?![0-9A-Za-z])"#), 0),
+        (try! NSRegularExpression(pattern: #"(?<![0-9])1[3-9]\d{9}(?![0-9])"#), 0),
+        (try! NSRegularExpression(pattern: #"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"#), 0),
+        (try! NSRegularExpression(pattern: #"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3})\b"#), 0),
+        (try! NSRegularExpression(pattern: #"(?i)(?:密码|口令|提取码|验证码|password|passwd|secret|api[_-]?key|access[_-]?token)\s*[:=：]\s*([^\s,，;；]{4,})"#), 1)
+    ]
+
+    /// 离线扫描截图中的敏感文字与二维码包围盒，生成物理不可逆的圆角晶格马赛克打码图（原图局部文字保持 100% 锐利）
+    static func redactSensitiveRegions(
+        at imageURL: URL,
+        maxEdge: Int = 2560
+    ) -> (result: ProcessedImageResult, redactedCount: Int)? {
+        guard let imgData = LocalVaultCrypto.readDecryptedImageData(at: imageURL) else {
+            return nil
+        }
+        return redactSensitiveRegions(in: imgData, maxEdge: maxEdge)
+    }
+
+    static func redactSensitiveRegions(
+        in imageData: Data,
+        maxEdge: Int = 2560
+    ) -> (result: ProcessedImageResult, redactedCount: Int)? {
+        autoreleasepool {
+            guard let source = CGImageSourceCreateWithData(imageData as CFData, nil) else {
+                return nil
+            }
+            let thumbOpts: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceThumbnailMaxPixelSize: maxEdge
+            ]
+            guard let srcCG = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbOpts as CFDictionary) else {
+                return nil
+            }
+
+            let width = srcCG.width
+            let height = srcCG.height
+            guard width > 0, height > 0 else { return nil }
+
+            let barcodeReq = VNDetectBarcodesRequest()
+            barcodeReq.symbologies = [.qr, .aztec, .dataMatrix, .pdf417]
+            let textReq = VNRecognizeTextRequest()
+            textReq.recognitionLevel = .accurate
+            textReq.usesLanguageCorrection = true
+            textReq.recognitionLanguages = ["zh-Hans", "zh-Hant", "en-US"]
+
+            let handler = VNImageRequestHandler(cgImage: srcCG, options: [:])
+            try? handler.perform([barcodeReq, textReq])
+
+            var normBoxes: [CGRect] = []
+            if let barcodes = barcodeReq.results {
+                for b in barcodes {
+                    normBoxes.append(b.boundingBox)
+                }
+            }
+
+            if let textObsList = textReq.results {
+                for obs in textObsList {
+                    guard let top = obs.topCandidates(1).first else { continue }
+                    let str = top.string
+                    let fullNSRange = NSRange(str.startIndex..<str.endIndex, in: str)
+                    var matchedSubBox = false
+
+                    for (rx, grp) in imageInlineSecretRegexes {
+                        for m in rx.matches(in: str, range: fullNSRange) {
+                            let targetNS = (grp < m.numberOfRanges && m.range(at: grp).location != NSNotFound)
+                                ? m.range(at: grp)
+                                : m.range
+                            if let swiftRange = Range(targetNS, in: str) {
+                                let tokenStr = String(str[swiftRange])
+                                // 对 18 位身份证与银行卡做校验位过滤，杜绝误打码普通单号
+                                if tokenStr.count == 18, tokenStr.first?.isNumber == true,
+                                   !SensitiveCredentialVeil.isValidChineseIDCard18(tokenStr) {
+                                    continue
+                                }
+                                if (15...19).contains(tokenStr.count), tokenStr.allSatisfy(\.isNumber),
+                                   !SensitiveCredentialVeil.isValidBankCardLuhn(tokenStr) {
+                                    continue
+                                }
+                                if let subBox = try? top.boundingBox(for: swiftRange)?.boundingBox {
+                                    normBoxes.append(subBox)
+                                } else {
+                                    normBoxes.append(obs.boundingBox)
+                                }
+                                matchedSubBox = true
+                            }
+                        }
+                    }
+
+                    if !matchedSubBox && SensitiveCredentialVeil.classify(str) != nil {
+                        normBoxes.append(obs.boundingBox)
+                    }
+                }
+            }
+
+            guard !normBoxes.isEmpty else {
+                return (ProcessedImageResult(data: imageData, utType: .png, byteCount: imageData.count), 0)
+            }
+
+            return renderMosaicBoxes(normBoxes, onto: srcCG)
+        }
+    }
+
+    /// 在给定 CGImage 的指定归一化矩形列表（左下角原点）上合成物理不可逆圆角晶格马赛克（公开供单测验证像素擦除）
+    static func renderMosaicBoxes(
+        _ normalizedBoxes: [CGRect],
+        onto srcCG: CGImage
+    ) -> (result: ProcessedImageResult, redactedCount: Int)? {
+        let width = srcCG.width
+        let height = srcCG.height
+        guard width > 0, height > 0, !normalizedBoxes.isEmpty else { return nil }
+
+        let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        let fullRect = CGRect(x: 0, y: 0, width: width, height: height)
+
+        // 1. 生成物理降采样晶格马赛克源纹理（彻底销毁局部高频文字像素）
+        let blockSize = max(8, min(width, height) / 38)
+        let smallW = max(1, width / blockSize)
+        let smallH = max(1, height / blockSize)
+        guard let smallCtx = CGContext(
+            data: nil,
+            width: smallW,
+            height: smallH,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        smallCtx.interpolationQuality = .medium
+        smallCtx.draw(srcCG, in: CGRect(x: 0, y: 0, width: smallW, height: smallH))
+        guard let mosaicCG = smallCtx.makeImage() else { return nil }
+
+        // 2. 在高清主画布上仅对命中的圆角隐私框裁剪覆盖晶格马赛克
+        guard let ctx = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+
+        ctx.interpolationQuality = .high
+        ctx.draw(srcCG, in: fullRect)
+
+        let wF = CGFloat(width)
+        let hF = CGFloat(height)
+        for nb in normalizedBoxes {
+            let rawRect = CGRect(
+                x: nb.minX * wF - 5.0,
+                y: nb.minY * hF - 3.5,
+                width: nb.width * wF + 10.0,
+                height: nb.height * hF + 7.0
+            ).intersection(fullRect)
+            guard rawRect.width >= 2, rawRect.height >= 2 else { continue }
+
+            let radius = min(8.0, min(rawRect.width, rawRect.height) * 0.32)
+            let path = CGPath(roundedRect: rawRect, cornerWidth: radius, cornerHeight: radius, transform: nil)
+
+            ctx.saveGState()
+            ctx.addPath(path)
+            ctx.clip()
+            ctx.interpolationQuality = .none
+            ctx.draw(mosaicCG, in: fullRect)
+            ctx.setFillColor(CGColor(srgbRed: 0.12, green: 0.15, blue: 0.22, alpha: 0.14))
+            ctx.fill(rawRect)
+            ctx.restoreGState()
+
+            ctx.saveGState()
+            ctx.addPath(path)
+            ctx.setStrokeColor(CGColor(srgbRed: 1.0, green: 1.0, blue: 1.0, alpha: 0.42))
+            ctx.setLineWidth(1.0)
+            ctx.strokePath()
+            ctx.restoreGState()
+        }
+
+        guard let finalCG = ctx.makeImage() else { return nil }
+        let outData = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(
+            outData as CFMutableData,
+            UTType.png.identifier as CFString,
+            1,
+            nil
+        ) else { return nil }
+        CGImageDestinationAddImage(dest, finalCG, nil)
+        guard CGImageDestinationFinalize(dest) else { return nil }
+
+        let pngBytes = outData as Data
+        return (
+            ProcessedImageResult(data: pngBytes, utType: .png, byteCount: pngBytes.count),
+            normalizedBoxes.count
+        )
     }
 }

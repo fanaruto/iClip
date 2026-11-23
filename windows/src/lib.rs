@@ -876,6 +876,49 @@ mod tests {
             .iter()
             .any(|i| i.text.as_deref() == Some("普通历史会议笔记永久保留")));
 
+        // 4. 一键无痕清扫未收藏敏感凭据（保留收藏项）与口令加密归档加解密核验
+        let mut fresh_sec =
+            ClipItem::new_text("sk-proj-TempSweepTarget9876543210AbCdEf".to_string(), None);
+        fresh_sec.created_unix_secs = now;
+        store.items.push(fresh_sec);
+        assert_eq!(store.unpinned_sensitive_count(), 1);
+        assert_eq!(store.sweep_all_unpinned_sensitive(), 1);
+        assert_eq!(store.unpinned_sensitive_count(), 0);
+        assert_eq!(store.items.len(), 2); // 收藏密钥与普通笔记均完好保留
+
+        let plain_archive =
+            export_pinned_archive_data(&store.items, &img_dir, "2.6.0", "dev").unwrap();
+        let enc_archive = crate::security::seal_archive_with_passphrase(
+            &plain_archive,
+            "VaultPass#2026",
+            &tmp_dir,
+        );
+        assert!(crate::security::is_encrypted_archive_bytes(&enc_archive));
+        assert_eq!(
+            crate::archive::merge_archive_data_full(&enc_archive, &[], &img_dir, None, None),
+            Err(ArchiveBackupError::PassphraseRequiredOrIncorrect)
+        );
+        assert_eq!(
+            crate::archive::merge_archive_data_full(
+                &enc_archive,
+                &[],
+                &img_dir,
+                Some("wrong"),
+                None
+            ),
+            Err(ArchiveBackupError::PassphraseRequiredOrIncorrect)
+        );
+        let (dec_items, dec_sum) = crate::archive::merge_archive_data_full(
+            &enc_archive,
+            &[],
+            &img_dir,
+            Some("VaultPass#2026"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(dec_sum.imported_new_count, 1);
+        assert_eq!(dec_items.len(), 1);
+
         let _ = fs::remove_dir_all(tmp_dir);
     }
 }

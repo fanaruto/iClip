@@ -626,6 +626,12 @@ struct ClipCardView: View {
 
         if !ClipboardStore.shared.minimalModeEnabled && item.type == .image {
             Divider()
+            Button("隐私智能打码粘贴（遮盖号/码/密钥）") {
+                ClipboardStore.shared.pastePrivacyRedactedImage(for: item, shouldAutoPaste: true)
+            }
+            Button("复制隐私打码图（PNG）") {
+                ClipboardStore.shared.pastePrivacyRedactedImage(for: item, shouldAutoPaste: false)
+            }
             Button("复制轻量瘦身图（JPEG）") {
                 ClipboardStore.shared.pasteCompressedJPEG(for: item, shouldAutoPaste: false)
             }
@@ -1346,6 +1352,12 @@ struct ClipCardView: View {
 
         if !ClipboardStore.shared.minimalModeEnabled && item.type == .image {
             Divider()
+            Button("隐私智能打码粘贴（遮盖号/码/密钥）") {
+                ClipboardStore.shared.pastePrivacyRedactedImage(for: item, shouldAutoPaste: true)
+            }
+            Button("复制隐私打码图（PNG）") {
+                ClipboardStore.shared.pastePrivacyRedactedImage(for: item, shouldAutoPaste: false)
+            }
             Button("复制轻量瘦身图（JPEG）") {
                 ClipboardStore.shared.pasteCompressedJPEG(for: item, shouldAutoPaste: false)
             }

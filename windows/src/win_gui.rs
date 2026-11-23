@@ -47,8 +47,8 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::System::DataExchange::{
     AddClipboardFormatListener, CloseClipboard, EmptyClipboard, GetClipboardData,
-    GetClipboardOwner, IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW,
-    RemoveClipboardFormatListener, SetClipboardData,
+    GetClipboardOwner, GetClipboardSequenceNumber, IsClipboardFormatAvailable, OpenClipboard,
+    RegisterClipboardFormatW, RemoveClipboardFormatListener, SetClipboardData,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Memory::{
@@ -178,6 +178,7 @@ enum HitAction {
     ToggleTodo(String),
     ArchiveCompletedTodos,
     CopyTodosMarkdown,
+    SweepUnpinnedSensitive,
     CreateInlineTodo,
     ClearQueue,
     DeleteItem(String),
@@ -268,6 +269,7 @@ struct WinAppState {
     kbd_hook: HHOOK,
     mouse_hook: HHOOK,
     boot_instant: Instant,
+    scrub_expected_seq_num: u32,
     double_tap_machine: WinModifierDoubleTapMachine,
 }
 
@@ -454,6 +456,7 @@ pub fn run_windows_app() -> i32 {
                 kbd_hook: null_mut(),
                 mouse_hook: null_mut(),
                 boot_instant: Instant::now(),
+                scrub_expected_seq_num: 0,
                 double_tap_machine: WinModifierDoubleTapMachine::default(),
             });
         });
@@ -605,6 +608,7 @@ pub fn run_windows_self_test() -> Result<(), String> {
             kbd_hook: null_mut(),
             mouse_hook: null_mut(),
             boot_instant: Instant::now(),
+            scrub_expected_seq_num: 0,
             double_tap_machine: WinModifierDoubleTapMachine::default(),
         };
 
@@ -1563,10 +1567,15 @@ unsafe extern "system" fn wnd_proc(
                 simulate_ctrl_c();
             } else if wparam == TIMER_ID_CONCEALED_SCRUB {
                 KillTimer(hwnd, TIMER_ID_CONCEALED_SCRUB);
+                let cur_seq = GetClipboardSequenceNumber();
                 let do_scrub = APP_STATE.with(|c| {
                     let mut b = c.borrow_mut();
                     let Some(st) = b.as_mut() else { return false };
-                    if st.store.config.auto_clear_concealed_clipboard {
+                    if st.store.config.auto_clear_concealed_clipboard
+                        && st.scrub_expected_seq_num != 0
+                        && cur_seq == st.scrub_expected_seq_num
+                    {
+                        st.scrub_expected_seq_num = 0;
                         st.ignore_next_clipboard_seq = true;
                         true
                     } else {
@@ -1869,6 +1878,7 @@ unsafe fn handle_clipboard_update(hwnd: HWND) {
             || is_disallowed_by_clipboard_history_flag(hwnd, st.cf_can_include_history)
         {
             if st.store.config.auto_clear_concealed_clipboard {
+                st.scrub_expected_seq_num = GetClipboardSequenceNumber();
                 SetTimer(hwnd, TIMER_ID_CONCEALED_SCRUB, 60_000, None);
             }
             return true;
@@ -1888,10 +1898,14 @@ unsafe fn handle_clipboard_update(hwnd: HWND) {
     });
     if source_ignored {
         let auto_scrub = APP_STATE.with(|c| {
-            c.borrow()
-                .as_ref()
-                .map(|st| st.store.config.auto_clear_concealed_clipboard)
-                .unwrap_or(false)
+            let mut b = c.borrow_mut();
+            let Some(st) = b.as_mut() else { return false };
+            if st.store.config.auto_clear_concealed_clipboard {
+                st.scrub_expected_seq_num = GetClipboardSequenceNumber();
+                true
+            } else {
+                false
+            }
         });
         if auto_scrub {
             SetTimer(hwnd, TIMER_ID_CONCEALED_SCRUB, 60_000, None);
@@ -2511,6 +2525,12 @@ unsafe fn commit_paste_item_by_index(hwnd: HWND, item_idx: usize, force_plain: b
         });
     }
     if scrub_unpinned_secret {
+        let seq = GetClipboardSequenceNumber();
+        APP_STATE.with(|c| {
+            if let Some(st) = c.borrow_mut().as_mut() {
+                st.scrub_expected_seq_num = seq;
+            }
+        });
         SetTimer(hwnd, TIMER_ID_CONCEALED_SCRUB, 45_000, None);
     }
 
@@ -3785,6 +3805,77 @@ fn layout_and_draw_main_view(
         }
     }
 
+    // `@敏感` / `@即焚` 安全体检汇总栏（支持 1 秒无痕清扫所有未收藏高敏残留）
+    if !minimal && st.selected_tab != ClipFilterTab::Todo {
+        let q_low = st.search_query.trim().to_lowercase();
+        let is_audit_q = [
+            "@敏感", "@密钥", "@隐私", "@secret", "敏感", "@即焚", "@burn",
+        ]
+        .iter()
+        .any(|k| {
+            q_low == *k || q_low.starts_with(&format!("{k} ")) || q_low.ends_with(&format!(" {k}"))
+        });
+        let unpinned_sec_cnt = if is_audit_q {
+            st.store.unpinned_sensitive_count()
+        } else {
+            0
+        };
+        if unpinned_sec_cnt > 0 {
+            let sub_h = s(24);
+            canvas.fill_circle(
+                (pad + s(7)) as f32,
+                (cur_y + sub_h / 2) as f32,
+                sf(3.3),
+                palette.amber,
+            );
+            texts.push(TextDrawCmd {
+                text: format!("检出 {unpinned_sec_cnt} 条未收藏敏感凭据 · 收藏项永久保护"),
+                rect: RECT {
+                    left: pad + s(16),
+                    top: cur_y,
+                    right: w - pad - s(88),
+                    bottom: cur_y + sub_h,
+                },
+                color: palette.text_primary,
+                font_kind: FontKind::Meta,
+                flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+            });
+            let sw_w = s(80);
+            let sw_x = w - pad - sw_w;
+            canvas.fill_round_rect(
+                sw_x,
+                cur_y,
+                sw_w,
+                sub_h,
+                sf(12.0),
+                palette.amber.with_alpha(36),
+            );
+            texts.push(TextDrawCmd {
+                text: "一键清扫".to_string(),
+                rect: RECT {
+                    left: sw_x,
+                    top: cur_y,
+                    right: sw_x + sw_w,
+                    bottom: cur_y + sub_h,
+                },
+                color: palette.amber,
+                font_kind: FontKind::BadgeBold,
+                flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            });
+            st.hit_regions.push(HitRegion {
+                rect: RECT {
+                    left: sw_x,
+                    top: cur_y,
+                    right: sw_x + sw_w,
+                    bottom: cur_y + sub_h,
+                },
+                interactive_cursor: true,
+                action: HitAction::SweepUnpinnedSensitive,
+            });
+            cur_y += sub_h + s(8);
+        }
+    }
+
     if !minimal && st.selected_tab == ClipFilterTab::Pinned {
         let sub_h = s(24);
         let sub_gap = s(5);
@@ -4130,6 +4221,44 @@ fn layout_and_draw_main_view(
                                     iw,
                                     ih,
                                 );
+                                if st.store.config.mask_sensitive_previews
+                                    && !is_sel
+                                    && !is_hov
+                                    && item.detected_sensitive_kind().is_some()
+                                {
+                                    canvas.fill_round_rect(
+                                        tx,
+                                        cur_y,
+                                        tw,
+                                        row_h,
+                                        sf(13.0),
+                                        Color4::rgba(18, 20, 28, 212),
+                                    );
+                                    let pill_w = s(64);
+                                    let pill_h = s(20);
+                                    let px = tx + (tw - pill_w) / 2;
+                                    let py = cur_y + (row_h - pill_h) / 2 - s(4);
+                                    canvas.fill_round_rect(
+                                        px,
+                                        py,
+                                        pill_w,
+                                        pill_h,
+                                        sf(10.0),
+                                        palette.amber.with_alpha(52),
+                                    );
+                                    texts.push(TextDrawCmd {
+                                        text: "隐私雾化".to_string(),
+                                        rect: RECT {
+                                            left: px,
+                                            top: py,
+                                            right: px + pill_w,
+                                            bottom: py + pill_h,
+                                        },
+                                        color: Color4::rgba(255, 255, 255, 240),
+                                        font_kind: FontKind::KeyCap,
+                                        flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                                    });
+                                }
                             }
                         }
 
@@ -7031,6 +7160,18 @@ unsafe fn handle_left_click(hwnd: HWND, x: i32, y: i32, is_double: bool) {
             if let Some((md, cnt)) = exported {
                 let _ = write_text_and_html_to_clipboard(hwnd, &md, None);
                 set_toast(hwnd, format!("✓ 已复制 {cnt} 条 Markdown 待办清单"));
+            }
+        }
+        HitAction::SweepUnpinnedSensitive => {
+            let cnt = APP_STATE.with(|c| {
+                let mut b = c.borrow_mut();
+                let Some(st) = b.as_mut() else { return 0 };
+                let removed = st.store.sweep_all_unpinned_sensitive();
+                st.selected_visible_pos = 0;
+                removed
+            });
+            if cnt > 0 {
+                set_toast(hwnd, format!("已无痕清扫 {cnt} 条未收藏敏感记录"));
             }
         }
         HitAction::CreateInlineTodo => {
