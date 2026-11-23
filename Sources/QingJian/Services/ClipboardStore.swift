@@ -15,9 +15,15 @@ struct IgnoredAppEntry: Identifiable, Codable, Equatable {
 
     static let defaults: [IgnoredAppEntry] = [
         IgnoredAppEntry(bundleIdentifier: "com.apple.keychainaccess", displayName: "钥匙串访问"),
+        IgnoredAppEntry(bundleIdentifier: "com.apple.Passwords", displayName: "密码"),
         IgnoredAppEntry(bundleIdentifier: "com.1password.1password", displayName: "1Password"),
         IgnoredAppEntry(bundleIdentifier: "com.bitwarden.desktop", displayName: "Bitwarden")
     ]
+
+    /// 仅返回当前这台 Mac 实际已安装的默认隐私保护应用，绝不展示本机不存在的工具
+    static func installedDefaults() -> [IgnoredAppEntry] {
+        defaults.filter { ClipboardStore.isAppAvailableOnSystem(bundleIdentifier: $0.bundleIdentifier) }
+    }
 }
 
 /// 面板官方材质样式（精简为液态玻璃与毛玻璃两种）
@@ -500,9 +506,14 @@ final class ClipboardStore: ObservableObject {
 
         if let ignoredData = UserDefaults.standard.data(forKey: "ignoredApps"),
            let decodedIgnored = try? JSONDecoder().decode([IgnoredAppEntry].self, from: ignoredData) {
-            self.ignoredApps = decodedIgnored
+            let filtered = decodedIgnored.filter { Self.isAppAvailableOnSystem(bundleIdentifier: $0.bundleIdentifier) }
+            self.ignoredApps = filtered
+            if filtered.count != decodedIgnored.count,
+               let cleanData = try? JSONEncoder().encode(filtered) {
+                UserDefaults.standard.set(cleanData, forKey: "ignoredApps")
+            }
         } else {
-            self.ignoredApps = IgnoredAppEntry.defaults
+            self.ignoredApps = IgnoredAppEntry.installedDefaults()
         }
         self.ignoredBundleIDSet = Set(self.ignoredApps.map(\.bundleIdentifier))
 
@@ -3164,6 +3175,25 @@ final class ClipboardStore: ObservableObject {
 
     // MARK: - 隐私忽略来源应用白名单
 
+    /// 判断目标应用在当前这台电脑上是否真实存在（已安装或正在运行）
+    nonisolated static func isAppAvailableOnSystem(bundleIdentifier: String) -> Bool {
+        let trimmed = bundleIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        if NSWorkspace.shared.urlForApplication(withBundleIdentifier: trimmed) != nil {
+            return true
+        }
+        return NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == trimmed }
+    }
+
+    /// 自动剔除本机未安装/已卸载的应用条目，确保设置列表只呈现电脑上真实存在的工具
+    func pruneUnavailableIgnoredApps() {
+        let filtered = ignoredApps.filter { Self.isAppAvailableOnSystem(bundleIdentifier: $0.bundleIdentifier) }
+        guard filtered != ignoredApps else { return }
+        ignoredApps = filtered
+        ignoredBundleIDSet = Set(filtered.map(\.bundleIdentifier))
+        persistIgnoredApps()
+    }
+
     func addIgnoredApp(bundleIdentifier: String, displayName: String) {
         let trimmedID = bundleIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedID.isEmpty, !ignoredBundleIDSet.contains(trimmedID) else { return }
@@ -3203,12 +3233,16 @@ final class ClipboardStore: ObservableObject {
         if let cached = fileIconCache.object(forKey: cacheKey) {
             return cached
         }
-        guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else {
-            return nil
+        if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+            let icon = NSWorkspace.shared.icon(forFile: appURL.path)
+            fileIconCache.setObject(icon, forKey: cacheKey)
+            return icon
         }
-        let icon = NSWorkspace.shared.icon(forFile: appURL.path)
-        fileIconCache.setObject(icon, forKey: cacheKey)
-        return icon
+        if let runningIcon = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == bundleID })?.icon {
+            fileIconCache.setObject(runningIcon, forKey: cacheKey)
+            return runningIcon
+        }
+        return nil
     }
 
     private func persistIgnoredApps() {

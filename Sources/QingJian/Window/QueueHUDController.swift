@@ -99,6 +99,7 @@ final class QueueHUDController {
             effect.material = .popover
             effect.blendingMode = .behindWindow
             effect.state = .active
+            effect.maskImage = LiquidGlassSurfaceHost.continuousCornerMaskImage(size: hudSize, radius: hudSize.height / 2)
             effect.wantsLayer = true
             effect.layer?.cornerRadius = hudSize.height / 2
             effect.layer?.masksToBounds = true

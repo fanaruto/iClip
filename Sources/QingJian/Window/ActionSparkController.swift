@@ -343,6 +343,7 @@ final class ActionSparkController {
             effect.material = .popover
             effect.blendingMode = .behindWindow
             effect.state = .active
+            effect.maskImage = LiquidGlassSurfaceHost.continuousCornerMaskImage(size: size, radius: size.height / 2)
             effect.wantsLayer = true
             effect.layer?.cornerRadius = size.height / 2
             effect.layer?.masksToBounds = true

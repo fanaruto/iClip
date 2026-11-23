@@ -371,7 +371,7 @@ struct ClipboardPopoverView: View {
             }
         }
         .frame(width: 420, height: 560)
-        .clipped()
+        .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
         .overlay {
             if store.surfaceStyle != .liquidGlass && !store.borderlessPanel {
                 RoundedRectangle(cornerRadius: 26, style: .continuous)
@@ -444,6 +444,7 @@ struct ClipboardPopoverView: View {
                 .transition(.opacity.combined(with: .scale(scale: 0.96)))
             }
         }
+        .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
         .coordinateSpace(name: "panelRoot")
         .animation(.spring(response: 0.28, dampingFraction: 0.86), value: nav.showSettings)
         .animation(.spring(response: 0.25, dampingFraction: 0.85), value: store.toastMessage)
@@ -490,6 +491,7 @@ struct ClipboardPopoverView: View {
             dismissImagePreview(clearItem: true)
             if showing {
                 store.refreshAccessibilityStatus()
+                store.pruneUnavailableIgnoredApps()
             } else if nav.isRecordingHotKey || nav.isRecordingQueueHotKey {
                 nav.isRecordingHotKey = false
                 nav.isRecordingQueueHotKey = false
@@ -1608,24 +1610,23 @@ struct ClipboardPopoverView: View {
                         .font(.system(size: 11.5))
                         .foregroundStyle(.secondary)
 
-                    if store.ignoredApps.isEmpty {
+                    let visibleIgnoredApps = store.ignoredApps.filter {
+                        ClipboardStore.isAppAvailableOnSystem(bundleIdentifier: $0.bundleIdentifier)
+                    }
+
+                    if visibleIgnoredApps.isEmpty {
                         Text("暂未设置忽略应用")
                             .font(.system(size: 12))
                             .foregroundStyle(.secondary.opacity(0.8))
                             .padding(.vertical, 4)
                     } else {
                         VStack(spacing: 6) {
-                            ForEach(store.ignoredApps) { app in
+                            ForEach(visibleIgnoredApps) { app in
                                 HStack(spacing: 8) {
                                     if let icon = store.appIcon(forBundleID: app.bundleIdentifier) {
                                         Image(nsImage: icon)
                                             .resizable()
                                             .scaledToFit()
-                                            .frame(width: 18, height: 18)
-                                    } else {
-                                        Image(systemName: "app.dashed")
-                                            .font(.system(size: 13))
-                                            .foregroundStyle(.secondary)
                                             .frame(width: 18, height: 18)
                                     }
 
@@ -2795,7 +2796,7 @@ struct ClipboardPopoverView: View {
             }
         }
         .frame(width: 420, height: 560)
-        .clipped()
+        .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
         .overlay {
             if store.surfaceStyle != .liquidGlass && !store.borderlessPanel {
                 RoundedRectangle(cornerRadius: 26, style: .continuous)
@@ -2868,6 +2869,7 @@ struct ClipboardPopoverView: View {
                 .transition(.opacity.combined(with: .scale(scale: 0.96)))
             }
         }
+        .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
         .coordinateSpace(name: "panelRoot")
         .animation(.spring(response: 0.28, dampingFraction: 0.86), value: nav.showSettings)
         .animation(.spring(response: 0.25, dampingFraction: 0.85), value: store.toastMessage)
@@ -2914,6 +2916,7 @@ struct ClipboardPopoverView: View {
             dismissImagePreview(clearItem: true)
             if showing {
                 store.refreshAccessibilityStatus()
+                store.pruneUnavailableIgnoredApps()
             } else if nav.isRecordingHotKey {
                 nav.isRecordingHotKey = false
                 HotKeyManager.shared.resumeAfterRecording()
@@ -3892,24 +3895,23 @@ struct ClipboardPopoverView: View {
                         .font(.system(size: 11.5))
                         .foregroundStyle(.secondary)
 
-                    if store.ignoredApps.isEmpty {
+                    let visibleIgnoredApps = store.ignoredApps.filter {
+                        ClipboardStore.isAppAvailableOnSystem(bundleIdentifier: $0.bundleIdentifier)
+                    }
+
+                    if visibleIgnoredApps.isEmpty {
                         Text("暂未设置忽略应用")
                             .font(.system(size: 12))
                             .foregroundStyle(.secondary.opacity(0.8))
                             .padding(.vertical, 4)
                     } else {
                         VStack(spacing: 6) {
-                            ForEach(store.ignoredApps) { app in
+                            ForEach(visibleIgnoredApps) { app in
                                 HStack(spacing: 8) {
                                     if let icon = store.appIcon(forBundleID: app.bundleIdentifier) {
                                         Image(nsImage: icon)
                                             .resizable()
                                             .scaledToFit()
-                                            .frame(width: 18, height: 18)
-                                    } else {
-                                        Image(systemName: "app.dashed")
-                                            .font(.system(size: 13))
-                                            .foregroundStyle(.secondary)
                                             .frame(width: 18, height: 18)
                                     }
 

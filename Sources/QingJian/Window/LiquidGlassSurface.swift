@@ -115,11 +115,14 @@ final class LiquidGlassSurfaceHost {
         glassView.autoresizingMask = [.width, .height]
         glassView.cornerRadius = cornerRadius
 
-        // 内部内容容器：透明承接外观监听与拖拽复制（绝不嵌套 NSVisualEffectView(.behindWindow)，彻底根除 WindowServer 四角矩形毛边）
+        // 内部内容容器：严格同心连续圆角裁切，承接外观监听与拖拽复制
         let contentContainer = LiquidGlassContentContainerView(frame: bounds)
         contentContainer.autoresizingMask = [.width, .height]
         contentContainer.wantsLayer = true
         contentContainer.layer?.backgroundColor = NSColor.clear.cgColor
+        contentContainer.layer?.cornerCurve = .continuous
+        contentContainer.layer?.cornerRadius = cornerRadius
+        contentContainer.layer?.masksToBounds = true
         contentContainer.onAppearanceChanged = { [weak self] in
             self?.refreshInPlace()
         }
@@ -161,6 +164,7 @@ final class LiquidGlassSurfaceHost {
         effectView.material = .popover
         effectView.blendingMode = .behindWindow
         effectView.state = .active
+        effectView.maskImage = Self.continuousCornerMaskImage(size: bounds.size, radius: cornerRadius)
         effectView.wantsLayer = true
         effectView.layer?.cornerCurve = .continuous
         effectView.layer?.cornerRadius = cornerRadius
@@ -170,6 +174,9 @@ final class LiquidGlassSurfaceHost {
         contentContainer.autoresizingMask = [.width, .height]
         contentContainer.wantsLayer = true
         contentContainer.layer?.backgroundColor = NSColor.clear.cgColor
+        contentContainer.layer?.cornerCurve = .continuous
+        contentContainer.layer?.cornerRadius = cornerRadius
+        contentContainer.layer?.masksToBounds = true
         contentContainer.onDragTargetedChanged = { [weak self] targeted in
             self?.onDragTargetedChanged?(targeted)
         }
@@ -230,7 +237,56 @@ final class LiquidGlassSurfaceHost {
         }
     }
 
-    /// 生成精确连续圆角遮罩（供胶囊 HUD 等轻量组件使用）
+    /// 生成真正符合苹果 `.continuous` 连续曲率（Squircle）的 `@2x` 高清圆角遮罩
+    /// 彻底根除 `NSVisualEffectView(.behindWindow)` 在 WindowServer 合成层的四角直角灰块溢出
+    static func continuousCornerMaskImage(size: NSSize, radius: CGFloat) -> NSImage {
+        let minSide = radius * 2 + 4
+        let safeSize = NSSize(width: max(size.width, minSide), height: max(size.height, minSide))
+        let scale: CGFloat = 2.0
+        let pixelWidth = max(1, Int(ceil(safeSize.width * scale)))
+        let pixelHeight = max(1, Int(ceil(safeSize.height * scale)))
+
+        let layer = CALayer()
+        layer.bounds = CGRect(origin: .zero, size: safeSize)
+        layer.backgroundColor = NSColor.black.cgColor
+        layer.cornerCurve = .continuous
+        layer.cornerRadius = radius
+        layer.masksToBounds = true
+        layer.contentsScale = scale
+
+        if let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: pixelWidth,
+            pixelsHigh: pixelHeight,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ) {
+            rep.size = safeSize
+            NSGraphicsContext.saveGraphicsState()
+            if let nsCtx = NSGraphicsContext(bitmapImageRep: rep) {
+                NSGraphicsContext.current = nsCtx
+                let cg = nsCtx.cgContext
+                cg.clear(CGRect(origin: .zero, size: safeSize))
+                layer.render(in: cg)
+            }
+            NSGraphicsContext.restoreGraphicsState()
+
+            let image = NSImage(size: safeSize)
+            image.addRepresentation(rep)
+            image.capInsets = NSEdgeInsets(top: radius, left: radius, bottom: radius, right: radius)
+            image.resizingMode = .stretch
+            return image
+        }
+
+        return roundedMaskImage(size: safeSize, radius: radius)
+    }
+
+    /// 生成精确圆角遮罩（兜底使用）
     static func roundedMaskImage(size: NSSize, radius: CGFloat) -> NSImage {
         let safeSize = NSSize(width: max(size.width, radius * 2 + 2), height: max(size.height, radius * 2 + 2))
         let image = NSImage(size: safeSize, flipped: false) { rect in

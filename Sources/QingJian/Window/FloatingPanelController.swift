@@ -84,7 +84,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
 
         let p = KeyableFloatingPanel(
             contentRect: contentRect,
-            styleMask: [.nonactivatingPanel, .borderless, .fullSizeContentView],
+            styleMask: [.nonactivatingPanel, .borderless],
             backing: .buffered,
             defer: false
         )
@@ -93,8 +93,8 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
         p.isOpaque = false
         p.backgroundColor = .clear
-        // 交由 macOS WindowServer 渲染真正的原生连续圆角阴影，永不截断、零方框感
-        p.hasShadow = true
+        // 液态玻璃模式初始即关闭外层矩形窗口阴影，毛玻璃模式配合 maskImage 渲染连续圆角阴影
+        p.hasShadow = (store.surfaceStyle != .liquidGlass)
         p.isMovableByWindowBackground = true
         p.hidesOnDeactivate = false
         p.minSize = panelSize
@@ -120,6 +120,9 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         hosting.autoresizingMask = [.width, .height]
         hosting.wantsLayer = true
         hosting.layer?.backgroundColor = NSColor.clear.cgColor
+        hosting.layer?.cornerCurve = .continuous
+        hosting.layer?.cornerRadius = cornerRadius
+        hosting.layer?.masksToBounds = true
         self.hostingView = hosting
 
         self.panel = p
@@ -834,7 +837,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
 
         let p = KeyableFloatingPanel(
             contentRect: contentRect,
-            styleMask: [.nonactivatingPanel, .borderless, .fullSizeContentView],
+            styleMask: [.nonactivatingPanel, .borderless],
             backing: .buffered,
             defer: false
         )
@@ -843,8 +846,8 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
         p.isOpaque = false
         p.backgroundColor = .clear
-        // 交由 macOS WindowServer 渲染真正的原生连续圆角阴影，永不截断、零方框感
-        p.hasShadow = true
+        // 液态玻璃模式初始即关闭外层矩形窗口阴影，毛玻璃模式配合 maskImage 渲染连续圆角阴影
+        p.hasShadow = (store.surfaceStyle != .liquidGlass)
         p.isMovableByWindowBackground = true
         p.hidesOnDeactivate = false
         p.minSize = panelSize
@@ -870,6 +873,9 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         hosting.autoresizingMask = [.width, .height]
         hosting.wantsLayer = true
         hosting.layer?.backgroundColor = NSColor.clear.cgColor
+        hosting.layer?.cornerCurve = .continuous
+        hosting.layer?.cornerRadius = cornerRadius
+        hosting.layer?.masksToBounds = true
         self.hostingView = hosting
 
         self.panel = p
