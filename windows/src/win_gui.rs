@@ -4174,7 +4174,7 @@ fn layout_and_draw_main_view(
                     plain_source,
                     is_inline_body,
                 } => {
-                    let veiled = iclip_core::security::veiled_preview(plain_source);
+                    let veiled = iclip_core::security::veiled_sensitive_preview(plain_source);
                     let src_lbl = if *is_inline_body {
                         "内联正文"
                     } else {
