@@ -1133,6 +1133,39 @@ enum DragFileExportHelper {
         }
     }
 
+    /// 当单条记录被删除或自毁时，立即擦除其可能在临时拖拽目录残留的未加密明文副本
+    static func purgeExportedFiles(for item: ClipItem, exportDirectory: URL? = nil) {
+        let fm = FileManager.default
+        let dir = exportDirectory ?? fm.temporaryDirectory.appendingPathComponent("iClipDragExports", isDirectory: true)
+        guard fm.fileExists(atPath: dir.path) else { return }
+        switch item.type {
+        case .image:
+            let name = suggestedFileName(for: item, ext: "png")
+            try? fm.removeItem(at: dir.appendingPathComponent(name))
+            try? fm.removeItem(at: dir.appendingPathComponent("export-" + name))
+        case .text:
+            if let raw = item.text, !raw.isEmpty {
+                let spec = inferTextArtifactSpec(for: raw)
+                let name = suggestedFileName(for: item, ext: spec.ext, fallbackStem: spec.fallbackStem)
+                try? fm.removeItem(at: dir.appendingPathComponent(name))
+            }
+        case .link, .file:
+            break
+        }
+    }
+
+    /// 锁屏、休眠、清空历史或退出应用时，全量擦除临时拖拽导出目录中的一切明文副本
+    static func wipeAllExports(exportDirectory: URL? = nil) {
+        let fm = FileManager.default
+        let dir = exportDirectory ?? fm.temporaryDirectory.appendingPathComponent("iClipDragExports", isDirectory: true)
+        guard fm.fileExists(atPath: dir.path) else { return }
+        if let files = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) {
+            for f in files {
+                try? fm.removeItem(at: f)
+            }
+        }
+    }
+
     static func sanitizeFileStem(_ raw: String, maxLength: Int = 44) -> String? {
         let components = raw
             .trimmingCharacters(in: .whitespacesAndNewlines)

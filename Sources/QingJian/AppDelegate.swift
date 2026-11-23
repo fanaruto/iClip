@@ -174,10 +174,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         minimalItem.target = self
         menu.addItem(minimalItem)
 
-        let pauseTitle = store.isPaused ? "恢复剪贴板记录" : "暂停剪贴板记录"
-        let pauseItem = NSMenuItem(title: pauseTitle, action: #selector(menuTogglePause), keyEquivalent: "")
-        pauseItem.target = self
-        menu.addItem(pauseItem)
+        if store.isPaused {
+            let resumeItem = NSMenuItem(title: "立即恢复剪贴板记录", action: #selector(menuResumeCapture), keyEquivalent: "")
+            resumeItem.target = self
+            menu.addItem(resumeItem)
+        } else {
+            let pause15Item = NSMenuItem(title: "无痕暂停 15 分钟（自动恢复）", action: #selector(menuPause15Minutes), keyEquivalent: "")
+            pause15Item.target = self
+            menu.addItem(pause15Item)
+
+            let pause60Item = NSMenuItem(title: "无痕暂停 60 分钟（自动恢复）", action: #selector(menuPause60Minutes), keyEquivalent: "")
+            pause60Item.target = self
+            menu.addItem(pause60Item)
+
+            let pauseIndefItem = NSMenuItem(title: "持续暂停剪贴板记录", action: #selector(menuTogglePause), keyEquivalent: "")
+            pauseIndefItem.target = self
+            menu.addItem(pauseIndefItem)
+        }
 
         menu.addItem(.separator())
 
@@ -236,8 +249,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ClipboardStore.shared.toggleMinimalMode()
     }
 
+    @objc private func menuResumeCapture() {
+        ClipboardStore.shared.resumeCapture()
+    }
+
+    @objc private func menuPause15Minutes() {
+        ClipboardStore.shared.pauseCapture(forMinutes: 15)
+        ClipboardStore.shared.showToast("已开启 15 分钟无痕暂停（到点自动恢复）")
+    }
+
+    @objc private func menuPause60Minutes() {
+        ClipboardStore.shared.pauseCapture(forMinutes: 60)
+        ClipboardStore.shared.showToast("已开启 60 分钟无痕暂停（到点自动恢复）")
+    }
+
     @objc private func menuTogglePause() {
-        ClipboardStore.shared.isPaused.toggle()
+        ClipboardStore.shared.pauseCapture(forMinutes: nil)
     }
 
     @objc private func menuClearHistory() {

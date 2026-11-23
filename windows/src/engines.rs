@@ -1,6 +1,7 @@
 use crate::model::{safe_utf8_prefix, QuickAction};
 #[cfg(feature = "dev")]
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use image::{
     codecs::jpeg::JpegEncoder, codecs::png::PngEncoder, ColorType, ImageEncoder, Rgba, RgbaImage,
 };
@@ -105,6 +106,23 @@ pub fn analyze_text_actions(raw: &str, minimal_mode: bool) -> Vec<QuickAction> {
                     result_text: deep,
                     html_table_payload: None,
                     toast_text: "已完成密钥 + 内网IP/邮箱/手机号全量脱敏".to_string(),
+                });
+            }
+            if let Some((jwt_decoded, unexpired)) =
+                decode_jwt_inspection(trimmed, crate::model::now_unix_secs())
+            {
+                let chip_title = match unexpired {
+                    Some(true) => "解码 JWT · 有效".to_string(),
+                    Some(false) => "解码 JWT · 已过期".to_string(),
+                    None => "解码 JWT".to_string(),
+                };
+                actions.push(QuickAction {
+                    id: "jwt-decode",
+                    title: chip_title,
+                    is_security: false,
+                    result_text: jwt_decoded,
+                    html_table_payload: None,
+                    toast_text: "已离线解码 JWT 载荷".to_string(),
                 });
             }
         }
@@ -1738,10 +1756,106 @@ pub fn redact_secrets(text: &str) -> String {
         out = env_re
             .replace_all(&out, "${1}***REDACTED***${3}")
             .into_owned();
+
+        let http_hdr_re = Regex::new(
+            r##"(?i)(\b(?:cookie|set-cookie|x-api-key|x-auth-token|x-csrf-token)\s*:\s*)([^\r\n'"]{8,})"##,
+        )
+        .unwrap();
+        out = http_hdr_re
+            .replace_all(&out, "${1}***REDACTED***")
+            .into_owned();
+
+        let http_basic_re = Regex::new(
+            r"(?i)(\b(?:authorization|proxy-authorization)\s*:\s*basic\s+)([A-Za-z0-9+/=]{8,})",
+        )
+        .unwrap();
+        out = http_basic_re
+            .replace_all(&out, "${1}***REDACTED***")
+            .into_owned();
+
+        let json_sec_re = Regex::new(
+            r##"(?i)("(?:password|passwd|secret|client_secret|api_key|apikey|access_token|refresh_token|id_token|session_token|private_key)"\s*:\s*")([^"\r\n]{6,})(")"##,
+        )
+        .unwrap();
+        out = json_sec_re
+            .replace_all(&out, "${1}***REDACTED***${3}")
+            .into_owned();
     }
 
     out = crate::security::mask_verified_identity_and_cards(&out);
     out
+}
+
+/// 100% 离线零联网解码 JWT Header + Payload，并计算 exp 有效/过期状态（彻底告别向外部网站粘贴 Token）
+pub fn decode_jwt_inspection(input: &str, now_secs: u64) -> Option<(String, Option<bool>)> {
+    let mut candidate = input.trim();
+    if candidate.as_bytes().len() >= 7 && candidate.as_bytes()[..7].eq_ignore_ascii_case(b"bearer ")
+    {
+        candidate = candidate[7..].trim();
+    }
+    if !(24..=8192).contains(&candidate.len())
+        || candidate.contains(' ')
+        || candidate.contains('\n')
+        || candidate.contains('\r')
+    {
+        return None;
+    }
+    let mut parts = candidate.split('.');
+    let h_b64 = parts.next()?;
+    let p_b64 = parts.next()?;
+    let _sig = parts.next()?;
+    if parts.next().is_some() || !h_b64.starts_with("eyJ") || !p_b64.starts_with("ey") {
+        return None;
+    }
+
+    let decode_seg = |seg: &str| -> Option<Value> {
+        let clean = seg
+            .trim_end_matches('=')
+            .replace('+', "-")
+            .replace('/', "_");
+        let bytes = URL_SAFE_NO_PAD.decode(clean).ok()?;
+        serde_json::from_slice::<Value>(&bytes).ok()
+    };
+
+    let header_val = decode_seg(h_b64)?;
+    let payload_val = decode_seg(p_b64)?;
+    let header_str = serde_json::to_string_pretty(&header_val).ok()?;
+    let payload_str = serde_json::to_string_pretty(&payload_val).ok()?;
+
+    let mut summary_lines = Vec::new();
+    let mut unexpired_flag = None;
+    if let Some(obj) = payload_val.as_object() {
+        let parse_epoch = |v: Option<&Value>| -> Option<u64> {
+            let v = v?;
+            v.as_u64()
+                .or_else(|| v.as_f64().filter(|f| *f > 0.0).map(|f| f as u64))
+        };
+        if let Some(exp_s) = parse_epoch(obj.get("exp")) {
+            let valid = exp_s > now_secs;
+            unexpired_flag = Some(valid);
+            let iso = crate::model::unix_secs_to_iso8601(exp_s)
+                .replace('T', " ")
+                .trim_end_matches('Z')
+                .to_string();
+            let status = if valid { "有效" } else { "已过期" };
+            summary_lines.push(format!("// 过期时间 (exp): {iso} UTC（{status}）"));
+        }
+        if let Some(iat_s) = parse_epoch(obj.get("iat")) {
+            let iso = crate::model::unix_secs_to_iso8601(iat_s)
+                .replace('T', " ")
+                .trim_end_matches('Z')
+                .to_string();
+            summary_lines.push(format!("// 签发时间 (iat): {iso} UTC"));
+        }
+    }
+
+    let mut blocks = Vec::new();
+    if !summary_lines.is_empty() {
+        blocks.push(summary_lines.join("\n"));
+    }
+    blocks.push(format!("// Header\n{header_str}"));
+    blocks.push(format!("// Payload\n{payload_str}"));
+    Some((blocks.join("\n\n"), unexpired_flag))
 }
 
 pub fn redact_pii_and_private_ip(text: &str) -> String {

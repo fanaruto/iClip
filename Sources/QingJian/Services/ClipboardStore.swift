@@ -291,7 +291,18 @@ final class ClipboardStore: ObservableObject {
 
     @Published private(set) var items: [ClipItem] = []
     @Published private(set) var isAccessibilityGranted: Bool = false
-    @Published var isPaused: Bool = false
+    @Published var isPaused: Bool = false {
+        didSet {
+            if !isPaused {
+                pauseResumeWorkItem?.cancel()
+                pauseResumeWorkItem = nil
+                pauseAutoResumeAt = nil
+            }
+        }
+    }
+    /// 定时无痕暂停的自动恢复时间点（nil 表示未开启倒计时或处于手动持续暂停）
+    @Published private(set) var pauseAutoResumeAt: Date? = nil
+    private var pauseResumeWorkItem: DispatchWorkItem? = nil
 
     /// 用户选择的目标角色版本（决定专属 OTA 更新轨道与跨角色热切换）
     @Published private(set) var targetRoleEdition: AppRoleEdition
@@ -719,6 +730,68 @@ final class ClipboardStore: ObservableObject {
         try? fm.createDirectory(at: imagesDirectoryURL, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: appSupportURL.path)
         try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: imagesDirectoryURL.path)
+        let localOTA = appSupportURL.appendingPathComponent("LocalOTA", isDirectory: true)
+        if fm.fileExists(atPath: localOTA.path) {
+            try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: localOTA.path)
+        }
+    }
+
+    // MARK: - 定时无痕隐私护盾（默认 15 分钟到点自动恢复，彻底解决「暂停后忘开」痛点）
+
+    func pauseCapture(forMinutes minutes: Int? = 15) {
+        pauseResumeWorkItem?.cancel()
+        pauseResumeWorkItem = nil
+        lastChangeCount = pasteboard.changeCount
+
+        if let mins = minutes, mins > 0 {
+            let clamped = min(max(mins, 1), 480)
+            let resumeDate = Date().addingTimeInterval(TimeInterval(clamped * 60))
+            isPaused = true
+            pauseAutoResumeAt = resumeDate
+            let work = DispatchWorkItem { [weak self] in
+                guard let self, self.isPaused else { return }
+                self.resumeCapture(silent: true)
+            }
+            pauseResumeWorkItem = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + TimeInterval(clamped * 60), execute: work)
+        } else {
+            pauseAutoResumeAt = nil
+            isPaused = true
+        }
+    }
+
+    func resumeCapture(silent: Bool = false) {
+        pauseResumeWorkItem?.cancel()
+        pauseResumeWorkItem = nil
+        pauseAutoResumeAt = nil
+        lastChangeCount = pasteboard.changeCount
+        if isPaused {
+            isPaused = false
+        }
+        if !silent {
+            showToast("已恢复记录剪贴板")
+        }
+    }
+
+    func toggleTimedPause(defaultMinutes: Int = 15) {
+        if isPaused {
+            resumeCapture(silent: false)
+        } else {
+            pauseCapture(forMinutes: defaultMinutes)
+            showToast("已开启 \(defaultMinutes) 分钟无痕暂停（到点自动恢复）")
+        }
+    }
+
+    var pauseStatusSummary: String {
+        guard isPaused else { return "开启无痕暂停（默认 15 分钟自动恢复）" }
+        if let deadline = pauseAutoResumeAt {
+            let remainSec = max(0, Int(ceil(deadline.timeIntervalSinceNow)))
+            if remainSec > 0 {
+                let remainMin = max(1, Int(ceil(Double(remainSec) / 60.0)))
+                return "无痕暂停中（约 \(remainMin) 分钟后自动恢复 · 点击立即恢复）"
+            }
+        }
+        return "已持续暂停记录（点击恢复）"
     }
 
     private func loadHistory() {
@@ -757,10 +830,14 @@ final class ClipboardStore: ObservableObject {
 
         guard !purged.isEmpty else { return 0 }
         items = kept
+        let activeHashes = Set(items.map(\.contentHash))
+        let deadHashes = Set(purged.map(\.contentHash)).subtracting(activeHashes)
+        AdaptiveIntelligenceEngine.shared.forgetContentHashes(deadHashes)
         for dead in purged {
             pendingOTPExpirationTasks[dead.id]?.cancel()
             pendingOTPExpirationTasks.removeValue(forKey: dead.id)
             evictItemMemoryCaches(for: dead)
+            DragFileExportHelper.purgeExportedFiles(for: dead)
             deleteImageFileIfNeeded(for: dead)
         }
         saveHistory()
@@ -796,11 +873,15 @@ final class ClipboardStore: ObservableObject {
         guard !removed.isEmpty else { return 0 }
 
         items = kept
+        let activeHashes = Set(items.map(\.contentHash))
+        let deadHashes = Set(removed.map(\.contentHash)).subtracting(activeHashes)
+        AdaptiveIntelligenceEngine.shared.forgetContentHashes(deadHashes)
         var shouldScrubPasteboard = false
         for dead in removed {
             pendingOTPExpirationTasks[dead.id]?.cancel()
             pendingOTPExpirationTasks.removeValue(forKey: dead.id)
             evictItemMemoryCaches(for: dead)
+            DragFileExportHelper.purgeExportedFiles(for: dead)
             if let cur = currentPBString, let raw = dead.text, cur == raw {
                 shouldScrubPasteboard = true
             }
@@ -908,6 +989,7 @@ final class ClipboardStore: ObservableObject {
     func stopMonitoring() {
         timer?.invalidate()
         timer = nil
+        DragFileExportHelper.wipeAllExports()
         saveHistory(immediate: true)
     }
 
@@ -944,6 +1026,9 @@ final class ClipboardStore: ObservableObject {
     }
 
     private func checkPasteboard() {
+        if isPaused, let deadline = pauseAutoResumeAt, Date() >= deadline {
+            resumeCapture(silent: true)
+        }
         guard !isPaused else {
             lastChangeCount = pasteboard.changeCount
             return
@@ -976,6 +1061,8 @@ final class ClipboardStore: ObservableObject {
             frontmostBundleID: frontBundleID
         ) {
         case .rejectConcealedSecret:
+            pendingCopyAppendDeadlineUptime = -100
+            pendingCopyAppendBaseText = nil
             scheduleConcealedPasteboardScrubIfNeeded(capturedChangeCount: currentCount)
             return
         case .rejectTransientAutomation:
@@ -2178,10 +2265,16 @@ final class ClipboardStore: ObservableObject {
             lastChangeCount = pasteboard.changeCount
         }
 
+        // 立即清理可能存在的拖拽明文导出副本
+        DragFileExportHelper.purgeExportedFiles(for: removed)
+
         if userInitiated {
             TactileFeedbackEngine.shared.perform(.deleteItem)
             if removed.isBurnAfterPaste {
                 // 粘贴即焚机密手动删除时立即物理擦除，不进入 8s 内存撤销缓冲
+                if !items.contains(where: { $0.contentHash == removed.contentHash }) {
+                    AdaptiveIntelligenceEngine.shared.forgetContentHashes([removed.contentHash])
+                }
                 deleteImageFileIfNeeded(for: removed)
                 showToast("已彻底销毁即焚记录", duration: 2.8)
                 return
@@ -2201,6 +2294,9 @@ final class ClipboardStore: ObservableObject {
             }
             showToast("已删除 · 按 ⌘Z 撤销", duration: 3.4)
         } else {
+            if !items.contains(where: { $0.contentHash == removed.contentHash }) {
+                AdaptiveIntelligenceEngine.shared.forgetContentHashes([removed.contentHash])
+            }
             deleteImageFileIfNeeded(for: removed)
         }
     }
@@ -2211,6 +2307,7 @@ final class ClipboardStore: ObservableObject {
         for item in toRemove {
             evictItemMemoryCaches(for: item)
         }
+        DragFileExportHelper.wipeAllExports()
         #if ICLIP_EDITION_FLOW
         let removedIDs = Set(toRemove.map(\.id))
         pasteQueueIDs.removeAll { removedIDs.contains($0) }
@@ -2244,6 +2341,8 @@ final class ClipboardStore: ObservableObject {
             return
         }
         let activeHashes = Set(items.map(\.contentHash))
+        let deadHashes = Set(undoRemovedItems.map(\.contentHash)).subtracting(activeHashes)
+        AdaptiveIntelligenceEngine.shared.forgetContentHashes(deadHashes)
         for item in undoRemovedItems where !activeHashes.contains(item.contentHash) {
             deleteImageFileIfNeeded(for: item)
         }

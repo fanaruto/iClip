@@ -263,6 +263,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     }
 
     private func lockDownPanelForSystemSleepOrLock() {
+        DragFileExportHelper.wipeAllExports()
         nav.showQuickLook = false
         nav.isQuickLookEditing = false
         nav.quickLookDraftText = ""
@@ -1120,6 +1121,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     }
 
     private func lockDownPanelForSystemSleepOrLock() {
+        DragFileExportHelper.wipeAllExports()
         nav.showQuickLook = false
         nav.isQuickLookEditing = false
         nav.quickLookDraftText = ""

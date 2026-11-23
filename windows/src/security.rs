@@ -334,12 +334,12 @@ pub fn open_vault_bytes(raw: &[u8], master_key: &[u8; 32]) -> Option<(Vec<u8>, b
         return Some((plain, false));
     }
 
-    // 平滑兼容历史遗留未加密 UTF-8 JSON 数组
+    // 平滑兼容历史遗留未加密 UTF-8 JSON 数组或对象
     let first_non_ws = raw
         .iter()
         .copied()
         .find(|b| !matches!(b, b' ' | b'\n' | b'\r' | b'\t'));
-    if first_non_ws == Some(b'[') {
+    if matches!(first_non_ws, Some(b'[' | b'{')) {
         return Some((raw.to_vec(), true));
     }
     None
@@ -489,6 +489,26 @@ pub fn materialize_temp_preview_image(images_dir: &Path, file_name: &str) -> Opt
     let out_path = preview_dir.join(clean_name);
     fs::write(&out_path, plain).ok()?;
     Some(out_path)
+}
+
+/// 删除单条记录或即焚销毁时，立即擦除临时预览目录中对应的明文副本
+pub fn purge_temp_preview_image(file_name: &str) {
+    if let Some(clean_name) = Path::new(file_name).file_name() {
+        let p = std::env::temp_dir()
+            .join("iClipPreviewExports")
+            .join(clean_name);
+        let _ = fs::remove_file(p);
+    }
+}
+
+/// 锁屏、休眠、清空历史或进程退出时，全量擦除临时预览导出目录中的明文文件
+pub fn wipe_all_temp_previews() {
+    let preview_dir = std::env::temp_dir().join("iClipPreviewExports");
+    if let Ok(entries) = fs::read_dir(&preview_dir) {
+        for ent in entries.flatten() {
+            let _ = fs::remove_file(ent.path());
+        }
+    }
 }
 
 // ============================================================================
@@ -781,10 +801,32 @@ pub fn classify_sensitive_text(raw: &str) -> Option<SensitiveSecretKind> {
     static BASIC_AUTH_RE: OnceLock<Regex> = OnceLock::new();
     let basic_re =
         BASIC_AUTH_RE.get_or_init(|| Regex::new(r"(?i)\bhttps?://[^:\s/@]+:[^@\s/]{4,}@").unwrap());
+    static HTTP_HDR_SEC_RE: OnceLock<Regex> = OnceLock::new();
+    let http_hdr_re = HTTP_HDR_SEC_RE.get_or_init(|| {
+        Regex::new(
+            r##"(?i)\b(?:cookie|set-cookie|x-api-key|x-auth-token|x-csrf-token)\s*:\s*[^\r\n'"]{8,}"##,
+        )
+        .unwrap()
+    });
+    static HTTP_BASIC_HDR_RE: OnceLock<Regex> = OnceLock::new();
+    let http_basic_hdr_re = HTTP_BASIC_HDR_RE.get_or_init(|| {
+        Regex::new(r"(?i)\b(?:authorization|proxy-authorization)\s*:\s*basic\s+[A-Za-z0-9+/=]{8,}")
+            .unwrap()
+    });
+    static JSON_SEC_RE: OnceLock<Regex> = OnceLock::new();
+    let json_sec_re = JSON_SEC_RE.get_or_init(|| {
+        Regex::new(
+            r##"(?i)"(?:password|passwd|secret|client_secret|api_key|apikey|access_token|refresh_token|id_token|session_token|private_key)"\s*:\s*"[^"\r\n]{6,}""##,
+        )
+        .unwrap()
+    });
     if conn_re.is_match(sample)
         || bearer_re.is_match(sample)
         || url_q_re.is_match(sample)
         || basic_re.is_match(sample)
+        || http_hdr_re.is_match(sample)
+        || http_basic_hdr_re.is_match(sample)
+        || json_sec_re.is_match(sample)
     {
         return Some(SensitiveSecretKind::ConnectionSecret);
     }

@@ -176,6 +176,7 @@ pub struct ClipboardStore {
     pub config: StoreConfig,
     pub memory: AdaptiveMemory,
     pub is_paused: bool,
+    pub pause_until_unix_secs: Option<u64>,
     pub queue_mode_active: bool,
     pub paste_queue_ids: VecDeque<String>,
     pub pending_otp_expirations: Vec<(String, u64)>,
@@ -200,6 +201,10 @@ impl ClipboardStore {
         let suggestions_file = data_dir.join("user_suggestions.json");
         let _ = fs::create_dir_all(&images_dir);
 
+        let vault_key = load_or_create_vault_key(&data_dir);
+        let mut legacy_migrated = false;
+        let mut legacy_memory_migrated = false;
+
         let config = fs::read(&config_file)
             .ok()
             .and_then(|b| serde_json::from_slice::<StoreConfig>(&b).ok())
@@ -207,11 +212,23 @@ impl ClipboardStore {
 
         let memory = fs::read(&memory_file)
             .ok()
-            .and_then(|b| serde_json::from_slice::<AdaptiveMemory>(&b).ok())
+            .and_then(|raw| {
+                let (plain, was_legacy) = open_vault_bytes(&raw, &vault_key)?;
+                let parsed = serde_json::from_slice::<AdaptiveMemory>(&plain).ok()?;
+                if was_legacy {
+                    legacy_memory_migrated = true;
+                }
+                Some(parsed)
+            })
             .unwrap_or_default();
 
-        let vault_key = load_or_create_vault_key(&data_dir);
-        let mut legacy_migrated = false;
+        // 若存量建议单为旧明文，启动时无感升级为认证密文
+        if let Ok(sug_raw) = fs::read(&suggestions_file) {
+            if let Some((plain, true)) = open_vault_bytes(&sug_raw, &vault_key) {
+                let sealed_sug = seal_vault_bytes(&plain, &vault_key, &data_dir);
+                Self::atomic_write(&suggestions_file, &sealed_sug);
+            }
+        }
 
         // 零信任双模自愈读取：支持 DPAPI 认证密文与历史明文自动升级，主文件篡改/截断时自动从加密备份恢复
         let primary_items = fs::read(&history_file).ok().and_then(|raw| {
@@ -243,6 +260,7 @@ impl ClipboardStore {
             config,
             memory,
             is_paused: false,
+            pause_until_unix_secs: None,
             queue_mode_active: false,
             paste_queue_ids: VecDeque::new(),
             pending_otp_expirations: Vec::new(),
@@ -257,6 +275,9 @@ impl ClipboardStore {
             undo_stack: Vec::new(),
         };
 
+        if legacy_memory_migrated {
+            store.save_memory();
+        }
         let _ = crate::security::upgrade_plain_images_in_dir(&store.images_dir, &store.vault_key);
         let now_init = now_unix_secs();
         let archived = store.archive_expired_completed_todos(now_init);
@@ -308,8 +329,70 @@ impl ClipboardStore {
     }
 
     pub fn save_memory(&self) {
-        if let Ok(bytes) = serde_json::to_vec(&self.memory) {
-            Self::atomic_write(&self.memory_file, &bytes);
+        if let Ok(plain_bytes) = serde_json::to_vec(&self.memory) {
+            let sealed = seal_vault_bytes(&plain_bytes, &self.vault_key, &self.data_dir);
+            Self::atomic_write(&self.memory_file, &sealed);
+        }
+    }
+
+    /// 定时无痕隐私护盾：开启指定分钟数的无痕暂停（`None` 表示持续暂停），到期自动恢复记录
+    pub fn pause_for_minutes(&mut self, minutes: Option<u64>, now_secs: u64) {
+        self.is_paused = true;
+        self.pause_until_unix_secs = minutes.map(|m| now_secs.saturating_add(m.clamp(1, 480) * 60));
+    }
+
+    pub fn resume_capture(&mut self) {
+        self.is_paused = false;
+        self.pause_until_unix_secs = None;
+    }
+
+    pub fn toggle_timed_pause(&mut self, default_minutes: u64, now_secs: u64) -> bool {
+        if self.is_paused {
+            self.resume_capture();
+            false
+        } else {
+            self.pause_for_minutes(Some(default_minutes), now_secs);
+            true
+        }
+    }
+
+    /// 检查定时无痕暂停是否已到期；若到期则自动恢复并返回 `true`
+    pub fn check_auto_resume_pause(&mut self, now_secs: u64) -> bool {
+        if self.is_paused {
+            if let Some(deadline) = self.pause_until_unix_secs {
+                if now_secs >= deadline {
+                    self.resume_capture();
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// 物理级不可追溯遗忘：当记录被销毁时连根抹除 `AdaptiveMemory` 中的 SHA-256 哈希指纹
+    pub fn forget_memory_hashes(&mut self, hashes: &[String]) {
+        if hashes.is_empty() {
+            return;
+        }
+        let mut changed = false;
+        for h in hashes {
+            if self.memory.reuse_counts.remove(h).is_some() {
+                changed = true;
+            }
+            if self.memory.app_affinity.remove(h).is_some() {
+                changed = true;
+            }
+        }
+        self.memory.app_affinity.retain(|_, bucket| {
+            for h in hashes {
+                if bucket.remove(h).is_some() {
+                    changed = true;
+                }
+            }
+            !bucket.is_empty()
+        });
+        if changed {
+            self.save_memory();
         }
     }
 
@@ -1054,6 +1137,34 @@ impl ClipboardStore {
             });
         }
 
+        if lower.contains("恢复记录")
+            || lower.contains("恢复监听")
+            || lower.contains("开启记录")
+            || lower.contains("取消暂停")
+        {
+            self.resume_capture();
+            effects.push("已立即恢复剪贴板记录".to_string());
+        } else if lower.contains("无痕暂停")
+            || lower.contains("暂停记录")
+            || lower.contains("暂停监听")
+            || lower.starts_with("暂停")
+            || lower.starts_with("无痕")
+        {
+            let mins = lower
+                .split(|c: char| !c.is_ascii_digit())
+                .find_map(|s| {
+                    if s.is_empty() {
+                        None
+                    } else {
+                        s.parse::<u64>().ok()
+                    }
+                })
+                .unwrap_or(15)
+                .clamp(1, 480);
+            self.pause_for_minutes(Some(mins), now_unix_secs());
+            effects.push(format!("已开启 {mins} 分钟无痕暂停（到点自动恢复）"));
+        }
+
         self.save_config();
 
         let summary = if effects.is_empty() {
@@ -1064,15 +1175,19 @@ impl ClipboardStore {
 
         let mut logs: Vec<UserSuggestionRecord> = fs::read(&self.suggestions_file)
             .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
+            .and_then(|raw| {
+                let (plain, _) = open_vault_bytes(&raw, &self.vault_key)?;
+                serde_json::from_slice(&plain).ok()
+            })
             .unwrap_or_default();
         logs.push(UserSuggestionRecord {
             created_unix_secs: now_unix_secs(),
             suggestion: text.to_string(),
             applied_summary: summary.clone(),
         });
-        if let Ok(bytes) = serde_json::to_vec_pretty(&logs) {
-            Self::atomic_write(&self.suggestions_file, &bytes);
+        if let Ok(plain_bytes) = serde_json::to_vec_pretty(&logs) {
+            let sealed = seal_vault_bytes(&plain_bytes, &self.vault_key, &self.data_dir);
+            Self::atomic_write(&self.suggestions_file, &sealed);
         }
 
         summary
@@ -1113,11 +1228,20 @@ impl ClipboardStore {
             let removed = self.items.remove(pos);
             let mut img_bytes = None;
             if let Some(img) = &removed.image_file_name {
+                crate::security::purge_temp_preview_image(img);
                 let p = self.images_dir.join(img);
                 if allow_undo {
                     img_bytes = fs::read(&p).ok();
                 }
                 let _ = fs::remove_file(p);
+            }
+            if !self
+                .items
+                .iter()
+                .any(|it| it.content_hash == removed.content_hash)
+            {
+                let h = removed.content_hash.clone();
+                self.forget_memory_hashes(&[h]);
             }
             if allow_undo {
                 self.push_undo_snapshot(vec![(removed, img_bytes)]);
@@ -1127,8 +1251,10 @@ impl ClipboardStore {
     }
 
     pub fn clear_unpinned(&mut self) {
+        crate::security::wipe_all_temp_previews();
         let mut kept = Vec::new();
         let mut removed_batch = Vec::new();
+        let mut purged_hashes = Vec::new();
         for item in self.items.drain(..) {
             if item.is_pinned || item.is_pending_todo() {
                 kept.push(item);
@@ -1144,10 +1270,13 @@ impl ClipboardStore {
                 self.paste_queue_ids.retain(|id| id != &item.id);
                 self.pending_otp_expirations
                     .retain(|(id, _)| id != &item.id);
+                purged_hashes.push(item.content_hash.clone());
                 removed_batch.push((item, img_bytes));
             }
         }
         self.items = kept;
+        purged_hashes.retain(|h| !self.items.iter().any(|k| &k.content_hash == h));
+        self.forget_memory_hashes(&purged_hashes);
         if !removed_batch.is_empty() {
             self.push_undo_snapshot(removed_batch);
         }

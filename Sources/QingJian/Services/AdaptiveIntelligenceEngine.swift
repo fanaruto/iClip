@@ -224,9 +224,12 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
         try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: suggestionsFileURL.path)
 
         let loaded: AdaptiveBrainState
-        if let data = try? Data(contentsOf: brainFileURL),
-           let decoded = try? JSONDecoder().decode(AdaptiveBrainState.self, from: data) {
+        var needsEncryptBrainUpgrade = false
+        if let rawData = try? Data(contentsOf: brainFileURL),
+           let opened = LocalVaultCrypto.openSnapshotData(rawData),
+           let decoded = try? JSONDecoder().decode(AdaptiveBrainState.self, from: opened.plainData) {
             loaded = decoded
+            needsEncryptBrainUpgrade = opened.wasLegacyPlaintext
         } else {
             loaded = AdaptiveBrainState()
         }
@@ -241,11 +244,28 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
         self.mutedSourceApps = loaded.mutedSourceApps
         self.totalLearnedInteractions = loaded.totalLearnedInteractions
 
-        if let sugData = try? Data(contentsOf: suggestionsFileURL),
-           let decodedSug = try? JSONDecoder().decode([UserSuggestionRecord].self, from: sugData) {
-            self.suggestions = decodedSug
+        var needsEncryptSugUpgrade = false
+        if let sugRaw = try? Data(contentsOf: suggestionsFileURL),
+           let openedSug = LocalVaultCrypto.openSnapshotData(sugRaw) {
+            let decoder = JSONDecoder()
+            let isoDec = JSONDecoder()
+            isoDec.dateDecodingStrategy = .iso8601
+            if let decodedSug = (try? isoDec.decode([UserSuggestionRecord].self, from: openedSug.plainData))
+                ?? (try? decoder.decode([UserSuggestionRecord].self, from: openedSug.plainData)) {
+                self.suggestions = decodedSug
+                needsEncryptSugUpgrade = openedSug.wasLegacyPlaintext
+            } else {
+                self.suggestions = []
+            }
         } else {
             self.suggestions = []
+        }
+
+        if needsEncryptBrainUpgrade {
+            scheduleSave()
+        }
+        if needsEncryptSugUpgrade {
+            saveSuggestions()
         }
     }
 
@@ -355,6 +375,46 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
 
     func reuseCount(for contentHash: String) -> Int {
         state.recentReuseCounts[contentHash] ?? 0
+    }
+
+    /// 物理级不可追溯遗忘：当敏感条目或历史记录被销毁时，同步连根抹除行为记忆库中的 SHA-256 内容指纹
+    func forgetContentHashes(_ hashes: Set<String>) {
+        guard !hashes.isEmpty else { return }
+        var mutated = false
+        for h in hashes {
+            if state.recentReuseCounts.removeValue(forKey: h) != nil {
+                mutated = true
+            }
+        }
+        let beforeOrderCount = state.recentReuseOrder.count
+        state.recentReuseOrder.removeAll { hashes.contains($0) }
+        if state.recentReuseOrder.count != beforeOrderCount {
+            mutated = true
+        }
+        if var allApps = state.targetAppPasteCounts {
+            for (appKey, var bucket) in allApps {
+                var appChanged = false
+                for h in hashes {
+                    if bucket.removeValue(forKey: h) != nil {
+                        appChanged = true
+                        mutated = true
+                    }
+                }
+                if appChanged {
+                    if bucket.isEmpty {
+                        allApps.removeValue(forKey: appKey)
+                        state.targetAppDisplayNames?.removeValue(forKey: appKey)
+                    } else {
+                        allApps[appKey] = bucket
+                    }
+                }
+            }
+            state.targetAppPasteCounts = allApps
+        }
+        if mutated {
+            revision &+= 1
+            scheduleSave()
+        }
     }
 
     /// 记录用户将某条内容实际粘贴进外部目标应用（如微信、飞书、Terminal、Cursor），构建个人目标场景记忆
@@ -1071,6 +1131,18 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
             adoptedEffects.append(!neg ? "已开启自动清除零宽幽灵与隐藏控制符契约" : "已关闭自动清除隐藏字符契约")
         }
 
+        let resumePauseKeys = ["恢复记录", "恢复监听", "开启记录", "取消暂停", "结束无痕"]
+        let timedPauseKeys = ["无痕暂停", "暂停记录", "暂停监听", "无痕模式", "隐私暂停"]
+        if Self.containsAny(lower, resumePauseKeys) {
+            store.resumeCapture()
+            adoptedEffects.append("已立即恢复剪贴板记录")
+        } else if Self.containsAny(lower, timedPauseKeys) || (lower.hasPrefix("暂停") || lower.hasPrefix("无痕")) {
+            let digits = lower.split(whereSeparator: { !$0.isNumber }).compactMap { Int($0) }.first
+            let mins = min(max(digits ?? 15, 1), 480)
+            store.pauseCapture(forMinutes: mins)
+            adoptedEffects.append("已开启 \(mins) 分钟无痕暂停（到点自动恢复记录）")
+        }
+
         let status: UserSuggestionRecord.Status
         let summary: String
         if !adoptedEffects.isEmpty {
@@ -1224,7 +1296,8 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
         let work = DispatchWorkItem { [ioQueue] in
             ioQueue.async {
                 if let data = try? JSONEncoder().encode(snapshot) {
-                    try? LocalVaultCrypto.writeProtectedFile(data, to: url)
+                    let payload = LocalVaultCrypto.sealSnapshotData(data) ?? data
+                    try? LocalVaultCrypto.writeProtectedFile(payload, to: url)
                 }
             }
         }
@@ -1240,7 +1313,8 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             encoder.dateEncodingStrategy = .iso8601
             if let data = try? encoder.encode(snapshot) {
-                try? LocalVaultCrypto.writeProtectedFile(data, to: url)
+                let payload = LocalVaultCrypto.sealSnapshotData(data) ?? data
+                try? LocalVaultCrypto.writeProtectedFile(payload, to: url)
             }
         }
     }

@@ -754,10 +754,9 @@ struct ClipboardPopoverView: View {
                 .accessibilityLabel("极简纯净模式开关")
                 .help(store.minimalModeEnabled ? "极简基础版已开启（点击或按 ⌘E 恢复进阶功能）" : "开启极简纯净模式（基础功能版 · ⌘E）")
 
-                // 暂停/恢复监听按钮
+                // 暂停/恢复监听按钮（单击开启 15 分钟无痕自动恢复暂停，右键可选时长或持续暂停）
                 Button {
-                    store.isPaused.toggle()
-                    store.showToast(store.isPaused ? "已暂停记录剪贴板" : "已恢复记录剪贴板")
+                    store.toggleTimedPause(defaultMinutes: 15)
                 } label: {
                     Image(systemName: store.isPaused ? "pause.circle.fill" : "record.circle")
                         .font(.system(size: 15, weight: .medium))
@@ -767,7 +766,30 @@ struct ClipboardPopoverView: View {
                         .overlay(Circle().strokeBorder(glassPalette.controlCapsuleStroke.opacity(0.85), lineWidth: 0.65))
                 }
                 .buttonStyle(.plain)
-                .help(store.isPaused ? "点击恢复记录" : "暂停记录剪贴板")
+                .help(store.pauseStatusSummary)
+                .contextMenu {
+                    if store.isPaused {
+                        Button("立即恢复记录剪贴板") { store.resumeCapture() }
+                        Divider()
+                    }
+                    Button("无痕暂停 5 分钟（自动恢复）") {
+                        store.pauseCapture(forMinutes: 5)
+                        store.showToast("已开启 5 分钟无痕暂停（到点自动恢复）")
+                    }
+                    Button("无痕暂停 15 分钟（推荐 · 自动恢复）") {
+                        store.pauseCapture(forMinutes: 15)
+                        store.showToast("已开启 15 分钟无痕暂停（到点自动恢复）")
+                    }
+                    Button("无痕暂停 60 分钟（自动恢复）") {
+                        store.pauseCapture(forMinutes: 60)
+                        store.showToast("已开启 60 分钟无痕暂停（到点自动恢复）")
+                    }
+                    Divider()
+                    Button("持续暂停（直到手动恢复）") {
+                        store.pauseCapture(forMinutes: nil)
+                        store.showToast("已持续暂停记录剪贴板")
+                    }
+                }
 
                 // 设置按钮（有 GitHub 新版本时右上角展示蓝点提示）
                 Button {
@@ -3525,10 +3547,9 @@ struct ClipboardPopoverView: View {
                 .accessibilityLabel("极简纯净模式开关")
                 .help(store.minimalModeEnabled ? "极简基础版已开启（点击或按 ⌘E 恢复进阶功能）" : "开启极简纯净模式（基础功能版 · ⌘E）")
 
-                // 暂停/恢复监听按钮
+                // 暂停/恢复监听按钮（单击开启 15 分钟无痕自动恢复暂停，右键可选时长或持续暂停）
                 Button {
-                    store.isPaused.toggle()
-                    store.showToast(store.isPaused ? "已暂停记录剪贴板" : "已恢复记录剪贴板")
+                    store.toggleTimedPause(defaultMinutes: 15)
                 } label: {
                     Image(systemName: store.isPaused ? "pause.circle.fill" : "record.circle")
                         .font(.system(size: 15, weight: .medium))
@@ -3538,8 +3559,31 @@ struct ClipboardPopoverView: View {
                         .overlay(Circle().strokeBorder(glassPalette.controlCapsuleStroke.opacity(0.85), lineWidth: 0.65))
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel(store.isPaused ? "恢复记录剪贴板" : "暂停记录剪贴板")
-                .help(store.isPaused ? "点击恢复记录" : "暂停记录剪贴板")
+                .accessibilityLabel(store.isPaused ? "恢复记录剪贴板" : "无痕暂停记录剪贴板")
+                .help(store.pauseStatusSummary)
+                .contextMenu {
+                    if store.isPaused {
+                        Button("立即恢复记录剪贴板") { store.resumeCapture() }
+                        Divider()
+                    }
+                    Button("无痕暂停 5 分钟（自动恢复）") {
+                        store.pauseCapture(forMinutes: 5)
+                        store.showToast("已开启 5 分钟无痕暂停（到点自动恢复）")
+                    }
+                    Button("无痕暂停 15 分钟（推荐 · 自动恢复）") {
+                        store.pauseCapture(forMinutes: 15)
+                        store.showToast("已开启 15 分钟无痕暂停（到点自动恢复）")
+                    }
+                    Button("无痕暂停 60 分钟（自动恢复）") {
+                        store.pauseCapture(forMinutes: 60)
+                        store.showToast("已开启 60 分钟无痕暂停（到点自动恢复）")
+                    }
+                    Divider()
+                    Button("持续暂停（直到手动恢复）") {
+                        store.pauseCapture(forMinutes: nil)
+                        store.showToast("已持续暂停记录剪贴板")
+                    }
+                }
 
                 // 设置按钮（有 GitHub 新版本时右上角展示蓝点提示）
                 Button {

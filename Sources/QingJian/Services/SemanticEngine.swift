@@ -197,7 +197,12 @@ enum SemanticEngine {
             // 数据库连接串中的密码 scheme://user:password@host
             ("URI Password", ["://"], #"([a-zA-Z][a-zA-Z0-9+.\-]*://[^:\s/@]+:)([^@\s]+)(@)"#, "$1***REDACTED***$3"),
             // .env / YAML / 配置文件敏感键值对（保留键名，掩码真实密钥值）
-            ("Env Secret", ["=", ":"], ##"(?im)^(\s*(?:export\s+)?[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY|AUTH_TOKEN|CLIENT_SECRET)[A-Z0-9_]*\s*[:=]\s*['"]?)([^\s'"#]{6,})(['"]?)"##, "$1***REDACTED***$3")
+            ("Env Secret", ["=", ":"], ##"(?im)^(\s*(?:export\s+)?[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY|AUTH_TOKEN|CLIENT_SECRET)[A-Z0-9_]*\s*[:=]\s*['"]?)([^\s'"#]{6,})(['"]?)"##, "$1***REDACTED***$3"),
+            // cURL / HTTP 请求头中的 Cookie / Set-Cookie / X-API-Key / X-Auth-Token / Basic Auth
+            ("HTTP Cookie/Key", [":"], ##"(?i)(\b(?:cookie|set-cookie|x-api-key|x-auth-token|x-csrf-token)\s*:\s*)([^\r\n'"]{8,})"##, "$1***REDACTED***"),
+            ("HTTP Basic Auth", ["Basic", "basic", "BASIC"], #"(?i)(\b(?:authorization|proxy-authorization)\s*:\s*basic\s+)([A-Za-z0-9+/=]{8,})"#, "$1***REDACTED***"),
+            // JSON 载荷中的敏感口令与 Token 键值
+            ("JSON Secret", ["\":", "\" :"], ##"(?i)("(?:password|passwd|secret|client_secret|api_key|apikey|access_token|refresh_token|id_token|session_token|private_key)"\s*:\s*")([^"\r\n]{6,})(")"##, "$1***REDACTED***$3")
         ]
         return specs.compactMap { name, hints, pattern, replacement in
             guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
@@ -315,13 +320,19 @@ enum SemanticEngine {
                         ))
                     }
                 }
-                if let jwtDecoded = decodeJWTInspection(trimmed) {
+                if let jwtInfo = decodeJWTInspectionWithStatus(trimmed) {
+                    let chipTitle: String
+                    if let valid = jwtInfo.isUnexpired {
+                        chipTitle = valid ? "解码 JWT · 有效" : "解码 JWT · 已过期"
+                    } else {
+                        chipTitle = "解码 JWT"
+                    }
                     actions.append(TransformAction(
                         id: "jwt-decode",
-                        title: "解码 JWT",
+                        title: chipTitle,
                         symbolName: "person.text.rectangle",
                         isSecurityAction: false,
-                        resultText: jwtDecoded,
+                        resultText: jwtInfo.decodedText,
                         toastText: "已离线解码 JWT 载荷并键入"
                     ))
                 }
@@ -833,6 +844,13 @@ enum SemanticEngine {
     // MARK: - JWT 离线零上传解码审查（支持裸 eyJ... 与 Bearer eyJ...，自动解析 exp/iat 时间戳）
 
     static func decodeJWTInspection(_ input: String, referenceDate: Date = Date()) -> String? {
+        decodeJWTInspectionWithStatus(input, referenceDate: referenceDate)?.decodedText
+    }
+
+    static func decodeJWTInspectionWithStatus(
+        _ input: String,
+        referenceDate: Date = Date()
+    ) -> (decodedText: String, isUnexpired: Bool?)? {
         var candidate = input.trimmingCharacters(in: .whitespacesAndNewlines)
         if candidate.lowercased().hasPrefix("bearer ") {
             candidate = String(candidate.dropFirst(7)).trimmingCharacters(in: .whitespaces)
@@ -863,10 +881,13 @@ enum SemanticEngine {
         }
 
         var summaryLines: [String] = []
+        var unexpiredFlag: Bool? = nil
         if let dict = payloadObj as? [String: Any] {
             if let expVal = numericEpochSeconds(from: dict["exp"]) {
                 let expDate = Date(timeIntervalSince1970: expVal)
-                let status = expDate > referenceDate ? "有效" : "已过期"
+                let isValid = expDate > referenceDate
+                unexpiredFlag = isValid
+                let status = isValid ? "有效" : "已过期"
                 summaryLines.append("// 过期时间 (exp): \(isoFormatter.string(from: expDate))（\(status)）")
             }
             if let iatVal = numericEpochSeconds(from: dict["iat"]) {
@@ -881,7 +902,7 @@ enum SemanticEngine {
         }
         blocks.append("// Header\n\(headerStr)")
         blocks.append("// Payload\n\(payloadStr)")
-        return blocks.joined(separator: "\n\n")
+        return (blocks.joined(separator: "\n\n"), unexpiredFlag)
     }
 
     private static func decodeBase64URL(_ segment: String) -> Data? {

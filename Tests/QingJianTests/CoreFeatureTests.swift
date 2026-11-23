@@ -2222,4 +2222,81 @@ final class CoreFeatureTests: XCTestCase {
         try stripped.data.write(to: cleanURL)
         XCTAssertFalse(ImageStudioEngine.fileContainsPrivacyMetadata(at: cleanURL))
     }
+
+    // MARK: - 46. 行为记忆库静态加密、删除哈希指纹遗忘、临时拖拽擦除、定时无痕暂停与 cURL Cookie/JWT 透视测试
+
+    @MainActor
+    func testEncryptedAdaptiveBrainHashForgetTimedPauseAndCurlCookieRedaction() throws {
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("iclip-iter6-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        // 1. 验证旧明文 adaptive_intelligence.json 自动原地升级密文，且删除记录时彻底抹除 SHA-256 哈希指纹
+        let brainFile = tmpDir.appendingPathComponent("adaptive_intelligence.json")
+        let legacyPlain = Data("""
+        {"sparkEnabled":true,"sparkDurationSeconds":2,"recentReuseCounts":{"text:secret_hash_1":4,"text:keep_hash":2},"recentReuseOrder":["text:secret_hash_1","text:keep_hash"],"targetAppPasteCounts":{"chatgpt":{"text:secret_hash_1":3}},"targetAppDisplayNames":{"chatgpt":"ChatGPT"},"actionWeights":{},"appActionWeights":{},"actionAcceptCounts":{},"categoryDismissStreaks":{},"enabledAutoRules":[],"declinedAutoRules":[],"mutedSourceApps":[],"totalLearnedInteractions":5}
+        """.utf8)
+        try legacyPlain.write(to: brainFile)
+
+        let engine = AdaptiveIntelligenceEngine(customDirectoryURL: tmpDir)
+        XCTAssertEqual(engine.reuseCount(for: "text:secret_hash_1"), 4)
+        XCTAssertEqual(engine.targetAppPasteCount(for: "text:secret_hash_1", targetApp: "chatgpt"), 3)
+
+        engine.forgetContentHashes(["text:secret_hash_1"])
+        XCTAssertEqual(engine.reuseCount(for: "text:secret_hash_1"), 0)
+        XCTAssertEqual(engine.targetAppPasteCount(for: "text:secret_hash_1", targetApp: "chatgpt"), 0)
+        XCTAssertEqual(engine.reuseCount(for: "text:keep_hash"), 2)
+
+        // 2. 验证拖拽明文临时导出文件在删除单条与全量擦除时立即销毁
+        let exportDir = tmpDir.appendingPathComponent("drag_exports", isDirectory: true)
+        let secretNote = ClipItem(type: .text, text: "{\"access_token\":\"tok_live_998877665544\"}", contentHash: "text:tok")
+        let exported = try XCTUnwrap(DragFileExportHelper.materializeExportFile(for: secretNote, exportDirectory: exportDir))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: exported.url.path))
+        DragFileExportHelper.purgeExportedFiles(for: secretNote, exportDirectory: exportDir)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: exported.url.path))
+
+        // 3. 验证定时无痕暂停与自然语言指令开启/恢复
+        let store = ClipboardStore.shared
+        defer { store.resumeCapture(silent: true) }
+        let outPause = engine.adoptUserSuggestion("无痕暂停 25 分钟", in: store)
+        XCTAssertTrue(outPause.adoptedImmediately)
+        XCTAssertTrue(store.isPaused)
+        XCTAssertNotNil(store.pauseAutoResumeAt)
+        let outResume = engine.adoptUserSuggestion("恢复记录", in: store)
+        XCTAssertTrue(outResume.adoptedImmediately)
+        XCTAssertFalse(store.isPaused)
+        XCTAssertNil(store.pauseAutoResumeAt)
+
+        // 4. 验证 cURL Cookie / X-API-Key / JSON Token 全量识别与结构无损脱敏
+        let curlCmd = """
+        curl 'https://api.example.com/v1/profile' \\
+          -H 'cookie: sessionid=ab98cd76ef543210; csrftoken=xyz987654321' \\
+          -H 'x-api-key: prod_key_1122334455667788' \\
+          --data-raw '{"refresh_token": "rt_secret_998877665544", "page": 1}'
+        """
+        XCTAssertEqual(SensitiveCredentialVeil.classify(curlCmd), .connectionSecret)
+        let redactedCurl = SensitiveCredentialVeil.redactForExternalSharing(curlCmd)
+        XCTAssertFalse(redactedCurl.contains("ab98cd76ef543210"))
+        XCTAssertFalse(redactedCurl.contains("prod_key_1122334455667788"))
+        XCTAssertFalse(redactedCurl.contains("rt_secret_998877665544"))
+        XCTAssertTrue(redactedCurl.contains("-H 'cookie: ***REDACTED***'"))
+        XCTAssertTrue(redactedCurl.contains("\"refresh_token\": \"***REDACTED***\""))
+
+        #if !ICLIP_EDITION_FLOW
+        // 5. 验证 JWT 离线过期状态透视（有效 vs 已过期）
+        // Header: {"alg":"HS256","typ":"JWT"} -> eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9
+        // Payload: {"sub":"u1","exp":2000000000} -> eyJzdWIiOiJ1MSIsImV4cCI6MjAwMDAwMDAwMH0
+        let sampleJWT = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1MSIsImV4cCI6MjAwMDAwMDAwMH0.sig_part_abc123456"
+        let validCheck = try XCTUnwrap(SemanticEngine.decodeJWTInspectionWithStatus(
+            sampleJWT,
+            referenceDate: Date(timeIntervalSince1970: 1_800_000_000)
+        ))
+        XCTAssertEqual(validCheck.isUnexpired, true)
+        let expiredCheck = try XCTUnwrap(SemanticEngine.decodeJWTInspectionWithStatus(
+            sampleJWT,
+            referenceDate: Date(timeIntervalSince1970: 2_100_000_000)
+        ))
+        XCTAssertEqual(expiredCheck.isUnexpired, false)
+        #endif
+    }
 }

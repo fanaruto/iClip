@@ -145,9 +145,9 @@ enum LocalVaultCrypto {
             return nil
         }
 
-        // 兼容旧版未加密 UTF-8 JSON 数组（首非空字节需为 `[`）
+        // 兼容旧版未加密 UTF-8 JSON 数组或对象（首非空字节需为 `[` 或 `{`）
         if let firstNonWS = rawData.first(where: { $0 != 0x20 && $0 != 0x0A && $0 != 0x0D && $0 != 0x09 }),
-           firstNonWS == UInt8(ascii: "[") {
+           (firstNonWS == UInt8(ascii: "[") || firstNonWS == UInt8(ascii: "{")) {
             return (rawData, true)
         }
         return nil
@@ -524,6 +524,15 @@ enum SensitiveCredentialVeil {
     private static let httpBasicAuthRegex = try! NSRegularExpression(
         pattern: #"(?i)\b(https?://[^:\s/@]+:)([^@\s/]{4,})(@)"#
     )
+    private static let httpHeaderAuthCookieRegex = try! NSRegularExpression(
+        pattern: ##"(?i)(\b(?:cookie|set-cookie|x-api-key|x-auth-token|x-csrf-token)\s*:\s*)([^\r\n'"]{8,})"##
+    )
+    private static let httpBasicHeaderRegex = try! NSRegularExpression(
+        pattern: #"(?i)(\b(?:authorization|proxy-authorization)\s*:\s*basic\s+)([A-Za-z0-9+/=]{8,})"#
+    )
+    private static let jsonSecretFieldRegex = try! NSRegularExpression(
+        pattern: ##"(?i)("(?:password|passwd|secret|client_secret|api_key|apikey|access_token|refresh_token|id_token|session_token|private_key)"\s*:\s*")([^"\r\n]{6,})(")"##
+    )
 
     /// 仅扫描首 2,048 UTF-8 字节，2MB 超大文本耗时 < 0.03ms
     static func classify(_ rawText: String) -> SensitiveSecretKind? {
@@ -542,7 +551,10 @@ enum SensitiveCredentialVeil {
         if connUriRegex.firstMatch(in: sample, range: nsRange) != nil
             || bearerRegex.firstMatch(in: sample, range: nsRange) != nil
             || urlQuerySecretRegex.firstMatch(in: sample, range: nsRange) != nil
-            || httpBasicAuthRegex.firstMatch(in: sample, range: nsRange) != nil {
+            || httpBasicAuthRegex.firstMatch(in: sample, range: nsRange) != nil
+            || httpHeaderAuthCookieRegex.firstMatch(in: sample, range: nsRange) != nil
+            || httpBasicHeaderRegex.firstMatch(in: sample, range: nsRange) != nil
+            || jsonSecretFieldRegex.firstMatch(in: sample, range: nsRange) != nil {
             return .connectionSecret
         }
         for match in idCardCandidateRegex.matches(in: sample, range: nsRange) {
@@ -680,6 +692,21 @@ enum SensitiveCredentialVeil {
         )
         if out.contains("=") || out.contains(":") {
             out = envSecretRegex.stringByReplacingMatches(
+                in: out,
+                range: NSRange(out.startIndex..<out.endIndex, in: out),
+                withTemplate: "$1***REDACTED***$3"
+            )
+            out = httpHeaderAuthCookieRegex.stringByReplacingMatches(
+                in: out,
+                range: NSRange(out.startIndex..<out.endIndex, in: out),
+                withTemplate: "$1***REDACTED***"
+            )
+            out = httpBasicHeaderRegex.stringByReplacingMatches(
+                in: out,
+                range: NSRange(out.startIndex..<out.endIndex, in: out),
+                withTemplate: "$1***REDACTED***"
+            )
+            out = jsonSecretFieldRegex.stringByReplacingMatches(
                 in: out,
                 range: NSRange(out.startIndex..<out.endIndex, in: out),
                 withTemplate: "$1***REDACTED***$3"

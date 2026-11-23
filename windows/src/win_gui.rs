@@ -129,6 +129,8 @@ const CMD_TOGGLE_QUEUE_MODE: usize = 3012;
 const CMD_OPEN_TODO_LIST: usize = 3013;
 const CMD_PIN_TODO_BOARD: usize = 3014;
 const CMD_INSTALL_TO_SYSTEM: usize = 3015;
+const CMD_PAUSE_15M: usize = 3016;
+const CMD_PAUSE_60M: usize = 3017;
 
 const CF_UNICODETEXT_ID: u32 = 13;
 const CF_DIB_ID: u32 = 8;
@@ -1503,6 +1505,7 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_WTSSESSION_CHANGE_MSG => {
             if wparam == WTS_SESSION_LOCK_VAL {
+                iclip_core::security::wipe_all_temp_previews();
                 APP_STATE.with(|c| {
                     if let Some(st) = c.borrow_mut().as_mut() {
                         st.show_quick_look = false;
@@ -1516,6 +1519,7 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_POWERBROADCAST_MSG => {
             if wparam == PBT_APMSUSPEND_VAL {
+                iclip_core::security::wipe_all_temp_previews();
                 APP_STATE.with(|c| {
                     if let Some(st) = c.borrow_mut().as_mut() {
                         st.show_quick_look = false;
@@ -1571,21 +1575,22 @@ unsafe extern "system" fn wnd_proc(
                 }
                 let _ = InvalidateRect(hwnd, null(), FALSE);
             } else if wparam == TIMER_ID_OTP_SWEEP {
-                let swept = APP_STATE.with(|c| {
+                let changed = APP_STATE.with(|c| {
                     c.borrow_mut()
                         .as_mut()
                         .map(|s| {
                             let n = now_unix_secs();
+                            let auto_resumed = s.store.check_auto_resume_pause(n);
                             let cnt = s.store.sweep_expired_otps(n)
                                 + s.store.archive_expired_completed_todos(n);
                             if cnt > 0 && s.show_quick_look {
                                 s.show_quick_look = false;
                             }
-                            cnt
+                            cnt > 0 || auto_resumed
                         })
-                        .unwrap_or(0)
+                        .unwrap_or(false)
                 });
-                if swept > 0 {
+                if changed {
                     let _ = InvalidateRect(hwnd, null(), FALSE);
                 }
             } else if wparam == TIMER_ID_TOAST_CLEAR {
@@ -1804,6 +1809,7 @@ unsafe extern "system" fn wnd_proc(
             0
         }
         WM_DESTROY => {
+            iclip_core::security::wipe_all_temp_previews();
             PostQuitMessage(0);
             0
         }
@@ -1909,6 +1915,7 @@ unsafe fn handle_clipboard_update(hwnd: HWND) {
             st.ignore_next_clipboard_seq = false;
             return true;
         }
+        let _ = st.store.check_auto_resume_pause(now_unix_secs());
         if st.store.is_paused {
             st.pending_append_capture = false;
             return true;
@@ -1919,6 +1926,7 @@ unsafe fn handle_clipboard_update(hwnd: HWND) {
                 && IsClipboardFormatAvailable(st.cf_viewer_ignore) != FALSE)
             || is_disallowed_by_clipboard_history_flag(hwnd, st.cf_can_include_history)
         {
+            st.pending_append_capture = false;
             if st.store.config.auto_clear_concealed_clipboard {
                 st.scrub_expected_seq_num = GetClipboardSequenceNumber();
                 SetTimer(hwnd, TIMER_ID_CONCEALED_SCRUB, 60_000, None);
@@ -1942,6 +1950,7 @@ unsafe fn handle_clipboard_update(hwnd: HWND) {
         let auto_scrub = APP_STATE.with(|c| {
             let mut b = c.borrow_mut();
             let Some(st) = b.as_mut() else { return false };
+            st.pending_append_capture = false;
             if st.store.config.auto_clear_concealed_clipboard {
                 st.scrub_expected_seq_num = GetClipboardSequenceNumber();
                 true
@@ -7551,13 +7560,12 @@ unsafe fn handle_left_click(hwnd: HWND, x: i32, y: i32, is_double: bool) {
             let paused = APP_STATE.with(|c| {
                 let mut b = c.borrow_mut();
                 let st = b.as_mut().unwrap();
-                st.store.is_paused = !st.store.is_paused;
-                st.store.is_paused
+                st.store.toggle_timed_pause(15, now_unix_secs())
             });
             set_toast(
                 hwnd,
                 if paused {
-                    "已暂停记录剪贴板".to_string()
+                    "已开启 15 分钟无痕暂停（到点自动恢复）".to_string()
                 } else {
                     "已恢复记录剪贴板".to_string()
                 },
@@ -8487,17 +8495,33 @@ unsafe fn show_tray_context_menu(hwnd: HWND) {
     );
 
     AppendMenuW(hmenu, MF_SEPARATOR, 0, null());
-    AppendMenuW(
-        hmenu,
-        MF_STRING,
-        CMD_TOGGLE_PAUSE,
-        to_wide(if paused {
-            "恢复剪贴板记录"
-        } else {
-            "暂停剪贴板记录"
-        })
-        .as_ptr(),
-    );
+    if paused {
+        AppendMenuW(
+            hmenu,
+            MF_STRING,
+            CMD_TOGGLE_PAUSE,
+            to_wide("立即恢复剪贴板记录").as_ptr(),
+        );
+    } else {
+        AppendMenuW(
+            hmenu,
+            MF_STRING,
+            CMD_PAUSE_15M,
+            to_wide("无痕暂停 15 分钟（自动恢复）").as_ptr(),
+        );
+        AppendMenuW(
+            hmenu,
+            MF_STRING,
+            CMD_PAUSE_60M,
+            to_wide("无痕暂停 60 分钟（自动恢复）").as_ptr(),
+        );
+        AppendMenuW(
+            hmenu,
+            MF_STRING,
+            CMD_TOGGLE_PAUSE,
+            to_wide("持续暂停剪贴板记录").as_ptr(),
+        );
+    }
     AppendMenuW(
         hmenu,
         MF_STRING,
@@ -8591,13 +8615,42 @@ unsafe fn handle_menu_command(hwnd: HWND, cmd: usize) {
         CMD_TOGGLE_OTP_EXPIRE => {
             toggle_config_bool(hwnd, |cfg| &mut cfg.auto_expire_otp);
         }
-        CMD_TOGGLE_PAUSE => {
+        CMD_PAUSE_15M => {
             APP_STATE.with(|c| {
                 if let Some(st) = c.borrow_mut().as_mut() {
-                    st.store.is_paused = !st.store.is_paused;
+                    st.store.pause_for_minutes(Some(15), now_unix_secs());
                 }
             });
-            let _ = InvalidateRect(hwnd, null(), FALSE);
+            set_toast(hwnd, "已开启 15 分钟无痕暂停（到点自动恢复）".to_string());
+        }
+        CMD_PAUSE_60M => {
+            APP_STATE.with(|c| {
+                if let Some(st) = c.borrow_mut().as_mut() {
+                    st.store.pause_for_minutes(Some(60), now_unix_secs());
+                }
+            });
+            set_toast(hwnd, "已开启 60 分钟无痕暂停（到点自动恢复）".to_string());
+        }
+        CMD_TOGGLE_PAUSE => {
+            let resumed = APP_STATE.with(|c| {
+                let mut b = c.borrow_mut();
+                let Some(st) = b.as_mut() else { return false };
+                if st.store.is_paused {
+                    st.store.resume_capture();
+                    true
+                } else {
+                    st.store.pause_for_minutes(None, now_unix_secs());
+                    false
+                }
+            });
+            set_toast(
+                hwnd,
+                if resumed {
+                    "已恢复记录剪贴板".to_string()
+                } else {
+                    "已持续暂停记录剪贴板".to_string()
+                },
+            );
         }
         CMD_TOGGLE_AUTOSTART => {
             let next = !is_autostart_enabled();

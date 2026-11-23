@@ -1083,4 +1083,91 @@ mod tests {
 
         let _ = fs::remove_dir_all(tmp_dir);
     }
+
+    #[test]
+    fn test_encrypted_memory_hash_forget_timed_pause_curl_cookie_and_jwt() {
+        use crate::engines::{decode_jwt_inspection, redact_secrets};
+        use crate::security::{classify_sensitive_text, SensitiveSecretKind};
+
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "iclip-iter6-test-{}-{}",
+            std::process::id(),
+            crate::model::now_unix_secs()
+        ));
+        let _ = fs::create_dir_all(&tmp_dir);
+
+        // 1. 旧明文 adaptive_intelligence.json 自动升级为认证密文，且删除条目连根抹除 SHA-256 指纹
+        let mem_path = tmp_dir.join("adaptive_intelligence.json");
+        fs::write(
+            &mem_path,
+            br#"{"reuseCounts":{"dead_hash":5,"keep_hash":2},"appAffinity":{"chatgpt":{"dead_hash":3}},"actionHabits":{}}"#,
+        )
+        .unwrap();
+
+        let mut store = ClipboardStore::new(tmp_dir.clone());
+        let raw_mem_on_disk = fs::read(&mem_path).unwrap();
+        assert!(raw_mem_on_disk.starts_with(b"ICLPWIN1"));
+        assert_eq!(store.reuse_count("dead_hash"), 5);
+
+        let sec_id = store.insert_or_promote(ClipItem::new_text(
+            "sk-proj-DeleteForgetHashTest998877665544".to_string(),
+            Some("Chrome".to_string()),
+        ));
+        let sec_hash = store
+            .items
+            .iter()
+            .find(|i| i.id == sec_id)
+            .unwrap()
+            .content_hash
+            .clone();
+        store.record_paste_usage(&sec_hash, Some("ChatGPT"));
+        assert!(store.reuse_count(&sec_hash) >= 1);
+        assert_eq!(store.target_affinity_count(&sec_hash, Some("ChatGPT")), 1);
+        store.delete_by_id(&sec_id);
+        assert_eq!(store.reuse_count(&sec_hash), 0);
+        assert_eq!(store.target_affinity_count(&sec_hash, Some("ChatGPT")), 0);
+
+        store.forget_memory_hashes(&["dead_hash".to_string()]);
+        assert_eq!(store.reuse_count("dead_hash"), 0);
+        assert_eq!(store.reuse_count("keep_hash"), 2);
+
+        // 2. 定时无痕暂停与到点自动恢复 + 自然语言指令
+        let t0 = 1_800_000_000u64;
+        assert!(store.toggle_timed_pause(15, t0));
+        assert!(store.is_paused);
+        assert!(!store.check_auto_resume_pause(t0 + 14 * 60));
+        assert!(store.is_paused);
+        assert!(store.check_auto_resume_pause(t0 + 15 * 60));
+        assert!(!store.is_paused);
+
+        let msg = store.adopt_user_suggestion("无痕暂停 20 分钟");
+        assert!(msg.contains("20 分钟"));
+        assert!(store.is_paused);
+        let msg2 = store.adopt_user_suggestion("恢复记录");
+        assert!(msg2.contains("恢复"));
+        assert!(!store.is_paused);
+
+        // 3. cURL Cookie / X-API-Key / JSON Token 全量识别与结构无损脱敏
+        let curl_cmd = "curl 'https://api.example.com/v1/me' \\\n  -H 'cookie: sessionid=ab98cd76ef543210; uid=42' \\\n  -H 'x-api-key: prod_key_1122334455667788' \\\n  --data-raw '{\"refresh_token\": \"rt_secret_998877665544\", \"ok\": true}'";
+        assert_eq!(
+            classify_sensitive_text(curl_cmd),
+            Some(SensitiveSecretKind::ConnectionSecret)
+        );
+        let red = redact_secrets(curl_cmd);
+        assert!(!red.contains("ab98cd76ef543210"));
+        assert!(!red.contains("prod_key_1122334455667788"));
+        assert!(!red.contains("rt_secret_998877665544"));
+        assert!(red.contains("-H 'cookie: ***REDACTED***'"));
+        assert!(red.contains("\"refresh_token\": \"***REDACTED***\""));
+
+        // 4. 离线零联网 JWT 载荷与过期状态解码
+        let sample_jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1MSIsImV4cCI6MjAwMDAwMDAwMH0.sig_part_abc123456";
+        let (decoded_valid, flag_valid) = decode_jwt_inspection(sample_jwt, 1_800_000_000).unwrap();
+        assert_eq!(flag_valid, Some(true));
+        assert!(decoded_valid.contains("有效"));
+        let (_decoded_exp, flag_exp) = decode_jwt_inspection(sample_jwt, 2_100_000_000).unwrap();
+        assert_eq!(flag_exp, Some(false));
+
+        let _ = fs::remove_dir_all(tmp_dir);
+    }
 }
