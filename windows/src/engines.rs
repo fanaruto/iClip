@@ -1,7 +1,9 @@
 use crate::model::{safe_utf8_prefix, QuickAction};
 #[cfg(feature = "dev")]
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use image::{codecs::jpeg::JpegEncoder, codecs::png::PngEncoder, ColorType, ImageEncoder, Rgba, RgbaImage};
+use image::{
+    codecs::jpeg::JpegEncoder, codecs::png::PngEncoder, ColorType, ImageEncoder, Rgba, RgbaImage,
+};
 use regex_lite::Regex;
 use serde_json::Value;
 
@@ -122,7 +124,9 @@ pub fn analyze_text_actions(raw: &str, minimal_mode: bool) -> Vec<QuickAction> {
         }
 
         // Dev 4: Unix 时间戳转换
-        if (trimmed.len() == 10 || trimmed.len() == 13) && trimmed.bytes().all(|b| b.is_ascii_digit()) {
+        if (trimmed.len() == 10 || trimmed.len() == 13)
+            && trimmed.bytes().all(|b| b.is_ascii_digit())
+        {
             if let Ok(v) = trimmed.parse::<u64>() {
                 let secs = if trimmed.len() == 13 { v / 1000 } else { v };
                 if (1_000_000_000..=4_102_444_800).contains(&secs) {
@@ -173,7 +177,9 @@ pub fn analyze_text_actions(raw: &str, minimal_mode: bool) -> Vec<QuickAction> {
                 if let Ok(decoded) = String::from_utf8(bytes) {
                     let clean = decoded.trim();
                     if clean.chars().count() >= 3
-                        && !clean.chars().any(|c| c.is_control() && c != '\n' && c != '\r' && c != '\t')
+                        && !clean
+                            .chars()
+                            .any(|c| c.is_control() && c != '\n' && c != '\r' && c != '\t')
                     {
                         actions.push(QuickAction {
                             id: "base64-decode",
@@ -244,7 +250,11 @@ pub fn to_chinese_uppercase_rmb(int_digits: &str, frac_digits: Option<&str>) -> 
         return None;
     }
     let normalized_int = int_digits.trim_start_matches('0');
-    let clean_int = if normalized_int.is_empty() { "0" } else { normalized_int };
+    let clean_int = if normalized_int.is_empty() {
+        "0"
+    } else {
+        normalized_int
+    };
     if clean_int.len() > 12 {
         return None;
     }
@@ -358,8 +368,10 @@ pub fn analyze_finance_numbers(raw: &str) -> Vec<QuickAction> {
     }
 
     if !trimmed.contains('\n') {
-        let re = Regex::new(r"^\s*([¥￥$€£]?)\s*([0-9][0-9,]*)(?:\.([0-9]{1,2}))?\s*(元|圆|RMB|CNY)?\s*$")
-            .unwrap();
+        let re = Regex::new(
+            r"^\s*([¥￥$€£]?)\s*([0-9][0-9,]*)(?:\.([0-9]{1,2}))?\s*(元|圆|RMB|CNY)?\s*$",
+        )
+        .unwrap();
         if let Some(caps) = re.captures(trimmed) {
             let prefix = caps.get(1).map(|m| m.as_str()).unwrap_or("");
             let raw_int = caps.get(2).map(|m| m.as_str()).unwrap_or("");
@@ -367,13 +379,16 @@ pub fn analyze_finance_numbers(raw: &str) -> Vec<QuickAction> {
             let suffix = caps.get(4).map(|m| m.as_str()).unwrap_or("");
 
             if raw_int.contains(',') {
-                let comma_ok = Regex::new(r"^\d{1,3}(?:,\d{3})+$").unwrap().is_match(raw_int);
+                let comma_ok = Regex::new(r"^\d{1,3}(?:,\d{3})+$")
+                    .unwrap()
+                    .is_match(raw_int);
                 if !comma_ok {
                     return Vec::new();
                 }
             }
             let clean_int = raw_int.replace(',', "");
-            let has_explicit = !prefix.is_empty() || !suffix.is_empty() || raw_int.contains(',') || frac.is_some();
+            let has_explicit =
+                !prefix.is_empty() || !suffix.is_empty() || raw_int.contains(',') || frac.is_some();
 
             // 防手机号、Unix 时间戳、年份、短序号误判
             if !has_explicit {
@@ -443,21 +458,37 @@ pub fn analyze_finance_numbers(raw: &str) -> Vec<QuickAction> {
     }
 
     // 多行报销/对账单精确分位求和（整数毫分运算，0 浮点误差）
-    let lines: Vec<&str> = raw.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let lines: Vec<&str> = raw
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
     if !(2..=200).contains(&lines.len()) {
         return Vec::new();
     }
-    if raw.contains('{') || raw.contains('}') || raw.contains("func ") || raw.contains("let ") || raw.contains("const ") {
+    if raw.contains('{')
+        || raw.contains('}')
+        || raw.contains("func ")
+        || raw.contains("let ")
+        || raw.contains("const ")
+    {
         return Vec::new();
     }
 
-    let tail_re = Regex::new(r"(?:[¥￥$]\s*)?(-?\d{1,3}(?:,\d{3})+|-?\d+)(?:\.(\d{1,2}))?\s*(?:元|圆|块)?\s*$").unwrap();
+    let tail_re = Regex::new(
+        r"(?:[¥￥$]\s*)?(-?\d{1,3}(?:,\d{3})+|-?\d+)(?:\.(\d{1,2}))?\s*(?:元|圆|块)?\s*$",
+    )
+    .unwrap();
     let mut matched_count = 0usize;
     let mut sum_cents: i128 = 0;
 
     for line in &lines {
         let lower = line.to_lowercase();
-        if lower.starts_with("合计") || lower.starts_with("总计") || lower.starts_with("小计") || lower.starts_with("total") {
+        if lower.starts_with("合计")
+            || lower.starts_with("总计")
+            || lower.starts_with("小计")
+            || lower.starts_with("total")
+        {
             continue;
         }
         if let Some(caps) = tail_re.captures(line) {
@@ -533,9 +564,30 @@ pub fn analyze_finance_numbers(raw: &str) -> Vec<QuickAction> {
 // ============================================================================
 
 const HYPHEN_KEEP_PREFIXES: [&str; 24] = [
-    "state-of-the", "end-to", "up-to", "out-of", "one-to", "peer-to",
-    "self", "non", "multi", "cross", "inter", "intra", "co", "re", "pre", "post",
-    "high", "low", "real", "open", "long", "short", "well", "zero",
+    "state-of-the",
+    "end-to",
+    "up-to",
+    "out-of",
+    "one-to",
+    "peer-to",
+    "self",
+    "non",
+    "multi",
+    "cross",
+    "inter",
+    "intra",
+    "co",
+    "re",
+    "pre",
+    "post",
+    "high",
+    "low",
+    "real",
+    "open",
+    "long",
+    "short",
+    "well",
+    "zero",
 ];
 
 pub fn heal_pdf_line_breaks(raw: &str) -> String {
@@ -626,7 +678,10 @@ pub fn apply_pangu_spacing(text: &str) -> String {
         if i + 1 < chars.len() {
             let next = chars[i + 1];
             let left_cjk_right_latin = is_cjk(c)
-                && (next.is_ascii_alphanumeric() || next == '\u{E000}' || next == '@' || next == '#');
+                && (next.is_ascii_alphanumeric()
+                    || next == '\u{E000}'
+                    || next == '@'
+                    || next == '#');
             let left_latin_right_cjk =
                 (c.is_ascii_alphanumeric() || c == '%' || c == '\u{E001}') && is_cjk(next);
             if left_cjk_right_latin || left_latin_right_cjk {
@@ -658,13 +713,20 @@ pub fn analyze_document_typography(raw: &str) -> Vec<QuickAction> {
     }
 
     let mut actions = Vec::new();
-    let non_empty_lines: Vec<&str> = trimmed.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let non_empty_lines: Vec<&str> = trimmed
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
     if non_empty_lines.len() >= 2 {
         let mid_breaks = non_empty_lines[..non_empty_lines.len() - 1]
             .iter()
             .filter(|l| {
                 let last = l.chars().last().unwrap_or('.');
-                !matches!(last, '。' | '！' | '？' | '；' | '.' | '!' | '?' | ';' | ':' | '：')
+                !matches!(
+                    last,
+                    '。' | '！' | '？' | '；' | '.' | '!' | '?' | ';' | ':' | '：'
+                )
             })
             .count();
         if mid_breaks >= 1 {
@@ -852,7 +914,11 @@ pub fn analyze_table_bridge(raw: &str) -> Vec<QuickAction> {
 }
 
 fn parse_markdown_table(raw: &str) -> Option<Vec<Vec<String>>> {
-    let lines: Vec<&str> = raw.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let lines: Vec<&str> = raw
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
     if lines.len() < 2 || !lines[0].contains('|') {
         return None;
     }
@@ -943,7 +1009,9 @@ pub fn compress_png_to_white_bg_jpeg(png_bytes: &[u8], quality: u8) -> Option<Ve
 
     let mut out = Vec::new();
     let encoder = JpegEncoder::new_with_quality(&mut out, quality);
-    encoder.write_image(&rgb_buf, w, h, ColorType::Rgb8.into()).ok()?;
+    encoder
+        .write_image(&rgb_buf, w, h, ColorType::Rgb8.into())
+        .ok()?;
     Some(out)
 }
 
@@ -1009,7 +1077,12 @@ pub fn render_mockup_frame_png(png_bytes: &[u8], padding: u32) -> Option<(Vec<u8
                 canvas.put_pixel(
                     cx,
                     cy,
-                    Rgba([blend(fg[0], bg[0]), blend(fg[1], bg[1]), blend(fg[2], bg[2]), 255]),
+                    Rgba([
+                        blend(fg[0], bg[0]),
+                        blend(fg[1], bg[1]),
+                        blend(fg[2], bg[2]),
+                        255,
+                    ]),
                 );
             }
         }
@@ -1050,11 +1123,13 @@ const ID_WEIGHTS: [u32; 17] = [7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4,
 const ID_MAP: [char; 11] = ['1', '0', 'X', '9', '8', '7', '6', '5', '4', '3', '2'];
 
 const USCC_ALPHABET: &[u8; 31] = b"0123456789ABCDEFGHJKLMNPQRTUWXY";
-const USCC_WEIGHTS: [u32; 17] = [1, 3, 9, 27, 19, 26, 16, 17, 20, 29, 25, 13, 8, 24, 10, 30, 28];
+const USCC_WEIGHTS: [u32; 17] = [
+    1, 3, 9, 27, 19, 26, 16, 17, 20, 29, 25, 13, 8, 24, 10, 30, 28,
+];
 const VALID_PROVINCE_CODES: [&str; 35] = [
-    "11", "12", "13", "14", "15", "21", "22", "23", "31", "32", "33", "34", "35", "36", "37",
-    "41", "42", "43", "44", "45", "46", "50", "51", "52", "53", "54", "61", "62", "63", "64",
-    "65", "71", "81", "82", "91",
+    "11", "12", "13", "14", "15", "21", "22", "23", "31", "32", "33", "34", "35", "36", "37", "41",
+    "42", "43", "44", "45", "46", "50", "51", "52", "53", "54", "61", "62", "63", "64", "65", "71",
+    "81", "82", "91",
 ];
 
 pub fn expected_id_card_checksum(first17: &str) -> Option<char> {
@@ -1131,11 +1206,21 @@ pub fn analyze_compliance_codes(raw: &str) -> Vec<QuickAction> {
     if compact.len() == 18 {
         let first17 = &compact[0..17];
         let actual = compact.chars().last().unwrap().to_ascii_uppercase();
-        if (actual.is_ascii_digit() || actual == 'X') && first17.bytes().all(|b| b.is_ascii_digit()) {
+        if (actual.is_ascii_digit() || actual == 'X') && first17.bytes().all(|b| b.is_ascii_digit())
+        {
             if let Some(expected) = expected_id_card_checksum(first17) {
                 if actual == expected {
-                    let grouped = format!("{} {} {}", &compact[0..6], &compact[6..14], &compact[14..18].to_ascii_uppercase());
-                    let masked = format!("{}********{}", &compact[0..6], &compact[14..18].to_ascii_uppercase());
+                    let grouped = format!(
+                        "{} {} {}",
+                        &compact[0..6],
+                        &compact[6..14],
+                        &compact[14..18].to_ascii_uppercase()
+                    );
+                    let masked = format!(
+                        "{}********{}",
+                        &compact[0..6],
+                        &compact[14..18].to_ascii_uppercase()
+                    );
                     return vec![
                         QuickAction {
                             id: "comp-id-group",
@@ -1190,7 +1275,13 @@ pub fn analyze_compliance_codes(raw: &str) -> Vec<QuickAction> {
         if let Some(exp) = expected_uscc_checksum(&upper[0..17]) {
             let actual = upper.chars().last().unwrap();
             if actual == exp {
-                let grouped = format!("{} {} {} {}", &upper[0..2], &upper[2..8], &upper[8..17], &upper[17..18]);
+                let grouped = format!(
+                    "{} {} {} {}",
+                    &upper[0..2],
+                    &upper[2..8],
+                    &upper[8..17],
+                    &upper[17..18]
+                );
                 return vec![QuickAction {
                     id: "comp-uscc-group",
                     title: "✓ 企业税号无误 · 分节核对".to_string(),
@@ -1216,7 +1307,11 @@ pub fn analyze_compliance_codes(raw: &str) -> Vec<QuickAction> {
                 .map(|c| std::str::from_utf8(c).unwrap())
                 .collect::<Vec<_>>()
                 .join(" ");
-            let masked = format!("{} **** **** {}", &compact[0..4], &compact[compact.len() - 4..]);
+            let masked = format!(
+                "{} **** **** {}",
+                &compact[0..4],
+                &compact[compact.len() - 4..]
+            );
             return vec![
                 QuickAction {
                     id: "comp-card-group",
@@ -1246,9 +1341,25 @@ pub fn analyze_compliance_codes(raw: &str) -> Vec<QuickAction> {
 // ============================================================================
 
 const OTP_KEYWORDS: [&str; 19] = [
-    "验证码", "校验码", "动态码", "安全码", "确认码", "登录码", "授权码", "提取码", "认证码",
-    "verification code", "security code", "auth code", "authentication code",
-    "login code", "confirmation code", "one-time password", "one-time code", "passcode", "otp",
+    "验证码",
+    "校验码",
+    "动态码",
+    "安全码",
+    "确认码",
+    "登录码",
+    "授权码",
+    "提取码",
+    "认证码",
+    "verification code",
+    "security code",
+    "auth code",
+    "authentication code",
+    "login code",
+    "confirmation code",
+    "one-time password",
+    "one-time code",
+    "passcode",
+    "otp",
 ];
 
 pub fn is_otp_message(raw: &str) -> bool {
@@ -1346,8 +1457,12 @@ pub fn clean_meeting_transcript(raw: &str) -> Option<CleanedTranscript> {
         return None;
     }
 
-    let srt_re = Regex::new(r"^\s*\d{1,2}:\d{2}(?::\d{2})?[.,]\d{1,3}\s*-->\s*\d{1,2}:\d{2}(?::\d{2})?[.,]\d{1,3}.*$").unwrap();
-    let standalone_ts_re = Regex::new(r"^\s*[\(\[（【]?(\d{1,2}:\d{2}(?::\d{2})?)[\)\]）】]?\s*$").unwrap();
+    let srt_re = Regex::new(
+        r"^\s*\d{1,2}:\d{2}(?::\d{2})?[.,]\d{1,3}\s*-->\s*\d{1,2}:\d{2}(?::\d{2})?[.,]\d{1,3}.*$",
+    )
+    .unwrap();
+    let standalone_ts_re =
+        Regex::new(r"^\s*[\(\[（【]?(\d{1,2}:\d{2}(?::\d{2})?)[\)\]）】]?\s*$").unwrap();
     let header_re = Regex::new(r"^\s*([^\d\[\]\n:：]{1,24}?(?:\s*\d{1,2})?)\s*[\(\[（【]?\b(\d{1,2}:\d{2}(?::\d{2})?)\b[\)\]）】]?\s*$").unwrap();
     let inline_re = Regex::new(r"^\s*[\(\[（【]?\b(\d{1,2}:\d{2}(?::\d{2})?)\b[\)\]）】]?\s*(?:([^\d\[\]\n:：]{1,20}?)\s*[:：]\s*)?(.+)$").unwrap();
 
@@ -1363,7 +1478,10 @@ pub fn clean_meeting_transcript(raw: &str) -> Option<CleanedTranscript> {
             i += 1;
             continue;
         }
-        if line.bytes().all(|b| b.is_ascii_digit()) && i + 1 < lines.len() && srt_re.is_match(lines[i + 1].trim()) {
+        if line.bytes().all(|b| b.is_ascii_digit())
+            && i + 1 < lines.len()
+            && srt_re.is_match(lines[i + 1].trim())
+        {
             hits += 1;
             i += 2;
             continue;
@@ -1383,7 +1501,10 @@ pub fn clean_meeting_transcript(raw: &str) -> Option<CleanedTranscript> {
             }
         }
         if let Some(caps) = inline_re.captures(line) {
-            let sp = caps.get(2).map(|m| m.as_str().trim().to_string()).filter(|s| !s.is_empty());
+            let sp = caps
+                .get(2)
+                .map(|m| m.as_str().trim().to_string())
+                .filter(|s| !s.is_empty());
             let content = caps.get(3).unwrap().as_str().trim().to_string();
             hits += 1;
             if let Some(ref s) = sp {
@@ -1461,7 +1582,11 @@ pub fn analyze_meeting_transcript(raw: &str) -> Vec<QuickAction> {
     actions
 }
 
-fn push_dialogue_turn(turns: &mut Vec<(Option<String>, String)>, speaker: Option<String>, text: String) {
+fn push_dialogue_turn(
+    turns: &mut Vec<(Option<String>, String)>,
+    speaker: Option<String>,
+    text: String,
+) {
     if let Some((last_sp, last_txt)) = turns.last_mut() {
         if *last_sp == speaker {
             *last_txt = join_fragments(last_txt, &text);
@@ -1509,7 +1634,10 @@ pub fn contains_sensitive_secret(text: &str) -> bool {
 pub fn redact_secrets(text: &str) -> String {
     let mut out = text.to_string();
     if out.contains("-----BEGIN ") && out.contains("PRIVATE KEY-----") {
-        let pem_re = Regex::new(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----").unwrap();
+        let pem_re = Regex::new(
+            r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----",
+        )
+        .unwrap();
         out = pem_re
             .replace_all(
                 &out,
@@ -1520,12 +1648,28 @@ pub fn redact_secrets(text: &str) -> String {
 
     let rules: &[(&str, &str, &str)] = &[
         ("sk-", r"sk-[A-Za-z0-9_\-]{18,}", "sk-***REDACTED***"),
-        ("gh", r"(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{24,}|github_pat_[A-Za-z0-9_]{30,}", "gh_***REDACTED***"),
+        (
+            "gh",
+            r"(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{24,}|github_pat_[A-Za-z0-9_]{30,}",
+            "gh_***REDACTED***",
+        ),
         ("AKIA", r"AKIA[0-9A-Z]{16}", "AKIA***REDACTED***"),
         ("AIza", r"AIza[0-9A-Za-z\-_]{35}", "AIza***REDACTED***"),
-        ("eyJ", r"eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}", "eyJ***JWT_REDACTED***"),
-        ("Bearer", r"(?i)(Bearer\s+)[A-Za-z0-9\-._~+/]{20,}=*", "${1}***REDACTED***"),
-        ("://", r"([a-zA-Z][a-zA-Z0-9+.\-]*://[^:\s/@]+:)([^@\s]+)(@)", "${1}***REDACTED***${3}"),
+        (
+            "eyJ",
+            r"eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}",
+            "eyJ***JWT_REDACTED***",
+        ),
+        (
+            "Bearer",
+            r"(?i)(Bearer\s+)[A-Za-z0-9\-._~+/]{20,}=*",
+            "${1}***REDACTED***",
+        ),
+        (
+            "://",
+            r"([a-zA-Z][a-zA-Z0-9+.\-]*://[^:\s/@]+:)([^@\s]+)(@)",
+            "${1}***REDACTED***${3}",
+        ),
     ];
     for (hint, pat, rep) in rules {
         if out.contains(hint) || (*hint == "Bearer" && out.to_lowercase().contains("bearer")) {
@@ -1539,7 +1683,9 @@ pub fn redact_secrets(text: &str) -> String {
             r##"(?im)^(\s*(?:export\s+)?[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY|AUTH_TOKEN|CLIENT_SECRET)[A-Z0-9_]*\s*[:=]\s*['"]?)([^\s'"#]{6,})(['"]?)"##,
         )
         .unwrap();
-        out = env_re.replace_all(&out, "${1}***REDACTED***${3}").into_owned();
+        out = env_re
+            .replace_all(&out, "${1}***REDACTED***${3}")
+            .into_owned();
     }
 
     out
@@ -1547,7 +1693,9 @@ pub fn redact_secrets(text: &str) -> String {
 
 pub fn redact_pii_and_private_ip(text: &str) -> String {
     let ip_re = Regex::new(r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3})\b").unwrap();
-    let email_re = Regex::new(r"\b([A-Za-z0-9._%+\-])([A-Za-z0-9._%+\-]*)(@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})\b").unwrap();
+    let email_re =
+        Regex::new(r"\b([A-Za-z0-9._%+\-])([A-Za-z0-9._%+\-]*)(@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})\b")
+            .unwrap();
     let phone_re = Regex::new(r"\b(1[3-9]\d)\d{4}(\d{4})\b").unwrap();
 
     let mut out = ip_re.replace_all(text, "*.*.*.*").into_owned();
@@ -1566,9 +1714,26 @@ pub fn clean_tracking_url(raw: &str) -> Option<String> {
     };
     let (base, query) = base_and_q.split_once('?')?;
     let tracking_keys = [
-        "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "utm_id",
-        "spm", "spm_id_from", "vd_source", "from_source", "share_source", "share_medium",
-        "fbclid", "gclid", "dclid", "msclkid", "twclid", "igshid", "igsh", "si",
+        "utm_source",
+        "utm_medium",
+        "utm_campaign",
+        "utm_term",
+        "utm_content",
+        "utm_id",
+        "spm",
+        "spm_id_from",
+        "vd_source",
+        "from_source",
+        "share_source",
+        "share_medium",
+        "fbclid",
+        "gclid",
+        "dclid",
+        "msclkid",
+        "twclid",
+        "igshid",
+        "igsh",
+        "si",
     ];
 
     let mut kept = Vec::new();

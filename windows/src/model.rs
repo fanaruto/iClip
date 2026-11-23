@@ -13,6 +13,9 @@ pub enum PinCategory {
 }
 
 impl PinCategory {
+    pub const ALL_CATEGORIES: [PinCategory; 4] =
+        [Self::Reply, Self::Invoice, Self::Contact, Self::Template];
+
     pub fn title(self) -> &'static str {
         match self {
             Self::Reply => "常用话术",
@@ -20,6 +23,64 @@ impl PinCategory {
             Self::Contact => "地址名片",
             Self::Template => "合同模板",
         }
+    }
+
+    /// 根据备注名与正文特征自动推断收藏分组（普通文本与代码保持 None 不乱分）
+    pub fn infer(alias: Option<&str>, text: Option<&str>) -> Option<Self> {
+        if let Some(raw) = text {
+            if raw.contains("{{") && raw.contains("}}") {
+                return Some(Self::Template);
+            }
+        }
+        let head: String = text.unwrap_or("").chars().take(160).collect();
+        let combined = format!("{} {}", alias.unwrap_or(""), head).to_lowercase();
+        if combined.trim().is_empty() {
+            return None;
+        }
+        for kw in ["模板", "合同", "协议", "条款", "template", "snippet"] {
+            if combined.contains(kw) {
+                return Some(Self::Template);
+            }
+        }
+        for kw in [
+            "税号",
+            "开票",
+            "发票",
+            "抬头",
+            "开户行",
+            "对公",
+            "联行号",
+            "纳税人",
+            "收款",
+            "财务",
+            "报价",
+        ] {
+            if combined.contains(kw) {
+                return Some(Self::Invoice);
+            }
+        }
+        for kw in [
+            "地址", "收货", "寄件", "快递", "电话", "手机", "名片", "联系", "邮箱", "邮编",
+        ] {
+            if combined.contains(kw) {
+                return Some(Self::Contact);
+            }
+        }
+        for kw in [
+            "话术",
+            "回复",
+            "客服",
+            "问候",
+            "售后",
+            "催款",
+            "通知",
+            "欢迎语",
+        ] {
+            if combined.contains(kw) {
+                return Some(Self::Reply);
+            }
+        }
+        None
     }
 }
 
@@ -118,7 +179,11 @@ impl ClipItem {
         let hash = sha256_hex(raw.as_bytes());
         Self {
             id: generate_pseudo_uuid(&hash),
-            kind: if is_link { ClipContentType::Link } else { ClipContentType::Text },
+            kind: if is_link {
+                ClipContentType::Link
+            } else {
+                ClipContentType::Text
+            },
             text: Some(raw),
             image_file_name: None,
             image_width: None,
@@ -207,7 +272,12 @@ impl ClipItem {
                 if raw.is_empty() {
                     return "空白文本".to_string();
                 }
-                let head: String = raw.chars().take(180).collect();
+                let readable_cow = if self.kind == ClipContentType::Link && raw.contains('%') {
+                    crate::intelligence::decode_percent_readable_url(raw)
+                } else {
+                    raw.clone()
+                };
+                let head: String = readable_cow.chars().take(180).collect();
                 let trimmed = head.trim();
                 if trimmed.is_empty() {
                     "空白文本".to_string()
@@ -291,44 +361,119 @@ impl ClipItem {
         }
     }
 
-    /// 零堆分配 ASCII 快速路径 + 64KB 搜索窗口限制（保证 500 条含 2MB 巨型记录检索 < 1ms）
+    /// 全维度直觉盲搜：支持多词 AND、`!` 排除词、自然情景时间窗（今天/昨天/本周）、跨语言应用/模态同义词、百分号中文 URL 与拼音首字母检索
     pub fn matches_query(&self, query: &str) -> bool {
         let q = query.trim();
         if q.is_empty() {
             return true;
         }
+        let now_secs = now_unix_secs();
+        for raw_token in q.split_whitespace() {
+            if raw_token.is_empty() {
+                continue;
+            }
+            if let Some(neg) = raw_token
+                .strip_prefix('!')
+                .or_else(|| raw_token.strip_prefix('！'))
+            {
+                let neg = neg.trim();
+                if !neg.is_empty() && self.matches_single_token(neg) {
+                    return false;
+                }
+                continue;
+            }
+            if let Some(scope) = crate::intelligence::TimeScopeFilter::from_token(raw_token) {
+                if !scope.matches_timestamp(self.created_unix_secs, now_secs) {
+                    return false;
+                }
+                continue;
+            }
+            if !self.matches_single_token(raw_token) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn matches_single_token(&self, token: &str) -> bool {
         if let Some(text) = &self.text {
             let window = safe_utf8_prefix(text, 65_536);
-            if contains_case_insensitive(window, q) {
+            if contains_case_insensitive(window, token) {
                 return true;
+            }
+            if self.kind == ClipContentType::Link && window.contains('%') {
+                let decoded = crate::intelligence::decode_percent_readable_url(window);
+                if contains_case_insensitive(&decoded, token) {
+                    return true;
+                }
+                if crate::intelligence::is_pure_ascii_letters(token) {
+                    let initials = crate::intelligence::extract_pinyin_initials(&decoded, 200);
+                    if initials.contains(&token.to_ascii_lowercase()) {
+                        return true;
+                    }
+                }
             }
         }
         if let Some(alias) = &self.custom_alias {
-            if contains_case_insensitive(alias, q) {
+            if contains_case_insensitive(alias, token) {
                 return true;
             }
         }
         if let Some(cat) = self.pin_category {
-            if contains_case_insensitive(cat.title(), q) {
+            if contains_case_insensitive(cat.title(), token) {
                 return true;
             }
         }
         if let Some(ocr) = &self.ocr_text {
-            if contains_case_insensitive(safe_utf8_prefix(ocr, 32_768), q) {
+            if contains_case_insensitive(safe_utf8_prefix(ocr, 32_768), token) {
                 return true;
             }
         }
         if let Some(paths) = &self.file_paths {
-            if paths.iter().any(|p| contains_case_insensitive(p, q)) {
+            if paths.iter().any(|p| contains_case_insensitive(p, token)) {
                 return true;
             }
         }
         if let Some(app) = &self.source_app_name {
-            if contains_case_insensitive(app, q) {
+            if contains_case_insensitive(app, token) {
                 return true;
             }
         }
-        contains_case_insensitive(self.kind.display_name(), q)
+        if contains_case_insensitive(self.kind.display_name(), token) {
+            return true;
+        }
+
+        let token_lower = token.to_lowercase();
+        if crate::intelligence::matches_app_or_modality_synonym(
+            &token_lower,
+            self.source_app_name.as_deref(),
+            self.kind,
+        ) {
+            return true;
+        }
+
+        // 英文输入法下免切输入法拼音首字母盲搜（如 `fptt` 命中「发票抬头」）
+        if crate::intelligence::is_pure_ascii_letters(&token_lower) {
+            if let Some(alias) = &self.custom_alias {
+                if crate::intelligence::extract_pinyin_initials(alias, 96).contains(&token_lower) {
+                    return true;
+                }
+            }
+            if let Some(text) = &self.text {
+                let head = safe_utf8_prefix(text, 2_048);
+                if crate::intelligence::extract_pinyin_initials(head, 320).contains(&token_lower) {
+                    return true;
+                }
+            }
+            if let Some(ocr) = &self.ocr_text {
+                let head = safe_utf8_prefix(ocr, 1_024);
+                if crate::intelligence::extract_pinyin_initials(head, 200).contains(&token_lower) {
+                    return true;
+                }
+            }
+        }
+
+        false
     }
 }
 
@@ -379,7 +524,7 @@ pub fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
 }
 
 pub fn is_valid_web_url(s: &str) -> bool {
-    if s.contains('\n') || s.contains(' ') {
+    if s.contains('\n') || s.contains('\r') || s.contains(' ') {
         return false;
     }
     let rest = if let Some(r) = s.strip_prefix("https://") {
@@ -389,8 +534,12 @@ pub fn is_valid_web_url(s: &str) -> bool {
     } else {
         return false;
     };
-    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
-    host.contains('.') && host.len() >= 4
+    let host_port = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = host_port.split(':').next().unwrap_or("");
+    (host.contains('.') && host.len() >= 4)
+        || host.eq_ignore_ascii_case("localhost")
+        || host == "127.0.0.1"
+        || host == "0.0.0.0"
 }
 
 pub fn extract_url_host(s: &str) -> Option<&str> {

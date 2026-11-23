@@ -1,0 +1,905 @@
+use crate::engines::{clean_tracking_url, to_chinese_uppercase_rmb};
+use crate::model::{now_unix_secs, ClipContentType};
+
+// ============================================================================
+// 1. 百分号编码中文 URL 可读解码与社媒分享口令剥壳提链
+// ============================================================================
+
+/// O(1) 前置 `%` 门控解码：将含 `%E4%B8%AD...` 的 URL 解码为可读中文预览，不破坏底层原始 URL
+pub fn decode_percent_readable_url(raw: &str) -> String {
+    if raw.len() > 4_096 || !raw.contains('%') || !raw.contains("://") {
+        return raw.to_string();
+    }
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                out.push((hi << 4) | lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    match String::from_utf8(out) {
+        Ok(decoded) if !decoded.is_empty() => decoded.replace(['\r', '\n'], " ").replace('\0', ""),
+        _ => raw.to_string(),
+    }
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// 从小红书 / B站 / 抖音 / 飞书等混排分享口令中剥壳提纯首个干净网页 URL（网盘含提取码时保留不盲剥）
+pub fn extract_clean_share_url(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let lower = trimmed.to_lowercase();
+    let start = lower.find("https://").or_else(|| lower.find("http://"))?;
+    let tail = &trimmed[start..];
+
+    let mut end_byte = 0;
+    let mut open_parens = 0i32;
+    let mut open_brackets = 0i32;
+
+    for (idx, ch) in tail.char_indices() {
+        if ch.is_whitespace() || ch.is_control() {
+            break;
+        }
+        // 遇到中文标点或口令粘连引号立即截断
+        if matches!(
+            ch,
+            '，' | '。'
+                | '！'
+                | '？'
+                | '；'
+                | '：'
+                | '、'
+                | '「'
+                | '」'
+                | '『'
+                | '』'
+                | '【'
+                | '】'
+                | '《'
+                | '》'
+                | '（'
+                | '）'
+                | '"'
+                | '\''
+                | '<'
+                | '>'
+        ) {
+            break;
+        }
+        if ch == '(' {
+            open_parens += 1;
+        } else if ch == ')' {
+            if open_parens <= 0 {
+                break;
+            }
+            open_parens -= 1;
+        } else if ch == '[' {
+            open_brackets += 1;
+        } else if ch == ']' {
+            if open_brackets <= 0 {
+                break;
+            }
+            open_brackets -= 1;
+        }
+        end_byte = idx + ch.len_utf8();
+    }
+
+    if end_byte == 0 {
+        return None;
+    }
+
+    let mut candidate = tail[..end_byte]
+        .trim_end_matches(['.', ',', ';', ':', '!', '?'])
+        .to_string();
+    let host_check = candidate
+        .strip_prefix("https://")
+        .or_else(|| candidate.strip_prefix("http://"))
+        .unwrap_or("");
+    let host = host_check.split(['/', '?', '#']).next().unwrap_or("");
+    if !(host.contains('.')
+        || host.eq_ignore_ascii_case("localhost")
+        || host.starts_with("localhost:"))
+    {
+        return None;
+    }
+
+    if let Some(cleaned) = clean_tracking_url(&candidate) {
+        candidate = cleaned;
+    }
+    Some(candidate)
+}
+
+// ============================================================================
+// 2. 跨语言应用/模态同义词、拼音首字母与情景时间窗盲搜
+// ============================================================================
+
+const APP_SYNONYM_GROUPS: &[&[&str]] = &[
+    &[
+        "code",
+        "vscode",
+        "visual studio code",
+        "cursor",
+        "antigravity",
+        "windsurf",
+        "zed",
+        "ide",
+        "编辑器",
+    ],
+    &["wechat", "weixin", "wx", "微信", "聊天"],
+    &["feishu", "lark", "飞书"],
+    &["dingtalk", "钉钉"],
+    &["qq", "tim", "腾讯qq"],
+    &[
+        "windowsterminal",
+        "wt",
+        "cmd",
+        "powershell",
+        "pwsh",
+        "iterm",
+        "iterm2",
+        "ghostty",
+        "warp",
+        "alacritty",
+        "terminal",
+        "终端",
+        "命令行",
+        "shell",
+    ],
+    &[
+        "chrome",
+        "google chrome",
+        "msedge",
+        "edge",
+        "firefox",
+        "safari",
+        "arc",
+        "brave",
+        "browser",
+        "浏览器",
+    ],
+    &["excel", "wps", "numbers", "表格", "电子表格"],
+    &[
+        "winword", "word", "notion", "obsidian", "typora", "文档", "笔记",
+    ],
+];
+
+pub fn matches_app_or_modality_synonym(
+    token_lower: &str,
+    source_app: Option<&str>,
+    kind: ClipContentType,
+) -> bool {
+    let modality_hit = match kind {
+        ClipContentType::Image => matches!(
+            token_lower,
+            "图片" | "截图" | "相册" | "image" | "img" | "pic" | "photo" | "screenshot"
+        ),
+        ClipContentType::Link => matches!(
+            token_lower,
+            "链接" | "网址" | "网页" | "link" | "url" | "http"
+        ),
+        ClipContentType::File => matches!(
+            token_lower,
+            "文件" | "附件" | "目录" | "文件夹" | "file" | "folder"
+        ),
+        ClipContentType::Text => matches!(token_lower, "文本" | "文字" | "text"),
+    };
+    if modality_hit {
+        return true;
+    }
+
+    let Some(app_raw) = source_app else {
+        return false;
+    };
+    let app_lower = app_raw.trim().to_lowercase();
+    if app_lower.is_empty() {
+        return false;
+    }
+
+    for group in APP_SYNONYM_GROUPS {
+        let query_in_group = group.contains(&token_lower);
+        if query_in_group
+            && group
+                .iter()
+                .any(|alias| app_lower == *alias || (alias.len() >= 4 && app_lower.contains(alias)))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// 识别 IDE / 代码编辑器 / 终端来源应用（过滤其默认附带的语法着色 HTML，避免误扰）
+pub fn is_code_editor_or_terminal_app(source_app: Option<&str>) -> bool {
+    let Some(app) = source_app else {
+        return false;
+    };
+    let lower = app.trim().to_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    if matches!(
+        lower.as_str(),
+        "code" | "wt" | "cmd" | "vim" | "nvim" | "emacs"
+    ) {
+        return true;
+    }
+    const IDE_KEYS: &[&str] = &[
+        "antigravity",
+        "cursor",
+        "vscode",
+        "visual studio",
+        "windsurf",
+        "trae",
+        "zed",
+        "idea",
+        "intellij",
+        "pycharm",
+        "webstorm",
+        "goland",
+        "clion",
+        "rustrover",
+        "rider",
+        "sublime",
+        "notepad++",
+        "windowsterminal",
+        "powershell",
+        "pwsh",
+        "terminal",
+        "iterm",
+        "ghostty",
+        "warp",
+        "alacritty",
+        "wezterm",
+        "git-bash",
+        "mintty",
+    ];
+    IDE_KEYS.iter().any(|k| lower.contains(k))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeScopeFilter {
+    Recent15Min,
+    Today,
+    Yesterday,
+    ThisWeek,
+}
+
+impl TimeScopeFilter {
+    pub fn from_token(token: &str) -> Option<Self> {
+        match token.to_lowercase().as_str() {
+            "刚才" | "刚刚" | "recent" => Some(Self::Recent15Min),
+            "今天" | "今日" | "today" => Some(Self::Today),
+            "昨天" | "昨日" | "yesterday" => Some(Self::Yesterday),
+            "本周" | "这周" | "七天" | "7d" | "week" => Some(Self::ThisWeek),
+            _ => None,
+        }
+    }
+
+    pub fn matches_timestamp(self, item_secs: u64, now_secs: u64) -> bool {
+        let age = now_secs.saturating_sub(item_secs);
+        match self {
+            Self::Recent15Min => age <= 900,
+            Self::Today => age <= 86_400,
+            Self::Yesterday => (43_200..=172_800).contains(&age),
+            Self::ThisWeek => age <= 7 * 86_400,
+        }
+    }
+}
+
+/// 轻量零依赖汉字拼音首字母提取（覆盖高频办公/开发/商务常用汉字 + ASCII 字母数字，支持如 `fptt` 命中「发票抬头」）
+pub fn extract_pinyin_initials(text: &str, max_chars: usize) -> String {
+    let mut out = String::with_capacity(text.len().min(max_chars));
+    for ch in text.chars().take(max_chars) {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else if let Some(initial) = chinese_char_initial(ch) {
+            out.push(initial);
+        }
+    }
+    out
+}
+
+pub fn is_pure_ascii_letters(s: &str) -> bool {
+    s.len() >= 2 && s.bytes().all(|b| b.is_ascii_alphabetic())
+}
+
+fn chinese_char_initial(ch: char) -> Option<char> {
+    if !('\u{4E00}'..='\u{9FA5}').contains(&ch) {
+        return None;
+    }
+    const INITIAL_GROUPS: &[(char, &str)] = &[
+        ('a', "阿啊哎哀埃挨癌矮艾爱碍安氨俺岸按案暗昂凹熬傲奥澳"),
+        ('b', "八巴拔把坝爸罢白百柏摆败拜班般颁斑搬板版办半伴扮瓣帮绑榜膀傍包胞宝饱保堡报抱豹暴爆杯悲碑北贝备背倍被奔本笨崩逼鼻比鄙笔币必毕闭辟碧壁避臂边编鞭扁便变遍辨辩标彪表憋别宾滨冰兵丙柄饼并病拨波玻剥播脖伯驳泊捕补不布步簿部"),
+        ('c', "擦猜才材财裁采彩踩菜参餐残蚕惨灿仓苍舱藏操糙槽草册侧测策层叉插查茶察差拆柴搀掺蝉馋缠产铲阐颤昌长肠尝偿常厂场畅倡唱抄钞超巢朝嘲潮吵炒车扯彻撤尘臣辰陈衬称撑成呈承诚城乘惩程澄橙吃痴池驰迟持尺齿耻斥赤翅充冲虫崇抽仇绸愁稠筹酬丑臭出初除厨础储楚处触川穿传船喘串疮窗床闯创吹炊锤春纯唇醇蠢戳词祠雌此次刺从匆葱聪丛凑粗促醋簇窜篡催摧脆粹翠村存寸磋撮挫措错"),
+        ('d', "搭达答打大呆歹代带待怠殆贷袋逮戴丹单担耽胆旦但诞弹淡蛋氮当挡党荡刀导岛倒蹈到悼道稻得德的灯登等瞪凳低堤滴迪敌涤笛底抵地弟帝递第颠典点碘电店垫淀殿刁叼雕吊钓调掉爹跌叠碟蝶丁叮盯钉顶鼎订定丢东冬懂动冻栋洞兜抖陡豆逗督毒读独堵赌睹妒度渡端短段断缎堆队对吨敦蹲盾顿多夺朵躲剁堕舵惰跺"),
+        ('f', "发乏伐罚阀筏法帆番翻凡烦繁反返犯泛饭范贩方坊芳防妨房肪仿访纺放飞非啡菲肥匪诽吠废沸肺费分吩纷芬坟焚粉份奋愤粪丰风枫封疯峰锋蜂逢缝讽凤奉佛否夫肤孵敷弗伏扶拂服俘浮符幅福抚府斧俯釜辅腐父付妇负附咐阜复赴副傅富赋腹覆"),
+        ('g', "该改钙盖溉干甘杆肝柑竿秆赶敢感赣冈刚钢缸纲岗港杠高膏糕搞稿告哥歌搁割革葛格阁隔个各给根跟耕更庚羹埂耿梗工弓公功攻供宫恭躬巩汞拱共贡勾沟钩狗苟构购够辜菇咕箍估沽孤姑鼓古骨谷股故顾固雇刮瓜剐寡挂褂乖拐怪棺关官冠观管馆罐惯灌贯光广逛归圭龟规闺硅瑰轨诡癸鬼柜贵桂跪辊滚棍锅郭国果裹过"),
+        ('h', "哈骸海亥骇害氦酣憨含函寒韩罕喊汉汗旱悍焊瀚航杭豪嚎壕好号浩耗呵喝荷核禾何合盒貉阂河涸赫褐鹤黑嘿痕很狠恨哼恒横衡轰哄烘虹鸿洪宏弘红喉侯猴吼厚候后呼乎忽瑚壶葫胡蝴狐糊湖弧虎唬护互沪户花哗华猾滑画划化话槐徊怀淮坏欢环桓还缓换患唤痪豢焕涣宦幻荒慌皇凰黄磺蝗簧恍晃谎灰挥辉徽恢蛔回毁悔慧卉惠晦贿秽会烩汇讳诲绘荤昏婚魂浑混豁活伙火获或惑霍货祸"),
+        ('j', "击圾基机畸稽积箕肌饥迹激讥鸡姬绩缉吉极棘辑籍集及急疾汲即嫉级挤几脊己蓟技冀季伎祭剂悸济寄寂计记既忌际妓继纪嘉枷夹佳家加荚颊贾甲钾假稼价架驾嫁歼监坚尖笺间煎兼肩艰奸缄茧检柬碱硷拣捡简俭剪减荐槛鉴践贱见键箭件健舰剑饯渐溅涧建僵姜将浆江疆蒋桨奖讲匠酱降蕉椒礁焦胶交郊浇骄娇嚼搅铰矫侥脚狡角饺缴绞剿教酵轿较叫窖揭接皆秸街阶截劫节桔杰捷睫竭洁结解姐戒藉芥界借介疥诫届巾筋斤金今津襟紧锦仅谨进靳晋禁近烬浸尽劲荆兢茎睛晶鲸京惊精粳经井警景颈静境敬镜径痉靖竟竞净炯窘揪究纠玖韭久灸九酒厩救旧臼舅咎就疚鞠拘狙疽居驹菊局咀矩举沮聚拒据巨具距踞锯俱句惧炬剧捐鹃娟倦眷卷绢撅攫抉掘倔爵觉决诀绝均菌钧军君峻俊竣浚郡骏"),
+        ('k', "咔咖卡咯开揩楷凯慨刊堪勘坎砍看康慷糠扛抗亢炕考拷烤靠坷苛柯棵磕颗科壳咳可渴克刻客课肯啃垦恳坑吭空恐孔控抠口扣寇枯哭窟苦酷库裤夸垮挎跨胯块筷侩快宽款匡筐狂框矿眶旷况亏盔岿窥葵奎魁傀馈愧溃坤昆捆困括扩廓阔"),
+        ('l', "垃拉喇蜡腊辣啦莱来赖蓝婪栏拦篮阑兰澜谰揽览懒缆烂滥琅榔狼廊郎朗浪捞劳牢老佬姥酪烙涝勒乐雷镭蕾磊累儡垒擂肋类泪棱楞冷厘梨犁黎篱狸离漓理李里鲤礼莉荔吏栗丽厉励砾历利傈例俐痢立粒沥隶力璃哩俩联莲连镰廉怜涟帘敛脸链恋炼练粮凉梁粱良两辆量晾亮谅撩聊僚疗燎寥辽潦了撂镣廖料列裂烈劣猎琳林磷霖临邻鳞淋凛赁吝拎玲菱零龄铃伶羚凌灵陵岭领另令溜琉榴硫馏留刘瘤流柳六龙聋咙笼窿隆垄拢陇楼娄搂篓漏陋芦卢颅庐炉掳卤虏鲁麓碌露路赂鹿潞禄录陆戮驴吕铝侣旅履屡缕虑氯律率滤绿峦挛孪滦卵乱掠略抡轮伦仑沦纶论萝螺罗逻锣箩骡裸落洛骆络"),
+        ('m', "妈麻玛码蚂马骂嘛吗埋买麦卖迈脉瞒馒蛮满蔓曼慢漫谩芒茫盲氓忙莽猫茅锚毛矛铆卯茂冒帽貌贸么玫枚梅酶霉煤没眉媒镁每美昧寐妹媚门闷们萌蒙檬盟锰猛梦孟眯醚靡迷谜弥米秘觅泌蜜密幂棉眠绵冕免勉娩缅面苗描瞄藐秒渺庙妙蔑灭民抿皿敏悯闽明螟鸣铭名命谬摸摹蘑模膜磨摩魔抹末莫墨默沫漠寞陌谋牟某母亩牡姆拇木目睦牧穆"),
+        ('n', "拿哪呐钠那娜纳氖乃奶耐奈南男难囊挠脑恼闹淖呢馁内嫩能妮霓倪泥尼拟你匿腻逆溺蔫拈年碾撵捻念娘酿鸟尿捏聂孽啮镊镍涅您柠狞凝宁拧泞牛扭钮纽脓浓农弄奴努怒女暖虐疟挪懦糯诺"),
+        ('o', "哦欧鸥殴藕呕偶沤"),
+        ('p', "啪趴爬帕怕琶拍排牌徘湃派攀潘盘磐盼畔判叛乓庞旁耪胖抛咆刨炮袍跑泡呸胚培裴赔陪配佩沛喷盆砰抨烹澎彭蓬棚硼篷膨朋鹏捧碰坯砒霹批披劈琵毗啤脾疲皮匹痞僻屁譬篇偏片骗飘漂瓢票撇瞥拼频贫品聘乒坪苹萍平凭瓶评屏坡泼颇婆破魄迫粕剖扑铺仆莆葡菩蒲埔朴圃普浦谱曝瀑"),
+        ('q', "期欺栖戚妻七凄漆柒沏其棋奇歧畦崎脐齐旗祈祁骑起岂乞企启契砌器气迄弃汽泣讫掐恰洽牵扦钎铅千迁签仟谦乾黔钱钳前潜遣浅谴堑嵌欠歉枪呛腔羌墙蔷强抢橇锹敲悄桥瞧乔侨巧鞘撬翘峭俏窍切茄且怯窃钦侵亲秦琴勤芹擒禽寝沁青轻氢倾卿清擎晴氰情顷请庆琼穷秋丘邱球求囚酋泅趋区蛆曲躯屈驱渠取娶龋趣去圈颧权醛泉全痊拳犬券劝缺炔瘸却鹊榷确雀裙群"),
+        ('r', "然燃冉染瓤壤攘嚷让饶扰绕惹热壬仁人忍韧任认刃妊纫扔仍日戎茸蓉荣融熔溶容绒冗揉柔肉茹蠕儒孺如辱乳汝入褥软阮蕊瑞锐闰润若弱"),
+        ('s', "撒洒萨腮鳃塞赛三叁伞散桑嗓丧搔骚扫嫂瑟色涩森僧莎砂杀刹沙纱傻啥煞筛晒珊苫杉山删煽衫闪陕擅赡膳善汕扇缮墒伤商赏晌上尚裳梢捎稍烧芍勺韶少哨邵绍奢赊蛇舌舍赦摄射慑涉社设砷申呻伸身深娠绅神沈审婶甚肾慎渗声生甥牲升绳省盛剩胜圣师失狮施湿诗尸虱十石拾时什食蚀实识史矢使屎驶始式示士世柿事拭誓逝势是嗜噬适仕侍释饰氏市恃室视试收手首守寿授售受瘦兽蔬枢梳殊抒输叔舒淑疏书赎孰熟薯暑曙署蜀黍鼠属术述树束戍竖墅庶数漱恕刷耍摔衰甩帅栓拴霜双爽谁水睡税吮瞬顺舜说硕朔烁斯撕嘶思私司丝死肆寺嗣四伺似饲巳松耸怂颂送宋讼诵搜艘擞嗽苏酥俗素速粟僳塑溯宿诉肃酸蒜算虽隋随绥髓碎岁穗遂隧祟孙损笋蓑梭唆缩琐索锁所"),
+        ('t', "塌他它她塔獭挞蹋踏胎苔抬台泰酞太态汰坍摊贪瘫滩坛檀痰潭谭谈坦毯袒碳探叹炭汤塘搪堂棠膛唐糖倘躺淌趟烫掏涛滔绦萄桃逃淘陶讨套特藤腾疼誊梯剔踢锑提题蹄啼体替嚏惕涕剃屉天添填田甜恬舔腆挑条迢眺跳贴铁帖厅听烃汀廷停亭庭挺艇通桐酮瞳同铜彤童桶捅统痛偷投头透凸秃突图徒途涂屠土吐兔湍团推颓腿蜕褪退吞屯臀拖托脱鸵陀驮驼椭妥拓唾"),
+        ('w', "挖哇蛙洼娃瓦袜歪外豌弯湾玩顽丸烷完碗挽晚皖惋宛婉万腕汪王亡枉网往旺望忘妄威巍微危韦违桅围唯惟为潍维苇萎委伟伪尾纬未蔚味畏胃喂魏位渭谓尉慰卫瘟温蚊文闻纹吻稳紊问嗡翁瓮挝蜗涡窝我斡卧握沃巫呜钨乌污诬屋无芜梧吾吴毋武五捂午舞伍侮坞戊雾晤物勿务悟误"),
+        ('x', "昔熙析西硒矽晰嘻吸锡牺稀息希悉膝夕惜熄烯溪汐犀檄袭席习媳喜铣洗系隙戏细瞎虾匣霞辖暇峡侠狭下厦夏吓掀锨先仙鲜纤咸贤衔舷闲涎弦嫌显险现献县腺馅羡宪陷限线相厢镶香箱襄湘乡翔祥详想响享项巷橡像向象萧硝霄削哮嚣销消宵淆晓小孝校肖啸笑效楔些歇蝎鞋协挟携邪斜胁谐写械卸蟹懈泄泻谢屑薪芯锌欣辛新忻心信衅星腥猩惺兴刑型形邢行醒幸杏性姓兄凶胸匈汹雄熊休修羞朽嗅锈秀袖绣墟戌需虚嘘须徐许蓄酗叙旭序畜恤絮婿绪续轩喧宣悬旋玄选癣眩绚靴薛学穴雪血勋熏循旬询寻驯巡殉汛训讯逊迅"),
+        ('y', "压押鸦鸭呀丫芽牙蚜崖衙涯雅哑亚讶焉咽阉烟淹盐严研蜒岩延言颜阎炎沿奄掩眼衍演艳堰燕厌砚雁唁彦焰宴谚验殃央鸯秧杨扬佯疡羊洋阳氧仰痒养样漾邀腰妖瑶摇尧遥窑谣姚咬舀药要耀椰噎耶爷野冶也页掖业叶曳腋夜液一壹医揖铱依伊衣颐夷遗移仪胰疑沂宜姨彝椅蚁倚已乙矣以艺抑易邑屹亿役臆逸肄疫亦裔意毅忆义益溢诣议谊译异翼翌绎茵荫因殷音阴姻吟银淫寅饮尹引隐印英樱婴鹰应缨莹萤营荧蝇迎赢盈影颖硬映哟拥佣臃痈庸雍踊蛹咏泳涌永恿勇用幽优悠忧尤由邮铀犹油游酉有友右佑釉诱又幼迂淤于盂榆虞愚舆余俞逾鱼愉渝渔隅予娱雨与屿禹宇语羽玉域芋郁吁遇喻峪御愈欲狱育誉浴寓裕预豫驭鸳渊冤元垣袁原援辕园员圆猿源缘远苑愿怨院曰约越跃钥岳粤月悦阅耘云郧匀陨允运蕴酝晕韵孕"),
+        ('z', "匝砸杂栽哉灾宰载再在咱攒暂赞赃脏葬遭糟凿藻枣早澡蚤躁噪造皂灶燥责择则泽贼怎增憎曾赠扎喳渣札轧铡闸眨栅榨咋乍炸诈摘斋宅窄债寨瞻毡詹粘沾盏斩辗崭展蘸栈占战站湛绽樟章彰漳张掌涨杖丈帐账仗胀瘴障招昭找沼赵照罩兆肇召遮折哲蛰辙者锗蔗这浙珍斟真甄砧臻贞针侦枕疹诊震振镇阵蒸挣睁征狰争怔整拯正政帧症郑证芝枝支吱蜘知肢脂汁之织职直植殖执值侄址指止趾只旨纸志挚掷至致置帜峙制智秩稚质炙痔滞治窒中盅忠钟衷终种肿重仲众舟周州洲诌粥轴肘帚咒皱宙昼骤珠株蛛朱猪诸诛逐竹烛煮拄瞩嘱主著柱助蛀贮铸筑住注祝驻抓爪拽专砖转撰赚篆桩庄装妆撞壮状椎锥追赘坠缀谆准捉拙卓桌琢茁酌啄着灼浊兹咨资姿滋淄孜紫仔籽滓子自渍字鬃棕踪宗综总纵邹走奏揍租足卒族祖诅阻组钻纂嘴醉最罪尊遵昨左佐柞做作坐座"),
+    ];
+    for (initial, chars) in INITIAL_GROUPS {
+        if chars.contains(ch) {
+            return Some(*initial);
+        }
+    }
+    None
+}
+
+// ============================================================================
+// 3. 搜索框即时速算（支持刚复制金额免重敲百分比续算）与闪念速记 / @建议
+// ============================================================================
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct InstantMathResult {
+    pub expression_display: String,
+    pub plain_value: String,
+    pub rmb_uppercase: Option<String>,
+    pub used_clipboard_context: bool,
+}
+
+pub fn evaluate_instant_math(
+    query: &str,
+    latest_clip_text: Option<&str>,
+) -> Option<InstantMathResult> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() || trimmed.len() > 96 {
+        return None;
+    }
+
+    // 排除纯 11+ 位手机号/单号
+    let pure_digits = trimmed.trim_start_matches('+');
+    if pure_digits.len() >= 11 && pure_digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+
+    let clean_expr = trimmed.strip_prefix('=').map(str::trim).unwrap_or(trimmed);
+    if clean_expr.is_empty() {
+        return None;
+    }
+
+    // 检测首字符是否为二元续算运算符（如 `* 13%`、`/ (1 + 6%)`、`+ 350`）
+    let mut used_ctx = false;
+    let full_expr = if clean_expr.starts_with(['*', '/', '×', '÷'])
+        || ((clean_expr.starts_with('+') || clean_expr.starts_with('-'))
+            && clean_expr.len() >= 2
+            && clean_expr
+                .chars()
+                .nth(1)
+                .map(|c| c.is_whitespace() || c.is_ascii_digit())
+                .unwrap_or(false)
+            && latest_clip_text.and_then(extract_leading_amount).is_some())
+    {
+        let base_num = latest_clip_text.and_then(extract_leading_amount)?;
+        used_ctx = true;
+        format!("{base_num} {clean_expr}")
+    } else {
+        clean_expr.to_string()
+    };
+
+    // 普通搜索词必须包含至少一个算术运算符或 `=` 前缀才触发速算卡
+    let has_op = trimmed.starts_with('=')
+        || full_expr
+            .chars()
+            .any(|c| matches!(c, '+' | '-' | '*' | '/' | '×' | '÷' | '%' | '万' | '亿'));
+    if !has_op {
+        return None;
+    }
+
+    let normalized = normalize_math_expr(&full_expr)?;
+    let val = eval_expr(&normalized)?;
+    if !val.is_finite() {
+        return None;
+    }
+
+    // 若只是单个裸正数且没有显式 `=` 也没有单位转换，不弹速算卡干扰数字搜索
+    if !trimmed.starts_with('=')
+        && !used_ctx
+        && !full_expr
+            .chars()
+            .skip(1)
+            .any(|c| matches!(c, '+' | '-' | '*' | '/' | '×' | '÷' | '%' | '万' | '亿'))
+    {
+        return None;
+    }
+
+    let plain = format_clean_decimal(val);
+    let rmb = if val >= 0.0 && val < 1_000_000_000_000.0 {
+        let abs_fixed = format!("{:.2}", val.abs());
+        let (i_part, f_part) = abs_fixed.split_once('.').unwrap_or((&abs_fixed, "00"));
+        to_chinese_uppercase_rmb(i_part, Some(f_part))
+    } else {
+        None
+    };
+
+    Some(InstantMathResult {
+        expression_display: full_expr,
+        plain_value: plain,
+        rmb_uppercase: rmb,
+        used_clipboard_context: used_ctx,
+    })
+}
+
+fn extract_leading_amount(clip: &str) -> Option<String> {
+    let s = clip.trim();
+    if s.is_empty() || s.len() > 48 || s.contains('\n') {
+        return None;
+    }
+    let stripped = s
+        .trim_start_matches(['¥', '￥', '$', '€', '£', ' '])
+        .trim_end_matches(['元', '块', ' '])
+        .replace(',', "");
+    // 保护 11 位手机号与超长单号不被当成金额续算
+    if stripped.len() >= 11 && stripped.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let mut multiplier = 1.0f64;
+    let num_part = if let Some(p) = stripped.strip_suffix('亿') {
+        multiplier = 100_000_000.0;
+        p.trim()
+    } else if let Some(p) = stripped.strip_suffix('万') {
+        multiplier = 10_000.0;
+        p.trim()
+    } else {
+        stripped.as_str()
+    };
+    let parsed: f64 = num_part.parse().ok()?;
+    if !parsed.is_finite() {
+        return None;
+    }
+    Some(format_clean_decimal(parsed * multiplier))
+}
+
+fn normalize_math_expr(raw: &str) -> Option<String> {
+    let mut s = raw
+        .replace('×', "*")
+        .replace('÷', "/")
+        .replace('（', "(")
+        .replace('）', ")")
+        .replace([',', '¥', '￥', '$', '元'], "");
+    s = s.replace("亿", "*100000000").replace("万", "*10000");
+
+    // 区分百分比 `13%` -> `*0.01` 与二元取模 `17 % 5`
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len() + 16);
+    for i in 0..chars.len() {
+        let c = chars[i];
+        if c == '%' {
+            let mut next_idx = i + 1;
+            while next_idx < chars.len() && chars[next_idx].is_whitespace() {
+                next_idx += 1;
+            }
+            let is_modulo = next_idx < chars.len()
+                && (chars[next_idx].is_ascii_digit() || chars[next_idx] == '(');
+            if is_modulo {
+                out.push('%');
+            } else {
+                out.push_str("*0.01");
+            }
+        } else if c.is_ascii_digit() || matches!(c, '.' | '+' | '-' | '*' | '/' | '(' | ')' | ' ') {
+            out.push(c);
+        } else {
+            return None;
+        }
+    }
+    Some(out)
+}
+
+fn format_clean_decimal(val: f64) -> String {
+    if (val - val.round()).abs() < 1e-9 && val.abs() < 1e15 {
+        format!("{}", val.round() as i64)
+    } else {
+        let s = format!("{val:.6}");
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
+    }
+}
+
+fn eval_expr(input: &str) -> Option<f64> {
+    struct Parser<'a> {
+        bytes: &'a [u8],
+        pos: usize,
+    }
+    impl<'a> Parser<'a> {
+        fn skip_ws(&mut self) {
+            while self.pos < self.bytes.len() && self.bytes[self.pos].is_ascii_whitespace() {
+                self.pos += 1;
+            }
+        }
+        fn parse_add_sub(&mut self) -> Option<f64> {
+            let mut val = self.parse_mul_div()?;
+            loop {
+                self.skip_ws();
+                if self.pos >= self.bytes.len() {
+                    break;
+                }
+                let op = self.bytes[self.pos];
+                if op == b'+' || op == b'-' {
+                    self.pos += 1;
+                    let rhs = self.parse_mul_div()?;
+                    val = if op == b'+' { val + rhs } else { val - rhs };
+                } else {
+                    break;
+                }
+            }
+            Some(val)
+        }
+        fn parse_mul_div(&mut self) -> Option<f64> {
+            let mut val = self.parse_unary()?;
+            loop {
+                self.skip_ws();
+                if self.pos >= self.bytes.len() {
+                    break;
+                }
+                let op = self.bytes[self.pos];
+                if op == b'*' || op == b'/' || op == b'%' {
+                    self.pos += 1;
+                    let rhs = self.parse_unary()?;
+                    if (op == b'/' || op == b'%') && rhs.abs() < 1e-12 {
+                        return None;
+                    }
+                    val = match op {
+                        b'*' => val * rhs,
+                        b'/' => val / rhs,
+                        _ => val % rhs,
+                    };
+                } else {
+                    break;
+                }
+            }
+            Some(val)
+        }
+        fn parse_unary(&mut self) -> Option<f64> {
+            self.skip_ws();
+            if self.pos < self.bytes.len() {
+                if self.bytes[self.pos] == b'+' {
+                    self.pos += 1;
+                    return self.parse_unary();
+                }
+                if self.bytes[self.pos] == b'-' {
+                    self.pos += 1;
+                    return self.parse_unary().map(|v| -v);
+                }
+            }
+            self.parse_primary()
+        }
+        fn parse_primary(&mut self) -> Option<f64> {
+            self.skip_ws();
+            if self.pos >= self.bytes.len() {
+                return None;
+            }
+            if self.bytes[self.pos] == b'(' {
+                self.pos += 1;
+                let v = self.parse_add_sub()?;
+                self.skip_ws();
+                if self.pos >= self.bytes.len() || self.bytes[self.pos] != b')' {
+                    return None;
+                }
+                self.pos += 1;
+                return Some(v);
+            }
+            let start = self.pos;
+            while self.pos < self.bytes.len()
+                && (self.bytes[self.pos].is_ascii_digit() || self.bytes[self.pos] == b'.')
+            {
+                self.pos += 1;
+            }
+            if self.pos == start {
+                return None;
+            }
+            std::str::from_utf8(&self.bytes[start..self.pos])
+                .ok()?
+                .parse::<f64>()
+                .ok()
+        }
+    }
+
+    let mut p = Parser {
+        bytes: input.as_bytes(),
+        pos: 0,
+    };
+    let res = p.parse_add_sub()?;
+    p.skip_ws();
+    if p.pos == p.bytes.len() {
+        Some(res)
+    } else {
+        None
+    }
+}
+
+/// 一行闪念速记解析器（支持 `> 备注名 :: 正文`、`> 正文`、`+收藏 备注 :: 正文`）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuickCaptureIntent {
+    pub alias: Option<String>,
+    pub body: String,
+    pub default_pin: bool,
+}
+
+pub fn parse_quick_capture(query: &str) -> Option<QuickCaptureIntent> {
+    let trimmed = query.trim();
+    let (rest, force_pin) = if let Some(r) = trimmed.strip_prefix(">>") {
+        (r.trim(), true)
+    } else if let Some(r) = trimmed.strip_prefix('>') {
+        (r.trim(), false)
+    } else if let Some(r) = trimmed.strip_prefix("+收藏 ") {
+        (r.trim(), true)
+    } else {
+        return None;
+    };
+
+    if rest.is_empty() {
+        return Some(QuickCaptureIntent {
+            alias: None,
+            body: String::new(),
+            default_pin: force_pin,
+        });
+    }
+
+    if let Some((left, right)) = rest.split_once("::") {
+        let alias_clean = left.trim();
+        let body_clean = right.trim();
+        Some(QuickCaptureIntent {
+            alias: if alias_clean.is_empty() {
+                None
+            } else {
+                Some(alias_clean.to_string())
+            },
+            body: body_clean.to_string(),
+            default_pin: force_pin || !alias_clean.is_empty(),
+        })
+    } else {
+        let is_tpl = rest.contains("{{") && rest.contains("}}");
+        Some(QuickCaptureIntent {
+            alias: None,
+            body: rest.to_string(),
+            default_pin: force_pin || is_tpl,
+        })
+    }
+}
+
+/// 提取 `@建议 ...` / `@suggest ...` 自然语言偏好指令
+pub fn extract_suggestion_payload(query: &str) -> Option<String> {
+    let trimmed = query.trim();
+    for prefix in ["@建议", "@反馈", "@进化", "@suggest"] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            return Some(rest.trim().to_string());
+        }
+    }
+    None
+}
+
+// ============================================================================
+// 4. 原位剪贴行级差异比对（有界 LCS + 压缩/乱序 JSON 字典序语义对齐）
+// ============================================================================
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiffLineKind {
+    Unchanged,
+    Added,
+    Removed,
+    Collapsed(usize),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffLine {
+    pub kind: DiffLineKind,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClipboardDiffSummary {
+    pub added_count: usize,
+    pub removed_count: usize,
+    pub json_semantically_equal: bool,
+    pub lines: Vec<DiffLine>,
+}
+
+impl ClipboardDiffSummary {
+    pub fn badge_title(&self) -> String {
+        if self.added_count == 0 && self.removed_count == 0 {
+            if self.json_semantically_equal {
+                "JSON 语义一致".to_string()
+            } else {
+                "内容完全一致".to_string()
+            }
+        } else {
+            format!("+{} / -{} 差异", self.added_count, self.removed_count)
+        }
+    }
+}
+
+pub fn compute_clipboard_diff(older: &str, newer: &str) -> ClipboardDiffSummary {
+    let (norm_old, norm_new, both_json) =
+        match (canonical_pretty_json(older), canonical_pretty_json(newer)) {
+            (Some(o), Some(n)) => (o, n, true),
+            _ => (
+                older.replace("\r\n", "\n"),
+                newer.replace("\r\n", "\n"),
+                false,
+            ),
+        };
+
+    if norm_old == norm_new {
+        return ClipboardDiffSummary {
+            added_count: 0,
+            removed_count: 0,
+            json_semantically_equal: both_json && older.trim() != newer.trim(),
+            lines: vec![DiffLine {
+                kind: DiffLineKind::Unchanged,
+                text: if both_json {
+                    "两段 JSON 键值语义 100% 一致（仅空白或字段顺序不同）".to_string()
+                } else {
+                    "两段文本完全一致，无行级差异".to_string()
+                },
+            }],
+        };
+    }
+
+    let old_lines: Vec<&str> = norm_old.lines().take(180).collect();
+    let new_lines: Vec<&str> = norm_new.lines().take(180).collect();
+    let m = old_lines.len();
+    let n = new_lines.len();
+
+    let mut dp = vec![vec![0u16; n + 1]; m + 1];
+    for i in (0..m).rev() {
+        for j in (0..n).rev() {
+            if old_lines[i] == new_lines[j] {
+                dp[i][j] = dp[i + 1][j + 1] + 1;
+            } else {
+                dp[i][j] = dp[i + 1][j].max(dp[i][j + 1]);
+            }
+        }
+    }
+
+    let mut raw_diff: Vec<DiffLine> = Vec::with_capacity(m + n);
+    let (mut i, mut j) = (0, 0);
+    let (mut added, mut removed) = (0usize, 0usize);
+
+    while i < m && j < n {
+        if old_lines[i] == new_lines[j] {
+            raw_diff.push(DiffLine {
+                kind: DiffLineKind::Unchanged,
+                text: format!("  {}", old_lines[i]),
+            });
+            i += 1;
+            j += 1;
+        } else if dp[i + 1][j] >= dp[i][j + 1] {
+            removed += 1;
+            raw_diff.push(DiffLine {
+                kind: DiffLineKind::Removed,
+                text: format!("- {}", old_lines[i]),
+            });
+            i += 1;
+        } else {
+            added += 1;
+            raw_diff.push(DiffLine {
+                kind: DiffLineKind::Added,
+                text: format!("+ {}", new_lines[j]),
+            });
+            j += 1;
+        }
+    }
+    while i < m {
+        removed += 1;
+        raw_diff.push(DiffLine {
+            kind: DiffLineKind::Removed,
+            text: format!("- {}", old_lines[i]),
+        });
+        i += 1;
+    }
+    while j < n {
+        added += 1;
+        raw_diff.push(DiffLine {
+            kind: DiffLineKind::Added,
+            text: format!("+ {}", new_lines[j]),
+        });
+        j += 1;
+    }
+
+    // 折叠连续 > 4 行的相同上下文行
+    let mut compact = Vec::new();
+    let mut run_start = 0;
+    while run_start < raw_diff.len() {
+        if raw_diff[run_start].kind != DiffLineKind::Unchanged {
+            compact.push(raw_diff[run_start].clone());
+            run_start += 1;
+            continue;
+        }
+        let mut run_end = run_start;
+        while run_end < raw_diff.len() && raw_diff[run_end].kind == DiffLineKind::Unchanged {
+            run_end += 1;
+        }
+        let count = run_end - run_start;
+        if count > 5 {
+            compact.push(raw_diff[run_start].clone());
+            compact.push(DiffLine {
+                kind: DiffLineKind::Collapsed(count - 2),
+                text: format!("  ··· 已折叠 {} 行相同上下文 ···", count - 2),
+            });
+            compact.push(raw_diff[run_end - 1].clone());
+        } else {
+            for item in &raw_diff[run_start..run_end] {
+                compact.push(item.clone());
+            }
+        }
+        run_start = run_end;
+    }
+
+    ClipboardDiffSummary {
+        added_count: added,
+        removed_count: removed,
+        json_semantically_equal: false,
+        lines: compact,
+    }
+}
+
+fn canonical_pretty_json(raw: &str) -> Option<String> {
+    let t = raw.trim();
+    if t.len() > 131_072
+        || !((t.starts_with('{') && t.ends_with('}')) || (t.starts_with('[') && t.ends_with(']')))
+    {
+        return None;
+    }
+    let val: serde_json::Value = serde_json::from_str(t).ok()?;
+    let sorted = sort_json_value(val);
+    serde_json::to_string_pretty(&sorted).ok()
+}
+
+fn sort_json_value(v: serde_json::Value) -> serde_json::Value {
+    match v {
+        serde_json::Value::Object(map) => {
+            let mut entries: Vec<(String, serde_json::Value)> = map.into_iter().collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            let mut out = serde_json::Map::new();
+            for (k, child) in entries {
+                out.insert(k, sort_json_value(child));
+            }
+            serde_json::Value::Object(out)
+        }
+        serde_json::Value::Array(arr) => {
+            serde_json::Value::Array(arr.into_iter().map(sort_json_value).collect())
+        }
+        other => other,
+    }
+}
+
+/// 相对时间友好展示（对齐 macOS 卡片右下角：刚刚 / 3 分钟前 / 2 小时前 / 3 天前）
+pub fn format_relative_time(item_secs: u64) -> String {
+    let now = now_unix_secs();
+    let diff = now.saturating_sub(item_secs);
+    if diff < 45 {
+        "刚刚".to_string()
+    } else if diff < 3_600 {
+        format!("{} 分钟前", diff / 60)
+    } else if diff < 86_400 {
+        format!("{} 小时前", diff / 3_600)
+    } else {
+        format!("{} 天前", diff / 86_400)
+    }
+}

@@ -1,5 +1,8 @@
 pub mod archive;
+pub mod canvas_ui;
 pub mod engines;
+pub mod hotkey;
+pub mod intelligence;
 pub mod model;
 pub mod store;
 
@@ -15,10 +18,22 @@ mod tests {
 
     #[test]
     fn test_rmb_uppercase_accounting_rules() {
-        assert_eq!(to_chinese_uppercase_rmb("0", None).as_deref(), Some("零元整"));
-        assert_eq!(to_chinese_uppercase_rmb("0", Some("05")).as_deref(), Some("伍分"));
-        assert_eq!(to_chinese_uppercase_rmb("10", Some("05")).as_deref(), Some("壹拾元零伍分"));
-        assert_eq!(to_chinese_uppercase_rmb("100000005", None).as_deref(), Some("壹亿零伍元整"));
+        assert_eq!(
+            to_chinese_uppercase_rmb("0", None).as_deref(),
+            Some("零元整")
+        );
+        assert_eq!(
+            to_chinese_uppercase_rmb("0", Some("05")).as_deref(),
+            Some("伍分")
+        );
+        assert_eq!(
+            to_chinese_uppercase_rmb("10", Some("05")).as_deref(),
+            Some("壹拾元零伍分")
+        );
+        assert_eq!(
+            to_chinese_uppercase_rmb("100000005", None).as_deref(),
+            Some("壹亿零伍元整")
+        );
         assert_eq!(
             to_chinese_uppercase_rmb("128560", Some("50")).as_deref(),
             Some("壹拾贰万捌仟伍佰陆拾元伍角整")
@@ -35,13 +50,18 @@ mod tests {
         let usd = analyze_finance_numbers("$1,280.50");
         assert!(!usd.iter().any(|a| a.id == "fin-rmb-upper"));
         assert_eq!(
-            usd.iter().find(|a| a.id == "fin-plain-num").map(|a| a.result_text.as_str()),
+            usd.iter()
+                .find(|a| a.id == "fin-plain-num")
+                .map(|a| a.result_text.as_str()),
             Some("1280.50")
         );
 
         let bill = "高铁差旅 ¥1,280.50\n酒店住宿 680\n市内打车 95.55元\n合计：99999";
         let bill_actions = analyze_finance_numbers(bill);
-        let sum_only = bill_actions.iter().find(|a| a.id == "bill-sum-only").unwrap();
+        let sum_only = bill_actions
+            .iter()
+            .find(|a| a.id == "bill-sum-only")
+            .unwrap();
         assert_eq!(sum_only.result_text, "2056.05");
     }
 
@@ -65,7 +85,10 @@ mod tests {
         let md = "| **商品名称** | 单价 | 库存 |\n| :--- | ---: | :---: |\n| iClip Win | 0.00 | 999 |\n| 贴膜,高清 | 39.90 | 50 |";
         let actions = analyze_table_bridge(md);
         let excel = actions.iter().find(|a| a.id == "tbl-md-to-excel").unwrap();
-        assert_eq!(excel.result_text, "商品名称\t单价\t库存\niClip Win\t0.00\t999\n贴膜,高清\t39.90\t50");
+        assert_eq!(
+            excel.result_text,
+            "商品名称\t单价\t库存\niClip Win\t0.00\t999\n贴膜,高清\t39.90\t50"
+        );
 
         // 严苛验证微软 CF_HTML 字节偏移头：StartFragment..EndFragment 必须与实际 UTF-8 表格片段字节严丝合缝！
         let cf_html = excel.html_table_payload.as_ref().unwrap();
@@ -80,7 +103,9 @@ mod tests {
 
         let bytes = cf_html.as_bytes();
         assert_eq!(end_html, bytes.len());
-        assert!(std::str::from_utf8(&bytes[start_html..end_html]).unwrap().starts_with("<html>"));
+        assert!(std::str::from_utf8(&bytes[start_html..end_html])
+            .unwrap()
+            .starts_with("<html>"));
         let frag_slice = std::str::from_utf8(&bytes[start_frag..end_frag]).unwrap();
         assert!(frag_slice.starts_with("<table"));
         assert!(frag_slice.ends_with("</table>"));
@@ -159,7 +184,8 @@ mod tests {
 
     #[test]
     fn test_cross_platform_macos_windows_archive_interoperability_and_otp_sweep() {
-        let tmp = std::env::temp_dir().join(format!("iclip-win-test-{}", crate::model::now_unix_secs()));
+        let tmp =
+            std::env::temp_dir().join(format!("iclip-win-test-{}", crate::model::now_unix_secs()));
         let img_dir = tmp.join("images");
         let _ = fs::create_dir_all(&img_dir);
 
@@ -193,20 +219,32 @@ mod tests {
         let (merged, summary) =
             merge_archive_data(macos_exported_json.as_bytes(), &store.items, &img_dir).unwrap();
         assert_eq!(summary.imported_new_count, 1);
-        assert_eq!(merged[0].custom_alias.as_deref(), Some("Mac端同步过来的开票抬头"));
+        assert_eq!(
+            merged[0].custom_alias.as_deref(),
+            Some("Mac端同步过来的开票抬头")
+        );
         assert_eq!(merged[0].pin_category, Some(PinCategory::Invoice));
         assert!(merged[0].is_pinned);
 
         // 验证 OTP 阅后即焚调度与到期自动无痕销毁
-        let otp_item = ClipItem::new_text("【GitHub】您的登录验证码：482910，5分钟内有效".to_string(), None);
+        let otp_item = ClipItem::new_text(
+            "【GitHub】您的登录验证码：482910，5分钟内有效".to_string(),
+            None,
+        );
         let otp_id = store.insert_or_promote(otp_item);
         store.schedule_otp_expire_if_needed(&otp_id, 30);
         assert_eq!(store.items.len(), 1);
         // 未到期不删
-        assert_eq!(store.sweep_expired_otps(crate::model::now_unix_secs() + 10), 0);
+        assert_eq!(
+            store.sweep_expired_otps(crate::model::now_unix_secs() + 10),
+            0
+        );
         assert_eq!(store.items.len(), 1);
         // 到期后自动无痕销毁
-        assert_eq!(store.sweep_expired_otps(crate::model::now_unix_secs() + 35), 1);
+        assert_eq!(
+            store.sweep_expired_otps(crate::model::now_unix_secs() + 35),
+            1
+        );
         assert!(store.items.is_empty());
 
         let _ = fs::remove_dir_all(&tmp);
@@ -214,7 +252,8 @@ mod tests {
 
     #[test]
     fn test_performance_benchmark_2mb_payload_under_5ms() {
-        let huge_log = "2026-11-22T10:00:00Z service=gateway latency_ms=8 status=200\n".repeat(35_000);
+        let huge_log =
+            "2026-11-22T10:00:00Z service=gateway latency_ms=8 status=200\n".repeat(35_000);
         assert!(huge_log.len() > 2_000_000);
         let huge_item = ClipItem::new_text(huge_log, Some("Terminal".to_string()));
 
@@ -232,7 +271,10 @@ mod tests {
             let _ = huge_item.primary_title(false);
             let _ = huge_item.subtitle_info();
         }
-        let hits: Vec<&ClipItem> = list.iter().filter(|it| it.matches_query("ord-2026-499")).collect();
+        let hits: Vec<&ClipItem> = list
+            .iter()
+            .filter(|it| it.matches_query("ord-2026-499"))
+            .collect();
         let elapsed = t0.elapsed();
 
         assert_eq!(hits.len(), 1);
@@ -246,7 +288,8 @@ mod tests {
 
     #[test]
     fn test_secret_redaction_and_url_cleaning() {
-        let env_raw = "OPENAI_API_KEY=sk-proj-1234567890abcdefghijklmnop\nDB_PASSWORD=\"mySuperSecret88\"";
+        let env_raw =
+            "OPENAI_API_KEY=sk-proj-1234567890abcdefghijklmnop\nDB_PASSWORD=\"mySuperSecret88\"";
         let red = redact_secrets(env_raw);
         assert!(!red.contains("1234567890abcdefghijklmnop"));
         assert!(!red.contains("mySuperSecret88"));
@@ -256,5 +299,246 @@ mod tests {
             clean_tracking_url(dirty).as_deref(),
             Some("https://webfooo.com/post?id=7#top")
         );
+    }
+
+    #[test]
+    fn test_double_tap_modifier_state_machine_and_zero_false_trigger() {
+        use crate::hotkey::{
+            static_hotkey_conflict_reason, DoubleTapOutcome, WinHotKeyShortcut, WinHotKeySlot,
+            WinModifierDoubleTapMachine, WinSingleModifier, MOD_CONTROL_BITS, MOD_SHIFT_BITS,
+            MOD_WIN_BITS,
+        };
+
+        let mut fsm = WinModifierDoubleTapMachine::default();
+        // 正常连按两次左 Ctrl (0xA2)：第二次松开瞬间触发
+        assert_eq!(
+            fsm.handle_modifier_transition(0xA2, true, MOD_CONTROL_BITS, 100),
+            DoubleTapOutcome::None
+        );
+        assert_eq!(
+            fsm.handle_modifier_transition(0xA2, false, 0, 180),
+            DoubleTapOutcome::FirstTapCompleted(WinSingleModifier::Control)
+        );
+        assert_eq!(
+            fsm.handle_modifier_transition(0xA2, true, MOD_CONTROL_BITS, 300),
+            DoubleTapOutcome::None
+        );
+        assert_eq!(
+            fsm.handle_modifier_transition(0xA2, false, 0, 360),
+            DoubleTapOutcome::DoubleTapTriggered(WinSingleModifier::Control)
+        );
+
+        // 严防误触：快速 Ctrl+C -> Ctrl+V 夹杂普通键时绝不触发双击
+        assert_eq!(
+            fsm.handle_modifier_transition(0xA2, true, MOD_CONTROL_BITS, 1000),
+            DoubleTapOutcome::None
+        );
+        fsm.mark_interfering_event(); // 按下了 C
+        assert_eq!(
+            fsm.handle_modifier_transition(0xA2, false, 0, 1080),
+            DoubleTapOutcome::None
+        );
+        assert_eq!(
+            fsm.handle_modifier_transition(0xA2, true, MOD_CONTROL_BITS, 1180),
+            DoubleTapOutcome::None
+        );
+        fsm.mark_interfering_event(); // 按下了 V
+        assert_eq!(
+            fsm.handle_modifier_transition(0xA2, false, 0, 1250),
+            DoubleTapOutcome::None
+        );
+
+        // 5 层快捷键冲突硬拦截校验
+        let own = WinHotKeyShortcut::default_toggle();
+        let queue_hk = WinHotKeyShortcut::default_queue_pop();
+        let others = [(&queue_hk, "顺序出队热键")];
+
+        // 1) 裸字符键拦截
+        assert!(static_hotkey_conflict_reason(
+            &WinHotKeyShortcut::combo(0x56, 0),
+            WinHotKeySlot::MainToggle,
+            &own,
+            &others
+        )
+        .is_some());
+        // 2) 单 Shift + 字母拦截
+        assert!(static_hotkey_conflict_reason(
+            &WinHotKeyShortcut::combo(0x41, MOD_SHIFT_BITS),
+            WinHotKeySlot::MainToggle,
+            &own,
+            &others
+        )
+        .is_some());
+        // 3) 系统保留键 Ctrl+C / Win+V 拦截
+        assert!(static_hotkey_conflict_reason(
+            &WinHotKeyShortcut::combo(0x43, MOD_CONTROL_BITS),
+            WinHotKeySlot::MainToggle,
+            &own,
+            &others
+        )
+        .is_some());
+        assert!(static_hotkey_conflict_reason(
+            &WinHotKeyShortcut::combo(0x56, MOD_WIN_BITS),
+            WinHotKeySlot::MainToggle,
+            &own,
+            &others
+        )
+        .is_some());
+        // 4) iClip 内部槽位互斥拦截
+        assert!(
+            static_hotkey_conflict_reason(&queue_hk, WinHotKeySlot::MainToggle, &own, &others)
+                .is_some()
+        );
+        // 5) 双击单键与合法组合键放行
+        let dt_ctrl = WinHotKeyShortcut::double_tap(WinSingleModifier::Control);
+        assert_eq!(dt_ctrl.display_string(), "双击 Ctrl");
+        assert!(
+            static_hotkey_conflict_reason(&dt_ctrl, WinHotKeySlot::MainToggle, &own, &others)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_pinyin_synonym_url_decode_math_and_diff_intelligence() {
+        use crate::intelligence::*;
+
+        // 百分号中文 URL 可读解码与社媒口令剥壳
+        let encoded = "https://zh.wikipedia.org/wiki/%E5%8F%91%E7%A5%A8%E6%8A%AC%E5%A4%B4";
+        assert_eq!(
+            decode_percent_readable_url(encoded),
+            "https://zh.wikipedia.org/wiki/发票抬头"
+        );
+        let share_text = "68 【超实用效率神器推荐】复制打开小红书看看 https://www.xiaohongshu.com/explore/66a1b2?utm_source=copy_link，「真的绝了！」";
+        assert_eq!(
+            extract_clean_share_url(share_text).as_deref(),
+            Some("https://www.xiaohongshu.com/explore/66a1b2")
+        );
+
+        // 拼音首字母盲搜 + 跨语言应用同义词 + `!排除词`
+        let mut item = ClipItem::new_text(
+            "公司名称：怀道科技\n纳税人识别号：91440300MA5F".to_string(),
+            Some("WeChat".to_string()),
+        );
+        item.custom_alias = Some("深圳公司发票抬头".to_string());
+        assert!(item.matches_query("fptt")); // 免切输入法搜拼音首字母
+        assert!(item.matches_query("微信 怀道")); // 跨语言搜 WeChat
+        assert!(!item.matches_query("怀道 !识别号")); // 排除词过滤
+
+        // 刚复制金额免重敲百分比续算 + 大写人民币
+        let math = evaluate_instant_math("* 13%", Some("¥10,000.00")).unwrap();
+        assert!(math.used_clipboard_context);
+        assert_eq!(math.plain_value, "1300");
+        assert_eq!(math.rmb_uppercase.as_deref(), Some("壹仟叁佰元整"));
+
+        // JSON 字典序语义对齐 Diff
+        let j1 = r#"{"b":2,"a":1}"#;
+        let j2 = "{\n  \"a\": 1,\n  \"b\": 2\n}";
+        let same_diff = compute_clipboard_diff(j1, j2);
+        assert_eq!(same_diff.added_count, 0);
+        assert!(same_diff.json_semantically_equal);
+    }
+
+    #[test]
+    fn test_store_backup_self_heal_undo_alias_autoprotect_and_suggestion() {
+        let tmp = std::env::temp_dir().join(format!(
+            "iclip-win-sync-test-{}-{}",
+            crate::model::now_unix_secs(),
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        {
+            let mut store = ClipboardStore::new(tmp.clone());
+            let id = store.insert_or_promote(ClipItem::new_text(
+                "税号：91440300192203821K".to_string(),
+                Some("Excel".to_string()),
+            ));
+            // 设置非空备注应自动开启收藏并推断为 Invoice（开票财务）分组
+            let auto_pinned = store.set_custom_alias(&id, "总公司开票税号").unwrap();
+            assert!(auto_pinned);
+            assert!(store.items[0].is_pinned);
+            assert_eq!(store.items[0].pin_category, Some(PinCategory::Invoice));
+
+            // 模拟主 history.json 断电截断损坏，验证重启从 history.backup.json 自愈
+            fs::write(tmp.join("history.json"), b"{corrupted_json").unwrap();
+        }
+
+        let mut healed = ClipboardStore::new(tmp.clone());
+        assert_eq!(healed.items.len(), 1);
+        assert_eq!(
+            healed.items[0].custom_alias.as_deref(),
+            Some("总公司开票税号")
+        );
+
+        // 验证误删后 8 秒内 Ctrl+Z 无损原位恢复
+        let del_id = healed.items[0].id.clone();
+        healed.delete_by_id(&del_id);
+        assert!(healed.items.is_empty());
+        assert_eq!(
+            healed.undo_last_delete(crate::model::now_unix_secs()),
+            Some(1)
+        );
+        assert_eq!(healed.items.len(), 1);
+
+        // 验证 `@建议` 自然语言即时改配置并落盘
+        let reply = healed.adopt_user_suggestion("开启始终在前，双击 Ctrl 呼出，保留 500 条");
+        assert!(reply.contains("即时生效"));
+        assert!(healed.config.always_on_top);
+        assert_eq!(healed.config.hotkey_toggle.display_string(), "双击 Ctrl");
+        assert_eq!(healed.config.max_history_count, 500);
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_canvas_sdf_primitives_zero_jitter_and_3col_grid_nav() {
+        use crate::canvas_ui::*;
+        use crate::store::GlassAppearance;
+
+        // 零抖动高度铁律：卡片高度仅取决于固有属性，不随选中态跳变
+        assert_eq!(standard_card_height(false, 1.0), 62);
+        assert_eq!(standard_card_height(true, 1.0), 86);
+
+        let items = vec![
+            ClipItem::new_text("文本A".into(), None),
+            ClipItem::new_image("1.png".into(), 100, 100, b"1", None),
+            ClipItem::new_image("2.png".into(), 100, 100, b"2", None),
+            ClipItem::new_image("3.png".into(), 100, 100, b"3", None),
+            ClipItem::new_image("4.png".into(), 100, 100, b"4", None),
+            ClipItem::new_text("文本B".into(), None),
+        ];
+        let indices: Vec<usize> = (0..items.len()).collect();
+        let rows = build_display_rows(&indices, &items);
+        assert_eq!(rows.len(), 4); // Card(0), ImageGrid(1,2,3), ImageGrid(4), Card(5)
+        assert_eq!(grid_move_selection(&rows, 0, 6, GridMoveDir::Down), 1);
+        assert_eq!(grid_move_selection(&rows, 1, 6, GridMoveDir::Right), 2);
+        assert_eq!(grid_move_selection(&rows, 2, 6, GridMoveDir::Down), 4);
+        assert_eq!(grid_move_selection(&rows, 4, 6, GridMoveDir::Down), 5);
+
+        // 验证亚像素抗锯齿画布与全套矢量图标绘制（含越界裁剪安全性）
+        let mut buf = vec![0u32; 420 * 560];
+        let palette = GlassPalette::for_appearance(GlassAppearance::Tinted);
+        let mut canvas = PixelCanvas::new(&mut buf, 420, 560);
+        canvas.clear(palette.window_bg);
+        canvas.fill_vgrad_round_rect(
+            14,
+            96,
+            392,
+            62,
+            14.0,
+            palette.select_top,
+            palette.select_bottom,
+        );
+        canvas.stroke_round_rect(14, 96, 392, 62, 14.0, 1.0, palette.select_border);
+        canvas.draw_icon_search(28.0, 30.0, 15.0, 1.7, palette.text_secondary);
+        canvas.draw_icon_leaf(320.0, 30.0, 15.0, 1.7, palette.emerald);
+        canvas.draw_icon_pin(356.0, 30.0, 15.0, 1.7, palette.cobalt, true);
+        canvas.draw_icon_gear(392.0, 30.0, 15.0, 1.7, palette.text_primary);
+        canvas.draw_icon_external_link(35.0, 127.0, 16.0, 1.8, Color4::rgb(255, 255, 255));
+        canvas.draw_icon_star(360.0, 112.0, 14.0, 1.6, palette.amber, true);
+        canvas.draw_icon_trash(388.0, 112.0, 14.0, 1.6, palette.danger);
+        canvas.draw_toggle_switch(350, 220, 38, 22, true, palette.cobalt);
+        // 故意传入负坐标与超出右底边界坐标，确保 100% 安全裁剪零 panic
+        canvas.fill_round_rect(-20, -20, 60, 60, 12.0, palette.cobalt);
+        canvas.stroke_round_rect(390, 530, 60, 60, 12.0, 1.5, palette.amber);
     }
 }

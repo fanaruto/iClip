@@ -1,6 +1,6 @@
 use crate::model::{
-    generate_pseudo_uuid, iso8601_to_unix_secs, now_unix_secs, unix_secs_to_iso8601, ClipContentType,
-    ClipItem, PinCategory,
+    generate_pseudo_uuid, iso8601_to_unix_secs, now_unix_secs, unix_secs_to_iso8601,
+    ClipContentType, ClipItem, PinCategory,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
@@ -68,9 +68,7 @@ pub enum ArchiveBackupError {
 impl ArchiveBackupError {
     pub fn message(&self) -> String {
         match self {
-            Self::NoPinnedItems => {
-                "当前暂无已固定的收藏记录，请先固定常用话术或模板".to_string()
-            }
+            Self::NoPinnedItems => "当前暂无已固定的收藏记录，请先固定常用话术或模板".to_string(),
             Self::InvalidArchiveFormat => {
                 "无法解析该归档文件，请确认选择的是有效的 .iclip 备份包".to_string()
             }
