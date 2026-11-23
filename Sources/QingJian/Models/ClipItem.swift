@@ -29,6 +29,30 @@ enum PinCategory: String, Codable, CaseIterable, Identifiable {
         case .template: return .purple
         }
     }
+
+    /// 根据用户备注名与正文特征自动推断收藏分组（无明确特征时返回 nil 保持通用收藏）
+    static func infer(alias: String?, text: String?) -> PinCategory? {
+        if let rawText = text, SnippetTemplateEngine.containsPlaceholders(rawText) {
+            return .template
+        }
+        let combined = ((alias ?? "") + " " + String((text ?? "").prefix(160))).lowercased()
+        guard !combined.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        for kw in ["模板", "合同", "协议", "条款", "template", "snippet"] {
+            if combined.contains(kw) { return .template }
+        }
+        for kw in ["税号", "开票", "发票", "抬头", "开户行", "对公", "联行号", "纳税人", "收款", "财务", "报价"] {
+            if combined.contains(kw) { return .invoice }
+        }
+        for kw in ["地址", "收货", "寄件", "快递", "电话", "手机", "名片", "联系", "邮箱", "邮编"] {
+            if combined.contains(kw) { return .contact }
+        }
+        for kw in ["话术", "回复", "客服", "问候", "售后", "催款", "通知", "欢迎语"] {
+            if combined.contains(kw) { return .reply }
+        }
+        return nil
+    }
 }
 
 /// 剪贴内容类型
@@ -351,12 +375,65 @@ struct ClipItem: Identifiable, Codable, Equatable {
         if type.displayName.range(of: token, options: opts) != nil {
             return true
         }
+        if token.utf8.count <= 20,
+           SemanticAppAndModalityMatcher.matches(tokenLower: token.lowercased(), item: self) {
+            return true
+        }
 
         // 免切中文输入法回退：当输入为 2~20 位纯英文字母时，匹配缓存的中文全拼与拼音首字母
         if PinyinSearchCache.isPureASCIILetters(token) {
             return PinyinSearchCache.matchesPinyin(tokenLower: token.lowercased(), for: self)
         }
         return false
+    }
+}
+
+/// 跨语言来源应用别名与内容模态同义词匹配器（解决 `Code` 搜 `vscode`、`微信` 搜 `wechat`、`iTerm2` 搜 `终端`、`Google Chrome` 搜 `浏览器` 等直觉检索盲区）
+enum SemanticAppAndModalityMatcher {
+    private static let browserHints = ["chrome", "safari", "arc", "edge", "firefox", "brave", "ego", "dia", "zen", "vivaldi", "opera", "浏览器"]
+    private static let terminalHints = ["终端", "terminal", "iterm", "warp", "ghostty", "kitty", "alacritty", "hyper", "cmux"]
+    private static let ideHints = ["code", "cursor", "xcode", "zed", "intellij", "webstorm", "pycharm", "goland", "android studio", "sublime", "nova"]
+    private static let chatHints = ["微信", "wechat", "飞书", "feishu", "lark", "钉钉", "dingtalk", "企业微信", "wecom", "wxwork", "telegram", "slack", "discord", "qq", "messages", "信息"]
+
+    static func matches(tokenLower: String, item: ClipItem) -> Bool {
+        switch tokenLower {
+        case "img", "image", "pic", "photo", "screenshot", "截图", "相册", "照片":
+            return item.type == .image
+        case "url", "link", "web", "网址", "网页":
+            return item.type == .link
+        case "file", "files", "folder", "finder", "访达", "文件夹":
+            return item.type == .file
+        case "txt", "text", "文字":
+            return item.type == .text
+        default:
+            break
+        }
+
+        guard let rawApp = item.sourceAppName, !rawApp.isEmpty else { return false }
+        let appLower = rawApp.lowercased()
+
+        switch tokenLower {
+        case "vscode", "vsc":
+            return appLower == "code" || appLower.contains("visual studio code")
+        case "wechat", "weixin", "wx", "微信":
+            return appLower.contains("微信") || appLower.contains("wechat")
+        case "feishu", "lark", "飞书":
+            return appLower.contains("飞书") || appLower.contains("feishu") || appLower.contains("lark")
+        case "dingtalk", "钉钉":
+            return appLower.contains("钉钉") || appLower.contains("dingtalk")
+        case "wecom", "wxwork", "企微", "企业微信":
+            return appLower.contains("企业微信") || appLower.contains("wecom") || appLower.contains("wxwork")
+        case "browser", "浏览器":
+            return browserHints.contains { appLower.contains($0) }
+        case "term", "terminal", "iterm", "shell", "cli", "终端":
+            return terminalHints.contains { appLower.contains($0) }
+        case "ide", "编辑器":
+            return ideHints.contains { appLower.contains($0) }
+        case "im", "chat", "聊天":
+            return chatHints.contains { appLower.contains($0) }
+        default:
+            return false
+        }
     }
 }
 

@@ -1844,6 +1844,9 @@ final class ClipboardStore: ObservableObject {
         if pinned {
             pendingOTPExpirationTasks[item.id]?.cancel()
             pendingOTPExpirationTasks.removeValue(forKey: item.id)
+            if items[idx].pinCategory == nil {
+                items[idx].pinCategory = PinCategory.infer(alias: items[idx].customAlias, text: items[idx].text)
+            }
         } else {
             items[idx].pinCategory = nil
         }
@@ -2097,6 +2100,7 @@ final class ClipboardStore: ObservableObject {
         ignoreNextChangeCount = pasteboard.changeCount
         lastChangeCount = pasteboard.changeCount
 
+        let inferredCategory = pin ? PinCategory.infer(alias: cleanAlias, text: trimmed) : nil
         let newItem = ClipItem(
             id: newID,
             type: isLink ? .link : .text,
@@ -2104,15 +2108,15 @@ final class ClipboardStore: ObservableObject {
             contentHash: contentHash,
             sourceAppName: isTemplate ? "iClip 模板" : "iClip 速记",
             isPinned: pin,
-            pinCategory: (pin && isTemplate) ? .template : nil,
+            pinCategory: inferredCategory,
             customAlias: cleanAlias
         )
         insertOrPromote(newItem)
         if let idx = items.firstIndex(where: { $0.contentHash == contentHash }) {
             if pin {
                 items[idx].isPinned = true
-                if isTemplate && items[idx].pinCategory == nil {
-                    items[idx].pinCategory = .template
+                if items[idx].pinCategory == nil {
+                    items[idx].pinCategory = inferredCategory
                 }
             }
             if let cleanAlias {
@@ -2177,9 +2181,28 @@ final class ClipboardStore: ObservableObject {
     func setCustomAlias(_ alias: String?, for item: ClipItem) {
         guard let idx = items.firstIndex(where: { $0.id == item.id }) else { return }
         let trimmed = alias?.trimmingCharacters(in: .whitespacesAndNewlines)
-        items[idx].customAlias = (trimmed?.isEmpty == false) ? trimmed : nil
+        let hasAlias = (trimmed?.isEmpty == false)
+        items[idx].customAlias = hasAlias ? trimmed : nil
+
+        var autoPinnedNow = false
+        if hasAlias {
+            if !items[idx].isPinned {
+                items[idx].isPinned = true
+                autoPinnedNow = true
+                pendingOTPExpirationTasks[item.id]?.cancel()
+                pendingOTPExpirationTasks.removeValue(forKey: item.id)
+                TactileFeedbackEngine.shared.perform(.favoriteOn)
+            }
+            if items[idx].pinCategory == nil {
+                items[idx].pinCategory = PinCategory.infer(alias: trimmed, text: items[idx].text)
+            }
+        }
         saveHistory()
-        showToast(items[idx].customAlias != nil ? "已更新备注标题" : "已清除备注标题")
+        if autoPinnedNow {
+            showToast("已保存备注并自动收藏保护")
+        } else {
+            showToast(hasAlias ? "已更新备注标题" : "已清除备注标题")
+        }
     }
 
     /// 纯函数：生成原位微调后的新 ClipItem（保留原 UUID、收藏、分组与备注名，自动重算类型与哈希）

@@ -1468,4 +1468,35 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertEqual(imgExported.url.lastPathComponent, "深圳公司营业执照.png")
         XCTAssertTrue(FileManager.default.fileExists(atPath: imgExported.url.path))
     }
+
+    // MARK: - 35. 跨语言应用别名与模态同义词盲搜（`vscode`/`wechat`/`浏览器`/`终端`/`截图`）及备注智能归类测试
+
+    func testCrossLanguageAppSynonymSearchAndPinCategoryInference() throws {
+        // 1. macOS 应用进程名与人类直觉搜索词双向映射（Code ↔ vscode、微信 ↔ wechat、iTerm2 ↔ 终端、Chrome ↔ 浏览器）
+        let vscodeSnippet = ClipItem(type: .text, text: "const api = '/v1/users'", contentHash: "text:vsc", sourceAppName: "Code")
+        XCTAssertTrue(vscodeSnippet.matches(query: "vscode"))
+        XCTAssertTrue(vscodeSnippet.matches(query: "ide api"))
+
+        let wechatAddr = ClipItem(type: .text, text: "南山区科技园 18 号", contentHash: "text:wx", sourceAppName: "微信")
+        XCTAssertTrue(wechatAddr.matches(query: "wechat 科技园"))
+        XCTAssertTrue(wechatAddr.matches(query: "聊天 南山"))
+
+        let ghosttyCmd = ClipItem(type: .text, text: "ssh root@10.0.0.8", contentHash: "text:ssh", sourceAppName: "Ghostty")
+        XCTAssertTrue(ghosttyCmd.matches(query: "终端 ssh"))
+        XCTAssertTrue(ghosttyCmd.matches(query: "shell 10.0.0.8"))
+
+        let chromeQuote = ClipItem(type: .text, text: "Stay hungry, stay foolish", contentHash: "text:quote", sourceAppName: "Google Chrome")
+        XCTAssertTrue(chromeQuote.matches(query: "浏览器 hungry"))
+
+        let shotItem = ClipItem(type: .image, imageFileName: "a.png", ocrText: "增值税电子普通发票", contentHash: "img:inv")
+        XCTAssertTrue(shotItem.matches(query: "截图 发票"))
+        XCTAssertTrue(shotItem.matches(query: "img 电子"))
+
+        // 2. 备注命名自动推断收藏分组（开票财务 / 地址名片 / 常用话术 / 合同模板，普通备注保持 nil 不乱打标）
+        XCTAssertEqual(PinCategory.infer(alias: "深圳总部开票税号", text: "91440300MA5F88888X"), .invoice)
+        XCTAssertEqual(PinCategory.infer(alias: "公司前台收货地址", text: "深圳市南山区..."), .contact)
+        XCTAssertEqual(PinCategory.infer(alias: "售后安抚客服话术", text: "非常抱歉给您带来不便"), .reply)
+        XCTAssertEqual(PinCategory.infer(alias: "日报通知", text: "今日日期 {{date}}"), .template)
+        XCTAssertNil(PinCategory.infer(alias: "生产跳板机命令", text: "ssh jump-prod"))
+    }
 }
