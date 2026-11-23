@@ -26,6 +26,7 @@ final class CursorDropPodController {
     }
 
     private var panel: NSPanel?
+    private var bleedRootRef: LiquidGlassBleedRootView?
     private var glassRoot: NSView?
     private var dropReceiver: DropPodReceiverNSView?
     private var hostingView: NSHostingView<CursorDropPodView>?
@@ -200,14 +201,18 @@ final class CursorDropPodController {
         guard let panel, panel.frame.size != size else { return }
         panel.setContentSize(size)
         let rect = NSRect(origin: .zero, size: size)
+        bleedRootRef?.frame = rect
+        bleedRootRef?.cardFrame = rect
         glassRoot?.frame = rect
         dropReceiver?.frame = rect
         hostingView?.frame = rect
         if #available(macOS 26.0, *), let glass = glassRoot as? NSGlassEffectView {
             glass.cornerRadius = size.height / 2
-        } else {
-            glassRoot?.layer?.cornerRadius = size.height / 2
+        } else if let effect = glassRoot as? NSVisualEffectView {
+            effect.maskImage = LiquidGlassSurfaceHost.continuousCornerMaskImage(size: size, radius: size.height / 2)
+            effect.layer?.cornerRadius = size.height / 2
         }
+        panel.invalidateShadow()
     }
 
     private func ensurePanel(size: NSSize) {
@@ -215,7 +220,7 @@ final class CursorDropPodController {
         let rect = NSRect(origin: .zero, size: size)
         let p = NSPanel(
             contentRect: rect,
-            styleMask: [.nonactivatingPanel, .borderless, .fullSizeContentView],
+            styleMask: [.nonactivatingPanel, .borderless],
             backing: .buffered,
             defer: false
         )
@@ -224,6 +229,7 @@ final class CursorDropPodController {
         p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
         p.isOpaque = false
         p.backgroundColor = .clear
+        p.hasShadow = true
         p.hidesOnDeactivate = false
         p.isMovable = false
 
@@ -254,6 +260,9 @@ final class CursorDropPodController {
             return self.executeDrop(from: pb, slot: slot)
         }
 
+        let bleedRoot = LiquidGlassBleedRootView(frame: rect, cardFrame: rect)
+        bleedRoot.autoresizingMask = [.width, .height]
+
         if #available(macOS 26.0, *) {
             let glass = NSGlassEffectView(frame: rect)
             glass.autoresizingMask = [.width, .height]
@@ -261,8 +270,8 @@ final class CursorDropPodController {
             glass.style = .regular
             glass.tintColor = nil
             glass.contentView = receiver
-            p.hasShadow = false
-            p.contentView = glass
+            bleedRoot.addSubview(glass)
+            p.contentView = bleedRoot
             self.glassRoot = glass
         } else {
             let effect = NSVisualEffectView(frame: rect)
@@ -272,14 +281,16 @@ final class CursorDropPodController {
             effect.state = .active
             effect.maskImage = LiquidGlassSurfaceHost.continuousCornerMaskImage(size: size, radius: size.height / 2)
             effect.wantsLayer = true
+            effect.layer?.cornerCurve = .continuous
             effect.layer?.cornerRadius = size.height / 2
             effect.layer?.masksToBounds = true
             effect.addSubview(receiver)
-            p.hasShadow = true
-            p.contentView = effect
+            bleedRoot.addSubview(effect)
+            p.contentView = bleedRoot
             self.glassRoot = effect
         }
 
+        self.bleedRootRef = bleedRoot
         self.hostingView = hosting
         self.dropReceiver = receiver
         self.panel = p

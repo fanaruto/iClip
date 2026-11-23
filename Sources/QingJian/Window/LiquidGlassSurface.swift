@@ -42,11 +42,12 @@ final class LiquidGlassSurfaceHost {
         }
     }
 
-    /// 挂载原生材质根容器到目标面板
+    /// 挂载原生材质根容器到目标面板（支持透明阴影出血边距，根除 macOS 26 NSGlassEffectView 外发光/SDF 阴影在窗口边界被直角截断）
     func install(
         on panel: NSWindow,
         hostingView: NSView,
         bounds: NSRect,
+        bleed: CGFloat = 0,
         cornerRadius: CGFloat,
         style: PanelSurfaceStyle,
         appearance: LiquidGlassAppearance,
@@ -57,8 +58,9 @@ final class LiquidGlassSurfaceHost {
         self.currentAppearance = appearance
         self.currentMaskOpacity = maskOpacity
 
+        let cardBounds = NSRect(origin: .zero, size: bounds.size)
         hostingView.removeFromSuperview()
-        hostingView.frame = bounds
+        hostingView.frame = cardBounds
         hostingView.autoresizingMask = [.width, .height]
 
         switch style {
@@ -67,17 +69,18 @@ final class LiquidGlassSurfaceHost {
                 installNativeLiquidGlass(
                     on: panel,
                     hostingView: hostingView,
-                    bounds: bounds,
+                    cardBounds: cardBounds,
+                    bleed: bleed,
                     cornerRadius: cornerRadius,
                     appearance: appearance,
                     maskOpacity: maskOpacity
                 )
                 return
             }
-            installFrostedSurface(on: panel, hostingView: hostingView, bounds: bounds, cornerRadius: cornerRadius)
+            installFrostedSurface(on: panel, hostingView: hostingView, cardBounds: cardBounds, bleed: bleed, cornerRadius: cornerRadius)
 
         case .frosted:
-            installFrostedSurface(on: panel, hostingView: hostingView, bounds: bounds, cornerRadius: cornerRadius)
+            installFrostedSurface(on: panel, hostingView: hostingView, cardBounds: cardBounds, bleed: bleed, cornerRadius: cornerRadius)
         }
     }
 
@@ -105,18 +108,19 @@ final class LiquidGlassSurfaceHost {
     private func installNativeLiquidGlass(
         on panel: NSWindow,
         hostingView: NSView,
-        bounds: NSRect,
+        cardBounds: NSRect,
+        bleed: CGFloat,
         cornerRadius: CGFloat,
         appearance: LiquidGlassAppearance,
         maskOpacity: Double
     ) {
-        // 直接使用官方 NSGlassEffectView 作为窗口唯一根视图：原生连续 R 角、原生折射高光、零四角毛边
-        let glassView = NSGlassEffectView(frame: bounds)
-        glassView.autoresizingMask = [.width, .height]
+        let cardFrame = NSRect(x: bleed, y: bleed, width: cardBounds.width, height: cardBounds.height)
+        let glassView = NSGlassEffectView(frame: cardFrame)
+        glassView.autoresizingMask = bleed > 0 ? [] : [.width, .height]
         glassView.cornerRadius = cornerRadius
 
         // 内部内容容器：严格同心连续圆角裁切，承接外观监听与拖拽复制
-        let contentContainer = LiquidGlassContentContainerView(frame: bounds)
+        let contentContainer = LiquidGlassContentContainerView(frame: cardBounds)
         contentContainer.autoresizingMask = [.width, .height]
         contentContainer.wantsLayer = true
         contentContainer.layer?.backgroundColor = NSColor.clear.cgColor
@@ -140,8 +144,20 @@ final class LiquidGlassSurfaceHost {
         self.backdropBlurView = nil
         self.activeGlassView = glassView
 
-        panel.hasShadow = false
-        panel.contentView = glassView
+        panel.hasShadow = true
+        if bleed > 0 {
+            let windowBounds = NSRect(
+                x: 0,
+                y: 0,
+                width: cardBounds.width + bleed * 2,
+                height: cardBounds.height + bleed * 2
+            )
+            let bleedRoot = LiquidGlassBleedRootView(frame: windowBounds, cardFrame: cardFrame)
+            bleedRoot.addSubview(glassView)
+            panel.contentView = bleedRoot
+        } else {
+            panel.contentView = glassView
+        }
         applyCompositeParameters(
             glassView: glassView,
             blurView: nil,
@@ -154,23 +170,25 @@ final class LiquidGlassSurfaceHost {
     private func installFrostedSurface(
         on panel: NSWindow,
         hostingView: NSView,
-        bounds: NSRect,
+        cardBounds: NSRect,
+        bleed: CGFloat,
         cornerRadius: CGFloat
     ) {
         self.activeGlassView = nil
 
-        let effectView = NSVisualEffectView(frame: bounds)
-        effectView.autoresizingMask = [.width, .height]
+        let cardFrame = NSRect(x: bleed, y: bleed, width: cardBounds.width, height: cardBounds.height)
+        let effectView = NSVisualEffectView(frame: cardFrame)
+        effectView.autoresizingMask = bleed > 0 ? [] : [.width, .height]
         effectView.material = .popover
         effectView.blendingMode = .behindWindow
         effectView.state = .active
-        effectView.maskImage = Self.continuousCornerMaskImage(size: bounds.size, radius: cornerRadius)
+        effectView.maskImage = Self.continuousCornerMaskImage(size: cardBounds.size, radius: cornerRadius)
         effectView.wantsLayer = true
         effectView.layer?.cornerCurve = .continuous
         effectView.layer?.cornerRadius = cornerRadius
         effectView.layer?.masksToBounds = true
 
-        let contentContainer = LiquidGlassContentContainerView(frame: bounds)
+        let contentContainer = LiquidGlassContentContainerView(frame: cardBounds)
         contentContainer.autoresizingMask = [.width, .height]
         contentContainer.wantsLayer = true
         contentContainer.layer?.backgroundColor = NSColor.clear.cgColor
@@ -189,7 +207,19 @@ final class LiquidGlassSurfaceHost {
         self.containerView = contentContainer
         self.backdropBlurView = effectView
         panel.hasShadow = true
-        panel.contentView = effectView
+        if bleed > 0 {
+            let windowBounds = NSRect(
+                x: 0,
+                y: 0,
+                width: cardBounds.width + bleed * 2,
+                height: cardBounds.height + bleed * 2
+            )
+            let bleedRoot = LiquidGlassBleedRootView(frame: windowBounds, cardFrame: cardFrame)
+            bleedRoot.addSubview(effectView)
+            panel.contentView = bleedRoot
+        } else {
+            panel.contentView = effectView
+        }
         panel.invalidateShadow()
     }
 
@@ -298,6 +328,31 @@ final class LiquidGlassSurfaceHost {
         image.capInsets = NSEdgeInsets(top: radius, left: radius, bottom: radius, right: radius)
         image.resizingMode = .stretch
         return image
+    }
+}
+
+/// 透明阴影出血根容器：隔离 NSNextStepFrame 对 NSGlassEffectView 的直角边框挂钩，并为连续圆角卡片预留无裁切外圈空间
+final class LiquidGlassBleedRootView: NSView {
+    var cardFrame: NSRect
+
+    init(frame frameRect: NSRect, cardFrame: NSRect) {
+        self.cardFrame = cardFrame
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.clear.cgColor
+        layer?.masksToBounds = false
+    }
+
+    required init?(coder: NSCoder) {
+        self.cardFrame = .zero
+        super.init(coder: coder)
+    }
+
+    override var isOpaque: Bool { false }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard cardFrame.contains(point) else { return nil }
+        return super.hitTest(point)
     }
 }
 

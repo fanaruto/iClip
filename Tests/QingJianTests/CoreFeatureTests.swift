@@ -1658,4 +1658,32 @@ final class CoreFeatureTests: XCTestCase {
         )
         XCTAssertTrue(conflictWithQueue?.contains("顺序出队热键") == true)
     }
+
+    // MARK: - 39. 液态玻璃四角无毛边出血容器点击穿透与连续圆角遮罩校验
+
+    @MainActor
+    func testLiquidGlassBleedRootHitTestAndCornerMask() {
+        let bleed: CGFloat = 36
+        let cardFrame = NSRect(x: bleed, y: bleed, width: 420, height: 560)
+        let windowBounds = NSRect(x: 0, y: 0, width: 492, height: 632)
+        let bleedRoot = LiquidGlassBleedRootView(frame: windowBounds, cardFrame: cardFrame)
+        let cardChild = NSView(frame: cardFrame)
+        bleedRoot.addSubview(cardChild)
+
+        // 出血边距区域内点击必须 100% 穿透返回 nil，卡片内部正常命中
+        XCTAssertNil(bleedRoot.hitTest(NSPoint(x: 10, y: 10)))
+        XCTAssertNil(bleedRoot.hitTest(NSPoint(x: 485, y: 625)))
+        XCTAssertNil(bleedRoot.hitTest(NSPoint(x: 35, y: 300)))
+        XCTAssertEqual(bleedRoot.hitTest(NSPoint(x: 200, y: 300)), cardChild)
+
+        // 连续圆角遮罩四角外缘必须为全透明（Alpha = 0），中心必须不透明（Alpha = 1）
+        let mask = LiquidGlassSurfaceHost.continuousCornerMaskImage(size: NSSize(width: 120, height: 120), radius: 26)
+        guard let rep = mask.representations.first as? NSBitmapImageRep else {
+            XCTFail("应生成高清位图遮罩表示")
+            return
+        }
+        XCTAssertEqual(rep.colorAt(x: 1, y: 1)?.alphaComponent ?? 1, 0, accuracy: 0.001)
+        XCTAssertEqual(rep.colorAt(x: rep.pixelsWide - 2, y: rep.pixelsHigh - 2)?.alphaComponent ?? 1, 0, accuracy: 0.001)
+        XCTAssertEqual(rep.colorAt(x: rep.pixelsWide / 2, y: rep.pixelsHigh / 2)?.alphaComponent ?? 0, 1, accuracy: 0.001)
+    }
 }

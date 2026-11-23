@@ -104,6 +104,7 @@ final class ActionSparkController {
     }
 
     private var panel: NSPanel?
+    private var bleedRootRef: LiquidGlassBleedRootView?
     private var glassViewRef: NSView?
     private var hostingView: NSHostingView<ActionSparkPillView>?
     private let viewModel = ViewModel()
@@ -279,13 +280,18 @@ final class ActionSparkController {
         guard let panel else { return }
         if panel.frame.size != size {
             panel.setContentSize(size)
-            hostingView?.frame = NSRect(origin: .zero, size: size)
-            glassViewRef?.frame = NSRect(origin: .zero, size: size)
+            let rect = NSRect(origin: .zero, size: size)
+            bleedRootRef?.frame = rect
+            bleedRootRef?.cardFrame = rect
+            hostingView?.frame = rect
+            glassViewRef?.frame = rect
             if #available(macOS 26.0, *), let glass = glassViewRef as? NSGlassEffectView {
                 glass.cornerRadius = size.height / 2
-            } else {
-                glassViewRef?.layer?.cornerRadius = size.height / 2
+            } else if let effect = glassViewRef as? NSVisualEffectView {
+                effect.maskImage = LiquidGlassSurfaceHost.continuousCornerMaskImage(size: size, radius: size.height / 2)
+                effect.layer?.cornerRadius = size.height / 2
             }
+            panel.invalidateShadow()
         }
     }
 
@@ -294,7 +300,7 @@ final class ActionSparkController {
         let rect = NSRect(origin: .zero, size: size)
         let p = NSPanel(
             contentRect: rect,
-            styleMask: [.nonactivatingPanel, .borderless, .fullSizeContentView],
+            styleMask: [.nonactivatingPanel, .borderless],
             backing: .buffered,
             defer: false
         )
@@ -303,6 +309,7 @@ final class ActionSparkController {
         p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
         p.isOpaque = false
         p.backgroundColor = .clear
+        p.hasShadow = true
         p.hidesOnDeactivate = false
         p.isMovable = false
 
@@ -326,6 +333,9 @@ final class ActionSparkController {
         hosting.frame = rect
         hosting.autoresizingMask = [.width, .height]
 
+        let bleedRoot = LiquidGlassBleedRootView(frame: rect, cardFrame: rect)
+        bleedRoot.autoresizingMask = [.width, .height]
+
         if #available(macOS 26.0, *) {
             let glass = NSGlassEffectView(frame: rect)
             glass.autoresizingMask = [.width, .height]
@@ -333,9 +343,8 @@ final class ActionSparkController {
             glass.style = .regular
             glass.tintColor = nil
             glass.contentView = hosting
-            // 严格关闭 borderless NSPanel 矩形窗口阴影，根除四角毛边
-            p.hasShadow = false
-            p.contentView = glass
+            bleedRoot.addSubview(glass)
+            p.contentView = bleedRoot
             self.glassViewRef = glass
         } else {
             let effect = NSVisualEffectView(frame: rect)
@@ -345,14 +354,16 @@ final class ActionSparkController {
             effect.state = .active
             effect.maskImage = LiquidGlassSurfaceHost.continuousCornerMaskImage(size: size, radius: size.height / 2)
             effect.wantsLayer = true
+            effect.layer?.cornerCurve = .continuous
             effect.layer?.cornerRadius = size.height / 2
             effect.layer?.masksToBounds = true
             effect.addSubview(hosting)
-            p.hasShadow = true
-            p.contentView = effect
+            bleedRoot.addSubview(effect)
+            p.contentView = bleedRoot
             self.glassViewRef = effect
         }
 
+        self.bleedRootRef = bleedRoot
         self.hostingView = hosting
         self.panel = p
     }

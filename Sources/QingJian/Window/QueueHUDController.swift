@@ -66,7 +66,7 @@ final class QueueHUDController {
         let rect = NSRect(origin: .zero, size: hudSize)
         let p = NSPanel(
             contentRect: rect,
-            styleMask: [.nonactivatingPanel, .borderless, .fullSizeContentView],
+            styleMask: [.nonactivatingPanel, .borderless],
             backing: .buffered,
             defer: false
         )
@@ -84,6 +84,9 @@ final class QueueHUDController {
         hosting.frame = rect
         hosting.autoresizingMask = [.width, .height]
 
+        let bleedRoot = LiquidGlassBleedRootView(frame: rect, cardFrame: rect)
+        bleedRoot.autoresizingMask = [.width, .height]
+
         if #available(macOS 26.0, *) {
             let glass = NSGlassEffectView(frame: rect)
             glass.autoresizingMask = [.width, .height]
@@ -91,8 +94,8 @@ final class QueueHUDController {
             glass.style = .regular
             glass.tintColor = nil
             glass.contentView = hosting
-            p.hasShadow = false
-            p.contentView = glass
+            bleedRoot.addSubview(glass)
+            p.contentView = bleedRoot
         } else {
             let effect = NSVisualEffectView(frame: rect)
             effect.autoresizingMask = [.width, .height]
@@ -101,10 +104,12 @@ final class QueueHUDController {
             effect.state = .active
             effect.maskImage = LiquidGlassSurfaceHost.continuousCornerMaskImage(size: hudSize, radius: hudSize.height / 2)
             effect.wantsLayer = true
+            effect.layer?.cornerCurve = .continuous
             effect.layer?.cornerRadius = hudSize.height / 2
             effect.layer?.masksToBounds = true
             effect.addSubview(hosting)
-            p.contentView = effect
+            bleedRoot.addSubview(effect)
+            p.contentView = bleedRoot
         }
 
         self.hostingView = hosting

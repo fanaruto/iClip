@@ -33,6 +33,11 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
 
     private let panelSize = NSSize(width: 420, height: 560)
     private let cornerRadius: CGFloat = 26
+    /// 为 macOS 26+ NSGlassEffectView 原生 SDF 外发光/投影预留透明出血边距，防止被窗口矩形边界截成四角灰三角
+    private let shadowBleed: CGFloat = 36
+    private var windowSize: NSSize {
+        NSSize(width: panelSize.width + shadowBleed * 2, height: panelSize.height + shadowBleed * 2)
+    }
 
     var isVisible: Bool {
         (panel?.isVisible ?? false) && nav.isPresented
@@ -81,10 +86,11 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     }
 
     private func setupPanel() {
-        let contentRect = NSRect(origin: .zero, size: panelSize)
+        let cardRect = NSRect(origin: .zero, size: panelSize)
+        let windowRect = NSRect(origin: .zero, size: windowSize)
 
         let p = KeyableFloatingPanel(
-            contentRect: contentRect,
+            contentRect: windowRect,
             styleMask: [.nonactivatingPanel, .borderless],
             backing: .buffered,
             defer: false
@@ -94,12 +100,12 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
         p.isOpaque = false
         p.backgroundColor = .clear
-        // 液态玻璃模式初始即关闭外层矩形窗口阴影，毛玻璃模式配合 maskImage 渲染连续圆角阴影
-        p.hasShadow = (store.surfaceStyle != .liquidGlass)
+        // 配合透明出血根容器渲染苹果原生 WindowServer 连续圆角 360° 柔和阴影，零四角毛边
+        p.hasShadow = true
         p.isMovableByWindowBackground = true
         p.hidesOnDeactivate = false
-        p.minSize = panelSize
-        p.maxSize = panelSize
+        p.minSize = windowSize
+        p.maxSize = windowSize
         p.delegate = self
 
         let view = ClipboardPopoverView(
@@ -117,7 +123,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         let hosting = FirstMouseHostingView(rootView: view)
         // 锁死 NSHostingView 尺寸反推：彻底禁止任何内部子视图状态切换反向拉宽或撑高 NSPanel 外框
         hosting.sizingOptions = []
-        hosting.frame = contentRect
+        hosting.frame = cardRect
         hosting.autoresizingMask = [.width, .height]
         hosting.wantsLayer = true
         hosting.layer?.backgroundColor = NSColor.clear.cgColor
@@ -163,7 +169,8 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         store.onPanelShown(visibleItems: nav.cachedFilteredItems)
         nav.suppressAutoHide = true
 
-        let startOrigin = NSPoint(x: origin.x + entryDelta.x, y: origin.y + entryDelta.y)
+        let targetWindowOrigin = NSPoint(x: origin.x - shadowBleed, y: origin.y - shadowBleed)
+        let startOrigin = NSPoint(x: targetWindowOrigin.x + entryDelta.x, y: targetWindowOrigin.y + entryDelta.y)
         panel.setFrameOrigin(startOrigin)
         panel.alphaValue = 0
 
@@ -175,7 +182,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             ctx.duration = 0.22
             ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
             panel.animator().alphaValue = 1
-            panel.animator().setFrameOrigin(origin)
+            panel.animator().setFrameOrigin(targetWindowOrigin)
         }
 
         DispatchQueue.main.async { [weak self] in
@@ -225,13 +232,14 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             .store(in: &cancellables)
     }
 
-    /// 按苹果官方 Liquid Glass 分层规范挂载原生材质根容器（底层柔焦隔断 + 顶层 NSGlassEffectView 光学壳体）
+    /// 按苹果官方 Liquid Glass 分层规范挂载原生材质根容器（含透明阴影出血区 + 顶层 NSGlassEffectView 光学壳体）
     private func applyNativeSurface(style: PanelSurfaceStyle) {
         let bounds = NSRect(origin: .zero, size: panelSize)
         surfaceHost.install(
             on: panel,
             hostingView: hostingView,
             bounds: bounds,
+            bleed: shadowBleed,
             cornerRadius: cornerRadius,
             style: style,
             appearance: store.liquidGlassAppearance,
@@ -363,7 +371,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             cardLeft = max(visible.minX + 10, min(cardLeft, visible.maxX - cardWidth - 10))
             cardBottom = max(visible.minY + 10, min(cardBottom, visible.maxY - cardHeight - 6))
 
-            return (NSPoint(x: cardLeft, y: cardBottom), NSPoint(x: 0, y: 10))
+            return (NSPoint(x: cardLeft - shadowBleed, y: cardBottom - shadowBleed), NSPoint(x: 0, y: 10))
         }
 
         // 「始终在前」空间记忆：若用户已固定窗口并手动摆放过工位，快捷键重开时回到专属桌面工位
@@ -373,7 +381,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             let visible = screen.visibleFrame
             let clampedX = max(visible.minX + 8, min(pinned.x, visible.maxX - cardWidth - 8))
             let clampedY = max(visible.minY + 8, min(pinned.y, visible.maxY - cardHeight - 8))
-            return (NSPoint(x: clampedX, y: clampedY), NSPoint(x: 0, y: 6))
+            return (NSPoint(x: clampedX - shadowBleed, y: clampedY - shadowBleed), NSPoint(x: 0, y: 6))
         }
 
         // 快捷键呼出：紧贴当前鼠标光标旁直觉出现，自动避让屏幕边缘
@@ -394,7 +402,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         }
 
         return (
-            NSPoint(x: cardLeft, y: cardBottom),
+            NSPoint(x: cardLeft - shadowBleed, y: cardBottom - shadowBleed),
             NSPoint(x: placeOnRight ? -8 : 8, y: 6)
         )
     }
@@ -403,7 +411,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
 
     func windowDidMove(_ notification: Notification) {
         guard store.alwaysOnTop, isVisible, let frame = panel?.frame else { return }
-        store.savePinnedPanelOrigin(frame.origin)
+        store.savePinnedPanelOrigin(NSPoint(x: frame.origin.x + shadowBleed, y: frame.origin.y + shadowBleed))
     }
 
     func windowDidResignKey(_ notification: Notification) {
@@ -825,6 +833,11 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
 
     private let panelSize = NSSize(width: 420, height: 560)
     private let cornerRadius: CGFloat = 26
+    /// 为 macOS 26+ NSGlassEffectView 原生 SDF 外发光/投影预留透明出血边距，防止被窗口矩形边界截成四角灰三角
+    private let shadowBleed: CGFloat = 36
+    private var windowSize: NSSize {
+        NSSize(width: panelSize.width + shadowBleed * 2, height: panelSize.height + shadowBleed * 2)
+    }
 
     var isVisible: Bool {
         (panel?.isVisible ?? false) && nav.isPresented
@@ -873,10 +886,11 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     }
 
     private func setupPanel() {
-        let contentRect = NSRect(origin: .zero, size: panelSize)
+        let cardRect = NSRect(origin: .zero, size: panelSize)
+        let windowRect = NSRect(origin: .zero, size: windowSize)
 
         let p = KeyableFloatingPanel(
-            contentRect: contentRect,
+            contentRect: windowRect,
             styleMask: [.nonactivatingPanel, .borderless],
             backing: .buffered,
             defer: false
@@ -886,12 +900,12 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
         p.isOpaque = false
         p.backgroundColor = .clear
-        // 液态玻璃模式初始即关闭外层矩形窗口阴影，毛玻璃模式配合 maskImage 渲染连续圆角阴影
-        p.hasShadow = (store.surfaceStyle != .liquidGlass)
+        // 配合透明出血根容器渲染苹果原生 WindowServer 连续圆角 360° 柔和阴影，零四角毛边
+        p.hasShadow = true
         p.isMovableByWindowBackground = true
         p.hidesOnDeactivate = false
-        p.minSize = panelSize
-        p.maxSize = panelSize
+        p.minSize = windowSize
+        p.maxSize = windowSize
         p.delegate = self
 
         let view = ClipboardPopoverView(
@@ -909,7 +923,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         let hosting = FirstMouseHostingView(rootView: view)
         // 锁死 NSHostingView 尺寸反推：彻底禁止任何内部子视图状态切换反向拉宽或撑高 NSPanel 外框
         hosting.sizingOptions = []
-        hosting.frame = contentRect
+        hosting.frame = cardRect
         hosting.autoresizingMask = [.width, .height]
         hosting.wantsLayer = true
         hosting.layer?.backgroundColor = NSColor.clear.cgColor
@@ -955,7 +969,8 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         store.onPanelShown(visibleItems: nav.cachedFilteredItems)
         nav.suppressAutoHide = true
 
-        let startOrigin = NSPoint(x: origin.x + entryDelta.x, y: origin.y + entryDelta.y)
+        let targetWindowOrigin = NSPoint(x: origin.x - shadowBleed, y: origin.y - shadowBleed)
+        let startOrigin = NSPoint(x: targetWindowOrigin.x + entryDelta.x, y: targetWindowOrigin.y + entryDelta.y)
         panel.setFrameOrigin(startOrigin)
         panel.alphaValue = 0
 
@@ -967,7 +982,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             ctx.duration = 0.22
             ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
             panel.animator().alphaValue = 1
-            panel.animator().setFrameOrigin(origin)
+            panel.animator().setFrameOrigin(targetWindowOrigin)
         }
 
         DispatchQueue.main.async { [weak self] in
@@ -1017,13 +1032,14 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             .store(in: &cancellables)
     }
 
-    /// 按苹果官方 Liquid Glass 分层规范挂载原生材质根容器（底层柔焦隔断 + 顶层 NSGlassEffectView 光学壳体）
+    /// 按苹果官方 Liquid Glass 分层规范挂载原生材质根容器（含透明阴影出血区 + 顶层 NSGlassEffectView 光学壳体）
     private func applyNativeSurface(style: PanelSurfaceStyle) {
         let bounds = NSRect(origin: .zero, size: panelSize)
         surfaceHost.install(
             on: panel,
             hostingView: hostingView,
             bounds: bounds,
+            bleed: shadowBleed,
             cornerRadius: cornerRadius,
             style: style,
             appearance: store.liquidGlassAppearance,
@@ -1155,7 +1171,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             cardLeft = max(visible.minX + 10, min(cardLeft, visible.maxX - cardWidth - 10))
             cardBottom = max(visible.minY + 10, min(cardBottom, visible.maxY - cardHeight - 6))
 
-            return (NSPoint(x: cardLeft, y: cardBottom), NSPoint(x: 0, y: 10))
+            return (NSPoint(x: cardLeft - shadowBleed, y: cardBottom - shadowBleed), NSPoint(x: 0, y: 10))
         }
 
         // 「始终在前」空间记忆：若用户已固定窗口并手动摆放过工位，快捷键重开时回到专属桌面工位
@@ -1165,7 +1181,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             let visible = screen.visibleFrame
             let clampedX = max(visible.minX + 8, min(pinned.x, visible.maxX - cardWidth - 8))
             let clampedY = max(visible.minY + 8, min(pinned.y, visible.maxY - cardHeight - 8))
-            return (NSPoint(x: clampedX, y: clampedY), NSPoint(x: 0, y: 6))
+            return (NSPoint(x: clampedX - shadowBleed, y: clampedY - shadowBleed), NSPoint(x: 0, y: 6))
         }
 
         // 快捷键呼出：紧贴当前鼠标光标旁直觉出现，自动避让屏幕边缘
@@ -1186,7 +1202,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         }
 
         return (
-            NSPoint(x: cardLeft, y: cardBottom),
+            NSPoint(x: cardLeft - shadowBleed, y: cardBottom - shadowBleed),
             NSPoint(x: placeOnRight ? -8 : 8, y: 6)
         )
     }
@@ -1195,7 +1211,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
 
     func windowDidMove(_ notification: Notification) {
         guard store.alwaysOnTop, isVisible, let frame = panel?.frame else { return }
-        store.savePinnedPanelOrigin(frame.origin)
+        store.savePinnedPanelOrigin(NSPoint(x: frame.origin.x + shadowBleed, y: frame.origin.y + shadowBleed))
     }
 
     func windowDidResignKey(_ notification: Notification) {
