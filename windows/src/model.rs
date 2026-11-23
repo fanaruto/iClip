@@ -402,10 +402,21 @@ impl ClipItem {
         }
     }
 
-    /// O(1) 字节门控辅助信息（大文本直接按 KB / MB 展示，零全串字符遍历）
+    /// O(1) 字节门控辅助信息（支持防肩窥遮罩：备注名卡片未选中/未悬停时绝不在副标题泄露明文密钥）
     pub fn subtitle_info(&self) -> String {
+        self.subtitle_info_veiled(false)
+    }
+
+    pub fn subtitle_info_veiled(&self, veil_active: bool) -> String {
         if let Some(alias) = &self.custom_alias {
             if !alias.trim().is_empty() {
+                if veil_active {
+                    if let Some(raw) = &self.text {
+                        if self.detected_sensitive_kind().is_some() {
+                            return crate::security::veiled_sensitive_preview(raw);
+                        }
+                    }
+                }
                 let p: String = self.raw_content_preview().chars().take(28).collect();
                 return p;
             }
@@ -495,6 +506,10 @@ impl ClipItem {
             "待办" | "todo" | "@todo" | "@待办" => return self.is_todo(),
             "未完成" | "@pending" => return self.is_pending_todo(),
             "已完成" | "@done" => return self.is_todo_completed(),
+            "敏感" | "@敏感" | "@密钥" | "@隐私" | "@secret" | "secret" => {
+                return self.detected_sensitive_kind().is_some() || self.is_burn_after_paste()
+            }
+            "即焚" | "@即焚" | "@burn" | "burn" => return self.is_burn_after_paste(),
             _ => {}
         }
         if let Some(text) = &self.text {

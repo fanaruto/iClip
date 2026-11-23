@@ -17,6 +17,7 @@ final class QueueHUDController {
     func show(symbol: String, title: String, subtitle: String?, tint: Color = .accentColor) {
         ensurePanel()
         guard let panel, let hostingView else { return }
+        panel.sharingType = (ClipboardStore.shared.screenSharePrivacyEnabled && !ProcessInfo.processInfo.arguments.contains("--demo")) ? .none : .readOnly
 
         dismissWorkItem?.cancel()
         hostingView.rootView = QueueHUDPillView(symbol: symbol, title: title, subtitle: subtitle, tint: tint)
@@ -78,6 +79,7 @@ final class QueueHUDController {
         p.hasShadow = true
         p.ignoresMouseEvents = true
         p.hidesOnDeactivate = false
+        p.sharingType = (ClipboardStore.shared.screenSharePrivacyEnabled && !ProcessInfo.processInfo.arguments.contains("--demo")) ? .none : .readOnly
 
         let root = QueueHUDPillView(symbol: "checkmark.circle.fill", title: "", subtitle: nil, tint: .accentColor)
         let hosting = NSHostingView(rootView: root)

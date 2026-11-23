@@ -712,4 +712,91 @@ mod tests {
 
         let _ = fs::remove_dir_all(tmp_dir);
     }
+
+    #[test]
+    fn test_red_team_subtitle_veil_url_guard_pii_and_ai_outbound() {
+        use crate::security::{
+            is_external_ai_or_chat_app, sanitize_safe_browser_url, seal_vault_bytes,
+            SensitiveSecretKind,
+        };
+        use std::collections::HashSet;
+
+        // 1. 高并发连续封装 Nonce 100% 无碰撞验证
+        let key = [0x42u8; 32];
+        let seed = std::path::Path::new("/tmp/iclip-nonce-test");
+        let mut nonces = HashSet::new();
+        for _ in 0..128 {
+            let sealed = seal_vault_bytes(b"[{\"ok\":true}]", &key, seed);
+            let mut nonce = [0u8; 16];
+            nonce.copy_from_slice(&sealed[8..24]);
+            assert!(nonces.insert(nonce), "CTR Nonce 绝不允许重复");
+        }
+
+        // 2. 备注名卡片副标题防泄密遮罩
+        let secret_raw = "sk-proj-WinRedTeamSecretCheck9876543210AbCd";
+        let mut aliased = ClipItem::new_text(secret_raw.to_string(), Some("Code".to_string()));
+        aliased.custom_alias = Some("线上主密钥".to_string());
+        assert_eq!(aliased.display_title(false, true), "线上主密钥");
+        let veiled_sub = aliased.subtitle_info_veiled(true);
+        assert!(veiled_sub.contains("••••••••••••"));
+        assert!(!veiled_sub.contains("WinRedTeamSecretCheck"));
+        assert!(aliased.subtitle_info_veiled(false).contains("sk-proj-"));
+
+        // 3. 外部浏览器 URL 严格 http/https 白名单守卫
+        assert_eq!(sanitize_safe_browser_url("javascript:alert(1)"), None);
+        assert_eq!(
+            sanitize_safe_browser_url("file:///C:/Windows/System32/calc.exe"),
+            None
+        );
+        assert_eq!(sanitize_safe_browser_url("ms-msdt:id=PCWDiagnostic"), None);
+        assert_eq!(sanitize_safe_browser_url("search-ms:query=password"), None);
+        assert_eq!(
+            sanitize_safe_browser_url(r"C:\Windows\System32\cmd.exe"),
+            None
+        );
+        assert_eq!(
+            sanitize_safe_browser_url(r"\\10.0.0.1\share\payload.bat"),
+            None
+        );
+        assert_eq!(
+            sanitize_safe_browser_url("localhost:3000/api"),
+            Some("http://localhost:3000/api".to_string())
+        );
+        assert_eq!(
+            sanitize_safe_browser_url("https://app.webfooo.com/iClip?utm_source=test"),
+            Some("https://app.webfooo.com/iClip".to_string())
+        );
+
+        // 4. GB 11643 身份证与 Luhn 银行卡精准遮罩 + `@敏感`/`@即焚` 审计快筛 + 外发 AI 置顶脱敏
+        let id_ok = ClipItem::new_text("法人身份证 110101199003077758".to_string(), None);
+        assert_eq!(
+            id_ok.detected_sensitive_kind(),
+            Some(SensitiveSecretKind::PersonalIdentity)
+        );
+        assert!(id_ok.matches_query("@敏感"));
+
+        let id_fake = ClipItem::new_text("运单流水 110101199003077759".to_string(), None);
+        assert_eq!(id_fake.detected_sensitive_kind(), None);
+        assert!(!id_fake.matches_query("@敏感"));
+
+        let card_ok = ClipItem::new_text("收款卡 6222021234567894".to_string(), None);
+        assert_eq!(
+            card_ok.detected_sensitive_kind(),
+            Some(SensitiveSecretKind::PersonalIdentity)
+        );
+
+        let mixed = "- 核对线上配置\n- 轮换密钥 sk-proj-AbCdEfGhIjKlMnOpQrStUvWxYz123456";
+        let mixed_item = ClipItem::new_text(mixed.to_string(), Some("Code".to_string()));
+        let tmp_store_dir = std::env::temp_dir().join("iclip_ai_rank_check");
+        let store = ClipboardStore::new(tmp_store_dir.clone());
+        let raw_acts = analyze_text_actions(mixed, false);
+        assert!(raw_acts.len() >= 2);
+        assert_eq!(raw_acts[0].id, "todo-split-checklist");
+
+        assert!(is_external_ai_or_chat_app(Some("ChatGPT")));
+        let ai_ranked = store.rank_actions_for_context(&mixed_item, Some("ChatGPT"), raw_acts);
+        assert_eq!(ai_ranked[0].id, "redact-secrets");
+        assert_eq!(ai_ranked[0].title, "防泄密脱敏");
+        let _ = fs::remove_dir_all(tmp_store_dir);
+    }
 }

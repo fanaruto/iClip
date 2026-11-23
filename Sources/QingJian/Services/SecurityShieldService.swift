@@ -9,6 +9,7 @@ enum SensitiveSecretKind: String, Equatable {
     case privateKey
     case jwtToken
     case connectionSecret
+    case personalIdentity
 
     var shieldBadgeTitle: String {
         switch self {
@@ -16,6 +17,7 @@ enum SensitiveSecretKind: String, Equatable {
         case .privateKey: return "私钥保护"
         case .jwtToken: return "令牌保护"
         case .connectionSecret: return "凭据保护"
+        case .personalIdentity: return "隐私保护"
         }
     }
 }
@@ -203,6 +205,18 @@ enum SensitiveCredentialVeil {
     private static let bearerRegex = try! NSRegularExpression(
         pattern: #"(?i)\b(?:bearer|authorization\s*:\s*bearer)\s+[A-Za-z0-9._~+/=-]{20,}"#
     )
+    private static let idCardCandidateRegex = try! NSRegularExpression(
+        pattern: #"(?<![0-9A-Za-z])[1-8]\d{5}(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[0-9Xx](?![0-9A-Za-z])"#
+    )
+    private static let bankCardCandidateRegex = try! NSRegularExpression(
+        pattern: #"(?<![0-9A-Za-z])(?:62\d{14,17}|4\d{15}|5[1-5]\d{14}|3[47]\d{13})(?![0-9A-Za-z])"#
+    )
+    private static let pemBlockRegex = try! NSRegularExpression(
+        pattern: #"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----"#
+    )
+    private static let envSecretRegex = try! NSRegularExpression(
+        pattern: ##"(?im)^(\s*(?:export\s+)?[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY|AUTH_TOKEN|CLIENT_SECRET)[A-Z0-9_]*\s*[:=]\s*['"]?)([^\s'"#]{6,})(['"]?)"##
+    )
 
     /// 仅扫描首 2,048 UTF-8 字节，2MB 超大文本耗时 < 0.03ms
     static func classify(_ rawText: String) -> SensitiveSecretKind? {
@@ -221,7 +235,54 @@ enum SensitiveCredentialVeil {
         if connUriRegex.firstMatch(in: sample, range: nsRange) != nil || bearerRegex.firstMatch(in: sample, range: nsRange) != nil {
             return .connectionSecret
         }
+        for match in idCardCandidateRegex.matches(in: sample, range: nsRange) {
+            if let r = Range(match.range, in: sample), isValidChineseIDCard18(String(sample[r])) {
+                return .personalIdentity
+            }
+        }
+        for match in bankCardCandidateRegex.matches(in: sample, range: nsRange) {
+            if let r = Range(match.range, in: sample), isValidBankCardLuhn(String(sample[r])) {
+                return .personalIdentity
+            }
+        }
         return nil
+    }
+
+    /// GB 11643-1999 公民身份号码 18 位加权校验码精确核验（零误伤普通 18 位订单号）
+    static func isValidChineseIDCard18(_ code: String) -> Bool {
+        let bytes = Array(code.utf8)
+        guard bytes.count == 18 else { return false }
+        let weights = [7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2]
+        let mapping: [UInt8] = Array("10X98765432".utf8)
+        var sum = 0
+        for i in 0..<17 {
+            let b = bytes[i]
+            guard b >= 48 && b <= 57 else { return false }
+            sum += Int(b - 48) * weights[i]
+        }
+        let expected = mapping[sum % 11]
+        let last = (bytes[17] == UInt8(ascii: "x")) ? UInt8(ascii: "X") : bytes[17]
+        return last == expected
+    }
+
+    /// 银联/国际银行卡号 Luhn 模 10 校验核验（排除全重复数字与普通流水号）
+    static func isValidBankCardLuhn(_ digits: String) -> Bool {
+        let bytes = Array(digits.utf8)
+        guard (15...19).contains(bytes.count) else { return false }
+        guard bytes.allSatisfy({ $0 >= 48 && $0 <= 57 }) else { return false }
+        if Set(bytes).count <= 2 { return false }
+        var sum = 0
+        var shouldDouble = false
+        for b in bytes.reversed() {
+            var d = Int(b - 48)
+            if shouldDouble {
+                d *= 2
+                if d > 9 { d -= 9 }
+            }
+            sum += d
+            shouldDouble.toggle()
+        }
+        return sum % 10 == 0
     }
 
     /// 生成防肩窥雾化摘要（保留辨识头尾，中间替换为紧凑圆点，行数与视觉长度恒定零抖动）
@@ -243,6 +304,170 @@ enum SensitiveCredentialVeil {
         let head = String(singleLine.prefix(headCount))
         let tail = String(singleLine.suffix(tailCount))
         return "\(head)••••••••••••\(tail)"
+    }
+
+    /// 判断当前前台目标窗口是否为外部 AI 助手或公域聊天工具（外发粘贴时自动置顶防泄密脱敏胶囊）
+    static func isExternalAIOrChatApp(_ appName: String?) -> Bool {
+        guard let raw = appName?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !raw.isEmpty else { return false }
+        let markers = [
+            "chatgpt", "claude", "deepseek", "grok", "kimi", "豆包", "doubao",
+            "元宝", "yuanbao", "通义", "tongyi", "perplexity", "gemini", "poe", "ego",
+            "微信", "wechat", "weixin", "飞书", "feishu", "lark", "钉钉", "dingtalk",
+            "企业微信", "wecom", "qq", "slack", "discord", "telegram", "whatsapp"
+        ]
+        return markers.contains { raw.contains($0) }
+    }
+
+    /// 双角色共享：一键掩码文本中的高敏密钥、私钥、连接凭据与身份证/银行卡（保留代码与日志上下文）
+    static func redactForExternalSharing(_ rawText: String) -> String {
+        guard !rawText.isEmpty, rawText.utf8.count <= 131_072 else { return rawText }
+        var out = rawText
+        if out.contains("-----BEGIN ") && out.contains("PRIVATE KEY-----") {
+            let r = NSRange(out.startIndex..<out.endIndex, in: out)
+            out = pemBlockRegex.stringByReplacingMatches(
+                in: out,
+                range: r,
+                withTemplate: "-----BEGIN PRIVATE KEY-----\n[REDACTED_BY_iCLIP]\n-----END PRIVATE KEY-----"
+            )
+        }
+        out = apiKeyRegex.stringByReplacingMatches(
+            in: out,
+            range: NSRange(out.startIndex..<out.endIndex, in: out),
+            withTemplate: "[API_KEY_REDACTED]"
+        )
+        out = jwtRegex.stringByReplacingMatches(
+            in: out,
+            range: NSRange(out.startIndex..<out.endIndex, in: out),
+            withTemplate: "eyJ***JWT_REDACTED***"
+        )
+        if out.contains("://") {
+            let uriSecretRegex = try! NSRegularExpression(
+                pattern: #"(?i)\b((?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp)://[^:\s/]+:)([^@\s]{4,})(@)"#
+            )
+            out = uriSecretRegex.stringByReplacingMatches(
+                in: out,
+                range: NSRange(out.startIndex..<out.endIndex, in: out),
+                withTemplate: "$1***REDACTED***$3"
+            )
+        }
+        out = bearerRegex.stringByReplacingMatches(
+            in: out,
+            range: NSRange(out.startIndex..<out.endIndex, in: out),
+            withTemplate: "Bearer ***REDACTED***"
+        )
+        if out.contains("=") || out.contains(":") {
+            out = envSecretRegex.stringByReplacingMatches(
+                in: out,
+                range: NSRange(out.startIndex..<out.endIndex, in: out),
+                withTemplate: "$1***REDACTED***$3"
+            )
+        }
+        // 精确替换通过 GB 11643 校验的 18 位身份证与通过 Luhn 校验的银行卡号
+        let idMatches = idCardCandidateRegex.matches(in: out, range: NSRange(out.startIndex..<out.endIndex, in: out))
+        for m in idMatches.reversed() {
+            if let r = Range(m.range, in: out) {
+                let s = String(out[r])
+                if isValidChineseIDCard18(s) {
+                    let masked = "\(s.prefix(3))***********\(s.suffix(4))"
+                    out.replaceSubrange(r, with: masked)
+                }
+            }
+        }
+        let cardMatches = bankCardCandidateRegex.matches(in: out, range: NSRange(out.startIndex..<out.endIndex, in: out))
+        for m in cardMatches.reversed() {
+            if let r = Range(m.range, in: out) {
+                let s = String(out[r])
+                if isValidBankCardLuhn(s) {
+                    let masked = "\(s.prefix(4))********\(s.suffix(4))"
+                    out.replaceSubrange(r, with: masked)
+                }
+            }
+        }
+        return out
+    }
+}
+
+/// 2.5 外部链接跳转严格协议白名单守卫（仅放行 http/https 合法主机，彻底阻断 javascript:/file:/ms-msdt:/ssh: 等危险伪协议）
+enum OutboundLinkSafety {
+    static func validatedBrowserURL(from rawInput: String) -> URL? {
+        let raw = rawInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return nil }
+
+        // 优先从混合分享文案中提取已净化的 http/https 网页链接
+        if let cleaned = URLTrackingCleaner.extractFirstCleanedWebURL(from: raw),
+           let url = parseStrictHTTPURL(cleaned) {
+            return url
+        }
+
+        // 独立打开时严禁包含换行、回车、空字节等注入控制符
+        if raw.contains("\n") || raw.contains("\r") || raw.contains("\0") || raw.contains("\t") {
+            return nil
+        }
+
+        // 本地路径或 UNC 共享路径一律禁止当成浏览器 URL 打开
+        if raw.hasPrefix("/") || raw.hasPrefix("~") || raw.hasPrefix("\\") {
+            return nil
+        }
+        if raw.count >= 3 {
+            let chars = Array(raw.prefix(3))
+            if chars[0].isLetter && chars[1] == ":" && (chars[2] == "\\" || chars[2] == "/") {
+                return nil
+            }
+        }
+
+        // 情况 A：显式包含 `://` 协议分隔符 —— 仅允许 http:// 与 https://
+        if let range = raw.range(of: "://") {
+            let scheme = raw[..<range.lowerBound].lowercased()
+            guard scheme == "http" || scheme == "https" else {
+                return nil
+            }
+            return parseStrictHTTPURL(raw)
+        }
+
+        // 情况 B：不含 `://`，检查是否为无双斜杠伪协议（如 javascript:alert(1), data:..., ms-msdt:..., search-ms:..., mailto:...）
+        if let colonIdx = raw.firstIndex(of: ":") {
+            let prefix = raw[..<colonIdx]
+            let afterColon = raw[raw.index(after: colonIdx)...]
+            let isSchemeChars = !prefix.isEmpty && prefix.unicodeScalars.allSatisfy { sc in
+                let v = sc.value
+                return (v >= 65 && v <= 90) || (v >= 97 && v <= 122) || (v >= 48 && v <= 57) || v == 43 || v == 45 || v == 46
+            }
+            // 合法的裸 host:port（如 localhost:3000/api 或 127.0.0.1:8080）冒号后必紧跟 1~5 位纯数字端口
+            let portDigits = afterColon.prefix(while: { $0.isWholeNumber && $0.isASCII })
+            let afterPort = afterColon.dropFirst(portDigits.count)
+            let looksLikeHostPort = !portDigits.isEmpty && portDigits.count <= 5
+                && (afterPort.isEmpty || afterPort.hasPrefix("/") || afterPort.hasPrefix("?") || afterPort.hasPrefix("#"))
+            if isSchemeChars && !looksLikeHostPort {
+                return nil
+            }
+        }
+
+        // 情况 C：无协议头的裸域名或本地域名端口，安全补全 http:// 或 https://
+        let lower = raw.lowercased()
+        let isLocal = lower == "localhost"
+            || lower.hasPrefix("localhost:")
+            || lower.hasPrefix("localhost/")
+            || lower.hasPrefix("127.0.0.1")
+            || lower.hasPrefix("0.0.0.0")
+        let prefixed = (isLocal ? "http://" : "https://") + raw
+        return parseStrictHTTPURL(prefixed)
+    }
+
+    private static func parseStrictHTTPURL(_ candidate: String) -> URL? {
+        let urlOpt = URL(string: candidate)
+            ?? candidate.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed).flatMap(URL.init(string:))
+        guard let url = urlOpt,
+              let scheme = url.scheme?.lowercased(),
+              (scheme == "http" || scheme == "https"),
+              let host = url.host?.lowercased(),
+              !host.isEmpty else {
+            return nil
+        }
+        guard host == "localhost" || host.contains(".") else {
+            return nil
+        }
+        return url
     }
 }
 

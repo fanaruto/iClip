@@ -54,21 +54,21 @@ pub fn analyze_text_actions(raw: &str, minimal_mode: bool) -> Vec<QuickAction> {
         }
     }
 
-    #[cfg(feature = "dev")]
-    {
-        // Dev 1: 敏感凭据与内网隐私脱敏
-        if contains_sensitive_secret(inspect) {
-            let redacted = redact_secrets(raw);
-            if redacted != raw {
-                actions.push(QuickAction {
-                    id: "redact-secrets",
-                    title: "脱敏粘贴".to_string(),
-                    is_security: true,
-                    result_text: redacted.clone(),
-                    html_table_payload: None,
-                    toast_text: "已掩码敏感密钥并写入剪贴板".to_string(),
-                });
-            }
+    // 0.8 双角色共享：高敏密钥、连接凭据与身份证/银行卡一键防泄密脱敏
+    if contains_sensitive_secret(inspect) {
+        let redacted = redact_secrets(raw);
+        if redacted != raw {
+            actions.push(QuickAction {
+                id: "redact-secrets",
+                title: "脱敏粘贴".to_string(),
+                is_security: true,
+                result_text: redacted.clone(),
+                html_table_payload: None,
+                toast_text: "已掩码敏感凭据与隐私并写入剪贴板".to_string(),
+            });
+        }
+        #[cfg(feature = "dev")]
+        {
             let deep = redact_pii_and_private_ip(&redacted);
             if deep != redacted {
                 actions.push(QuickAction {
@@ -80,7 +80,12 @@ pub fn analyze_text_actions(raw: &str, minimal_mode: bool) -> Vec<QuickAction> {
                     toast_text: "已完成密钥 + 内网IP/邮箱/手机号全量脱敏".to_string(),
                 });
             }
-        } else if trimmed.len() >= 11 {
+        }
+    }
+
+    #[cfg(feature = "dev")]
+    {
+        if trimmed.len() >= 11 && !actions.iter().any(|a| a.id.starts_with("redact-")) {
             let pii = redact_pii_and_private_ip(raw);
             if pii != raw && actions.is_empty() {
                 actions.push(QuickAction {
@@ -1703,6 +1708,7 @@ pub fn redact_secrets(text: &str) -> String {
             .into_owned();
     }
 
+    out = crate::security::mask_verified_identity_and_cards(&out);
     out
 }
 

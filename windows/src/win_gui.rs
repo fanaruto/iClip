@@ -1950,8 +1950,9 @@ unsafe fn handle_clipboard_update(hwnd: HWND) {
                         st.last_copy_at_ms = now_ms;
 
                         if is_double_copy {
-                            let acts = st.store.rank_actions_for_item(
+                            let acts = st.store.rank_actions_for_context(
                                 &ClipItem::new_text(raw_text.clone(), source_app.clone()),
+                                st.active_target_app_name.as_deref(),
                                 analyze_text_actions(&raw_text, false),
                             );
                             if let Some(top_act) = acts.first() {
@@ -2038,14 +2039,18 @@ unsafe fn open_item_external_target(hwnd: HWND, store_idx: usize) {
     match item.kind {
         ClipContentType::Link | ClipContentType::Text => {
             let Some(raw) = &item.text else { return };
-            let url = if item.kind == ClipContentType::Link {
+            let candidate = if item.kind == ClipContentType::Link {
                 clean_tracking_url(raw.trim()).unwrap_or_else(|| raw.trim().to_string())
             } else if let Some(extracted) = extract_clean_share_url(raw) {
                 extracted
             } else {
                 return;
             };
-            let url_w = to_wide(&url);
+            let Some(safe_url) = iclip_core::security::sanitize_safe_browser_url(&candidate) else {
+                set_toast(hwnd, "已拦截非网页安全协议".to_string());
+                return;
+            };
+            let url_w = to_wide(&safe_url);
             let always_top = APP_STATE.with(|c| {
                 c.borrow()
                     .as_ref()
@@ -2069,7 +2074,8 @@ unsafe fn open_item_external_target(hwnd: HWND, store_idx: usize) {
         ClipContentType::File => {
             if let Some(first_path) = item.file_paths.as_ref().and_then(|p| p.first()) {
                 let explorer = to_wide("explorer.exe");
-                let param = to_wide(&format!("/select,\"{first_path}\""));
+                let safe_path = first_path.replace('"', "");
+                let param = to_wide(&format!("/select,\"{safe_path}\""));
                 let always_top = APP_STATE.with(|c| {
                     c.borrow()
                         .as_ref()
@@ -2092,18 +2098,22 @@ unsafe fn open_item_external_target(hwnd: HWND, store_idx: usize) {
         ClipContentType::Image => {
             let img_path = APP_STATE.with(|c| {
                 c.borrow().as_ref().and_then(|st| {
-                    item.image_file_name
-                        .as_ref()
-                        .map(|f| st.store.images_dir.join(f))
+                    item.image_file_name.as_ref().and_then(|f| {
+                        let clean_name = std::path::Path::new(f).file_name()?;
+                        let candidate = st.store.images_dir.join(clean_name);
+                        candidate.exists().then_some(candidate)
+                    })
                 })
             });
             if let Some(p) = img_path {
-                let pw = to_wide(&p.to_string_lossy());
+                let explorer = to_wide("explorer.exe");
+                let safe_path = p.to_string_lossy().replace('"', "");
+                let param = to_wide(&format!("/select,\"{safe_path}\""));
                 let _ = ShellExecuteW(
                     null_mut(),
                     op_open.as_ptr(),
-                    pw.as_ptr(),
-                    null(),
+                    explorer.as_ptr(),
+                    param.as_ptr(),
                     null(),
                     SW_SHOWNORMAL,
                 );
@@ -2114,7 +2124,12 @@ unsafe fn open_item_external_target(hwnd: HWND, store_idx: usize) {
 
 fn item_supports_external_jump(item: &ClipItem) -> bool {
     match item.kind {
-        ClipContentType::Link | ClipContentType::File => true,
+        ClipContentType::Link => item
+            .text
+            .as_deref()
+            .and_then(iclip_core::security::sanitize_safe_browser_url)
+            .is_some(),
+        ClipContentType::File => true,
         ClipContentType::Text => item
             .text
             .as_deref()
@@ -2122,6 +2137,7 @@ fn item_supports_external_jump(item: &ClipItem) -> bool {
                 let head = iclip_core::model::safe_utf8_prefix(t, 2048);
                 if head.contains("http://") || head.contains("https://") {
                     extract_clean_share_url(head)
+                        .and_then(|u| iclip_core::security::sanitize_safe_browser_url(&u))
                 } else {
                     None
                 }
@@ -4341,8 +4357,11 @@ fn layout_and_draw_main_view(
 
                     let quick_actions = if !minimal {
                         if let Some(raw) = &item.text {
-                            st.store
-                                .rank_actions_for_item(&item, analyze_text_actions(raw, false))
+                            st.store.rank_actions_for_context(
+                                &item,
+                                st.active_target_app_name.as_deref(),
+                                analyze_text_actions(raw, false),
+                            )
                         } else {
                             Vec::new()
                         }
@@ -4881,7 +4900,7 @@ fn layout_and_draw_main_view(
                             sub_parts.push(cat.title().to_string());
                         }
                     }
-                    sub_parts.push(item.subtitle_info());
+                    sub_parts.push(item.subtitle_info_veiled(veil_on));
                     if let Some(app) = &item.source_app_name {
                         if !app.is_empty() {
                             sub_parts.push(app.clone());
@@ -7590,8 +7609,9 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32) {
                         if let Some(raw) = &st.store.items[idx].text {
                             top_act = st
                                 .store
-                                .rank_actions_for_item(
+                                .rank_actions_for_context(
                                     &st.store.items[idx],
+                                    st.active_target_app_name.as_deref(),
                                     analyze_text_actions(raw, false),
                                 )
                                 .into_iter()
@@ -7895,8 +7915,9 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32) {
                         if let Some(raw) = &st.store.items[idx].text {
                             first_quick_action = st
                                 .store
-                                .rank_actions_for_item(
+                                .rank_actions_for_context(
                                     &st.store.items[idx],
+                                    st.active_target_app_name.as_deref(),
                                     analyze_text_actions(raw, false),
                                 )
                                 .into_iter()

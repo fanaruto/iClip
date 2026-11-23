@@ -165,6 +165,7 @@ final class CursorDropPodController {
         let size = dualImageMode ? dualPodSize : singlePodSize
         ensurePanel(size: size)
         guard let panel, let dropReceiver else { return }
+        panel.sharingType = (ClipboardStore.shared.screenSharePrivacyEnabled && !ProcessInfo.processInfo.arguments.contains("--demo")) ? .none : .readOnly
 
         hideWorkItem?.cancel()
         didCompleteDropInCurrentDrag = false
@@ -232,6 +233,7 @@ final class CursorDropPodController {
         p.hasShadow = true
         p.hidesOnDeactivate = false
         p.isMovable = false
+        p.sharingType = (ClipboardStore.shared.screenSharePrivacyEnabled && !ProcessInfo.processInfo.arguments.contains("--demo")) ? .none : .readOnly
 
         let swiftUIView = CursorDropPodView(viewModel: viewModel)
         let hosting = NSHostingView(rootView: swiftUIView)

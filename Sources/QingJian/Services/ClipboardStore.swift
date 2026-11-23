@@ -1773,32 +1773,10 @@ final class ClipboardStore: ObservableObject {
         }
     }
 
-    /// 解析链接条目的可访问 URL（兼容含中文未转义路径及省略协议头的本地域名）
+    /// 解析链接条目的安全可访问网页 URL（严格锁定 http/https 白名单，拦截一切非网页危险伪协议）
     func resolvedBrowserURL(for item: ClipItem) -> URL? {
         let raw = (item.text ?? item.primaryTitle).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !raw.isEmpty else { return nil }
-        if let cleaned = URLTrackingCleaner.extractFirstCleanedWebURL(from: raw),
-           let cleanedURL = URL(string: cleaned) ?? cleaned.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed).flatMap(URL.init(string:)) {
-            return cleanedURL
-        }
-        if let direct = URL(string: raw), direct.scheme != nil {
-            return direct
-        }
-        if let encoded = raw.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed),
-           let encodedURL = URL(string: encoded),
-           encodedURL.scheme != nil {
-            return encodedURL
-        }
-        let lower = raw.lowercased()
-        let isLocal = lower.hasPrefix("localhost") || lower.hasPrefix("127.0.0.1") || lower.hasPrefix("0.0.0.0")
-        let prefixed = (isLocal ? "http://" : "https://") + raw
-        if let url = URL(string: prefixed) {
-            return url
-        }
-        if let encoded = prefixed.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) {
-            return URL(string: encoded)
-        }
-        return nil
+        return OutboundLinkSafety.validatedBrowserURL(from: raw)
     }
 
     /// 点击链接卡片左侧徽标或悬停打开按钮：触发跃迁声触反馈并强制激活默认浏览器前台打开链接
@@ -2226,18 +2204,57 @@ final class ClipboardStore: ObservableObject {
     #if !ICLIP_EDITION_FLOW
     func semanticSnapshot(for item: ClipItem) -> SemanticSnapshot {
         guard !minimalModeEnabled, (item.type == .text || item.type == .link) else { return .empty }
-        let cacheKey = "\(item.contentHash)|\(item.sourceAppName ?? "")" as NSString
+        let isExternalAI = SensitiveCredentialVeil.isExternalAIOrChatApp(activeTargetAppName)
+        let cacheKey = "\(item.contentHash)|\(item.sourceAppName ?? "")|\(isExternalAI ? "ext" : "std")" as NSString
         if let cached = semanticCache.object(forKey: cacheKey) {
             return cached.snapshot
         }
         let analyzed = SemanticEngine.analyze(item)
-        let rankedActions = AdaptiveIntelligenceEngine.shared.rankActions(
-            analyzed.actions,
+        var baseActions = analyzed.actions
+        var resolvedKind = analyzed.primaryKind
+
+        // 兜底身份证/银行卡等高敏凭据的通用脱敏胶囊
+        if let raw = item.text, item.detectedSensitiveKind != nil,
+           !baseActions.contains(where: { $0.id.hasPrefix("redact-") }) {
+            let redacted = SensitiveCredentialVeil.redactForExternalSharing(raw)
+            if redacted != raw {
+                if resolvedKind == nil { resolvedKind = .sensitiveSecret }
+                baseActions.insert(
+                    TransformAction(
+                        id: "redact-secrets",
+                        title: isExternalAI ? "防泄密脱敏" : "脱敏粘贴",
+                        symbolName: "lock.shield",
+                        isSecurityAction: true,
+                        resultText: redacted,
+                        toastText: "已自动掩码敏感凭据与隐私后键入"
+                    ),
+                    at: 0
+                )
+            }
+        }
+
+        var rankedActions = AdaptiveIntelligenceEngine.shared.rankActions(
+            baseActions,
             idOf: \.id,
             sourceApp: item.sourceAppName
         )
+
+        // 外发 AI 助手 / 公域聊天软件防泄密护航：自动将安全脱敏胶囊提升为 #1 首选动作（⇧↵ 一键脱敏直发）
+        if isExternalAI, let secIdx = rankedActions.firstIndex(where: { $0.isSecurityAction || $0.id.hasPrefix("redact-") }) {
+            let sec = rankedActions.remove(at: secIdx)
+            let upgraded = TransformAction(
+                id: sec.id,
+                title: sec.id == "redact-secrets" ? "防泄密脱敏" : sec.title,
+                symbolName: sec.symbolName,
+                isSecurityAction: true,
+                resultText: sec.resultText,
+                toastText: sec.toastText
+            )
+            rankedActions.insert(upgraded, at: 0)
+        }
+
         let personalized = SemanticSnapshot(
-            primaryKind: analyzed.primaryKind,
+            primaryKind: resolvedKind,
             parsedColorRGBA: analyzed.parsedColorRGBA,
             actions: rankedActions
         )
@@ -2861,7 +2878,8 @@ final class ClipboardStore: ObservableObject {
     #if ICLIP_EDITION_FLOW
     func financeActions(for item: ClipItem) -> [FinanceQuickAction] {
         guard !minimalModeEnabled, item.type == .text, let raw = item.text else { return [] }
-        let cacheKey = "\(item.contentHash)|\(item.sourceAppName ?? "")" as NSString
+        let isExternalAI = SensitiveCredentialVeil.isExternalAIOrChatApp(activeTargetAppName)
+        let cacheKey = "\(item.contentHash)|\(item.sourceAppName ?? "")|\(isExternalAI ? "ext" : "std")" as NSString
         if let cached = financeCache.object(forKey: cacheKey) {
             return cached.actions
         }
@@ -2878,6 +2896,21 @@ final class ClipboardStore: ObservableObject {
         if analyzed.isEmpty {
             analyzed = DocumentTypographyEngine.analyze(raw)
         }
+        if item.detectedSensitiveKind != nil {
+            let redacted = SensitiveCredentialVeil.redactForExternalSharing(raw)
+            if redacted != raw {
+                analyzed.insert(
+                    FinanceQuickAction(
+                        id: "redact-secrets",
+                        title: isExternalAI ? "防泄密脱敏" : "脱敏粘贴",
+                        symbolName: "lock.shield",
+                        resultText: redacted,
+                        toastText: "已自动掩码密钥与敏感隐私"
+                    ),
+                    at: 0
+                )
+            }
+        }
         if !item.isTodo {
             let checklist = TodoChecklistExtractor.extractChecklistItems(from: raw)
             if checklist.count >= 2 {
@@ -2893,11 +2926,15 @@ final class ClipboardStore: ObservableObject {
                 )
             }
         }
-        let ranked = AdaptiveIntelligenceEngine.shared.rankActions(
+        var ranked = AdaptiveIntelligenceEngine.shared.rankActions(
             analyzed,
             idOf: \.id,
             sourceApp: item.sourceAppName
         )
+        if isExternalAI, let secIdx = ranked.firstIndex(where: { $0.id == "redact-secrets" }) {
+            let sec = ranked.remove(at: secIdx)
+            ranked.insert(sec, at: 0)
+        }
         financeCache.setObject(FinanceActionsBox(ranked), forKey: cacheKey)
         return ranked
     }

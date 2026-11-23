@@ -830,28 +830,52 @@ impl ClipboardStore {
     pub fn rank_actions_for_item(
         &self,
         item: &ClipItem,
+        actions: Vec<QuickAction>,
+    ) -> Vec<QuickAction> {
+        self.rank_actions_for_context(item, None, actions)
+    }
+
+    pub fn rank_actions_for_context(
+        &self,
+        item: &ClipItem,
+        target_app: Option<&str>,
         mut actions: Vec<QuickAction>,
     ) -> Vec<QuickAction> {
-        if actions.len() <= 1 || self.config.minimal_mode_enabled {
+        if actions.is_empty() || self.config.minimal_mode_enabled {
             return actions;
         }
-        let app_key = item
-            .source_app_name
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or("_global_");
-        let preferred = self
-            .memory
-            .action_habits
-            .get(app_key)
-            .or_else(|| self.memory.action_habits.get("_global_"));
-        if let Some(pref_id) = preferred {
-            if let Some(pos) = actions.iter().position(|a| a.id == pref_id.as_str()) {
-                if pos > 0 {
-                    let act = actions.remove(pos);
-                    actions.insert(0, act);
+        if actions.len() > 1 {
+            let app_key = item
+                .source_app_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("_global_");
+            let preferred = self
+                .memory
+                .action_habits
+                .get(app_key)
+                .or_else(|| self.memory.action_habits.get("_global_"));
+            if let Some(pref_id) = preferred {
+                if let Some(pos) = actions.iter().position(|a| a.id == pref_id.as_str()) {
+                    if pos > 0 {
+                        let act = actions.remove(pos);
+                        actions.insert(0, act);
+                    }
                 }
+            }
+        }
+        // 外发 AI 助手 / 公域聊天软件防泄密护航：自动将安全脱敏胶囊置顶为 #1 首选动作（Shift+Enter 直发）
+        if crate::security::is_external_ai_or_chat_app(target_app) {
+            if let Some(sec_pos) = actions
+                .iter()
+                .position(|a| a.is_security || a.id.starts_with("redact-"))
+            {
+                let mut sec = actions.remove(sec_pos);
+                if sec.id == "redact-secrets" {
+                    sec.title = "防泄密脱敏".to_string();
+                }
+                actions.insert(0, sec);
             }
         }
         actions

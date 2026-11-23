@@ -134,7 +134,7 @@ struct ClipCardView: View {
                             Text("·")
                         }
 
-                        Text(item.subtitleInfo)
+                        Text(item.subtitleInfo(veilActive: veilOn))
                             .lineLimit(1)
                             .truncationMode(.middle)
 
@@ -886,9 +886,14 @@ struct ClipCardView: View {
                                         : (kind == .sensitiveSecret ? Color.orange : Color.accentColor)
                                 )
                             Text("·")
+                        } else if !item.isBurnAfterPaste, let secKind = item.detectedSensitiveKind {
+                            Text(secKind.shieldBadgeTitle)
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.orange)
+                            Text("·")
                         }
 
-                        Text(item.subtitleInfo)
+                        Text(item.subtitleInfo(veilActive: veilOn))
                             .lineLimit(1)
                             .truncationMode(.middle)
 

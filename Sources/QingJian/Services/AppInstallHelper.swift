@@ -93,12 +93,13 @@ enum AppInstallHelper {
         codesign --force --deep --identifier com.qingjian.clipboard --sign - \(qDest) >/dev/null 2>&1 || true
         /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f \(qDest) >/dev/null 2>&1 || true
         open -n \(qDest)
+        rm -f "$0"
         """
 
         let tmpScript = fm.temporaryDirectory.appendingPathComponent("iclip-move-\(UUID().uuidString).sh")
         do {
             try script.write(to: tmpScript, atomically: true, encoding: .utf8)
-            try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tmpScript.path)
+            try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: tmpScript.path)
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: "/bin/zsh")
             proc.arguments = ["-c", "nohup \(shellQuote(tmpScript.path)) >/dev/null 2>&1 &"]

@@ -3,9 +3,11 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 pub const VAULT_MAGIC: &[u8; 8] = b"ICLPWIN1";
+static NONCE_SEQ: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SensitiveSecretKind {
@@ -13,6 +15,7 @@ pub enum SensitiveSecretKind {
     PrivateKey,
     JwtToken,
     ConnectionSecret,
+    PersonalIdentity,
 }
 
 impl SensitiveSecretKind {
@@ -22,6 +25,7 @@ impl SensitiveSecretKind {
             Self::PrivateKey => "私钥保护",
             Self::JwtToken => "令牌保护",
             Self::ConnectionSecret => "凭据保护",
+            Self::PersonalIdentity => "隐私保护",
         }
     }
 }
@@ -135,7 +139,30 @@ mod win_dpapi {
     }
 }
 
+fn fill_os_csprng(buf: &mut [u8; 32]) {
+    #[cfg(target_os = "windows")]
+    {
+        #[link(name = "advapi32")]
+        extern "system" {
+            fn SystemFunction036(random_buffer: *mut u8, random_buffer_length: u32) -> u8;
+        }
+        unsafe {
+            let _ = SystemFunction036(buf.as_mut_ptr(), buf.len() as u32);
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        if let Ok(mut f) = fs::File::open("/dev/urandom") {
+            let _ = f.read_exact(buf);
+        }
+    }
+}
+
 fn generate_entropy_32(seed_hint: &Path) -> [u8; 32] {
+    let mut os_rand = [0u8; 32];
+    fill_os_csprng(&mut os_rand);
+    let seq = NONCE_SEQ.fetch_add(1, Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -143,7 +170,9 @@ fn generate_entropy_32(seed_hint: &Path) -> [u8; 32] {
     let pid = std::process::id();
     let addr = seed_hint as *const Path as *const u8 as usize;
     let mut h = Sha256::new();
-    h.update(b"iclip-vault-entropy-v1|");
+    h.update(b"iclip-vault-entropy-v2|");
+    h.update(os_rand);
+    h.update(seq.to_le_bytes());
     h.update(nanos.to_le_bytes());
     h.update(pid.to_le_bytes());
     h.update(addr.to_le_bytes());
@@ -348,7 +377,294 @@ pub fn classify_sensitive_text(raw: &str) -> Option<SensitiveSecretKind> {
         return Some(SensitiveSecretKind::ConnectionSecret);
     }
 
+    if contains_verified_identity_or_card(sample) {
+        return Some(SensitiveSecretKind::PersonalIdentity);
+    }
+
     None
+}
+
+/// GB 11643-1999 18 位二代身份证加权模 11 校验核验（零误伤普通 18 位订单号）
+pub fn is_valid_chinese_id_card_18(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.len() != 18 || !(b'1'..=b'8').contains(&b[0]) {
+        return false;
+    }
+    for &c in &b[0..17] {
+        if !c.is_ascii_digit() {
+            return false;
+        }
+    }
+    let year = (b[6] - b'0') as u32 * 1000
+        + (b[7] - b'0') as u32 * 100
+        + (b[8] - b'0') as u32 * 10
+        + (b[9] - b'0') as u32;
+    let month = (b[10] - b'0') * 10 + (b[11] - b'0');
+    let day = (b[12] - b'0') * 10 + (b[13] - b'0');
+    if !(1900..=2099).contains(&year) || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return false;
+    }
+    const WEIGHTS: [u32; 17] = [7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2];
+    const MAP: [u8; 11] = *b"10X98765432";
+    let mut sum = 0u32;
+    for i in 0..17 {
+        sum += (b[i] - b'0') as u32 * WEIGHTS[i];
+    }
+    let expected = MAP[(sum % 11) as usize];
+    let last = b[17].to_ascii_uppercase();
+    last == expected
+}
+
+/// 银联 / Visa / MasterCard / Amex 银行卡号 BIN 前缀 + Luhn 模 10 校验核验
+pub fn is_valid_bank_card_luhn(s: &str) -> bool {
+    let b = s.as_bytes();
+    if !(15..=19).contains(&b.len()) || !b.iter().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    let bin_ok = match b.len() {
+        15 => b.starts_with(b"34") || b.starts_with(b"37"),
+        16 => b.starts_with(b"62") || b[0] == b'4' || (b'1'..=b'5').contains(&b[1]) && b[0] == b'5',
+        17..=19 => b.starts_with(b"62"),
+        _ => false,
+    };
+    if !bin_ok {
+        return false;
+    }
+    let first = b[0];
+    if b.iter().all(|&c| c == first) {
+        return false;
+    }
+    let mut sum = 0u32;
+    let mut double = false;
+    for &c in b.iter().rev() {
+        let mut d = (c - b'0') as u32;
+        if double {
+            d *= 2;
+            if d > 9 {
+                d -= 9;
+            }
+        }
+        sum += d;
+        double = !double;
+    }
+    sum % 10 == 0
+}
+
+pub fn contains_verified_identity_or_card(sample: &str) -> bool {
+    let bytes = sample.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_digit() {
+            let prev_alnum = i > 0 && bytes[i - 1].is_ascii_alphanumeric();
+            let mut end = i + 1;
+            while end < bytes.len()
+                && (bytes[end].is_ascii_digit()
+                    || ((end - i) == 17 && (bytes[end] == b'X' || bytes[end] == b'x')))
+            {
+                end += 1;
+            }
+            let next_alnum = end < bytes.len() && bytes[end].is_ascii_alphanumeric();
+            if !prev_alnum && !next_alnum {
+                let tok = &sample[i..end];
+                if (tok.len() == 18 && is_valid_chinese_id_card_18(tok))
+                    || ((15..=19).contains(&tok.len()) && is_valid_bank_card_luhn(tok))
+                {
+                    return true;
+                }
+            }
+            i = end;
+        } else {
+            i += 1;
+        }
+    }
+    false
+}
+
+/// 精准掩码文本中通过校验位的 18 位身份证与银行卡号（保留首尾辨识位，零误伤普通数字串）
+pub fn mask_verified_identity_and_cards(text: &str) -> String {
+    if !contains_verified_identity_or_card(text) {
+        return text.to_string();
+    }
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut last_copied = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_digit() {
+            let prev_alnum = i > 0 && bytes[i - 1].is_ascii_alphanumeric();
+            let mut end = i + 1;
+            while end < bytes.len()
+                && (bytes[end].is_ascii_digit()
+                    || ((end - i) == 17 && (bytes[end] == b'X' || bytes[end] == b'x')))
+            {
+                end += 1;
+            }
+            let next_alnum = end < bytes.len() && bytes[end].is_ascii_alphanumeric();
+            if !prev_alnum && !next_alnum {
+                let tok = &text[i..end];
+                if tok.len() == 18 && is_valid_chinese_id_card_18(tok) {
+                    out.push_str(&text[last_copied..i]);
+                    out.push_str(&tok[..3]);
+                    out.push_str("***********");
+                    out.push_str(&tok[14..]);
+                    last_copied = end;
+                } else if (15..=19).contains(&tok.len()) && is_valid_bank_card_luhn(tok) {
+                    out.push_str(&text[last_copied..i]);
+                    out.push_str(&tok[..4]);
+                    out.push_str("********");
+                    out.push_str(&tok[tok.len() - 4..]);
+                    last_copied = end;
+                }
+            }
+            i = end;
+        } else {
+            i += 1;
+        }
+    }
+    out.push_str(&text[last_copied..]);
+    out
+}
+
+/// 判断目标窗口是否为外部公域 AI 助手或聊天工具（外发粘贴时自动置顶防泄密脱敏胶囊）
+pub fn is_external_ai_or_chat_app(app_name: Option<&str>) -> bool {
+    let Some(raw) = app_name.map(str::trim).filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    let lower = raw.to_lowercase();
+    const MARKERS: &[&str] = &[
+        "chatgpt",
+        "claude",
+        "deepseek",
+        "grok",
+        "kimi",
+        "豆包",
+        "doubao",
+        "元宝",
+        "yuanbao",
+        "通义",
+        "tongyi",
+        "perplexity",
+        "gemini",
+        "poe",
+        "ego",
+        "微信",
+        "wechat",
+        "weixin",
+        "飞书",
+        "feishu",
+        "lark",
+        "钉钉",
+        "dingtalk",
+        "企业微信",
+        "wecom",
+        "qq",
+        "slack",
+        "discord",
+        "telegram",
+        "whatsapp",
+    ];
+    MARKERS.iter().any(|m| lower.contains(m))
+}
+
+/// 严格网页浏览器跳转 URL 协议白名单校验（仅放行合法的 http:// 与 https:// 主机，拦截 javascript:/file:/ms-msdt:/UNC/本地路径）
+pub fn sanitize_safe_browser_url(raw_input: &str) -> Option<String> {
+    let raw = raw_input.trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    // 控制符、空白或命令行引号一律拒绝，防止 ShellExecute 参数欺骗
+    if raw
+        .chars()
+        .any(|c| c.is_control() || c == ' ' || c == '"' || c == '<' || c == '>')
+    {
+        return None;
+    }
+
+    // 拒绝本地文件路径与 UNC 共享路径
+    if raw.starts_with('/') || raw.starts_with('~') || raw.starts_with('\\') {
+        return None;
+    }
+    let bytes = raw.as_bytes();
+    if bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+    {
+        return None;
+    }
+
+    let normalized = if let Some((scheme, _rest)) = raw.split_once("://") {
+        let sc = scheme.to_ascii_lowercase();
+        if sc != "http" && sc != "https" {
+            return None;
+        }
+        if let Some(clean) = crate::engines::clean_tracking_url(raw) {
+            clean
+        } else {
+            raw.to_string()
+        }
+    } else {
+        // 检查无双斜杠伪协议（如 javascript:alert(1), ms-msdt:id=..., search-ms:query=..., data:..., mailto:...）
+        if let Some((prefix, after_colon)) = raw.split_once(':') {
+            let is_scheme_chars = !prefix.is_empty()
+                && prefix
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'-' || b == b'.');
+            let port_digits_len = after_colon
+                .bytes()
+                .take_while(|b| b.is_ascii_digit())
+                .count();
+            let after_port = &after_colon[port_digits_len..];
+            let looks_like_host_port = (1..=5).contains(&port_digits_len)
+                && (after_port.is_empty()
+                    || after_port.starts_with('/')
+                    || after_port.starts_with('?')
+                    || after_port.starts_with('#'));
+            if is_scheme_chars && !looks_like_host_port {
+                return None;
+            }
+        }
+        let lower = raw.to_ascii_lowercase();
+        let is_local = lower == "localhost"
+            || lower.starts_with("localhost:")
+            || lower.starts_with("localhost/")
+            || lower.starts_with("127.0.0.1")
+            || lower.starts_with("0.0.0.0");
+        let prefixed = format!("{}{raw}", if is_local { "http://" } else { "https://" });
+        crate::engines::clean_tracking_url(&prefixed).unwrap_or(prefixed)
+    };
+
+    let after_scheme = normalized
+        .strip_prefix("https://")
+        .or_else(|| normalized.strip_prefix("http://"))
+        .or_else(|| {
+            let lower = normalized.to_ascii_lowercase();
+            if lower.starts_with("https://") {
+                Some(&normalized[8..])
+            } else if lower.starts_with("http://") {
+                Some(&normalized[7..])
+            } else {
+                None
+            }
+        })?;
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .trim();
+    if authority.is_empty() || authority.contains('@') {
+        return None;
+    }
+    let host = authority
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if host.is_empty() || (host != "localhost" && !host.contains('.')) {
+        return None;
+    }
+    Some(normalized)
 }
 
 pub fn veiled_sensitive_preview(raw: &str) -> String {

@@ -322,9 +322,16 @@ struct ClipItem: Identifiable, Codable, Equatable {
         }
     }
 
-    /// 辅助信息（基于 Swift 原生 String O(1) utf8.count 门控，彻底消除百万字符遍历）
+    /// 辅助信息（支持防肩窥遮罩：当备注卡片处于未选中/未悬停隐私态时，绝不在副标题泄露明文密钥）
     var subtitleInfo: String {
+        subtitleInfo(veilActive: false)
+    }
+
+    func subtitleInfo(veilActive: Bool) -> String {
         if let alias = customAlias?.trimmingCharacters(in: .whitespacesAndNewlines), !alias.isEmpty {
+            if veilActive, let raw = text, detectedSensitiveKind != nil {
+                return SensitiveCredentialVeil.veiledPreview(for: raw)
+            }
             let preview = rawContentPreview.replacingOccurrences(of: "\n", with: " ")
             return preview.count > 28 ? String(preview.prefix(28)) + "…" : preview
         }
@@ -558,6 +565,10 @@ enum EpisodicQueryMatcher {
             return item.isTodoCompleted
         case "二维码", "qrcode", "@qr":
             return !(item.qrCodePayload?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        case "敏感", "@敏感", "@密钥", "@隐私", "@secret", "secret":
+            return item.detectedSensitiveKind != nil || item.isBurnAfterPaste
+        case "即焚", "@即焚", "@burn", "burn":
+            return item.isBurnAfterPaste
         case "今天", "今日", "today", "@today":
             let start = startOfToday(for: now)
             let ts = item.createdAt.timeIntervalSince1970
@@ -584,7 +595,9 @@ enum EpisodicQueryMatcher {
              "昨天", "昨日", "yesterday", "@yesterday",
              "刚刚", "1h", "1小时", "@1h",
              "本周", "一周", "7d", "week", "@7d", "@week",
-             "二维码", "qrcode", "@qr":
+             "二维码", "qrcode", "@qr",
+             "敏感", "@敏感", "@密钥", "@隐私", "@secret", "secret",
+             "即焚", "@即焚", "@burn", "burn":
             return true
         default:
             return false

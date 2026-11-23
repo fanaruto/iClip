@@ -1907,4 +1907,70 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertEqual(csvSum.importedNewCount, 2)
         XCTAssertEqual(csvMerged.count, 4)
     }
+
+    // MARK: - 41. 红队安全闭环回归（备注副标题防泄密、外部 URL 协议白名单、身份证/银行卡校验遮罩、外发 AI 防泄密置顶与 @敏感 快筛）
+
+    @MainActor
+    func testRedTeamSubtitleVeilURLProtocolGuardAndAIOutboundRedaction() throws {
+        // 1. 备注名卡片副标题防泄密：开启遮罩时既保留用户备注标题，又把副标题中的明文密钥雾化遮罩
+        let secretRaw = "sk-proj-RedTeamLeakCheck9876543210XyZ1"
+        let aliasedSecret = ClipItem(
+            type: .text,
+            text: secretRaw,
+            contentHash: "text:rt-alias",
+            customAlias: "主站 OpenAI 生产密钥"
+        )
+        XCTAssertEqual(aliasedSecret.displayTitle(minimalMode: false, veilActive: true), "主站 OpenAI 生产密钥")
+        let veiledSub = aliasedSecret.subtitleInfo(veilActive: true)
+        XCTAssertTrue(veiledSub.contains("••••••••••••"))
+        XCTAssertFalse(veiledSub.contains("RedTeamLeakCheck"))
+        XCTAssertTrue(aliasedSecret.subtitleInfo(veilActive: false).contains("sk-proj-"))
+
+        // 2. 外部浏览器跳转严格 http/https 白名单：拦截危险伪协议，保留合法网页与 localhost:port
+        XCTAssertNil(OutboundLinkSafety.validatedBrowserURL(from: "javascript:alert(document.cookie)"))
+        XCTAssertNil(OutboundLinkSafety.validatedBrowserURL(from: "file:///etc/passwd"))
+        XCTAssertNil(OutboundLinkSafety.validatedBrowserURL(from: "ms-msdt:id=PCWDiagnostic"))
+        XCTAssertNil(OutboundLinkSafety.validatedBrowserURL(from: "search-ms:query=secret"))
+        XCTAssertNil(OutboundLinkSafety.validatedBrowserURL(from: "ssh://root@10.0.0.1"))
+        XCTAssertNil(OutboundLinkSafety.validatedBrowserURL(from: "/Users/fanaruto/.ssh/id_ed25519"))
+        XCTAssertEqual(
+            OutboundLinkSafety.validatedBrowserURL(from: "localhost:5173/dashboard")?.absoluteString,
+            "http://localhost:5173/dashboard"
+        )
+        XCTAssertEqual(
+            OutboundLinkSafety.validatedBrowserURL(from: "app.webfooo.com/iClip")?.absoluteString,
+            "https://app.webfooo.com/iClip"
+        )
+
+        // 3. 18 位身份证（GB 11643 校验位）与银行卡（Luhn 校验）防肩窥遮罩（零误伤普通 18 位错位订单号）
+        let validIDItem = ClipItem(type: .text, text: "报销人身份证：110101199003077758", contentHash: "text:id-ok")
+        XCTAssertEqual(validIDItem.detectedSensitiveKind, .personalIdentity)
+        let fakeOrderItem = ClipItem(type: .text, text: "订单流水号：110101199003077759", contentHash: "text:id-fake")
+        XCTAssertNil(fakeOrderItem.detectedSensitiveKind)
+
+        let validCardItem = ClipItem(type: .text, text: "打款卡号 6222021234567894", contentHash: "text:card-ok")
+        XCTAssertEqual(validCardItem.detectedSensitiveKind, .personalIdentity)
+        let redactedMix = SensitiveCredentialVeil.redactForExternalSharing(
+            "请核对：身份证 110101199003077758，卡号 6222021234567894，Key=sk-proj-AbCdEfGhIjKlMnOpQrStUv1234"
+        )
+        XCTAssertFalse(redactedMix.contains("110101199003077758"))
+        XCTAssertFalse(redactedMix.contains("6222021234567894"))
+        XCTAssertFalse(redactedMix.contains("AbCdEfGhIjKlMnOpQrStUv1234"))
+        XCTAssertTrue(redactedMix.contains("110***********7758"))
+        XCTAssertTrue(redactedMix.contains("6222********7894"))
+
+        // 4. `@敏感` / `@即焚` 1 秒安全盘点快筛与外部 AI 窗口自动置顶防泄密脱敏
+        var burnNormal = ClipItem(type: .text, text: "一次性内部口令 9527", contentHash: "text:burn1", burnAfterPaste: true)
+        XCTAssertTrue(validIDItem.matches(query: "@敏感"))
+        XCTAssertTrue(aliasedSecret.matches(query: "@secret"))
+        XCTAssertFalse(fakeOrderItem.matches(query: "@敏感"))
+        XCTAssertTrue(burnNormal.matches(query: "@即焚"))
+        XCTAssertTrue(burnNormal.matches(query: "@敏感"))
+        burnNormal.burnAfterPaste = false
+        XCTAssertFalse(burnNormal.matches(query: "@即焚"))
+
+        XCTAssertTrue(SensitiveCredentialVeil.isExternalAIOrChatApp("ChatGPT"))
+        XCTAssertTrue(SensitiveCredentialVeil.isExternalAIOrChatApp("微信"))
+        XCTAssertFalse(SensitiveCredentialVeil.isExternalAIOrChatApp("Ghostty"))
+    }
 }
