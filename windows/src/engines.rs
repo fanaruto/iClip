@@ -82,6 +82,28 @@ pub fn analyze_text_actions(raw: &str, minimal_mode: bool) -> Vec<QuickAction> {
         }
     }
 
+    // 0.2 双角色共享：离线 2FA TOTP 动态验证码实时直出（`otpauth://totp/...`）
+    if trimmed.len() <= 2048 {
+        if let Some(totp) =
+            crate::security::evaluate_totp_uri(trimmed, crate::model::now_unix_secs())
+        {
+            actions.push(QuickAction {
+                id: "totp-live-code",
+                title: format!(
+                    "动态码 {} · {}s",
+                    totp.formatted_code, totp.remaining_seconds
+                ),
+                is_security: false,
+                result_text: totp.code,
+                html_table_payload: None,
+                toast_text: format!(
+                    "已算出 2FA 动态码 {}（30s后自动擦除剪贴板）",
+                    totp.formatted_code
+                ),
+            });
+        }
+    }
+
     // 0.8 双角色共享：高敏密钥、连接凭据与身份证/银行卡一键防泄密脱敏
     if contains_sensitive_secret(inspect) {
         let redacted = redact_secrets(raw);
@@ -93,6 +115,16 @@ pub fn analyze_text_actions(raw: &str, minimal_mode: bool) -> Vec<QuickAction> {
                 result_text: redacted.clone(),
                 html_table_payload: None,
                 toast_text: "已掩码敏感凭据与隐私并写入剪贴板".to_string(),
+            });
+        }
+        if let Some(env_example) = crate::security::generate_env_example_template(raw) {
+            actions.push(QuickAction {
+                id: "env-to-example",
+                title: "生成 .env.example".to_string(),
+                is_security: true,
+                result_text: env_example,
+                html_table_payload: None,
+                toast_text: "已生成安全的 .env.example 净模板".to_string(),
             });
         }
         #[cfg(feature = "dev")]
@@ -1690,7 +1722,7 @@ fn join_fragments(lhs: &str, rhs: &str) -> String {
 // ============================================================================
 
 pub fn contains_sensitive_secret(text: &str) -> bool {
-    if text.contains("-----BEGIN ") && text.contains("PRIVATE KEY-----") {
+    if crate::security::classify_sensitive_text(text).is_some() {
         return true;
     }
     redact_secrets(text) != text
@@ -1726,6 +1758,18 @@ pub fn redact_secrets(text: &str) -> String {
         out = webhook_re
             .replace_all(&out, "${1}***WEBHOOK_REDACTED***")
             .into_owned();
+        if out.to_ascii_lowercase().contains("otpauth") {
+            let otp_re = Regex::new(r##"(?i)([?&](?:secret|data)=)([^&\s#'"]+)"##).unwrap();
+            out = otp_re
+                .replace_all(&out, "${1}***2FA_SECRET_REDACTED***")
+                .into_owned();
+        }
+    }
+    if out.to_ascii_uppercase().contains("WIFI:") {
+        let wifi_re = Regex::new(r"(?i)(WIFI:(?:[^;\r\n]*;)*?P:)([^;\r\n]{4,})(;)").unwrap();
+        out = wifi_re
+            .replace_all(&out, "${1}***WIFI_REDACTED***${3}")
+            .into_owned();
     }
 
     let rules: &[(&str, &str, &str)] = &[
@@ -1754,7 +1798,7 @@ pub fn redact_secrets(text: &str) -> String {
         ),
         (
             "=",
-            r"(?i)([?&](?:api_key|apikey|access_token|auth_token|client_secret|secret|password|passwd)=)([^&\s#]{8,})",
+            r"(?i)([?&](?:api_key|apikey|access_token|auth_token|client_secret|secret|password|passwd)=)([^&\s#*]{8,})",
             "${1}***REDACTED***",
         ),
     ];

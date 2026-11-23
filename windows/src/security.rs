@@ -772,6 +772,81 @@ pub fn is_webhook_url(raw: &str) -> bool {
         .contains("oapi.dingtalk.com/robot/send")
 }
 
+pub fn is_otpauth_uri(raw: &str) -> bool {
+    if raw.is_empty() {
+        return false;
+    }
+    let sample = if raw.len() > 2048 {
+        let mut end = 2048;
+        while end > 0 && !raw.is_char_boundary(end) {
+            end -= 1;
+        }
+        &raw[..end]
+    } else {
+        raw
+    };
+    static OTPAUTH_RE: OnceLock<Regex> = OnceLock::new();
+    let re = OTPAUTH_RE.get_or_init(|| {
+        Regex::new(r##"(?i)\botpauth(?:-migration)?://(?:totp|hotp|offline)[^\s'"]+"##).unwrap()
+    });
+    re.is_match(sample)
+}
+
+fn is_placeholder_secret_value(val: &str) -> bool {
+    let lower = val.trim().to_ascii_lowercase();
+    if lower.len() < 6 {
+        return true;
+    }
+    const PLACEHOLDERS: &[&str] = &[
+        "changeme",
+        "change_me",
+        "example",
+        "placeholder",
+        "replace_me",
+        "redacted",
+        "todo",
+        "123456",
+        "password",
+        "secret",
+        "xxxxxx",
+    ];
+    if PLACEHOLDERS.contains(&lower.as_str())
+        || lower.starts_with("your_")
+        || lower.ends_with("_here")
+        || lower.contains("redacted")
+        || lower.contains("***")
+        || (lower.starts_with('<') && lower.ends_with('>'))
+    {
+        return true;
+    }
+    let bytes = lower.as_bytes();
+    if bytes.iter().all(|&b| b == bytes[0]) {
+        return true;
+    }
+    false
+}
+
+fn has_real_env_secret_assignment(sample: &str) -> bool {
+    if !sample.contains('=') && !sample.contains(':') {
+        return false;
+    }
+    static ENV_SEC_DETECT_RE: OnceLock<Regex> = OnceLock::new();
+    let re = ENV_SEC_DETECT_RE.get_or_init(|| {
+        Regex::new(
+            r##"(?im)^(?:\s*(?:export\s+)?[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY|AUTH_TOKEN|CLIENT_SECRET)[A-Z0-9_]*\s*[:=]\s*['"]?)([^\s'"#]{6,})"##,
+        )
+        .unwrap()
+    });
+    for caps in re.captures_iter(sample) {
+        if let Some(m) = caps.get(1) {
+            if !is_placeholder_secret_value(m.as_str()) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 pub fn classify_sensitive_text(raw: &str) -> Option<SensitiveSecretKind> {
     if raw.is_empty() {
         return None;
@@ -795,7 +870,7 @@ pub fn classify_sensitive_text(raw: &str) -> Option<SensitiveSecretKind> {
     static AGE_KEY_RE: OnceLock<Regex> = OnceLock::new();
     let age_re =
         AGE_KEY_RE.get_or_init(|| Regex::new(r"\bAGE-SECRET-KEY-1[A-Z0-9]{50,}\b").unwrap());
-    if age_re.is_match(sample) {
+    if age_re.is_match(sample) || is_otpauth_uri(sample) {
         return Some(SensitiveSecretKind::PrivateKey);
     }
 
@@ -854,6 +929,9 @@ pub fn classify_sensitive_text(raw: &str) -> Option<SensitiveSecretKind> {
         )
         .unwrap()
     });
+    static WIFI_PW_RE: OnceLock<Regex> = OnceLock::new();
+    let wifi_re =
+        WIFI_PW_RE.get_or_init(|| Regex::new(r"(?i)WIFI:(?:[^;\r\n]*;)*?P:[^;\r\n]{4,};").unwrap());
     if conn_re.is_match(sample)
         || bearer_re.is_match(sample)
         || url_q_re.is_match(sample)
@@ -862,6 +940,8 @@ pub fn classify_sensitive_text(raw: &str) -> Option<SensitiveSecretKind> {
         || http_hdr_re.is_match(sample)
         || http_basic_hdr_re.is_match(sample)
         || json_sec_re.is_match(sample)
+        || wifi_re.is_match(sample)
+        || has_real_env_secret_assignment(sample)
     {
         return Some(SensitiveSecretKind::ConnectionSecret);
     }
@@ -1861,5 +1941,382 @@ fn build_password_candidate(spec: PasswordSpecKind, tag: Option<&str>) -> Secure
                 default_vault_alias: format!("随机强密码 ({len}位)"),
             }
         }
+    }
+}
+
+// ============================================================================
+// 8. 离线零联网 RFC 6238 TOTP 两步验证动态码直算引擎（纯 Rust 标准 SHA-1 / SHA-256 + Base32）
+// ============================================================================
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TotpEvaluation {
+    pub code: String,
+    pub formatted_code: String,
+    pub remaining_seconds: u32,
+    pub period: u32,
+}
+
+pub fn decode_base32_rfc4648(encoded: &str) -> Option<Vec<u8>> {
+    let mut buffer: u32 = 0;
+    let mut bits_left: u32 = 0;
+    let mut out = Vec::with_capacity(encoded.len() * 5 / 8 + 1);
+    for b in encoded.bytes() {
+        if b == b' ' || b == b'-' {
+            continue;
+        }
+        if b == b'=' {
+            break;
+        }
+        let five = match b {
+            b'A'..=b'Z' => (b - b'A') as u32,
+            b'a'..=b'z' => (b - b'a') as u32,
+            b'2'..=b'7' => (b - b'2' + 26) as u32,
+            _ => return None,
+        };
+        buffer = (buffer << 5) | five;
+        bits_left += 5;
+        if bits_left >= 8 {
+            bits_left -= 8;
+            out.push(((buffer >> bits_left) & 0xff) as u8);
+        }
+    }
+    if out.len() >= 5 {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+fn sha1_digest(message: &[u8]) -> [u8; 20] {
+    let mut h0: u32 = 0x6745_2301;
+    let mut h1: u32 = 0xEFCD_AB89;
+    let mut h2: u32 = 0x98BA_DCFE;
+    let mut h3: u32 = 0x1032_5476;
+    let mut h4: u32 = 0xC3D2_E1F0;
+
+    let bit_len = (message.len() as u64).wrapping_mul(8);
+    let mut padded = Vec::with_capacity(((message.len() + 9 + 63) / 64) * 64);
+    padded.extend_from_slice(message);
+    padded.push(0x80);
+    while (padded.len() % 64) != 56 {
+        padded.push(0x00);
+    }
+    padded.extend_from_slice(&bit_len.to_be_bytes());
+
+    for chunk in padded.chunks_exact(64) {
+        let mut w = [0u32; 80];
+        for i in 0..16 {
+            let s = i * 4;
+            w[i] = u32::from_be_bytes([chunk[s], chunk[s + 1], chunk[s + 2], chunk[s + 3]]);
+        }
+        for i in 16..80 {
+            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
+        }
+
+        let mut a = h0;
+        let mut b = h1;
+        let mut c = h2;
+        let mut d = h3;
+        let mut e = h4;
+
+        for (i, &wi) in w.iter().enumerate() {
+            let (f, k) = match i {
+                0..=19 => ((b & c) | ((!b) & d), 0x5A82_7999u32),
+                20..=39 => (b ^ c ^ d, 0x6ED9_EBA1u32),
+                40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1B_BCDCu32),
+                _ => (b ^ c ^ d, 0xCA62_C1D6u32),
+            };
+            let temp = a
+                .rotate_left(5)
+                .wrapping_add(f)
+                .wrapping_add(e)
+                .wrapping_add(k)
+                .wrapping_add(wi);
+            e = d;
+            d = c;
+            c = b.rotate_left(30);
+            b = a;
+            a = temp;
+        }
+
+        h0 = h0.wrapping_add(a);
+        h1 = h1.wrapping_add(b);
+        h2 = h2.wrapping_add(c);
+        h3 = h3.wrapping_add(d);
+        h4 = h4.wrapping_add(e);
+    }
+
+    let mut out = [0u8; 20];
+    out[0..4].copy_from_slice(&h0.to_be_bytes());
+    out[4..8].copy_from_slice(&h1.to_be_bytes());
+    out[8..12].copy_from_slice(&h2.to_be_bytes());
+    out[12..16].copy_from_slice(&h3.to_be_bytes());
+    out[16..20].copy_from_slice(&h4.to_be_bytes());
+    out
+}
+
+fn hmac_sha1_var(key: &[u8], message: &[u8]) -> [u8; 20] {
+    let mut k_block = [0u8; 64];
+    if key.len() > 64 {
+        let kh = sha1_digest(key);
+        k_block[..20].copy_from_slice(&kh);
+    } else {
+        k_block[..key.len()].copy_from_slice(key);
+    }
+    let mut ipad = [0x36u8; 64];
+    let mut opad = [0x5cu8; 64];
+    for i in 0..64 {
+        ipad[i] ^= k_block[i];
+        opad[i] ^= k_block[i];
+    }
+    let mut inner_in = Vec::with_capacity(64 + message.len());
+    inner_in.extend_from_slice(&ipad);
+    inner_in.extend_from_slice(message);
+    let inner_hash = sha1_digest(&inner_in);
+
+    let mut outer_in = [0u8; 64 + 20];
+    outer_in[..64].copy_from_slice(&opad);
+    outer_in[64..].copy_from_slice(&inner_hash);
+    sha1_digest(&outer_in)
+}
+
+fn hmac_sha256_var(key: &[u8], message: &[u8]) -> [u8; 32] {
+    let mut k_block = [0u8; 64];
+    if key.len() > 64 {
+        let mut h = Sha256::new();
+        h.update(key);
+        k_block[..32].copy_from_slice(&h.finalize());
+    } else {
+        k_block[..key.len()].copy_from_slice(key);
+    }
+    let mut ipad = [0x36u8; 64];
+    let mut opad = [0x5cu8; 64];
+    for i in 0..64 {
+        ipad[i] ^= k_block[i];
+        opad[i] ^= k_block[i];
+    }
+    let mut inner = Sha256::new();
+    inner.update(ipad);
+    inner.update(message);
+    let inner_digest = inner.finalize();
+
+    let mut outer = Sha256::new();
+    outer.update(opad);
+    outer.update(inner_digest);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&outer.finalize());
+    out
+}
+
+pub fn evaluate_totp_uri(raw: &str, unix_secs: u64) -> Option<TotpEvaluation> {
+    let trimmed = raw.trim();
+    if trimmed.len() < 20 || trimmed.len() > 2048 {
+        return None;
+    }
+    if !trimmed.as_bytes()[..15].eq_ignore_ascii_case(b"otpauth://totp/") {
+        return None;
+    }
+    let q_pos = trimmed.find('?')?;
+    let query = &trimmed[q_pos + 1..];
+    let query_clean = query.split('#').next().unwrap_or(query);
+
+    let mut secret_b32: Option<&str> = None;
+    let mut digits: u32 = 6;
+    let mut period: u32 = 30;
+    let mut use_sha256 = false;
+
+    for pair in query_clean.split('&') {
+        let Some((k, v)) = pair.split_once('=') else {
+            continue;
+        };
+        if k.eq_ignore_ascii_case("secret") {
+            secret_b32 = Some(v.trim());
+        } else if k.eq_ignore_ascii_case("digits") {
+            if let Ok(d) = v.trim().parse::<u32>() {
+                if matches!(d, 6..=8) {
+                    digits = d;
+                }
+            }
+        } else if k.eq_ignore_ascii_case("period") {
+            if let Ok(p) = v.trim().parse::<u32>() {
+                if (10..=120).contains(&p) {
+                    period = p;
+                }
+            }
+        } else if k.eq_ignore_ascii_case("algorithm") {
+            let alg = v.trim();
+            if alg.eq_ignore_ascii_case("sha256") || alg.eq_ignore_ascii_case("hmacsha256") {
+                use_sha256 = true;
+            }
+        }
+    }
+
+    let key_bytes = decode_base32_rfc4648(secret_b32?)?;
+    let counter = unix_secs / (period as u64);
+    let counter_be = counter.to_be_bytes();
+
+    let (bin_code, rem) = if use_sha256 {
+        let mac = hmac_sha256_var(&key_bytes, &counter_be);
+        let offset = (mac[31] & 0x0f) as usize;
+        let code_u32 = (((mac[offset] & 0x7f) as u32) << 24)
+            | ((mac[offset + 1] as u32) << 16)
+            | ((mac[offset + 2] as u32) << 8)
+            | (mac[offset + 3] as u32);
+        (code_u32, period - ((unix_secs % (period as u64)) as u32))
+    } else {
+        let mac = hmac_sha1_var(&key_bytes, &counter_be);
+        let offset = (mac[19] & 0x0f) as usize;
+        let code_u32 = (((mac[offset] & 0x7f) as u32) << 24)
+            | ((mac[offset + 1] as u32) << 16)
+            | ((mac[offset + 2] as u32) << 8)
+            | (mac[offset + 3] as u32);
+        (code_u32, period - ((unix_secs % (period as u64)) as u32))
+    };
+
+    let modulo = match digits {
+        8 => 100_000_000,
+        7 => 10_000_000,
+        _ => 1_000_000,
+    };
+    let val = bin_code % modulo;
+    let code = format!("{val:0width$}", width = digits as usize);
+    let formatted_code = match code.len() {
+        6 => format!("{} {}", &code[..3], &code[3..]),
+        8 => format!("{} {}", &code[..4], &code[4..]),
+        _ => code.clone(),
+    };
+
+    Some(TotpEvaluation {
+        code,
+        formatted_code,
+        remaining_seconds: rem,
+        period,
+    })
+}
+
+// ============================================================================
+// 9. `.env` 环境变量配置一键生成安全 `.env.example` 净模板引擎
+// ============================================================================
+
+pub fn generate_env_example_template(raw: &str) -> Option<String> {
+    if raw.len() > 65_536 || !raw.contains('=') || !raw.contains('\n') {
+        return None;
+    }
+    let lines: Vec<&str> = raw.split('\n').collect();
+    if lines.len() < 2 {
+        return None;
+    }
+
+    static ENV_LINE_RE: OnceLock<Regex> = OnceLock::new();
+    let re = ENV_LINE_RE.get_or_init(|| {
+        Regex::new(r"^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_]*)(\s*=\s*)(.*)$").unwrap()
+    });
+    const SENSITIVE_MARKERS: &[&str] = &[
+        "KEY",
+        "SECRET",
+        "TOKEN",
+        "PASS",
+        "PWD",
+        "AUTH",
+        "PRIVATE",
+        "CERT",
+        "CREDENTIAL",
+        "WEBHOOK",
+        "COOKIE",
+        "DSN",
+        "MNEMONIC",
+        "SEED",
+    ];
+
+    let mut valid_assignments = 0usize;
+    let mut mutated_count = 0usize;
+    let mut out_lines = Vec::with_capacity(lines.len());
+
+    for raw_line in lines {
+        let has_cr = raw_line.ends_with('\r');
+        let line = if has_cr {
+            &raw_line[..raw_line.len() - 1]
+        } else {
+            raw_line
+        };
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            out_lines.push(raw_line.to_string());
+            continue;
+        }
+        let Some(caps) = re.captures(line) else {
+            if trimmed.starts_with('{')
+                || trimmed.starts_with('}')
+                || trimmed.starts_with('<')
+                || trimmed.ends_with(';')
+            {
+                return None;
+            }
+            out_lines.push(raw_line.to_string());
+            continue;
+        };
+
+        valid_assignments += 1;
+        let prefix = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+        let key = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+        let eq = caps.get(3).map(|m| m.as_str()).unwrap_or("=");
+        let val_part = caps.get(4).map(|m| m.as_str()).unwrap_or("").trim();
+
+        if val_part.is_empty() {
+            out_lines.push(raw_line.to_string());
+            continue;
+        }
+
+        let quote = if val_part.len() >= 2 && val_part.starts_with('"') && val_part.ends_with('"') {
+            "\""
+        } else if val_part.len() >= 2 && val_part.starts_with('\'') && val_part.ends_with('\'') {
+            "'"
+        } else {
+            ""
+        };
+        let inner = if quote.is_empty() {
+            val_part
+        } else {
+            &val_part[1..val_part.len() - 1]
+        };
+
+        let upper_key = key.to_ascii_uppercase();
+        let key_sens = SENSITIVE_MARKERS.iter().any(|m| upper_key.contains(m));
+        let val_sens = classify_sensitive_text(&format!("{key}={inner}")).is_some()
+            || classify_sensitive_text(inner).is_some();
+
+        if key_sens || val_sens {
+            let lower_inner = inner.to_ascii_lowercase();
+            let placeholder = if lower_inner.starts_with("postgres://")
+                || lower_inner.starts_with("postgresql://")
+            {
+                "postgresql://user:password@localhost:5432/dbname".to_string()
+            } else if lower_inner.starts_with("mysql://") {
+                "mysql://user:password@localhost:3306/dbname".to_string()
+            } else if lower_inner.starts_with("mongodb://")
+                || lower_inner.starts_with("mongodb+srv://")
+            {
+                "mongodb://user:password@localhost:27017/dbname".to_string()
+            } else if lower_inner.starts_with("redis://") {
+                "redis://:password@localhost:6379/0".to_string()
+            } else {
+                format!("your_{}_here", key.to_ascii_lowercase())
+            };
+            if placeholder != inner {
+                mutated_count += 1;
+            }
+            let suffix = if has_cr { "\r" } else { "" };
+            out_lines.push(format!(
+                "{prefix}{key}{eq}{quote}{placeholder}{quote}{suffix}"
+            ));
+        } else {
+            out_lines.push(raw_line.to_string());
+        }
+    }
+
+    if valid_assignments >= 2 && mutated_count >= 1 {
+        Some(out_lines.join("\n"))
+    } else {
+        None
     }
 }

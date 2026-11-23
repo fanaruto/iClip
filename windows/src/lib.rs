@@ -1315,4 +1315,68 @@ mod tests {
 
         let _ = fs::remove_dir_all(tmp_dir);
     }
+
+    #[test]
+    fn test_rfc6238_offline_totp_wifi_env_guard_and_env_example_sanitizer() {
+        use crate::engines::{analyze_text_actions, redact_secrets};
+        use crate::model::ClipItem;
+        use crate::security::{
+            classify_sensitive_text, evaluate_totp_uri, generate_env_example_template,
+            SensitiveSecretKind,
+        };
+
+        // 1. RFC 6238 Appendix B 官方标准测试向量验证
+        let rfc_uri = "otpauth://totp/Example:alice@google.com?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&digits=8&period=30&algorithm=SHA1";
+        let v59 = evaluate_totp_uri(rfc_uri, 59).unwrap();
+        assert_eq!(v59.code, "94287082");
+        assert_eq!(v59.formatted_code, "9428 7082");
+        assert_eq!(v59.remaining_seconds, 1);
+
+        let v111 = evaluate_totp_uri(rfc_uri, 1_111_111_109).unwrap();
+        assert_eq!(v111.code, "07081804");
+
+        // 2. 2FA URI、Wi-Fi 密码识别脱敏与 `@2fa` 快筛及快捷动作置顶
+        let std_2fa = "otpauth://totp/GitHub:devuser?secret=JBSWY3DPEHPK3PXP&issuer=GitHub";
+        assert_eq!(
+            classify_sensitive_text(std_2fa),
+            Some(SensitiveSecretKind::PrivateKey)
+        );
+        let red_2fa = redact_secrets(std_2fa);
+        assert!(!red_2fa.contains("JBSWY3DPEHPK3PXP"));
+        assert!(red_2fa.contains("***2FA_SECRET_REDACTED***"));
+
+        let item_2fa = ClipItem::new_text(std_2fa.to_string(), None);
+        assert!(item_2fa.matches_query("@2fa"));
+        assert!(item_2fa.matches_query("@totp"));
+        let actions_2fa = analyze_text_actions(std_2fa, false);
+        assert_eq!(actions_2fa[0].id, "totp-live-code");
+
+        let wifi_str = "WIFI:T:WPA;S:CorpNet;P:SuperWifiPass2026;;";
+        assert_eq!(
+            classify_sensitive_text(wifi_str),
+            Some(SensitiveSecretKind::ConnectionSecret)
+        );
+        let red_wifi = redact_secrets(wifi_str);
+        assert!(!red_wifi.contains("SuperWifiPass2026"));
+        assert!(red_wifi.contains("P:***WIFI_REDACTED***;"));
+
+        // 3. `.env` 真实密钥识别、占位符豁免与一键生成 `.env.example`
+        let placeholder_env = "PORT=3000\nAPI_KEY=your_api_key_here\nDB_PASSWORD=changeme";
+        assert_eq!(classify_sensitive_text(placeholder_env), None);
+
+        let prod_env = "# Prod\nPORT=8080\nNODE_ENV=production\nDB_PASSWORD=ProdDb99#K2mZpQ8!\nDATABASE_URL=\"postgresql://admin:RealPass99@10.0.0.12:5432/core\"";
+        assert_eq!(
+            classify_sensitive_text(prod_env),
+            Some(SensitiveSecretKind::ConnectionSecret)
+        );
+        let example = generate_env_example_template(prod_env).unwrap();
+        assert!(example.contains("# Prod"));
+        assert!(example.contains("PORT=8080"));
+        assert!(example.contains("DB_PASSWORD=your_db_password_here"));
+        assert!(
+            example.contains("DATABASE_URL=\"postgresql://user:password@localhost:5432/dbname\"")
+        );
+        assert!(!example.contains("ProdDb99"));
+        assert!(!example.contains("RealPass99"));
+    }
 }

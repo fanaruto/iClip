@@ -203,9 +203,11 @@ enum SemanticEngine {
             ("HTTP Basic Auth", ["Basic", "basic", "BASIC"], #"(?i)(\b(?:authorization|proxy-authorization)\s*:\s*basic\s+)([A-Za-z0-9+/=]{8,})"#, "$1***REDACTED***"),
             // JSON 载荷中的敏感口令与 Token 键值
             ("JSON Secret", ["\":", "\" :"], ##"(?i)("(?:password|passwd|secret|client_secret|api_key|apikey|access_token|refresh_token|id_token|session_token|private_key)"\s*:\s*")([^"\r\n]{6,})(")"##, "$1***REDACTED***$3"),
-            // 企业群机器人 Webhook（飞书 / Lark / 企微 / Slack / Discord）与 Age 私钥
+            // 企业群机器人 Webhook（飞书 / Lark / 企微 / Slack / Discord）、Age 私钥、otpauth 2FA 与 Wi-Fi 密码
             ("Webhook Secret", ["://"], #"(?i)(https?://(?:open\.(?:feishu\.cn|larksuite\.com)/open-apis/bot/v2/hook/|qyapi\.weixin\.qq\.com/cgi-bin/webhook/send\?(?:[^&#\s]+&)*key=|hooks\.slack\.com/services/[A-Z0-9]{8,}/[A-Z0-9]{8,}/|(?:ptb\.|canary\.)?discord(?:app)?\.com/api/webhooks/\d{10,}/))([A-Za-z0-9_\-]{12,})"#, "$1***WEBHOOK_REDACTED***"),
-            ("Age Secret Key", ["AGE-SECRET-KEY-1"], #"\bAGE-SECRET-KEY-1[A-Z0-9]{50,}\b"#, "AGE-SECRET-KEY-1***REDACTED***")
+            ("Age Secret Key", ["AGE-SECRET-KEY-1"], #"\bAGE-SECRET-KEY-1[A-Z0-9]{50,}\b"#, "AGE-SECRET-KEY-1***REDACTED***"),
+            ("OTPAuth Secret", ["otpauth", "OTPAUTH"], #"(?i)([?&](?:secret|data)=)([^&\s#'"]+)"#, "$1***2FA_SECRET_REDACTED***"),
+            ("WiFi Password", ["WIFI:", "wifi:"], #"(?i)(WIFI:(?:[^;\r\n]*;)*?P:)([^;\r\n]{4,})(;)"#, "$1***WIFI_REDACTED***$3")
         ]
         return specs.compactMap { name, hints, pattern, replacement in
             guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
@@ -337,6 +339,16 @@ enum SemanticEngine {
                         isSecurityAction: false,
                         resultText: jwtInfo.decodedText,
                         toastText: "已离线解码 JWT 载荷并键入"
+                    ))
+                }
+                if let envExample = EnvTemplateSanitizer.generateExampleTemplate(from: raw) {
+                    actions.append(TransformAction(
+                        id: "env-to-example",
+                        title: "生成 .env.example",
+                        symbolName: "doc.badge.gearshape",
+                        isSecurityAction: true,
+                        resultText: envExample,
+                        toastText: "已生成安全的 .env.example 净模板并键入"
                     ))
                 }
             }
@@ -774,7 +786,7 @@ enum SemanticEngine {
     // MARK: - 具体转换与脱敏实现
 
     static func containsSensitiveSecret(in text: String) -> Bool {
-        if text.contains("-----BEGIN ") && text.contains("PRIVATE KEY-----") {
+        if SensitiveCredentialVeil.classify(text) != nil {
             return true
         }
         let range = NSRange(text.startIndex..<text.endIndex, in: text)

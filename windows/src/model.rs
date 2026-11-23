@@ -596,6 +596,13 @@ impl ClipItem {
                     .map(crate::security::is_webhook_url)
                     .unwrap_or(false)
             }
+            "2fa" | "@2fa" | "totp" | "@totp" | "@动态码" => {
+                return self
+                    .text
+                    .as_deref()
+                    .map(crate::security::is_otpauth_uri)
+                    .unwrap_or(false)
+            }
             "风险" | "@风险" | "@毒" | "@poison" | "poison" => {
                 return self.detected_poison_threat().is_some()
                     || self.detected_link_risk().is_some()

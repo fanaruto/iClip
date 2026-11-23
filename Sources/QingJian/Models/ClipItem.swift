@@ -618,6 +618,10 @@ enum EpisodicQueryMatcher {
             return item.detectedSensitiveKind == .personalIdentity
         case "webhook", "@webhook":
             return item.text.map { SensitiveCredentialVeil.isWebhookURL($0) } ?? false
+        case "2fa", "@2fa", "totp", "@totp", "@动态码":
+            if let t = item.text, SensitiveCredentialVeil.isOTPAuthURI(t) { return true }
+            if let qr = item.qrCodePayload, SensitiveCredentialVeil.isOTPAuthURI(qr) { return true }
+            return false
         case "风险", "@风险", "@毒", "@poison", "poison":
             return item.detectedPoisonThreat != nil || item.detectedLinkRisk != nil
         case "即焚", "@即焚", "@burn", "burn":
@@ -654,6 +658,7 @@ enum EpisodicQueryMatcher {
              "@apikey", "apikey", "@token",
              "身份证", "@身份证", "银行卡", "@银行卡", "@idcard",
              "webhook", "@webhook",
+             "2fa", "@2fa", "totp", "@totp", "@动态码",
              "风险", "@风险", "@毒", "@poison", "poison",
              "即焚", "@即焚", "@burn", "burn":
             return true

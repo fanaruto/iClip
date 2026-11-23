@@ -1190,11 +1190,19 @@ final class ClipboardStore: ObservableObject {
                            AdaptiveIntelligenceEngine.shared.enabledAutoRules.contains(.extractQRCode) {
                             self.pasteboard.clearContents()
                             self.pasteboard.setString(qr, forType: .string)
-                            if Self.isValidWebURL(qr) {
+                            if Self.isValidWebURL(qr) && SensitiveCredentialVeil.classify(qr) == nil {
                                 self.pasteboard.setString(qr, forType: .URL)
                             }
-                            self.ignoreNextChangeCount = self.pasteboard.changeCount
-                            self.lastChangeCount = self.pasteboard.changeCount
+                            let isSensQR = SensitiveCredentialVeil.classify(qr) != nil
+                            if isSensQR {
+                                PasteboardPrivacyStandards.applyLocalOnlyConcealedProtection(to: self.pasteboard)
+                            }
+                            let written = self.pasteboard.changeCount
+                            self.ignoreNextChangeCount = written
+                            self.lastChangeCount = written
+                            if isSensQR {
+                                self.scheduleConcealedPasteboardScrubIfNeeded(capturedChangeCount: written, delaySeconds: 45.0)
+                            }
                             self.showToast(LearnedAutoRuleKind.extractQRCode.shortToast)
                         } else if !self.minimalModeEnabled,
                                   AdaptiveIntelligenceEngine.shared.enabledAutoRules.contains(.compressLargeImage),
@@ -2229,6 +2237,25 @@ final class ClipboardStore: ObservableObject {
         }
     }
 
+    /// 统一出口剪贴板隐私门卫：任何二级写回通道（续接拼接、多选合并、模板展开、转换输出、二维码提取）只要含敏感凭据，一律注入 `LocalOnly` 阻断 Handoff 云广播并挂载超时清擦
+    private func commitOutboundPasteboardGuard(
+        for text: String,
+        forceProtected: Bool = false,
+        isPinnedSource: Bool = false,
+        scrubDelay: TimeInterval = 45.0
+    ) {
+        let isSens = forceProtected || SensitiveCredentialVeil.classify(text) != nil
+        if isSens {
+            PasteboardPrivacyStandards.applyLocalOnlyConcealedProtection(to: pasteboard)
+        }
+        let written = pasteboard.changeCount
+        ignoreNextChangeCount = written
+        lastChangeCount = written
+        if isSens && !isPinnedSource {
+            scheduleConcealedPasteboardScrubIfNeeded(capturedChangeCount: written, delaySeconds: scrubDelay)
+        }
+    }
+
     func togglePin(_ item: ClipItem) {
         guard let idx = items.firstIndex(where: { $0.id == item.id }) else { return }
         items[idx].isPinned.toggle()
@@ -2407,10 +2434,11 @@ final class ClipboardStore: ObservableObject {
         }
     }
 
-    /// 将 `@pw` / `@genkey` 生成的一次性高强度随机密码无痕键入目标输入框（不写入历史列表、阻断 Handoff 云同步、45s 后自动清擦剪贴板）
+    /// 将 `@pw` / `@genkey` 或离线 2FA 动态码无痕键入目标输入框（不写入历史列表、阻断 Handoff 云同步、到期自动清擦剪贴板）
     func pasteEphemeralSecret(
         _ secretValue: String,
         toast: String,
+        scrubDelaySeconds: TimeInterval = 45.0,
         shouldAutoPaste: Bool = true,
         onBeforePaste: (() -> Void)? = nil
     ) {
@@ -2421,7 +2449,7 @@ final class ClipboardStore: ObservableObject {
         let writtenCount = pasteboard.changeCount
         ignoreNextChangeCount = writtenCount
         lastChangeCount = writtenCount
-        scheduleConcealedPasteboardScrubIfNeeded(capturedChangeCount: writtenCount, delaySeconds: 45.0)
+        scheduleConcealedPasteboardScrubIfNeeded(capturedChangeCount: writtenCount, delaySeconds: scrubDelaySeconds)
 
         TactileFeedbackEngine.shared.perform(.pasteCommit)
         onBeforePaste?()
@@ -2564,6 +2592,27 @@ final class ClipboardStore: ObservableObject {
             parsedColorRGBA: analyzed.parsedColorRGBA,
             actions: rankedActions
         )
+        if let raw = item.text, let totp = TOTPAuthenticator.evaluate(uri: raw) {
+            var liveActions = personalized.actions
+            let totpChip = TransformAction(
+                id: "totp-live-code",
+                title: "动态码 \(totp.formattedCode) · \(totp.remainingSeconds)s",
+                symbolName: "key.viewfinder",
+                isSecurityAction: false,
+                resultText: totp.code,
+                toastText: "已算出 2FA 动态码 \(totp.formattedCode) 并无痕键入"
+            )
+            if isExternalAI, !liveActions.isEmpty, liveActions[0].isSecurityAction {
+                liveActions.insert(totpChip, at: 1)
+            } else {
+                liveActions.insert(totpChip, at: 0)
+            }
+            return SemanticSnapshot(
+                primaryKind: resolvedKind ?? .ephemeralOTP,
+                parsedColorRGBA: analyzed.parsedColorRGBA,
+                actions: liveActions
+            )
+        }
         semanticCache.setObject(SemanticSnapshotBox(personalized), forKey: cacheKey)
         return personalized
     }
@@ -2580,6 +2629,16 @@ final class ClipboardStore: ObservableObject {
         )
         if action.id == "todo-split-checklist" {
             _ = splitChecklistIntoTodos(from: item)
+            return
+        }
+        if action.id == "totp-live-code", let raw = item.text, let fresh = TOTPAuthenticator.evaluate(uri: raw) {
+            pasteEphemeralSecret(
+                fresh.code,
+                toast: "已键入 2FA 动态码 \(fresh.formattedCode)（剩 \(fresh.remainingSeconds)s · 30s 后擦除）",
+                scrubDelaySeconds: 30.0,
+                shouldAutoPaste: shouldAutoPaste,
+                onBeforePaste: onBeforePaste
+            )
             return
         }
         let htmlPayload = (action.id == "tbl-md-to-excel") ? TableBridgeEngine.toHTMLTable(fromTSV: action.resultText) : nil
@@ -2734,10 +2793,10 @@ final class ClipboardStore: ObservableObject {
     func copyTodosAsMarkdownChecklist() -> Int {
         guard let md = Self.formatTodosAsMarkdownChecklist(from: items) else { return 0 }
         let total = items.reduce(0) { $0 + ($1.isTodo ? 1 : 0) }
+        let hasSensitiveTodo = items.contains { $0.isTodo && ($0.detectedSensitiveKind != nil || $0.isBurnAfterPaste) }
         pasteboard.clearContents()
         pasteboard.setString(md, forType: .string)
-        ignoreNextChangeCount = pasteboard.changeCount
-        lastChangeCount = pasteboard.changeCount
+        commitOutboundPasteboardGuard(for: md, forceProtected: hasSensitiveTodo, isPinnedSource: false)
         TactileFeedbackEngine.shared.perform(.pasteCommit)
         showToast("✓ 已复制 \(total) 条 Markdown 待办清单")
         return total
@@ -2959,8 +3018,11 @@ final class ClipboardStore: ObservableObject {
             pasteboard.setString(text, forType: .tabularText)
             pasteboard.setString(htmlTable, forType: .html)
         }
-        ignoreNextChangeCount = pasteboard.changeCount
-        lastChangeCount = pasteboard.changeCount
+        commitOutboundPasteboardGuard(
+            for: text,
+            forceProtected: sourceItem.isBurnAfterPaste,
+            isPinnedSource: sourceItem.isPinned
+        )
 
         if shouldAutoPaste {
             recordTargetAppPasteIfAppropriate(for: sourceItem)
@@ -3137,8 +3199,7 @@ final class ClipboardStore: ObservableObject {
 
         pasteboard.clearContents()
         pasteboard.setString(combined, forType: .string)
-        ignoreNextChangeCount = pasteboard.changeCount
-        lastChangeCount = pasteboard.changeCount
+        commitOutboundPasteboardGuard(for: combined, forceProtected: false, isPinnedSource: false)
 
         let finalIsLink = isValidWebURL(combined.trimmingCharacters(in: .whitespacesAndNewlines))
         let newType: ClipContentType = finalIsLink ? .link : .text
@@ -3212,6 +3273,18 @@ final class ClipboardStore: ObservableObject {
             analyzed = DocumentTypographyEngine.analyze(raw)
         }
         if item.detectedSensitiveKind != nil {
+            if let envExample = EnvTemplateSanitizer.generateExampleTemplate(from: raw) {
+                analyzed.insert(
+                    FinanceQuickAction(
+                        id: "env-to-example",
+                        title: "生成 .env.example",
+                        symbolName: "doc.badge.gearshape",
+                        resultText: envExample,
+                        toastText: "已生成安全的 .env.example 净模板"
+                    ),
+                    at: 0
+                )
+            }
             let redacted = SensitiveCredentialVeil.redactForExternalSharing(raw)
             if redacted != raw {
                 analyzed.insert(
@@ -3271,6 +3344,21 @@ final class ClipboardStore: ObservableObject {
             let sec = ranked.remove(at: secIdx)
             ranked.insert(sec, at: 0)
         }
+        if let totp = TOTPAuthenticator.evaluate(uri: raw) {
+            let totpAction = FinanceQuickAction(
+                id: "totp-live-code",
+                title: "动态码 \(totp.formattedCode) · \(totp.remainingSeconds)s",
+                symbolName: "key.viewfinder",
+                resultText: totp.code,
+                toastText: "已算出 2FA 动态码 \(totp.formattedCode)"
+            )
+            if isExternalAI, !ranked.isEmpty, ranked[0].id == "redact-secrets" {
+                ranked.insert(totpAction, at: 1)
+            } else {
+                ranked.insert(totpAction, at: 0)
+            }
+            return ranked
+        }
         financeCache.setObject(FinanceActionsBox(ranked), forKey: cacheKey)
         return ranked
     }
@@ -3289,14 +3377,27 @@ final class ClipboardStore: ObservableObject {
             _ = splitChecklistIntoTodos(from: item)
             return
         }
+        if action.id == "totp-live-code", let raw = item.text, let fresh = TOTPAuthenticator.evaluate(uri: raw) {
+            pasteEphemeralSecret(
+                fresh.code,
+                toast: "已键入 2FA 动态码 \(fresh.formattedCode)（剩 \(fresh.remainingSeconds)s · 30s 后擦除）",
+                scrubDelaySeconds: 30.0,
+                shouldAutoPaste: shouldAutoPaste,
+                onBeforePaste: onBeforePaste
+            )
+            return
+        }
         pasteboard.clearContents()
         pasteboard.setString(action.resultText, forType: .string)
         if action.id == "tbl-md-to-excel", let html = TableBridgeEngine.toHTMLTable(fromTSV: action.resultText) {
             pasteboard.setString(action.resultText, forType: .tabularText)
             pasteboard.setString(html, forType: .html)
         }
-        ignoreNextChangeCount = pasteboard.changeCount
-        lastChangeCount = pasteboard.changeCount
+        commitOutboundPasteboardGuard(
+            for: action.resultText,
+            forceProtected: item.isBurnAfterPaste,
+            isPinnedSource: item.isPinned
+        )
 
         if shouldAutoPaste {
             recordTargetAppPasteIfAppropriate(for: item)
@@ -3368,10 +3469,32 @@ final class ClipboardStore: ObservableObject {
             pasteQueueIDs.removeFirst()
             if let target = items.first(where: { $0.id == firstID }) {
                 let remaining = pasteQueueIDs.count
-                let nextPreview = nextQueuedItem?.primaryTitle
-                writeToPasteboard(target, plainTextOnly: false)
+                let nextVeiled = nextQueuedItem?.displayTitle(minimalMode: minimalModeEnabled, veilActive: true)
+
+                if !minimalModeEnabled,
+                   let raw = target.text,
+                   case .pastejackingOrBidi = target.detectedPoisonThreat,
+                   ClipboardPoisonGuard.isTerminalApp(activeTargetAppName) {
+                    let safeCmd = ClipboardPoisonGuard.sanitize(raw)
+                    if safeCmd != raw && !safeCmd.isEmpty {
+                        pasteboard.clearContents()
+                        pasteboard.setString(safeCmd, forType: .string)
+                        commitOutboundPasteboardGuard(
+                            for: safeCmd,
+                            forceProtected: target.detectedSensitiveKind != nil || target.isBurnAfterPaste,
+                            isPinnedSource: target.isPinned
+                        )
+                    } else {
+                        writeToPasteboard(target, plainTextOnly: false)
+                    }
+                } else {
+                    writeToPasteboard(target, plainTextOnly: false)
+                }
+
                 recordTargetAppPasteIfAppropriate(for: target)
                 onBeforePaste?()
+                scheduleOTPAutoExpireIfNeeded(for: target)
+                scheduleBurnAfterPasteIfNeeded(for: target)
                 refreshAccessibilityStatus()
                 let sendTabAfter = queueAutoTabEnabled
                 if autoPasteEnabled && isAccessibilityGranted {
@@ -3379,12 +3502,13 @@ final class ClipboardStore: ObservableObject {
                 }
 
                 if showGlobalHUD {
-                    let shortTitle = target.primaryTitle.count > 18
-                        ? String(target.primaryTitle.prefix(18)) + "…"
-                        : target.primaryTitle
+                    let veiledTarget = target.displayTitle(minimalMode: minimalModeEnabled, veilActive: true)
+                    let shortTitle = veiledTarget.count > 18
+                        ? String(veiledTarget.prefix(18)) + "…"
+                        : veiledTarget
                     let sub: String
-                    if let nextPreview {
-                        let cleanNext = nextPreview.count > 16 ? String(nextPreview.prefix(16)) + "…" : nextPreview
+                    if let nextVeiled {
+                        let cleanNext = nextVeiled.count > 16 ? String(nextVeiled.prefix(16)) + "…" : nextVeiled
                         sub = "下一项：\(cleanNext)（剩 \(remaining) 项）"
                     } else {
                         sub = "队列已全部键入完毕"
@@ -3443,8 +3567,9 @@ final class ClipboardStore: ObservableObject {
         shouldAutoPaste: Bool = true,
         onBeforePaste: (() -> Void)? = nil
     ) {
-        let segments: [String] = selectedMergeIDs.compactMap { id in
-            guard let item = items.first(where: { $0.id == id }) else { return nil }
+        let sourceItems = selectedMergeIDs.compactMap { id in items.first(where: { $0.id == id }) }
+        let anySourceSensitive = sourceItems.contains { $0.detectedSensitiveKind != nil || $0.isBurnAfterPaste }
+        let segments: [String] = sourceItems.compactMap { item in
             switch item.type {
             case .text, .link:
                 let t = (item.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -3478,8 +3603,7 @@ final class ClipboardStore: ObservableObject {
         selectedMergeIDs.removeAll()
         pasteboard.clearContents()
         pasteboard.setString(merged, forType: .string)
-        ignoreNextChangeCount = pasteboard.changeCount
-        lastChangeCount = pasteboard.changeCount
+        commitOutboundPasteboardGuard(for: merged, forceProtected: anySourceSensitive, isPinnedSource: false)
 
         onBeforePaste?()
         refreshAccessibilityStatus()
@@ -3624,18 +3748,29 @@ final class ClipboardStore: ObservableObject {
     }
 
     private func commitPlainStringPaste(_ text: String, isQRCode: Bool, shouldAutoPaste: Bool, onBeforePaste: (() -> Void)?) {
-        let shouldAutoRedactForAI = SensitiveCredentialVeil.isExternalAIOrChatApp(activeTargetAppName)
-            && SensitiveCredentialVeil.classify(text) != nil
+        let isExternalAI = SensitiveCredentialVeil.isExternalAIOrChatApp(activeTargetAppName)
+        // 若图中二维码是 2FA TOTP 绑定码且目标窗口不是外部 AI/聊天工具，直接离线现算当前 6 位动态码无痕键入（绝不将根密钥贴入网页登录框）
+        if isQRCode && !isExternalAI, let totp = TOTPAuthenticator.evaluate(uri: text) {
+            pasteEphemeralSecret(
+                totp.code,
+                toast: "已从二维码算出 2FA 动态码 \(totp.formattedCode)（剩 \(totp.remainingSeconds)s · 30s 后擦除）",
+                scrubDelaySeconds: 30.0,
+                shouldAutoPaste: shouldAutoPaste,
+                onBeforePaste: onBeforePaste
+            )
+            return
+        }
+
+        let shouldAutoRedactForAI = isExternalAI && SensitiveCredentialVeil.classify(text) != nil
         let finalOut = shouldAutoRedactForAI ? SensitiveCredentialVeil.redactForExternalSharing(text) : text
         let didRedact = (finalOut != text)
 
         pasteboard.clearContents()
         pasteboard.setString(finalOut, forType: .string)
-        if isQRCode && !didRedact && Self.isValidWebURL(finalOut) {
+        if isQRCode && !didRedact && Self.isValidWebURL(finalOut) && SensitiveCredentialVeil.classify(finalOut) == nil {
             pasteboard.setString(finalOut, forType: .URL)
         }
-        ignoreNextChangeCount = pasteboard.changeCount
-        lastChangeCount = pasteboard.changeCount
+        commitOutboundPasteboardGuard(for: finalOut, forceProtected: false, isPinnedSource: false)
 
         onBeforePaste?()
         refreshAccessibilityStatus()

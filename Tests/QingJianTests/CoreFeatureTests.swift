@@ -2387,4 +2387,63 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertFalse(ArchiveBackupService.isValidRasterImageHeader(Data("MZ_FAKE_EXE_PAYLOAD_1234".utf8)))
         XCTAssertTrue(ArchiveBackupService.isValidRasterImageHeader(Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13])))
     }
+
+    // MARK: - 49. 离线 RFC 6238 TOTP 动态口令直算、2FA/Wi-Fi/.env 漏检修复与 `.env.example` 净模板测试
+
+    @MainActor
+    func testOfflineRFC6238TOTPAuthenticatorEnvSecretGuardAndExampleSanitizer() throws {
+        // 1. RFC 6238 Appendix B 官方标准测试向量验证（ASCII "12345678901234567890" -> Base32 GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ）
+        let rfcURI = "otpauth://totp/Example:alice@google.com?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&digits=8&period=30&algorithm=SHA1"
+        let vec59 = try XCTUnwrap(TOTPAuthenticator.evaluate(uri: rfcURI, timestampSeconds: 59))
+        XCTAssertEqual(vec59.code, "94287082")
+        XCTAssertEqual(vec59.formattedCode, "9428 7082")
+        XCTAssertEqual(vec59.remainingSeconds, 1)
+
+        let vec111 = try XCTUnwrap(TOTPAuthenticator.evaluate(uri: rfcURI, timestampSeconds: 1_111_111_109))
+        XCTAssertEqual(vec111.code, "07081804")
+
+        // 2. 验证 2FA 二维码/URI 与 Wi-Fi 密码分享串敏感识别、脱敏及 `@2fa` 快筛
+        let std2FA = "otpauth://totp/GitHub:devuser?secret=JBSWY3DPEHPK3PXP&issuer=GitHub"
+        XCTAssertEqual(SensitiveCredentialVeil.classify(std2FA), .privateKey)
+        let redacted2FA = SensitiveCredentialVeil.redactForExternalSharing(std2FA)
+        XCTAssertFalse(redacted2FA.contains("JBSWY3DPEHPK3PXP"))
+        XCTAssertTrue(redacted2FA.contains("***2FA_SECRET_REDACTED***"))
+
+        let qrImgItem = ClipItem(
+            type: .image,
+            imageFileName: "qr2fa.png",
+            qrCodePayload: std2FA,
+            contentHash: "img:qr2fa"
+        )
+        XCTAssertEqual(qrImgItem.detectedSensitiveKind, .privateKey)
+        XCTAssertTrue(qrImgItem.matches(query: "@2fa"))
+        XCTAssertTrue(qrImgItem.matches(query: "@totp"))
+
+        let wifiCode = "WIFI:T:WPA;S:OfficeCorp5G;P:MyRealWifiPass2026;;"
+        XCTAssertEqual(SensitiveCredentialVeil.classify(wifiCode), .connectionSecret)
+        let redactedWifi = SensitiveCredentialVeil.redactForExternalSharing(wifiCode)
+        XCTAssertFalse(redactedWifi.contains("MyRealWifiPass2026"))
+        XCTAssertTrue(redactedWifi.contains("P:***WIFI_REDACTED***;"))
+
+        // 3. 验证 `.env` 真实密钥识别、模板占位符零误报及一键生成 `.env.example`
+        let templateEnv = "PORT=3000\nAPI_KEY=your_api_key_here\nDB_PASSWORD=changeme"
+        XCTAssertNil(SensitiveCredentialVeil.classify(templateEnv))
+
+        let realEnv = """
+        # Production Config
+        PORT=8080
+        NODE_ENV=production
+        DB_PASSWORD=ProdDb99#K2mZpQ8!
+        DATABASE_URL="postgresql://admin:RealPass99@10.0.0.12:5432/core"
+        """
+        XCTAssertEqual(SensitiveCredentialVeil.classify(realEnv), .connectionSecret)
+        let envExample = try XCTUnwrap(EnvTemplateSanitizer.generateExampleTemplate(from: realEnv))
+        XCTAssertTrue(envExample.contains("# Production Config"))
+        XCTAssertTrue(envExample.contains("PORT=8080"))
+        XCTAssertTrue(envExample.contains("NODE_ENV=production"))
+        XCTAssertTrue(envExample.contains("DB_PASSWORD=your_db_password_here"))
+        XCTAssertTrue(envExample.contains("DATABASE_URL=\"postgresql://user:password@localhost:5432/dbname\""))
+        XCTAssertFalse(envExample.contains("ProdDb99"))
+        XCTAssertFalse(envExample.contains("RealPass99"))
+    }
 }

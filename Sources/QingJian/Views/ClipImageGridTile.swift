@@ -116,9 +116,10 @@ struct ClipImageGridTile: View {
                 Spacer(minLength: 0)
                 if !ClipboardStore.shared.minimalModeEnabled {
                     let hasQR = !(item.qrCodePayload?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+                    let isTOTPQR = TOTPAuthenticator.isTOTPURI(item.qrCodePayload)
                     let hasOCR = !(item.ocrText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
                     if hasQR || hasOCR {
-                        Image(systemName: hasQR ? "qrcode.viewfinder" : "text.viewfinder")
+                        Image(systemName: isTOTPQR ? "key.viewfinder" : (hasQR ? "qrcode.viewfinder" : "text.viewfinder"))
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(Color.white.opacity(0.95))
                     }
@@ -159,13 +160,14 @@ struct ClipImageGridTile: View {
                 HStack(spacing: 4) {
                     if !ClipboardStore.shared.minimalModeEnabled {
                         let hasQR = !(item.qrCodePayload?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+                        let isTOTPQR = TOTPAuthenticator.isTOTPURI(item.qrCodePayload)
                         HoverActionCircleButton(
-                            symbolName: hasQR ? "qrcode.viewfinder" : "text.viewfinder",
+                            symbolName: isTOTPQR ? "key.viewfinder" : (hasQR ? "qrcode.viewfinder" : "text.viewfinder"),
                             size: 22,
                             iconSize: 10,
                             surface: .onImageTile,
                             kind: .ocr,
-                            helpText: hasQR ? "提取二维码内容并键入（⇧↵）" : "提取图中文字并键入（⇧↵）",
+                            helpText: isTOTPQR ? "实时算出 2FA 动态验证码并键入（⇧↵）" : (hasQR ? "提取二维码内容并键入（⇧↵）" : "提取图中文字并键入（⇧↵）"),
                             action: { onExtractOCR(true) }
                         )
                     }
@@ -668,9 +670,10 @@ struct ClipImageGridTile: View {
                 Spacer(minLength: 0)
                 if !ClipboardStore.shared.minimalModeEnabled {
                     let hasQR = !(item.qrCodePayload?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+                    let isTOTPQR = TOTPAuthenticator.isTOTPURI(item.qrCodePayload)
                     let hasOCR = !(item.ocrText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
                     if hasQR || hasOCR {
-                        Image(systemName: hasQR ? "qrcode.viewfinder" : "text.viewfinder")
+                        Image(systemName: isTOTPQR ? "key.viewfinder" : (hasQR ? "qrcode.viewfinder" : "text.viewfinder"))
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(Color.white.opacity(0.95))
                     }
@@ -702,13 +705,14 @@ struct ClipImageGridTile: View {
                 HStack(spacing: 4) {
                     if !ClipboardStore.shared.minimalModeEnabled, let onExtractOCR {
                         let hasQR = !(item.qrCodePayload?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+                        let isTOTPQR = TOTPAuthenticator.isTOTPURI(item.qrCodePayload)
                         HoverActionCircleButton(
-                            symbolName: hasQR ? "qrcode.viewfinder" : "text.viewfinder",
+                            symbolName: isTOTPQR ? "key.viewfinder" : (hasQR ? "qrcode.viewfinder" : "text.viewfinder"),
                             size: 22,
                             iconSize: 10,
                             surface: .onImageTile,
                             kind: .ocr,
-                            helpText: hasQR ? "提取二维码内容并键入（⇧↵）" : "提取图中文字并键入（⇧↵）",
+                            helpText: isTOTPQR ? "实时算出 2FA 动态验证码并键入（⇧↵）" : (hasQR ? "提取二维码内容并键入（⇧↵）" : "提取图中文字并键入（⇧↵）"),
                             action: { onExtractOCR(true) }
                         )
                     }

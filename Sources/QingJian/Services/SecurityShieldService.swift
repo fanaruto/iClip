@@ -539,6 +539,50 @@ enum SensitiveCredentialVeil {
     private static let jsonSecretFieldRegex = try! NSRegularExpression(
         pattern: ##"(?i)("(?:password|passwd|secret|client_secret|api_key|apikey|access_token|refresh_token|id_token|session_token|private_key)"\s*:\s*")([^"\r\n]{6,})(")"##
     )
+    private static let otpAuthUriRegex = try! NSRegularExpression(
+        pattern: #"(?i)\botpauth(?:-migration)?://(?:totp|hotp|offline)[^\s'"]+"#
+    )
+    private static let otpAuthSecretParamRegex = try! NSRegularExpression(
+        pattern: #"(?i)([?&](?:secret|data)=)([^&\s#'"]+)"#
+    )
+    private static let wifiPasswordRegex = try! NSRegularExpression(
+        pattern: #"(?i)(WIFI:(?:[^;\r\n]*;)*?P:)([^;\r\n]{4,})(;)"#
+    )
+
+    static func isOTPAuthURI(_ rawText: String) -> Bool {
+        guard !rawText.isEmpty else { return false }
+        let sample: String = rawText.utf8.count > 2_048 ? String(rawText.prefix(1_024)) : rawText
+        let nsRange = NSRange(sample.startIndex..<sample.endIndex, in: sample)
+        return otpAuthUriRegex.firstMatch(in: sample, range: nsRange) != nil
+    }
+
+    private static func isPlaceholderSecretValue(_ val: String) -> Bool {
+        let lower = val.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard lower.count >= 6 else { return true }
+        let placeholders = [
+            "your_", "changeme", "change_me", "example", "placeholder",
+            "replace_me", "redacted", "todo", "<your", "<secret", "<password",
+            "***", "xxxxxx", "123456", "password", "secret"
+        ]
+        if placeholders.contains(where: { lower == $0 || lower.hasPrefix("your_") || lower.hasSuffix("_here") || lower.contains("redacted") || lower.contains("***") || (lower.hasPrefix("<") && lower.hasSuffix(">")) }) {
+            return true
+        }
+        if Set(lower).count <= 1 { return true }
+        return false
+    }
+
+    private static func hasRealEnvSecretAssignment(in sample: String, nsRange: NSRange) -> Bool {
+        guard sample.contains("=") || sample.contains(":") else { return false }
+        for match in envSecretRegex.matches(in: sample, range: nsRange) {
+            if match.numberOfRanges >= 3, let valRange = Range(match.range(at: 2), in: sample) {
+                let candidate = String(sample[valRange])
+                if !isPlaceholderSecretValue(candidate) {
+                    return true
+                }
+            }
+        }
+        return false
+    }
 
     static func isWebhookURL(_ rawText: String) -> Bool {
         guard !rawText.isEmpty else { return false }
@@ -558,7 +602,8 @@ enum SensitiveCredentialVeil {
             return .privateKey
         }
         let nsRange = NSRange(sample.startIndex..<sample.endIndex, in: sample)
-        if ageSecretKeyRegex.firstMatch(in: sample, range: nsRange) != nil {
+        if ageSecretKeyRegex.firstMatch(in: sample, range: nsRange) != nil
+            || otpAuthUriRegex.firstMatch(in: sample, range: nsRange) != nil {
             return .privateKey
         }
         if apiKeyRegex.firstMatch(in: sample, range: nsRange) != nil {
@@ -574,7 +619,9 @@ enum SensitiveCredentialVeil {
             || webhookSecretRegex.firstMatch(in: sample, range: nsRange) != nil
             || httpHeaderAuthCookieRegex.firstMatch(in: sample, range: nsRange) != nil
             || httpBasicHeaderRegex.firstMatch(in: sample, range: nsRange) != nil
-            || jsonSecretFieldRegex.firstMatch(in: sample, range: nsRange) != nil {
+            || jsonSecretFieldRegex.firstMatch(in: sample, range: nsRange) != nil
+            || wifiPasswordRegex.firstMatch(in: sample, range: nsRange) != nil
+            || hasRealEnvSecretAssignment(in: sample, nsRange: nsRange) {
             return .connectionSecret
         }
         for match in idCardCandidateRegex.matches(in: sample, range: nsRange) {
@@ -707,6 +754,20 @@ enum SensitiveCredentialVeil {
                 range: NSRange(out.startIndex..<out.endIndex, in: out),
                 withTemplate: "$1***WEBHOOK_REDACTED***"
             )
+            if out.lowercased().contains("otpauth") {
+                out = otpAuthSecretParamRegex.stringByReplacingMatches(
+                    in: out,
+                    range: NSRange(out.startIndex..<out.endIndex, in: out),
+                    withTemplate: "$1***2FA_SECRET_REDACTED***"
+                )
+            }
+        }
+        if out.uppercased().contains("WIFI:") {
+            out = wifiPasswordRegex.stringByReplacingMatches(
+                in: out,
+                range: NSRange(out.startIndex..<out.endIndex, in: out),
+                withTemplate: "$1***WIFI_REDACTED***$3"
+            )
         }
         if out.contains("?") || out.contains("&") {
             out = urlQuerySecretRegex.stringByReplacingMatches(
@@ -714,6 +775,16 @@ enum SensitiveCredentialVeil {
                 range: NSRange(out.startIndex..<out.endIndex, in: out),
                 withTemplate: "$1***REDACTED***"
             )
+            if out.lowercased().contains("otpauth") {
+                let otpUpgradeRegex = try! NSRegularExpression(
+                    pattern: #"(?i)(\botpauth(?:-migration)?://[^\s'"]*?[?&](?:secret|data)=)\*{3}REDACTED\*{3}"#
+                )
+                out = otpUpgradeRegex.stringByReplacingMatches(
+                    in: out,
+                    range: NSRange(out.startIndex..<out.endIndex, in: out),
+                    withTemplate: "$1***2FA_SECRET_REDACTED***"
+                )
+            }
         }
         out = bearerRegex.stringByReplacingMatches(
             in: out,
@@ -1479,5 +1550,257 @@ enum SecurePasswordGenerator {
                 buffer = raw
             }
         }
+    }
+}
+
+/// 6. 离线零联网 RFC 6238 TOTP 两步验证动态码直算引擎（支持 `otpauth://totp/...` 链接与 2FA 绑定二维码实时算码）
+enum TOTPAuthenticator {
+    enum Algorithm: String, Equatable {
+        case sha1 = "SHA1"
+        case sha256 = "SHA256"
+        case sha512 = "SHA512"
+    }
+
+    struct Evaluation: Equatable {
+        let code: String
+        let formattedCode: String
+        let remainingSeconds: Int
+        let period: Int
+        let accountLabel: String?
+    }
+
+    static func isTOTPURI(_ raw: String?) -> Bool {
+        guard let s = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !s.isEmpty else { return false }
+        return s.lowercased().hasPrefix("otpauth://totp/")
+    }
+
+    /// RFC 4648 Base32 无偏解码（忽略空格、连字符与 `=` 填充）
+    static func decodeBase32(_ encoded: String) -> Data? {
+        var buffer: UInt32 = 0
+        var bitsLeft = 0
+        var out = Data()
+        for scalar in encoded.unicodeScalars {
+            let v = scalar.value
+            if v == 32 || v == 45 { continue } // space or '-'
+            if v == 61 { break } // '=' padding
+            let fiveBit: UInt32
+            if v >= 65 && v <= 90 {
+                fiveBit = v - 65
+            } else if v >= 97 && v <= 122 {
+                fiveBit = v - 97
+            } else if v >= 50 && v <= 55 {
+                fiveBit = (v - 50) + 26
+            } else {
+                return nil
+            }
+            buffer = (buffer << 5) | fiveBit
+            bitsLeft += 5
+            if bitsLeft >= 8 {
+                bitsLeft -= 8
+                out.append(UInt8((buffer >> UInt32(bitsLeft)) & 0xff))
+            }
+        }
+        return out.count >= 5 ? out : nil
+    }
+
+    /// 按指定 Unix 秒时间戳对标准 `otpauth://totp/...` URI 进行离线动态口令求值
+    static func evaluate(uri rawText: String, timestampSeconds: Int64? = nil) -> Evaluation? {
+        let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.lowercased().hasPrefix("otpauth://totp/"),
+              let components = URLComponents(string: trimmed),
+              let queryItems = components.queryItems else {
+            return nil
+        }
+
+        var secretBase32: String?
+        var digits = 6
+        var period = 30
+        var algorithm: Algorithm = .sha1
+        var issuerParam: String?
+
+        for item in queryItems {
+            let k = item.name.lowercased()
+            let val = (item.value ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            switch k {
+            case "secret":
+                secretBase32 = val
+            case "digits":
+                if let d = Int(val), (d == 6 || d == 7 || d == 8) { digits = d }
+            case "period":
+                if let p = Int(val), (10...120).contains(p) { period = p }
+            case "algorithm":
+                switch val.uppercased() {
+                case "SHA256", "HMACSHA256": algorithm = .sha256
+                case "SHA512", "HMACSHA512": algorithm = .sha512
+                default: algorithm = .sha1
+                }
+            case "issuer":
+                if !val.isEmpty { issuerParam = val }
+            default:
+                break
+            }
+        }
+
+        guard let secretStr = secretBase32,
+              let secretKeyData = decodeBase32(secretStr) else {
+            return nil
+        }
+
+        let nowSec = max(0, timestampSeconds ?? Int64(Date().timeIntervalSince1970))
+        let code = computeHOTP(
+            secretKey: secretKeyData,
+            counter: UInt64(nowSec) / UInt64(period),
+            digits: digits,
+            algorithm: algorithm
+        )
+        let rem = Int(Int64(period) - (nowSec % Int64(period)))
+        let formatted: String = {
+            if code.count == 6 {
+                return "\(code.prefix(3)) \(code.suffix(3))"
+            } else if code.count == 8 {
+                return "\(code.prefix(4)) \(code.suffix(4))"
+            }
+            return code
+        }()
+
+        let rawPath = components.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let decodedPath = rawPath.removingPercentEncoding ?? rawPath
+        let label: String? = {
+            if !decodedPath.isEmpty { return decodedPath }
+            return issuerParam
+        }()
+
+        return Evaluation(
+            code: code,
+            formattedCode: formatted,
+            remainingSeconds: rem,
+            period: period,
+            accountLabel: label
+        )
+    }
+
+    static func computeHOTP(
+        secretKey: Data,
+        counter: UInt64,
+        digits: Int = 6,
+        algorithm: Algorithm = .sha1
+    ) -> String {
+        var counterBE = counter.bigEndian
+        let counterData = withUnsafeBytes(of: &counterBE) { Data($0) }
+        let symKey = SymmetricKey(data: secretKey)
+        let macBytes: [UInt8]
+        switch algorithm {
+        case .sha1:
+            macBytes = Array(HMAC<Insecure.SHA1>.authenticationCode(for: counterData, using: symKey))
+        case .sha256:
+            macBytes = Array(HMAC<SHA256>.authenticationCode(for: counterData, using: symKey))
+        case .sha512:
+            macBytes = Array(HMAC<SHA512>.authenticationCode(for: counterData, using: symKey))
+        }
+        let offset = Int(macBytes[macBytes.count - 1] & 0x0f)
+        let binCode = (UInt32(macBytes[offset] & 0x7f) << 24)
+            | (UInt32(macBytes[offset + 1]) << 16)
+            | (UInt32(macBytes[offset + 2]) << 8)
+            | UInt32(macBytes[offset + 3])
+        let mod: UInt32
+        switch digits {
+        case 8: mod = 100_000_000
+        case 7: mod = 10_000_000
+        default: mod = 1_000_000
+        }
+        return String(format: "%0*u", digits, binCode % mod)
+    }
+}
+
+/// 7. `.env` 环境变量配置一键净模版生成器（保留注释与非敏感开关原值，将密钥/连接串安全转换为 `.env.example` 规范占位符）
+enum EnvTemplateSanitizer {
+    private static let envLineRegex = try! NSRegularExpression(
+        pattern: #"^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_]*)(\s*=\s*)(.*)$"#
+    )
+    private static let sensitiveKeyMarkers = [
+        "KEY", "SECRET", "TOKEN", "PASS", "PWD", "AUTH", "PRIVATE",
+        "CERT", "CREDENTIAL", "WEBHOOK", "COOKIE", "DSN", "MNEMONIC", "SEED"
+    ]
+
+    static func generateExampleTemplate(from rawText: String) -> String? {
+        guard rawText.utf8.count <= 65_536, rawText.contains("="), rawText.contains("\n") else { return nil }
+        let lines = rawText.components(separatedBy: "\n")
+        guard lines.count >= 2 else { return nil }
+
+        var validAssignments = 0
+        var mutatedCount = 0
+        var outLines: [String] = []
+        outLines.reserveCapacity(lines.count)
+
+        for rawLine in lines {
+            let hasCR = rawLine.hasSuffix("\r")
+            let line = hasCR ? String(rawLine.dropLast()) : rawLine
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty || trimmed.hasPrefix("#") {
+                outLines.append(rawLine)
+                continue
+            }
+            let nsRange = NSRange(line.startIndex..<line.endIndex, in: line)
+            guard let m = envLineRegex.firstMatch(in: line, range: nsRange),
+                  let prefixR = Range(m.range(at: 1), in: line),
+                  let keyR = Range(m.range(at: 2), in: line),
+                  let eqR = Range(m.range(at: 3), in: line),
+                  let valR = Range(m.range(at: 4), in: line) else {
+                // 若存在明显非注释、非环境变量语法（如代码块大括号），说明不是 `.env` 文件
+                if trimmed.hasPrefix("{") || trimmed.hasPrefix("}") || trimmed.hasPrefix("<") || trimmed.hasSuffix(";") {
+                    return nil
+                }
+                outLines.append(rawLine)
+                continue
+            }
+
+            validAssignments += 1
+            let prefix = String(line[prefixR])
+            let key = String(line[keyR])
+            let eq = String(line[eqR])
+            let valPart = String(line[valR]).trimmingCharacters(in: .whitespaces)
+
+            if valPart.isEmpty {
+                outLines.append(rawLine)
+                continue
+            }
+
+            let quoteChar: String = {
+                if valPart.count >= 2 && valPart.hasPrefix("\"") && valPart.hasSuffix("\"") { return "\"" }
+                if valPart.count >= 2 && valPart.hasPrefix("'") && valPart.hasSuffix("'") { return "'" }
+                return ""
+            }()
+            let innerVal = quoteChar.isEmpty ? valPart : String(valPart.dropFirst().dropLast())
+            let upperKey = key.uppercased()
+            let keyLooksSensitive = sensitiveKeyMarkers.contains { upperKey.contains($0) }
+            let valLooksSensitive = SensitiveCredentialVeil.classify("\(key)=\(innerVal)") != nil
+                || SensitiveCredentialVeil.classify(innerVal) != nil
+
+            if keyLooksSensitive || valLooksSensitive {
+                let lowerInner = innerVal.lowercased()
+                let placeholder: String
+                if lowerInner.hasPrefix("postgres://") || lowerInner.hasPrefix("postgresql://") {
+                    placeholder = "postgresql://user:password@localhost:5432/dbname"
+                } else if lowerInner.hasPrefix("mysql://") {
+                    placeholder = "mysql://user:password@localhost:3306/dbname"
+                } else if lowerInner.hasPrefix("mongodb://") || lowerInner.hasPrefix("mongodb+srv://") {
+                    placeholder = "mongodb://user:password@localhost:27017/dbname"
+                } else if lowerInner.hasPrefix("redis://") {
+                    placeholder = "redis://:password@localhost:6379/0"
+                } else {
+                    placeholder = "your_\(key.lowercased())_here"
+                }
+                if placeholder != innerVal {
+                    mutatedCount += 1
+                }
+                let rebuilt = "\(prefix)\(key)\(eq)\(quoteChar)\(placeholder)\(quoteChar)\(hasCR ? "\r" : "")"
+                outLines.append(rebuilt)
+            } else {
+                outLines.append(rawLine)
+            }
+        }
+
+        guard validAssignments >= 2 && mutatedCount >= 1 else { return nil }
+        return outLines.joined(separator: "\n")
     }
 }

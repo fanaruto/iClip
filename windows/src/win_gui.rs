@@ -2808,7 +2808,12 @@ unsafe fn commit_paste_item_by_index(hwnd: HWND, item_idx: usize, force_plain: b
     }
 }
 
-unsafe fn commit_ephemeral_secret_paste(hwnd: HWND, secret: &str, toast: String) {
+unsafe fn commit_ephemeral_secret_paste_with_delay(
+    hwnd: HWND,
+    secret: &str,
+    toast: String,
+    scrub_ms: u32,
+) {
     iclip_core::security::bump_password_generation_salt();
     let (auto_paste, always_top, target_fg, guard) = APP_STATE.with(|c| {
         let mut b = c.borrow_mut();
@@ -2834,7 +2839,7 @@ unsafe fn commit_ephemeral_secret_paste(hwnd: HWND, secret: &str, toast: String)
             st.scrub_expected_seq_num = seq;
         }
     });
-    SetTimer(hwnd, TIMER_ID_CONCEALED_SCRUB, 45_000, None);
+    SetTimer(hwnd, TIMER_ID_CONCEALED_SCRUB, scrub_ms, None);
 
     if always_top {
         if !target_fg.is_null() && IsWindow(target_fg) != FALSE {
@@ -2850,8 +2855,13 @@ unsafe fn commit_ephemeral_secret_paste(hwnd: HWND, secret: &str, toast: String)
     }
 }
 
+unsafe fn commit_ephemeral_secret_paste(hwnd: HWND, secret: &str, toast: String) {
+    commit_ephemeral_secret_paste_with_delay(hwnd, secret, toast, 45_000);
+}
+
 unsafe fn commit_direct_text_paste(hwnd: HWND, text: &str, toast: String) {
-    let (auto_paste, always_top, target_fg) = APP_STATE.with(|c| {
+    let is_sens = iclip_core::security::classify_sensitive_text(text).is_some();
+    let (auto_paste, always_top, target_fg, guard, scrub_45s) = APP_STATE.with(|c| {
         let mut b = c.borrow_mut();
         let st = b.as_mut().unwrap();
         st.ignore_next_clipboard_seq = true;
@@ -2860,9 +2870,25 @@ unsafe fn commit_direct_text_paste(hwnd: HWND, text: &str, toast: String) {
             st.store.config.auto_paste_enabled,
             st.store.config.always_on_top,
             st.previous_foreground,
+            WinClipboardLocalOnlyGuard {
+                block_cloud_and_history: is_sens,
+                cf_excl: st.cf_exclude_monitor,
+                cf_can_hist: st.cf_can_include_history,
+                cf_can_cloud: st.cf_can_upload_cloud,
+            },
+            is_sens && st.store.config.auto_clear_concealed_clipboard,
         )
     });
-    let _ = write_text_and_html_to_clipboard(hwnd, text, None);
+    let _ = write_text_and_html_to_clipboard_ext(hwnd, text, None, guard);
+    if scrub_45s {
+        let seq = GetClipboardSequenceNumber();
+        APP_STATE.with(|c| {
+            if let Some(st) = c.borrow_mut().as_mut() {
+                st.scrub_expected_seq_num = seq;
+            }
+        });
+        SetTimer(hwnd, TIMER_ID_CONCEALED_SCRUB, 45_000, None);
+    }
     if always_top {
         if !target_fg.is_null() && IsWindow(target_fg) != FALSE {
             let _ = SetForegroundWindow(target_fg);
@@ -2883,6 +2909,9 @@ unsafe fn commit_quick_action(hwnd: HWND, item_idx: usize, action: &QuickAction)
     let mut target_fg: HWND = null_mut();
     let mut cf_html_id = 0u32;
     let mut item_id: Option<String> = None;
+    let mut raw_item_text: Option<String> = None;
+    let mut source_pinned = false;
+    let mut source_burn = false;
 
     APP_STATE.with(|cell| {
         if let Some(st) = cell.borrow_mut().as_mut() {
@@ -2892,12 +2921,33 @@ unsafe fn commit_quick_action(hwnd: HWND, item_idx: usize, action: &QuickAction)
             cf_html_id = st.cf_html_format;
             st.ignore_next_clipboard_seq = true;
             if let Some(it) = st.store.items.get(item_idx).cloned() {
+                raw_item_text = it.text.clone();
+                source_pinned = it.is_pinned;
+                source_burn = it.is_burn_after_paste();
                 item_id = Some(it.id);
                 st.store
                     .record_action_habit(it.source_app_name.as_deref(), action.id);
             }
         }
     });
+
+    if action.id == "totp-live-code" {
+        if let Some(raw) = raw_item_text.as_deref() {
+            let now_secs = iclip_core::model::now_unix_secs();
+            if let Some(fresh) = iclip_core::security::evaluate_totp_uri(raw, now_secs) {
+                commit_ephemeral_secret_paste_with_delay(
+                    hwnd,
+                    &fresh.code,
+                    format!(
+                        "已键入 2FA 动态码 {}（剩 {}s · 30s后擦除）",
+                        fresh.formatted_code, fresh.remaining_seconds
+                    ),
+                    30_000,
+                );
+                return;
+            }
+        }
+    }
 
     if action.id == "todo-split-checklist" {
         if let Some(id) = item_id {
@@ -2939,7 +2989,34 @@ unsafe fn commit_quick_action(hwnd: HWND, item_idx: usize, action: &QuickAction)
         .html_table_payload
         .as_deref()
         .map(|h| (cf_html_id, h));
-    let _ = write_text_and_html_to_clipboard(hwnd, &action.result_text, html_pair);
+    let out_is_sens =
+        source_burn || iclip_core::security::classify_sensitive_text(&action.result_text).is_some();
+    let (out_guard, scrub_45s) = APP_STATE.with(|c| {
+        c.borrow()
+            .as_ref()
+            .map(|st| {
+                (
+                    WinClipboardLocalOnlyGuard {
+                        block_cloud_and_history: out_is_sens,
+                        cf_excl: st.cf_exclude_monitor,
+                        cf_can_hist: st.cf_can_include_history,
+                        cf_can_cloud: st.cf_can_upload_cloud,
+                    },
+                    out_is_sens && !source_pinned && st.store.config.auto_clear_concealed_clipboard,
+                )
+            })
+            .unwrap_or((WinClipboardLocalOnlyGuard::default(), false))
+    });
+    let _ = write_text_and_html_to_clipboard_ext(hwnd, &action.result_text, html_pair, out_guard);
+    if scrub_45s {
+        let seq = GetClipboardSequenceNumber();
+        APP_STATE.with(|c| {
+            if let Some(st) = c.borrow_mut().as_mut() {
+                st.scrub_expected_seq_num = seq;
+            }
+        });
+        SetTimer(hwnd, TIMER_ID_CONCEALED_SCRUB, 45_000, None);
+    }
 
     if let Some(id) = item_id {
         APP_STATE.with(|c| {
@@ -2967,14 +3044,18 @@ unsafe fn handle_queue_pop_shortcut(hwnd: HWND) {
     let mut next_item: Option<ClipItem> = None;
     let mut auto_tab = false;
     let mut img_dir = PathBuf::new();
+    let mut target_app_name: Option<String> = None;
+    let mut minimal_mode = false;
 
     APP_STATE.with(|cell| {
         if let Some(st) = cell.borrow_mut().as_mut() {
             if st.store.config.minimal_mode_enabled {
                 return;
             }
+            minimal_mode = st.store.config.minimal_mode_enabled;
             auto_tab = st.store.config.queue_auto_tab;
             img_dir = st.store.images_dir.clone();
+            target_app_name = st.active_target_app_name.clone();
             next_item = st.store.dequeue_next_item();
             if next_item.is_some() {
                 st.ignore_next_clipboard_seq = true;
@@ -2995,12 +3076,12 @@ unsafe fn handle_queue_pop_shortcut(hwnd: HWND) {
         hide_panel(hwnd, true);
     }
 
+    let is_sens = item.detected_sensitive_kind().is_some() || item.is_burn_after_paste();
     let q_privacy_guard = APP_STATE.with(|c| {
         c.borrow()
             .as_ref()
             .map(|st| WinClipboardLocalOnlyGuard {
-                block_cloud_and_history: item.detected_sensitive_kind().is_some()
-                    || item.is_burn_after_paste(),
+                block_cloud_and_history: is_sens,
                 cf_excl: st.cf_exclude_monitor,
                 cf_can_hist: st.cf_can_include_history,
                 cf_can_cloud: st.cf_can_upload_cloud,
@@ -3008,7 +3089,25 @@ unsafe fn handle_queue_pop_shortcut(hwnd: HWND) {
             .unwrap_or_default()
     });
     if let Some(txt) = &item.text {
-        let _ = write_text_and_html_to_clipboard_ext(hwnd, txt, None, q_privacy_guard);
+        let out_txt = if !minimal_mode
+            && matches!(
+                item.detected_poison_threat(),
+                Some(iclip_core::security::PoisonThreatKind::PastejackingOrBidi(
+                    _
+                ))
+            )
+            && iclip_core::security::is_terminal_app(target_app_name.as_deref())
+        {
+            let cleaned = iclip_core::security::sanitize_clipboard_poison(txt);
+            if cleaned != *txt && !cleaned.is_empty() {
+                cleaned
+            } else {
+                txt.clone()
+            }
+        } else {
+            txt.clone()
+        };
+        let _ = write_text_and_html_to_clipboard_ext(hwnd, &out_txt, None, q_privacy_guard);
     } else if item.kind == ClipContentType::Image {
         if let Some(f) = &item.image_file_name {
             if let Some(bytes) = iclip_core::security::read_decrypted_image_from_dir(&img_dir, f) {
@@ -3016,6 +3115,29 @@ unsafe fn handle_queue_pop_shortcut(hwnd: HWND) {
             }
         }
     }
+
+    let mut scrub_delay_ms: Option<u32> = None;
+    APP_STATE.with(|c| {
+        if let Some(st) = c.borrow_mut().as_mut() {
+            st.store.schedule_otp_expire_if_needed(&item.id, 30);
+            let is_burn = st.store.schedule_burn_after_paste_if_needed(&item.id, 5);
+            if is_burn {
+                scrub_delay_ms = Some(5_000);
+            } else if st.store.config.auto_clear_concealed_clipboard && !item.is_pinned && is_sens {
+                scrub_delay_ms = Some(45_000);
+            }
+        }
+    });
+    if let Some(delay_ms) = scrub_delay_ms {
+        let seq = GetClipboardSequenceNumber();
+        APP_STATE.with(|c| {
+            if let Some(st) = c.borrow_mut().as_mut() {
+                st.scrub_expected_seq_num = seq;
+            }
+        });
+        SetTimer(hwnd, TIMER_ID_CONCEALED_SCRUB, delay_ms, None);
+    }
+
     std::thread::sleep(std::time::Duration::from_millis(35));
     simulate_ctrl_v(auto_tab);
 }
