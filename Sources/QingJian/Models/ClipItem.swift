@@ -278,7 +278,7 @@ struct ClipItem: Identifiable, Codable, Equatable {
             }
             return nil
         case .file:
-            return nil
+            return FileAndLinkSecurityGuard.classifyFilePaths(filePaths)
         }
     }
 
@@ -286,6 +286,12 @@ struct ClipItem: Identifiable, Codable, Equatable {
     var detectedPoisonThreat: ClipboardPoisonGuard.ThreatKind? {
         guard type == .text || type == .link, let raw = text else { return nil }
         return ClipboardPoisonGuard.inspect(raw)
+    }
+
+    /// 离线可疑钓鱼同形异义域名与可执行直链风险检测
+    var detectedLinkRisk: FileAndLinkSecurityGuard.LinkRiskKind? {
+        guard type == .link, let raw = text else { return nil }
+        return FileAndLinkSecurityGuard.inspectLinkRisk(raw)
     }
 
     /// 根据隐私遮罩状态返回卡片标题（未选中且未悬停时对无备注的高敏文本/链接做圆点防肩窥遮罩，零高度抖动）
@@ -600,9 +606,10 @@ enum EpisodicQueryMatcher {
             return !(item.qrCodePayload?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
         case "敏感", "@敏感", "@密钥", "@隐私", "@secret", "secret":
             if case .pastejackingOrBidi = item.detectedPoisonThreat { return true }
+            if item.detectedLinkRisk != nil { return true }
             return item.detectedSensitiveKind != nil || item.isBurnAfterPaste
         case "风险", "@风险", "@毒", "@poison", "poison":
-            return item.detectedPoisonThreat != nil
+            return item.detectedPoisonThreat != nil || item.detectedLinkRisk != nil
         case "即焚", "@即焚", "@burn", "burn":
             return item.isBurnAfterPaste
         case "今天", "今日", "today", "@today":

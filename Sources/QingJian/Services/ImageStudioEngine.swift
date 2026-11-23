@@ -405,4 +405,94 @@ enum ImageStudioEngine {
             normalizedBoxes.count
         )
     }
+
+    // MARK: - 照片与本地图片一键剥离 GPS 经纬度与拍摄设备 EXIF 隐私元数据
+
+    private static let supportedPhotoFileExtensions: Set<String> = [
+        "jpg", "jpeg", "heic", "heif", "png", "webp", "tif", "tiff"
+    ]
+
+    /// 微秒级只读检查图片文件头是否携带 GPS 定位坐标或拍摄设备/作者 EXIF 元数据（0 像素解码开销）
+    static func fileContainsPrivacyMetadata(at fileURL: URL) -> Bool {
+        let ext = fileURL.pathExtension.lowercased()
+        guard supportedPhotoFileExtensions.contains(ext),
+              FileManager.default.fileExists(atPath: fileURL.path),
+              let source = CGImageSourceCreateWithURL(fileURL as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else {
+            return false
+        }
+        if let gps = props[kCGImagePropertyGPSDictionary] as? [AnyHashable: Any], !gps.isEmpty {
+            return true
+        }
+        if let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any] {
+            if exif[kCGImagePropertyExifDateTimeOriginal] != nil
+                || exif[kCGImagePropertyExifLensSerialNumber] != nil
+                || exif[kCGImagePropertyExifBodySerialNumber] != nil
+                || exif[kCGImagePropertyExifUserComment] != nil {
+                return true
+            }
+        }
+        if let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any] {
+            if tiff[kCGImagePropertyTIFFMake] != nil
+                || tiff[kCGImagePropertyTIFFModel] != nil
+                || tiff[kCGImagePropertyTIFFArtist] != nil {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// 将含 GPS/EXIF 的本地照片文件或加密缓存截图重编码为 100% 零隐私元数据的纯净图像
+    static func stripPrivacyMetadata(at imageURL: URL, isEncryptedVaultImage: Bool = false) -> ProcessedImageResult? {
+        autoreleasepool {
+            let sourceOpt: CGImageSource? = {
+                if isEncryptedVaultImage {
+                    guard let data = LocalVaultCrypto.readDecryptedImageData(at: imageURL) else { return nil }
+                    return CGImageSourceCreateWithData(data as CFData, nil)
+                }
+                return CGImageSourceCreateWithURL(imageURL as CFURL, nil)
+            }()
+            guard let source = sourceOpt else { return nil }
+
+            let thumbOpts: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceThumbnailMaxPixelSize: 4096
+            ]
+            guard let srcCG = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbOpts as CFDictionary) else {
+                return nil
+            }
+
+            // 重新绘制到全新 sRGB 位图上下文，物理斩断一切原始 CGImage 附属 EXIF/GPS/IPTC/XMP 字典引用
+            let w = srcCG.width
+            let h = srcCG.height
+            guard w > 0, h > 0 else { return nil }
+            let cs = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+            guard let ctx = CGContext(
+                data: nil,
+                width: w,
+                height: h,
+                bitsPerComponent: 8,
+                bytesPerRow: 0,
+                space: cs,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            ) else { return nil }
+            ctx.interpolationQuality = .high
+            ctx.draw(srcCG, in: CGRect(x: 0, y: 0, width: w, height: h))
+            guard let cleanCG = ctx.makeImage() else { return nil }
+
+            let outData = NSMutableData()
+            guard let dest = CGImageDestinationCreateWithData(
+                outData as CFMutableData,
+                UTType.png.identifier as CFString,
+                1,
+                nil
+            ) else { return nil }
+            CGImageDestinationAddImage(dest, cleanCG, nil)
+            guard CGImageDestinationFinalize(dest) else { return nil }
+
+            let bytes = outData as Data
+            return ProcessedImageResult(data: bytes, utType: .png, byteCount: bytes.count)
+        }
+    }
 }

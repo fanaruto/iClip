@@ -109,6 +109,11 @@ struct ClipCardView: View {
                                 .font(.system(size: 10, weight: .semibold))
                                 .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.red)
                             Text("·")
+                        } else if let linkRisk = item.detectedLinkRisk {
+                            Text(linkRisk.badgeTitle)
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.red)
+                            Text("·")
                         } else if let secKind = item.detectedSensitiveKind {
                             let ttlHint = (!item.isPinned && !item.isPendingTodo && ClipboardStore.shared.autoExpireUnpinnedSecrets) ? " · 24h自毁" : ""
                             Text(secKind.shieldBadgeTitle + ttlHint)
@@ -637,6 +642,9 @@ struct ClipCardView: View {
             Button("复制隐私打码图（PNG）") {
                 ClipboardStore.shared.pastePrivacyRedactedImage(for: item, shouldAutoPaste: false)
             }
+            Button("复制无定位/无 EXIF 纯净图") {
+                ClipboardStore.shared.pasteMetadataStrippedImage(for: item, shouldAutoPaste: false)
+            }
             Button("复制轻量瘦身图（JPEG）") {
                 ClipboardStore.shared.pasteCompressedJPEG(for: item, shouldAutoPaste: false)
             }
@@ -671,6 +679,18 @@ struct ClipCardView: View {
                 Button("仅复制图中文字") {
                     onExtractOCR(false)
                 }
+            }
+        }
+
+        if item.type == .file,
+           let first = item.filePaths?.first,
+           ImageStudioEngine.fileContainsPrivacyMetadata(at: URL(fileURLWithPath: first)) {
+            Divider()
+            Button("抹除照片 GPS 定位与 EXIF 后粘贴") {
+                ClipboardStore.shared.pasteMetadataStrippedImage(for: item, shouldAutoPaste: true)
+            }
+            Button("复制无定位/无 EXIF 纯净图") {
+                ClipboardStore.shared.pasteMetadataStrippedImage(for: item, shouldAutoPaste: false)
             }
         }
 
@@ -878,6 +898,11 @@ struct ClipCardView: View {
                             Text("·")
                         } else if case .pastejackingOrBidi = item.detectedPoisonThreat {
                             Text("含隐藏控制符")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.red)
+                            Text("·")
+                        } else if let linkRisk = item.detectedLinkRisk {
+                            Text(linkRisk.badgeTitle)
                                 .font(.system(size: 10, weight: .semibold))
                                 .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.red)
                             Text("·")
@@ -1368,6 +1393,9 @@ struct ClipCardView: View {
             Button("复制隐私打码图（PNG）") {
                 ClipboardStore.shared.pastePrivacyRedactedImage(for: item, shouldAutoPaste: false)
             }
+            Button("复制无定位/无 EXIF 纯净图") {
+                ClipboardStore.shared.pasteMetadataStrippedImage(for: item, shouldAutoPaste: false)
+            }
             Button("复制轻量瘦身图（JPEG）") {
                 ClipboardStore.shared.pasteCompressedJPEG(for: item, shouldAutoPaste: false)
             }
@@ -1382,6 +1410,18 @@ struct ClipCardView: View {
                 Button("智变键入：\(action.title)") {
                     onApplyTransform(action, true)
                 }
+            }
+        }
+
+        if item.type == .file,
+           let first = item.filePaths?.first,
+           ImageStudioEngine.fileContainsPrivacyMetadata(at: URL(fileURLWithPath: first)) {
+            Divider()
+            Button("抹除照片 GPS 定位与 EXIF 后粘贴") {
+                ClipboardStore.shared.pasteMetadataStrippedImage(for: item, shouldAutoPaste: true)
+            }
+            Button("复制无定位/无 EXIF 纯净图") {
+                ClipboardStore.shared.pasteMetadataStrippedImage(for: item, shouldAutoPaste: false)
             }
         }
 

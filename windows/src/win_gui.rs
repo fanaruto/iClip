@@ -5,8 +5,8 @@ use iclip_core::canvas_ui::{
     standard_card_height, Color4, DisplayRow, GlassPalette, GridMoveDir, PixelCanvas,
 };
 use iclip_core::engines::{
-    analyze_text_actions, clean_tracking_url, compress_png_to_white_bg_jpeg,
-    render_dynamic_template, render_mockup_frame_png,
+    analyze_file_actions, analyze_text_actions, clean_tracking_url, compress_png_to_white_bg_jpeg,
+    render_dynamic_template, render_mockup_frame_png, strip_file_metadata_to_clean_png,
 };
 use iclip_core::hotkey::{
     static_hotkey_conflict_reason, DoubleTapOutcome, WinHotKeyShortcut, WinHotKeySlot,
@@ -88,6 +88,16 @@ const PANEL_BASE_H: i32 = 560;
 const WM_TRAYICON: u32 = WM_USER + 101;
 const WM_APP_DOUBLETAP: u32 = WM_USER + 102;
 const WM_CLIPBOARDUPDATE_MSG: u32 = 0x031D;
+const WM_POWERBROADCAST_MSG: u32 = 0x0218;
+const PBT_APMSUSPEND_VAL: usize = 0x0004;
+const WM_WTSSESSION_CHANGE_MSG: u32 = 0x02B1;
+const WTS_SESSION_LOCK_VAL: usize = 0x0007;
+
+#[link(name = "wtsapi32")]
+extern "system" {
+    fn WTSRegisterSessionNotification(hwnd: HWND, dw_flags: u32) -> i32;
+    fn WTSUnRegisterSessionNotification(hwnd: HWND) -> i32;
+}
 
 const HOTKEY_ID_TOGGLE: i32 = 1001;
 const HOTKEY_ID_QUEUE_POP: i32 = 1002;
@@ -462,6 +472,7 @@ pub fn run_windows_app() -> i32 {
         });
 
         let _ = AddClipboardFormatListener(hwnd);
+        let _ = WTSRegisterSessionNotification(hwnd, 0);
         reload_global_hotkeys_and_hooks(hwnd);
         SetTimer(hwnd, TIMER_ID_OTP_SWEEP, 5_000, None);
         install_or_update_tray_icon(hwnd, false);
@@ -479,6 +490,7 @@ pub fn run_windows_app() -> i32 {
         let _ = UnregisterHotKey(hwnd, HOTKEY_ID_TOGGLE);
         let _ = UnregisterHotKey(hwnd, HOTKEY_ID_QUEUE_POP);
         let _ = UnregisterHotKey(hwnd, HOTKEY_ID_COPY_APPEND);
+        let _ = WTSUnRegisterSessionNotification(hwnd);
         let _ = RemoveClipboardFormatListener(hwnd);
         MAIN_HWND_RAW.store(0, Ordering::SeqCst);
         0
@@ -1489,6 +1501,32 @@ unsafe extern "system" fn wnd_proc(
             handle_clipboard_update(hwnd);
             0
         }
+        WM_WTSSESSION_CHANGE_MSG => {
+            if wparam == WTS_SESSION_LOCK_VAL {
+                APP_STATE.with(|c| {
+                    if let Some(st) = c.borrow_mut().as_mut() {
+                        st.show_quick_look = false;
+                        st.editing_alias_item_id = None;
+                        st.alias_draft.clear();
+                    }
+                });
+                hide_panel(hwnd, false);
+            }
+            0
+        }
+        WM_POWERBROADCAST_MSG => {
+            if wparam == PBT_APMSUSPEND_VAL {
+                APP_STATE.with(|c| {
+                    if let Some(st) = c.borrow_mut().as_mut() {
+                        st.show_quick_look = false;
+                        st.editing_alias_item_id = None;
+                        st.alias_draft.clear();
+                    }
+                });
+                hide_panel(hwnd, false);
+            }
+            0
+        }
         WM_SETTINGCHANGE => {
             sync_effective_theme(hwnd);
             0
@@ -2080,6 +2118,15 @@ unsafe fn open_item_external_target(hwnd: HWND, store_idx: usize) {
             } else {
                 return;
             };
+            if iclip_core::security::inspect_link_risk(&candidate)
+                == Some(iclip_core::security::LinkRiskKind::HomographPhishing)
+            {
+                set_toast(
+                    hwnd,
+                    "已拦截同形异义伪装钓鱼域名，请核对真实地址".to_string(),
+                );
+                return;
+            }
             let Some(safe_url) = iclip_core::security::sanitize_safe_browser_url(&candidate) else {
                 set_toast(hwnd, "已拦截非网页安全协议".to_string());
                 return;
@@ -2179,6 +2226,66 @@ fn item_supports_external_jump(item: &ClipItem) -> bool {
             })
             .is_some(),
         ClipContentType::Image => false,
+    }
+}
+
+fn item_quick_actions_for_ui(st: &AppState, item: &ClipItem) -> Vec<QuickAction> {
+    if st.store.config.minimal_mode_enabled {
+        return Vec::new();
+    }
+    if item.kind == ClipContentType::File {
+        if let Some(paths) = &item.file_paths {
+            return st.store.rank_actions_for_context(
+                item,
+                st.active_target_app_name.as_deref(),
+                analyze_file_actions(paths, false),
+            );
+        }
+        return Vec::new();
+    }
+    if let Some(raw) = &item.text {
+        return st.store.rank_actions_for_context(
+            item,
+            st.active_target_app_name.as_deref(),
+            analyze_text_actions(raw, false),
+        );
+    }
+    Vec::new()
+}
+
+/// 所删即所净：删除敏感记录时同步关闭速览预览，并校验擦除系统剪贴板中的同内容敏感明文残留
+unsafe fn delete_item_and_scrub_clipboard_if_needed(hwnd: HWND, id: &str) {
+    let mut sensitive_text_to_scrub: Option<String> = None;
+    APP_STATE.with(|c| {
+        if let Some(st) = c.borrow_mut().as_mut() {
+            if let Some(target) = st.store.items.iter().find(|it| it.id == id) {
+                if target.detected_sensitive_kind().is_some() || target.is_burn_after_paste() {
+                    sensitive_text_to_scrub = target.text.clone();
+                }
+            }
+            if st.show_quick_look {
+                st.show_quick_look = false;
+                st.editing_alias_item_id = None;
+                st.alias_draft.clear();
+            }
+            st.store.delete_by_id(id);
+        }
+    });
+
+    if let Some(target_text) = sensitive_text_to_scrub {
+        if let Some(current_clip) = read_unicode_text_from_clipboard(hwnd) {
+            if current_clip == target_text {
+                APP_STATE.with(|c| {
+                    if let Some(st) = c.borrow_mut().as_mut() {
+                        st.ignore_next_clipboard_seq = true;
+                    }
+                });
+                if OpenClipboard(hwnd) != FALSE {
+                    let _ = EmptyClipboard();
+                    let _ = CloseClipboard();
+                }
+            }
+        }
     }
 }
 
@@ -2646,6 +2753,27 @@ unsafe fn commit_quick_action(hwnd: HWND, item_idx: usize, action: &QuickAction)
             if created > 0 {
                 set_toast(hwnd, format!("✓ 已拆解为 {created} 条待办（Alt+2 查看）"));
             }
+        }
+        return;
+    }
+
+    if action.id == "file-strip-exif" {
+        if let Some(clean_png) = strip_file_metadata_to_clean_png(Path::new(&action.result_text)) {
+            let _ = write_image_bytes_to_clipboard(hwnd, &clean_png);
+            if always_top {
+                if !target_fg.is_null() && IsWindow(target_fg) != FALSE {
+                    let _ = SetForegroundWindow(target_fg);
+                }
+                set_toast(hwnd, action.toast_text.clone());
+            } else {
+                hide_panel(hwnd, true);
+            }
+            if auto_paste {
+                std::thread::sleep(std::time::Duration::from_millis(35));
+                simulate_ctrl_v(false);
+            }
+        } else {
+            set_toast(hwnd, "无法读取或净化该图片文件".to_string());
         }
         return;
     }
@@ -4548,19 +4676,7 @@ fn layout_and_draw_main_view(
                     let is_selected = vis_pos == st.selected_visible_pos;
                     let is_hovered = st.hovered_visible_pos == Some(vis_pos);
 
-                    let quick_actions = if !minimal {
-                        if let Some(raw) = &item.text {
-                            st.store.rank_actions_for_context(
-                                &item,
-                                st.active_target_app_name.as_deref(),
-                                analyze_text_actions(raw, false),
-                            )
-                        } else {
-                            Vec::new()
-                        }
-                    } else {
-                        Vec::new()
-                    };
+                    let quick_actions = item_quick_actions_for_ui(st, &item);
                     let has_chips = !quick_actions.is_empty();
                     let card_h = standard_card_height(has_chips, scale);
                     if cur_y + card_h > max_list_bottom {
@@ -5092,6 +5208,8 @@ fn layout_and_draw_main_view(
                         ))
                     ) {
                         sub_parts.push("含隐藏控制符".to_string());
+                    } else if let Some(link_risk) = item.detected_link_risk() {
+                        sub_parts.push(link_risk.badge_title().to_string());
                     } else if let Some(sec_kind) = item.detected_sensitive_kind() {
                         if !item.is_pinned
                             && !item.is_pending_todo()
@@ -7247,11 +7365,7 @@ unsafe fn handle_left_click(hwnd: HWND, x: i32, y: i32, is_double: bool) {
             let _ = InvalidateRect(hwnd, null(), FALSE);
         }
         HitAction::DeleteItem(id) => {
-            APP_STATE.with(|c| {
-                if let Some(st) = c.borrow_mut().as_mut() {
-                    st.store.delete_by_id(&id);
-                }
-            });
+            delete_item_and_scrub_clipboard_if_needed(hwnd, &id);
             let _ = InvalidateRect(hwnd, null(), FALSE);
         }
         HitAction::UndoDelete => {
@@ -7838,17 +7952,10 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32) {
                 if let Some(&idx) = filtered.get(pos) {
                     target_idx = Some(idx);
                     if alt_down && !st.store.config.minimal_mode_enabled {
-                        if let Some(raw) = &st.store.items[idx].text {
-                            top_act = st
-                                .store
-                                .rank_actions_for_context(
-                                    &st.store.items[idx],
-                                    st.active_target_app_name.as_deref(),
-                                    analyze_text_actions(raw, false),
-                                )
-                                .into_iter()
-                                .next();
-                        }
+                        let item_snapshot = st.store.items[idx].clone();
+                        top_act = item_quick_actions_for_ui(st, &item_snapshot)
+                            .into_iter()
+                            .next();
                     }
                 }
             }
@@ -8045,6 +8152,7 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32) {
     }
 
     if vk == VK_DELETE as u32 {
+        let mut target_id = None;
         APP_STATE.with(|c| {
             if let Some(st) = c.borrow_mut().as_mut() {
                 let filtered = st.store.filtered_indices_ext(
@@ -8054,11 +8162,13 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32) {
                     st.active_target_app_name.as_deref(),
                 );
                 if let Some(&idx) = filtered.get(st.selected_visible_pos) {
-                    let id = st.store.items[idx].id.clone();
-                    st.store.delete_by_id(&id);
+                    target_id = Some(st.store.items[idx].id.clone());
                 }
             }
         });
+        if let Some(id) = target_id {
+            delete_item_and_scrub_clipboard_if_needed(hwnd, &id);
+        }
         let _ = InvalidateRect(hwnd, null(), FALSE);
         return;
     }
@@ -8144,17 +8254,10 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32) {
                     if ctrl_down && !shift_down && st.store.items[idx].is_pending_todo() {
                         mark_todo_done_id = Some(st.store.items[idx].id.clone());
                     } else if shift_down && !st.store.config.minimal_mode_enabled {
-                        if let Some(raw) = &st.store.items[idx].text {
-                            first_quick_action = st
-                                .store
-                                .rank_actions_for_context(
-                                    &st.store.items[idx],
-                                    st.active_target_app_name.as_deref(),
-                                    analyze_text_actions(raw, false),
-                                )
-                                .into_iter()
-                                .next();
-                        }
+                        let item_snapshot = st.store.items[idx].clone();
+                        first_quick_action = item_quick_actions_for_ui(st, &item_snapshot)
+                            .into_iter()
+                            .next();
                     }
                 }
             }

@@ -966,4 +966,121 @@ mod tests {
         assert_eq!(acts[0].id, "sanitize-invisible-poison");
         assert!(is_terminal_app(Some("WindowsTerminal")));
     }
+
+    #[test]
+    fn test_sensitive_file_guard_homograph_phishing_and_exif_strip() {
+        use crate::engines::{
+            analyze_file_actions, file_has_privacy_metadata, strip_file_metadata_to_clean_png,
+        };
+        use crate::security::{
+            classify_sensitive_file_paths, inspect_link_risk, LinkRiskKind, SensitiveSecretKind,
+        };
+        use image::{codecs::png::PngEncoder, ColorType, ImageEncoder};
+
+        // 1. 敏感私钥/凭据文件识别与 `.pub` / `.env.example` 零误伤
+        assert_eq!(
+            classify_sensitive_file_paths(&[r"C:\Users\dev\.ssh\id_ed25519".to_string()]),
+            Some(SensitiveSecretKind::PrivateKey)
+        );
+        assert_eq!(
+            classify_sensitive_file_paths(&[r"D:\certs\prod_bundle.pfx".to_string()]),
+            Some(SensitiveSecretKind::PrivateKey)
+        );
+        assert_eq!(
+            classify_sensitive_file_paths(&[r"C:\work\api\.env.production".to_string()]),
+            Some(SensitiveSecretKind::ConnectionSecret)
+        );
+        assert_eq!(
+            classify_sensitive_file_paths(&[r"C:\Users\dev\.ssh\id_ed25519.pub".to_string()]),
+            None
+        );
+        assert_eq!(
+            classify_sensitive_file_paths(&[r"C:\work\api\.env.example".to_string()]),
+            None
+        );
+
+        let key_file_item = ClipItem::new_files(
+            vec![r"C:\Users\dev\.ssh\id_rsa".to_string()],
+            Some("explorer".to_string()),
+        );
+        assert_eq!(
+            key_file_item.detected_sensitive_kind(),
+            Some(SensitiveSecretKind::PrivateKey)
+        );
+        assert!(key_file_item.matches_query("@敏感"));
+
+        // 2. 同形异义字钓鱼域名与高危可执行下载链接检测
+        assert_eq!(
+            inspect_link_risk("https://xn--80ak6aa92e.com/login"),
+            Some(LinkRiskKind::HomographPhishing)
+        );
+        assert_eq!(
+            inspect_link_risk("https://a\u{0440}ple.com/security"),
+            Some(LinkRiskKind::HomographPhishing)
+        );
+        assert_eq!(
+            inspect_link_risk("https://apple.com@evil-login.net/auth"),
+            Some(LinkRiskKind::HomographPhishing)
+        );
+        assert_eq!(
+            inspect_link_risk("https://mirror-untrusted.org/patcher.exe"),
+            Some(LinkRiskKind::ExecutableDownload)
+        );
+        assert_eq!(
+            inspect_link_risk(
+                "https://github.com/nekoyoubi/iClip/releases/download/v2.6.0/iClip-Setup.exe"
+            ),
+            None
+        );
+        let phish_item = ClipItem::new_text(
+            "https://xn--80ak6aa92e.com/login".to_string(),
+            Some("Chrome".to_string()),
+        );
+        assert!(phish_item.matches_query("@风险"));
+        assert!(phish_item.matches_query("@敏感"));
+
+        // 3. 粘贴即焚条目删除彻底跳过撤销栈（零残留）
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "iclip-iter5-test-{}-{}",
+            std::process::id(),
+            crate::model::now_unix_secs()
+        ));
+        let _ = fs::create_dir_all(&tmp_dir);
+        let mut store = ClipboardStore::new(tmp_dir.clone());
+        let burn_id =
+            store.insert_or_promote(ClipItem::new_text("OTP-Secret-Burn-9921".to_string(), None));
+        let _ = store.toggle_burn_after_paste(&burn_id);
+        store.delete_by_id(&burn_id);
+        assert_eq!(store.undo_last_delete(crate::model::now_unix_secs()), None);
+
+        // 4. 含 eXIf 块的 PNG 照片检测与物理像素级重编码净化验证
+        let mut raw_png = Vec::new();
+        let rgba = [40u8, 120, 220, 255].repeat(16 * 16);
+        PngEncoder::new(&mut raw_png)
+            .write_image(&rgba, 16, 16, ColorType::Rgba8.into())
+            .unwrap();
+        // 在 IHDR 后（偏移 33）插入合法的空 eXIf 块：[len=4][eXIf][MM\0*][CRC=0]
+        let mut exif_png = Vec::new();
+        exif_png.extend_from_slice(&raw_png[..33]);
+        exif_png.extend_from_slice(&4u32.to_be_bytes());
+        exif_png.extend_from_slice(b"eXIf");
+        exif_png.extend_from_slice(b"MM\x00*");
+        exif_png.extend_from_slice(&0u32.to_be_bytes());
+        exif_png.extend_from_slice(&raw_png[33..]);
+
+        let dirty_path = tmp_dir.join("photo_with_exif.png");
+        fs::write(&dirty_path, &exif_png).unwrap();
+        assert!(file_has_privacy_metadata(&dirty_path));
+
+        let file_acts = analyze_file_actions(&[dirty_path.to_string_lossy().to_string()], false);
+        assert_eq!(file_acts.len(), 1);
+        assert_eq!(file_acts[0].id, "file-strip-exif");
+
+        let clean_bytes = strip_file_metadata_to_clean_png(&dirty_path).unwrap();
+        let clean_path = tmp_dir.join("photo_clean.png");
+        fs::write(&clean_path, &clean_bytes).unwrap();
+        assert!(!file_has_privacy_metadata(&clean_path));
+
+        let _ = fs::remove_dir_all(tmp_dir);
+    }
 }

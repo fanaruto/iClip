@@ -1077,3 +1077,138 @@ enum UniversalCompetitorImporter {
         return out
     }
 }
+
+/// 5. 离线敏感凭证文件识别与防钓鱼域名/高危可执行链接透视引擎
+enum FileAndLinkSecurityGuard {
+    enum LinkRiskKind: Equatable {
+        /// 同形异义伪装域名（IDN Punycode `xn--`、西里尔/希腊混排拉丁主机、或 `trusted@evil` 用户信息段欺骗）
+        case homographPhishing
+        /// 直接指向非官方源可执行脚本/安装器的高危下载链接
+        case executableDownload
+
+        var badgeTitle: String {
+            switch self {
+            case .homographPhishing: return "疑似伪装域名"
+            case .executableDownload: return "可执行下载链接"
+            }
+        }
+    }
+
+    private static let privateKeyExactNames: Set<String> = [
+        "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa", "id_xmss"
+    ]
+    private static let privateKeyExtensions: Set<String> = [
+        "pem", "key", "p12", "pfx", "jks", "keystore", "mobileprovision"
+    ]
+    private static let secretConfigExactNames: Set<String> = [
+        ".env", ".npmrc", ".pypirc", ".netrc", ".pgpass", "kubeconfig",
+        "credentials.json", "secrets.json", "secrets.yaml", "secrets.yml"
+    ]
+    private static let secretConfigExtensions: Set<String> = [
+        "kdbx", "ovpn", "rdp", "tfvars"
+    ]
+    private static let safeTemplateSuffixes: [String] = [
+        ".example", ".sample", ".template", ".dist", ".schema"
+    ]
+
+    /// 离线微秒级识别高危私钥与凭据配置文件（排除 `.pub` 公钥与 `.env.example` 模板，零误伤）
+    static func classifyFilePaths(_ paths: [String]?) -> SensitiveSecretKind? {
+        guard let paths, !paths.isEmpty else { return nil }
+        for rawPath in paths {
+            let fileName = URL(fileURLWithPath: rawPath).lastPathComponent.lowercased()
+            guard !fileName.isEmpty, !fileName.hasSuffix(".pub") else { continue }
+            if safeTemplateSuffixes.contains(where: { fileName.hasSuffix($0) }) {
+                continue
+            }
+            if privateKeyExactNames.contains(fileName) {
+                return .privateKey
+            }
+            let ext = URL(fileURLWithPath: fileName).pathExtension
+            if privateKeyExtensions.contains(ext) {
+                return .privateKey
+            }
+            if secretConfigExactNames.contains(fileName)
+                || fileName.hasPrefix(".env.")
+                || (fileName.hasPrefix("service-account") && fileName.hasSuffix(".json"))
+                || secretConfigExtensions.contains(ext) {
+                return .connectionSecret
+            }
+        }
+        return nil
+    }
+
+    private static let dangerousExecExtensions: Set<String> = [
+        "exe", "msi", "bat", "cmd", "scr", "vbs", "vbe", "js", "jse", "wsf", "hta", "ps1", "apk"
+    ]
+    private static let trustedDownloadHosts: Set<String> = [
+        "github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com",
+        "app.webfooo.com", "apple.com", "microsoft.com"
+    ]
+
+    /// 离线检测同形异义字钓鱼域名（IDN Homograph Attack）与非信任源可执行文件直链
+    static func inspectLinkRisk(_ rawInput: String) -> LinkRiskKind? {
+        let trimmed = rawInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.utf8.count <= 4_096 else { return nil }
+
+        // 检测 `https://apple.com@evil.example` URL userinfo 欺骗
+        if let schemeRange = trimmed.range(of: "://") {
+            let afterScheme = trimmed[schemeRange.upperBound...]
+            let authority = afterScheme.prefix(while: { $0 != "/" && $0 != "?" && $0 != "#" })
+            if authority.contains("@") && !SensitiveCredentialVeil.classify(trimmed).map({ _ in true }, default: false) {
+                return .homographPhishing
+            }
+        }
+
+        let candidate = (trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://"))
+            ? trimmed
+            : ("https://" + trimmed)
+        let parsed = URL(string: candidate)
+            ?? candidate.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed).flatMap(URL.init(string:))
+        guard let url = parsed, let host = url.host?.lowercased(), !host.isEmpty else {
+            return nil
+        }
+
+        // 1. Punycode `xn--` 同形异义字编码预警
+        if host.contains("xn--") {
+            return .homographPhishing
+        }
+
+        // 2. 同一域名标签内混排 ASCII 拉丁字母与西里尔/希腊视觉同形字母（如 `аррӏе.com`）
+        for label in host.split(separator: ".") {
+            var hasASCIIAlpha = false
+            var hasConfusableScript = false
+            for sc in label.unicodeScalars {
+                let v = sc.value
+                if (v >= 97 && v <= 122) || (v >= 65 && v <= 90) {
+                    hasASCIIAlpha = true
+                } else if (v >= 0x0370 && v <= 0x052F) {
+                    // Greek / Cyrillic 区间
+                    hasConfusableScript = true
+                }
+            }
+            if hasASCIIAlpha && hasConfusableScript {
+                return .homographPhishing
+            }
+        }
+
+        // 3. 非可信主机的高危可执行脚本/安装器直链预警
+        let isTrusted = trustedDownloadHosts.contains { host == $0 || host.hasSuffix("." + $0) }
+        if !isTrusted {
+            let pathExt = url.pathExtension.lowercased()
+            if dangerousExecExtensions.contains(pathExt) {
+                return .executableDownload
+            }
+        }
+
+        return nil
+    }
+}
+
+private extension Optional {
+    func map<U>(_ transform: (Wrapped) -> U, default fallback: U) -> U {
+        switch self {
+        case .some(let v): return transform(v)
+        case .none: return fallback
+        }
+    }
+}

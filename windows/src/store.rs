@@ -1097,7 +1097,13 @@ impl ClipboardStore {
     }
 
     pub fn delete_by_id(&mut self, item_id: &str) {
-        self.delete_by_id_with_undo(item_id, true);
+        let skip_undo = self
+            .items
+            .iter()
+            .find(|it| it.id == item_id)
+            .map(|it| it.is_burn_after_paste())
+            .unwrap_or(false);
+        self.delete_by_id_with_undo(item_id, !skip_undo);
     }
 
     fn delete_by_id_with_undo(&mut self, item_id: &str, allow_undo: bool) {

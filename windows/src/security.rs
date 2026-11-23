@@ -1079,6 +1079,182 @@ pub fn sanitize_safe_browser_url(raw_input: &str) -> Option<String> {
     Some(normalized)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkRiskKind {
+    /// 同形异义伪装域名（IDN Punycode `xn--`、西里尔/希腊混排拉丁主机、或 `trusted@evil` 用户信息段欺骗）
+    HomographPhishing,
+    /// 直接指向非官方源可执行脚本/安装器的高危下载链接
+    ExecutableDownload,
+}
+
+impl LinkRiskKind {
+    pub fn badge_title(self) -> &'static str {
+        match self {
+            Self::HomographPhishing => "疑似伪装域名",
+            Self::ExecutableDownload => "可执行下载链接",
+        }
+    }
+}
+
+/// 离线微秒级识别高危私钥与凭据配置文件（排除 `.pub` 公钥与 `.env.example` 模板，零误伤）
+pub fn classify_sensitive_file_paths(paths: &[String]) -> Option<SensitiveSecretKind> {
+    const PRIVATE_KEY_EXACT: &[&str] = &["id_rsa", "id_ed25519", "id_ecdsa", "id_dsa", "id_xmss"];
+    const PRIVATE_KEY_EXTS: &[&str] = &[
+        "pem",
+        "key",
+        "p12",
+        "pfx",
+        "jks",
+        "keystore",
+        "mobileprovision",
+    ];
+    const SECRET_CONFIG_EXACT: &[&str] = &[
+        ".env",
+        ".npmrc",
+        ".pypirc",
+        ".netrc",
+        ".pgpass",
+        "kubeconfig",
+        "credentials.json",
+        "secrets.json",
+        "secrets.yaml",
+        "secrets.yml",
+    ];
+    const SECRET_CONFIG_EXTS: &[&str] = &["kdbx", "ovpn", "rdp", "tfvars"];
+    const SAFE_TEMPLATE_SUFFIXES: &[&str] =
+        &[".example", ".sample", ".template", ".dist", ".schema"];
+
+    for raw_path in paths {
+        let file_name = raw_path
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        if file_name.is_empty() || file_name.ends_with(".pub") {
+            continue;
+        }
+        if SAFE_TEMPLATE_SUFFIXES
+            .iter()
+            .any(|suf| file_name.ends_with(suf))
+        {
+            continue;
+        }
+        if PRIVATE_KEY_EXACT.contains(&file_name.as_str()) {
+            return Some(SensitiveSecretKind::PrivateKey);
+        }
+        let ext = file_name.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+        if !ext.is_empty() && PRIVATE_KEY_EXTS.contains(&ext) {
+            return Some(SensitiveSecretKind::PrivateKey);
+        }
+        if SECRET_CONFIG_EXACT.contains(&file_name.as_str())
+            || file_name.starts_with(".env.")
+            || (file_name.starts_with("service-account") && file_name.ends_with(".json"))
+            || (!ext.is_empty() && SECRET_CONFIG_EXTS.contains(&ext))
+        {
+            return Some(SensitiveSecretKind::ConnectionSecret);
+        }
+    }
+    None
+}
+
+/// 离线检测同形异义字钓鱼域名（IDN Homograph Attack）与非信任源可执行文件直链
+pub fn inspect_link_risk(raw_input: &str) -> Option<LinkRiskKind> {
+    const DANGEROUS_EXEC_EXTS: &[&str] = &[
+        "exe", "msi", "bat", "cmd", "scr", "vbs", "vbe", "js", "jse", "wsf", "hta", "ps1", "apk",
+    ];
+    const TRUSTED_DOWNLOAD_HOSTS: &[&str] = &[
+        "github.com",
+        "objects.githubusercontent.com",
+        "release-assets.githubusercontent.com",
+        "app.webfooo.com",
+        "apple.com",
+        "microsoft.com",
+    ];
+
+    let trimmed = raw_input.trim();
+    if trimmed.is_empty() || trimmed.len() > 4_096 {
+        return None;
+    }
+
+    // 检测 `https://apple.com@evil.example` URL userinfo 欺骗
+    if let Some((_scheme, after_scheme)) = trimmed.split_once("://") {
+        let authority = after_scheme.split(['/', '?', '#']).next().unwrap_or("");
+        if authority.contains('@') && classify_sensitive_text(trimmed).is_none() {
+            return Some(LinkRiskKind::HomographPhishing);
+        }
+    }
+
+    let lower_head: String = trimmed
+        .chars()
+        .take(12)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let after_scheme_owned;
+    let after_scheme: &str = if lower_head.starts_with("https://") {
+        &trimmed[8..]
+    } else if lower_head.starts_with("http://") {
+        &trimmed[7..]
+    } else {
+        after_scheme_owned = trimmed.to_string();
+        after_scheme_owned.as_str()
+    };
+
+    let (authority_raw, path_and_rest) = match after_scheme.find(['/', '?', '#']) {
+        Some(pos) => (&after_scheme[..pos], &after_scheme[pos..]),
+        None => (after_scheme, ""),
+    };
+    let host_port = authority_raw.rsplit('@').next().unwrap_or("").trim();
+    let host = host_port
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
+    if host.is_empty() || !host.contains('.') {
+        return None;
+    }
+
+    // 1. Punycode `xn--` 同形异义字编码预警
+    if host.contains("xn--") {
+        return Some(LinkRiskKind::HomographPhishing);
+    }
+
+    // 2. 同一域名标签内混排 ASCII 拉丁字母与西里尔/希腊视觉同形字母（如 `аррӏе.com`）
+    for label in host.split('.') {
+        let mut has_ascii_alpha = false;
+        let mut has_confusable_script = false;
+        for ch in label.chars() {
+            let v = ch as u32;
+            if ch.is_ascii_alphabetic() {
+                has_ascii_alpha = true;
+            } else if (0x0370..=0x052F).contains(&v) {
+                has_confusable_script = true;
+            }
+        }
+        if has_ascii_alpha && has_confusable_script {
+            return Some(LinkRiskKind::HomographPhishing);
+        }
+    }
+
+    // 3. 非可信主机的高危可执行脚本/安装器直链预警
+    let is_trusted = TRUSTED_DOWNLOAD_HOSTS
+        .iter()
+        .any(|t| host == *t || host.ends_with(&format!(".{t}")));
+    if !is_trusted && path_and_rest.starts_with('/') {
+        let path_only = path_and_rest.split(['?', '#']).next().unwrap_or("");
+        let last_seg = path_only.rsplit('/').next().unwrap_or("");
+        if let Some((_, ext)) = last_seg.rsplit_once('.') {
+            let ext_lower = ext.to_ascii_lowercase();
+            if DANGEROUS_EXEC_EXTS.contains(&ext_lower.as_str()) {
+                return Some(LinkRiskKind::ExecutableDownload);
+            }
+        }
+    }
+
+    None
+}
+
 pub fn veiled_sensitive_preview(raw: &str) -> String {
     let prefix: String = raw.chars().take(360).collect();
     let trimmed = prefix.trim();

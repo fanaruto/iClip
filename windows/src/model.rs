@@ -217,7 +217,10 @@ impl ClipItem {
                 .ocr_text
                 .as_deref()
                 .and_then(crate::security::classify_sensitive_text),
-            ClipContentType::File => None,
+            ClipContentType::File => self
+                .file_paths
+                .as_deref()
+                .and_then(crate::security::classify_sensitive_file_paths),
         }
     }
 
@@ -227,6 +230,25 @@ impl ClipItem {
                 .text
                 .as_deref()
                 .and_then(crate::security::inspect_clipboard_poison),
+            ClipContentType::Image | ClipContentType::File => None,
+        }
+    }
+
+    pub fn detected_link_risk(&self) -> Option<crate::security::LinkRiskKind> {
+        match self.kind {
+            ClipContentType::Link => self
+                .text
+                .as_deref()
+                .and_then(crate::security::inspect_link_risk),
+            ClipContentType::Text => self.text.as_deref().and_then(|t| {
+                let head = safe_utf8_prefix(t, 2048);
+                if head.contains("http://") || head.contains("https://") {
+                    crate::intelligence::extract_clean_share_url(head)
+                        .and_then(|u| crate::security::inspect_link_risk(&u))
+                } else {
+                    None
+                }
+            }),
             ClipContentType::Image | ClipContentType::File => None,
         }
     }
@@ -539,13 +561,16 @@ impl ClipItem {
                 if matches!(
                     self.detected_poison_threat(),
                     Some(crate::security::PoisonThreatKind::PastejackingOrBidi(_))
-                ) {
+                ) || self.detected_link_risk()
+                    == Some(crate::security::LinkRiskKind::HomographPhishing)
+                {
                     return true;
                 }
                 return self.detected_sensitive_kind().is_some() || self.is_burn_after_paste();
             }
             "风险" | "@风险" | "@毒" | "@poison" | "poison" => {
                 return self.detected_poison_threat().is_some()
+                    || self.detected_link_risk().is_some()
             }
             "即焚" | "@即焚" | "@burn" | "burn" => return self.is_burn_after_paste(),
             _ => {}

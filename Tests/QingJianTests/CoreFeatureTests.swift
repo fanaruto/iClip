@@ -2124,4 +2124,102 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertNil(LocalVaultCrypto.openEncryptedArchive(sealed, passphrase: "wrong"))
         XCTAssertEqual(LocalVaultCrypto.openEncryptedArchive(sealed, passphrase: "SyncKey#88"), rawPayload)
     }
+
+    // MARK: - 45. 敏感私钥/凭据文件识别、同形异义钓鱼域名拦截与照片 GPS/EXIF 元数据物理剥离测试
+
+    @MainActor
+    func testSensitiveFileGuardHomographPhishingAndPhotoExifStrip() throws {
+        // 1. 全四模态合拢：高危私钥/凭据配置文件识别与 `.pub` / `.env.example` 零误伤
+        XCTAssertEqual(
+            FileAndLinkSecurityGuard.classifyFilePaths(["/Users/dev/.ssh/id_ed25519"]),
+            .privateKey
+        )
+        XCTAssertEqual(
+            FileAndLinkSecurityGuard.classifyFilePaths(["/Users/dev/certs/client.p12"]),
+            .privateKey
+        )
+        XCTAssertEqual(
+            FileAndLinkSecurityGuard.classifyFilePaths(["/Users/dev/app/.env.production"]),
+            .connectionSecret
+        )
+        XCTAssertEqual(
+            FileAndLinkSecurityGuard.classifyFilePaths(["/Users/dev/vault/personal.kdbx"]),
+            .connectionSecret
+        )
+        XCTAssertNil(FileAndLinkSecurityGuard.classifyFilePaths(["/Users/dev/.ssh/id_ed25519.pub"]))
+        XCTAssertNil(FileAndLinkSecurityGuard.classifyFilePaths(["/Users/dev/app/.env.example"]))
+        XCTAssertNil(FileAndLinkSecurityGuard.classifyFilePaths(["/Users/dev/Documents/报价单.pdf"]))
+
+        let keyFileItem = ClipItem(
+            type: .file,
+            filePaths: ["/Users/dev/.ssh/id_rsa"],
+            contentHash: "file:id_rsa"
+        )
+        XCTAssertEqual(keyFileItem.detectedSensitiveKind, .privateKey)
+        XCTAssertTrue(keyFileItem.matches(query: "@敏感"))
+
+        // 2. IDN Punycode / 西里尔混排钓鱼域名与非信任源可执行文件下载链接识别
+        XCTAssertEqual(
+            FileAndLinkSecurityGuard.inspectLinkRisk("https://xn--80ak6aa92e.com/login"),
+            .homographPhishing
+        )
+        // 拉丁 `a` + 西里尔 `р` (`U+0440`) 混排伪装域名
+        XCTAssertEqual(
+            FileAndLinkSecurityGuard.inspectLinkRisk("https://a\u{0440}ple.com/security"),
+            .homographPhishing
+        )
+        XCTAssertEqual(
+            FileAndLinkSecurityGuard.inspectLinkRisk("https://apple.com@evil-login.net/auth"),
+            .homographPhishing
+        )
+        XCTAssertEqual(
+            FileAndLinkSecurityGuard.inspectLinkRisk("https://cdn-unknown-mirror.org/setup_patch.exe"),
+            .executableDownload
+        )
+        // 官方 GitHub Release 下载直链与正常官网零误伤
+        XCTAssertNil(FileAndLinkSecurityGuard.inspectLinkRisk("https://github.com/nekoyoubi/iClip/releases/download/v2.6.0/iClip-Setup.exe"))
+        XCTAssertNil(FileAndLinkSecurityGuard.inspectLinkRisk("https://app.webfooo.com/iClip"))
+
+        let phishItem = ClipItem(type: .link, text: "https://xn--80ak6aa92e.com/login", contentHash: "link:phish")
+        XCTAssertEqual(phishItem.detectedLinkRisk, .homographPhishing)
+        XCTAssertTrue(phishItem.matches(query: "@风险"))
+        XCTAssertTrue(phishItem.matches(query: "@敏感"))
+
+        // 3. 含 GPS 经纬度与相机 EXIF 元数据的照片检测与 100% 物理重绘剥离
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("iclip-exif-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let cs = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        let ctx = try XCTUnwrap(CGContext(
+            data: nil, width: 32, height: 32, bitsPerComponent: 8, bytesPerRow: 0,
+            space: cs, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ))
+        ctx.setFillColor(CGColor(srgbRed: 0.2, green: 0.5, blue: 0.9, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: 32, height: 32))
+        let cg = try XCTUnwrap(ctx.makeImage())
+
+        let photoWithGPS = tmpDir.appendingPathComponent("IMG_GPS.jpg")
+        let jpgData = NSMutableData()
+        let dest = try XCTUnwrap(CGImageDestinationCreateWithData(jpgData as CFMutableData, "public.jpeg" as CFString, 1, nil))
+        let metaProps: [CFString: Any] = [
+            kCGImagePropertyGPSDictionary: [
+                kCGImagePropertyGPSLatitude: 31.2304,
+                kCGImagePropertyGPSLongitude: 121.4737
+            ],
+            kCGImagePropertyTIFFDictionary: [
+                kCGImagePropertyTIFFMake: "Apple",
+                kCGImagePropertyTIFFModel: "iPhone 17 Pro"
+            ]
+        ]
+        CGImageDestinationAddImage(dest, cg, metaProps as CFDictionary)
+        XCTAssertTrue(CGImageDestinationFinalize(dest))
+        try (jpgData as Data).write(to: photoWithGPS)
+
+        XCTAssertTrue(ImageStudioEngine.fileContainsPrivacyMetadata(at: photoWithGPS))
+        let stripped = try XCTUnwrap(ImageStudioEngine.stripPrivacyMetadata(at: photoWithGPS))
+        let cleanURL = tmpDir.appendingPathComponent("IMG_CLEAN.png")
+        try stripped.data.write(to: cleanURL)
+        XCTAssertFalse(ImageStudioEngine.fileContainsPrivacyMetadata(at: cleanURL))
+    }
 }

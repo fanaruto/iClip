@@ -1829,3 +1829,124 @@ pub fn render_dynamic_template(template: &str, latest_context: Option<&str>) -> 
         .replace("{{date}}", date_only)
         .replace("{{datetime}}", &iso)
 }
+
+/// 零像素解码快速嗅探本地 JPEG / PNG 照片是否携带 EXIF / GPS / XMP / 文本隐私元数据块
+pub fn file_has_privacy_metadata(path: &std::path::Path) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    if !matches!(ext.as_str(), "jpg" | "jpeg" | "png") {
+        return false;
+    }
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut sig = [0u8; 8];
+    if file.read_exact(&mut sig).is_err() {
+        return false;
+    }
+
+    // 1. JPEG 段标记扫描（SOI 0xFFD8 -> APP1 EXIF/XMP 0xFFE1 / APP13 IPTC 0xFFED / COM 0xFFFE）
+    if sig[0] == 0xFF && sig[1] == 0xD8 {
+        if file.seek(SeekFrom::Start(2)).is_err() {
+            return false;
+        }
+        for _ in 0..64 {
+            let mut hdr = [0u8; 4];
+            if file.read_exact(&mut hdr).is_err() || hdr[0] != 0xFF {
+                break;
+            }
+            let mut marker = hdr[1];
+            while marker == 0xFF {
+                let mut b = [0u8; 1];
+                if file.read_exact(&mut b).is_err() {
+                    return false;
+                }
+                marker = b[0];
+                // 若跳过了填充 0xFF，需补读长度低字节
+                hdr[2] = hdr[3];
+                if file.read_exact(&mut hdr[3..4]).is_err() {
+                    return false;
+                }
+            }
+            if marker == 0xDA || marker == 0xD9 {
+                break;
+            }
+            let seg_len = u16::from_be_bytes([hdr[2], hdr[3]]) as usize;
+            if seg_len < 2 {
+                break;
+            }
+            if matches!(marker, 0xE1 | 0xED | 0xFE) {
+                return true;
+            }
+            if file.seek(SeekFrom::Current((seg_len - 2) as i64)).is_err() {
+                break;
+            }
+        }
+        return false;
+    }
+
+    // 2. PNG 块头扫描（eXIf / tEXt / iTXt / zTXt）
+    if &sig == b"\x89PNG\r\n\x1a\n" {
+        for _ in 0..128 {
+            let mut chunk_hdr = [0u8; 8];
+            if file.read_exact(&mut chunk_hdr).is_err() {
+                break;
+            }
+            let chunk_len =
+                u32::from_be_bytes([chunk_hdr[0], chunk_hdr[1], chunk_hdr[2], chunk_hdr[3]]) as i64;
+            let chunk_type = &chunk_hdr[4..8];
+            if matches!(chunk_type, b"eXIf" | b"tEXt" | b"iTXt" | b"zTXt") {
+                return true;
+            }
+            if chunk_type == b"IEND" || chunk_len < 0 {
+                break;
+            }
+            // 跳过 chunk_data + 4B CRC
+            if file.seek(SeekFrom::Current(chunk_len + 4)).is_err() {
+                break;
+            }
+        }
+    }
+
+    false
+}
+
+/// 纯像素级重绘剥离照片全部 GPS / EXIF / XMP / 文本隐私块，输出纯净 PNG 字节流
+pub fn strip_file_metadata_to_clean_png(path: &std::path::Path) -> Option<Vec<u8>> {
+    let dyn_img = image::open(path).ok()?;
+    let rgba = dyn_img.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    if w == 0 || h == 0 || w > 12_000 || h > 12_000 {
+        return None;
+    }
+    let mut clean_png = Vec::new();
+    PngEncoder::new(&mut clean_png)
+        .write_image(&rgba, w, h, ColorType::Rgba8.into())
+        .ok()?;
+    Some(clean_png)
+}
+
+/// 本地文件模态专属隐私动作（检测到照片携带 EXIF/GPS 时生成一键净图粘贴胶囊）
+pub fn analyze_file_actions(paths: &[String], minimal_mode: bool) -> Vec<QuickAction> {
+    if minimal_mode || paths.is_empty() {
+        return Vec::new();
+    }
+    let first = &paths[0];
+    if file_has_privacy_metadata(std::path::Path::new(first)) {
+        vec![QuickAction {
+            id: "file-strip-exif",
+            title: "抹除定位/EXIF粘贴".to_string(),
+            is_security: true,
+            result_text: first.clone(),
+            html_table_payload: None,
+            toast_text: "已抹除照片 GPS 定位与拍摄设备 EXIF 隐私元数据".to_string(),
+        }]
+    } else {
+        Vec::new()
+    }
+}

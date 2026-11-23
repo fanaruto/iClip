@@ -240,6 +240,38 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
                 self.panel?.sharingType = shielded ? .none : .readOnly
             }
             .store(in: &cancellables)
+
+        // 系统锁屏或合盖休眠隐私保护：立即关闭速览浮层、清空草稿并自动收起悬浮窗
+        let wsCenter = NSWorkspace.shared.notificationCenter
+        Publishers.Merge(
+            wsCenter.publisher(for: NSWorkspace.willSleepNotification),
+            wsCenter.publisher(for: NSWorkspace.screensDidSleepNotification)
+        )
+        .receive(on: RunLoop.main)
+        .sink { [weak self] _ in
+            self?.lockDownPanelForSystemSleepOrLock()
+        }
+        .store(in: &cancellables)
+
+        DistributedNotificationCenter.default()
+            .publisher(for: Notification.Name("com.apple.screenIsLocked"))
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.lockDownPanelForSystemSleepOrLock()
+            }
+            .store(in: &cancellables)
+    }
+
+    private func lockDownPanelForSystemSleepOrLock() {
+        nav.showQuickLook = false
+        nav.isQuickLookEditing = false
+        nav.quickLookDraftText = ""
+        nav.selectedIndex = 0
+        if panel?.isVisible == true {
+            nav.isPresented = false
+            panel?.orderOut(nil)
+            store.onPanelHidden()
+        }
     }
 
     /// 按苹果官方 Liquid Glass 分层规范挂载原生材质根容器（含透明阴影出血区 + 顶层 NSGlassEffectView 光学壳体）
@@ -1065,6 +1097,38 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
                 self.panel?.sharingType = shielded ? .none : .readOnly
             }
             .store(in: &cancellables)
+
+        // 系统锁屏或合盖休眠隐私保护：立即关闭速览浮层、清空草稿并自动收起悬浮窗
+        let wsCenter = NSWorkspace.shared.notificationCenter
+        Publishers.Merge(
+            wsCenter.publisher(for: NSWorkspace.willSleepNotification),
+            wsCenter.publisher(for: NSWorkspace.screensDidSleepNotification)
+        )
+        .receive(on: RunLoop.main)
+        .sink { [weak self] _ in
+            self?.lockDownPanelForSystemSleepOrLock()
+        }
+        .store(in: &cancellables)
+
+        DistributedNotificationCenter.default()
+            .publisher(for: Notification.Name("com.apple.screenIsLocked"))
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.lockDownPanelForSystemSleepOrLock()
+            }
+            .store(in: &cancellables)
+    }
+
+    private func lockDownPanelForSystemSleepOrLock() {
+        nav.showQuickLook = false
+        nav.isQuickLookEditing = false
+        nav.quickLookDraftText = ""
+        nav.selectedIndex = 0
+        if panel?.isVisible == true {
+            nav.isPresented = false
+            panel?.orderOut(nil)
+            store.onPanelHidden()
+        }
     }
 
     /// 按苹果官方 Liquid Glass 分层规范挂载原生材质根容器（含透明阴影出血区 + 顶层 NSGlassEffectView 光学壳体）

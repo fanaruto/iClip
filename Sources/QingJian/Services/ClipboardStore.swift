@@ -1896,8 +1896,12 @@ final class ClipboardStore: ObservableObject {
         return OutboundLinkSafety.validatedBrowserURL(from: raw)
     }
 
-    /// 点击链接卡片左侧徽标或悬停打开按钮：触发跃迁声触反馈并强制激活默认浏览器前台打开链接
+    /// 点击链接卡片左侧徽标或悬停打开按钮：对同形异义钓鱼伪装域名执行主动拦截，安全网页正常打开
     func openLinkInBrowser(_ item: ClipItem) {
+        if item.detectedLinkRisk == .homographPhishing {
+            showToast("已拦截同形异义伪装钓鱼域名，请核对真实地址", duration: 3.6)
+            return
+        }
         guard let url = resolvedBrowserURL(for: item) else {
             showToast("无效的链接地址")
             return
@@ -2164,8 +2168,24 @@ final class ClipboardStore: ObservableObject {
         #endif
         saveHistory(allowEmptyBackup: true)
 
+        // 「所删即所净」：若当前系统剪贴板正好停留在该被删敏感/即焚内容上，同步清空系统剪贴板残留
+        if let curPB = pasteboard.string(forType: .string),
+           let raw = removed.text,
+           curPB == raw,
+           (removed.detectedSensitiveKind != nil || removed.isBurnAfterPaste || removed.detectedPoisonThreat != nil) {
+            pasteboard.clearContents()
+            ignoreNextChangeCount = pasteboard.changeCount
+            lastChangeCount = pasteboard.changeCount
+        }
+
         if userInitiated {
             TactileFeedbackEngine.shared.perform(.deleteItem)
+            if removed.isBurnAfterPaste {
+                // 粘贴即焚机密手动删除时立即物理擦除，不进入 8s 内存撤销缓冲
+                deleteImageFileIfNeeded(for: removed)
+                showToast("已彻底销毁即焚记录", duration: 2.8)
+                return
+            }
             stageDeletionUndoBuffer([removed])
             if let bid = removed.sourceAppBundleID,
                let appName = removed.sourceAppName,
@@ -3608,6 +3628,51 @@ final class ClipboardStore: ObservableObject {
                     self.showToast("已智能打码 \(outcome.redactedCount) 处隐私并键入")
                 } else {
                     self.showToast("已智能打码 \(outcome.redactedCount) 处隐私到剪贴板")
+                }
+            }
+        }
+    }
+
+    /// 一键抹除照片文件（`.file`）或缓存图片（`.image`）中的 GPS 经纬度与拍摄设备 EXIF 元数据后粘贴
+    func pasteMetadataStrippedImage(
+        for item: ClipItem,
+        shouldAutoPaste: Bool = true,
+        onBeforePaste: (() -> Void)? = nil
+    ) {
+        let targetInfo: (url: URL, encrypted: Bool)? = {
+            if item.type == .image, let u = imageURL(for: item) {
+                return (u, true)
+            }
+            if item.type == .file, let first = item.filePaths?.first {
+                return (URL(fileURLWithPath: first), false)
+            }
+            return nil
+        }()
+        guard let info = targetInfo else {
+            showToast("未找到可处理的图片文件")
+            return
+        }
+
+        Task.detached(priority: .userInitiated) { [weak self] in
+            guard let clean = ImageStudioEngine.stripPrivacyMetadata(at: info.url, isEncryptedVaultImage: info.encrypted) else {
+                await MainActor.run { [weak self] in self?.showToast("抹除图片隐私元数据失败") }
+                return
+            }
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.pasteboard.clearContents()
+                self.pasteboard.setData(clean.data, forType: .png)
+                self.ignoreNextChangeCount = self.pasteboard.changeCount
+                self.lastChangeCount = self.pasteboard.changeCount
+
+                TactileFeedbackEngine.shared.perform(.magicTransform)
+                onBeforePaste?()
+                self.refreshAccessibilityStatus()
+                if shouldAutoPaste && self.autoPasteEnabled && self.isAccessibilityGranted {
+                    Self.schedulePasteWhenTargetReady()
+                    self.showToast("已抹除 GPS 定位与 EXIF 元数据并键入")
+                } else {
+                    self.showToast("已复制无定位/无 EXIF 纯净图像")
                 }
             }
         }
