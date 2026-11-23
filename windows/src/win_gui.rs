@@ -276,6 +276,7 @@ struct WinAppState {
     cf_exclude_monitor: u32,
     cf_viewer_ignore: u32,
     cf_can_include_history: u32,
+    cf_can_upload_cloud: u32,
     suppress_deactivate_hide: bool,
     autostart_cached: bool,
     kbd_hook: HHOOK,
@@ -419,6 +420,7 @@ pub fn run_windows_app() -> i32 {
         let cf_ignore = RegisterClipboardFormatW(to_wide("Clipboard Viewer Ignore").as_ptr());
         let cf_can_hist =
             RegisterClipboardFormatW(to_wide("CanIncludeInClipboardHistory").as_ptr());
+        let cf_can_cloud = RegisterClipboardFormatW(to_wide("CanUploadToCloudClipboard").as_ptr());
         let autostart = is_autostart_enabled();
 
         APP_STATE.with(|cell| {
@@ -463,6 +465,7 @@ pub fn run_windows_app() -> i32 {
                 cf_exclude_monitor: cf_excl,
                 cf_viewer_ignore: cf_ignore,
                 cf_can_include_history: cf_can_hist,
+                cf_can_upload_cloud: cf_can_cloud,
                 suppress_deactivate_hide: false,
                 autostart_cached: autostart,
                 kbd_hook: null_mut(),
@@ -617,6 +620,7 @@ pub fn run_windows_self_test() -> Result<(), String> {
             cf_exclude_monitor: 0,
             cf_viewer_ignore: 0,
             cf_can_include_history: 0,
+            cf_can_upload_cloud: 0,
             suppress_deactivate_hide: true,
             autostart_cached: true,
             kbd_hook: null_mut(),
@@ -2408,10 +2412,61 @@ unsafe fn read_dib_as_png_from_clipboard(hwnd: HWND) -> Option<(Vec<u8>, u32, u3
     result
 }
 
+#[derive(Clone, Copy, Default)]
+struct WinClipboardLocalOnlyGuard {
+    block_cloud_and_history: bool,
+    cf_excl: u32,
+    cf_can_hist: u32,
+    cf_can_cloud: u32,
+}
+
+unsafe fn apply_win32_local_only_privacy_formats(guard: WinClipboardLocalOnlyGuard) {
+    if !guard.block_cloud_and_history {
+        return;
+    }
+    let write_dword_zero = |fmt_id: u32| {
+        if fmt_id == 0 {
+            return;
+        }
+        let h = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, 4);
+        if !h.is_null() {
+            let p = GlobalLock(h) as *mut u32;
+            if !p.is_null() {
+                *p = 0u32;
+                let _ = GlobalUnlock(h);
+                let _ = SetClipboardData(fmt_id, h);
+            }
+        }
+    };
+    // 物理阻断 Windows `Win+V` 明文历史入库与微软云剪贴板同步上传
+    write_dword_zero(guard.cf_can_hist);
+    write_dword_zero(guard.cf_can_cloud);
+    if guard.cf_excl != 0 {
+        let h_excl = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, 4);
+        if !h_excl.is_null() {
+            let _ = SetClipboardData(guard.cf_excl, h_excl);
+        }
+    }
+}
+
 unsafe fn write_text_and_html_to_clipboard(
     hwnd: HWND,
     text: &str,
     html_format_pair: Option<(u32, &str)>,
+) -> bool {
+    write_text_and_html_to_clipboard_ext(
+        hwnd,
+        text,
+        html_format_pair,
+        WinClipboardLocalOnlyGuard::default(),
+    )
+}
+
+unsafe fn write_text_and_html_to_clipboard_ext(
+    hwnd: HWND,
+    text: &str,
+    html_format_pair: Option<(u32, &str)>,
+    privacy_guard: WinClipboardLocalOnlyGuard,
 ) -> bool {
     if OpenClipboard(hwnd) == FALSE {
         return false;
@@ -2445,11 +2500,20 @@ unsafe fn write_text_and_html_to_clipboard(
         }
     }
 
+    apply_win32_local_only_privacy_formats(privacy_guard);
     let _ = CloseClipboard();
     true
 }
 
 unsafe fn write_image_bytes_to_clipboard(hwnd: HWND, encoded_img: &[u8]) -> bool {
+    write_image_bytes_to_clipboard_ext(hwnd, encoded_img, WinClipboardLocalOnlyGuard::default())
+}
+
+unsafe fn write_image_bytes_to_clipboard_ext(
+    hwnd: HWND,
+    encoded_img: &[u8],
+    privacy_guard: WinClipboardLocalOnlyGuard,
+) -> bool {
     let Ok(dyn_img) = image::load_from_memory(encoded_img) else {
         return false;
     };
@@ -2460,7 +2524,7 @@ unsafe fn write_image_bytes_to_clipboard(hwnd: HWND, encoded_img: &[u8]) -> bool
 
     if OpenClipboard(hwnd) == FALSE {
         return false;
-    }
+    };
     let _ = EmptyClipboard();
     let hdib = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, hdr_size + pixel_bytes);
     if !hdib.is_null() {
@@ -2491,6 +2555,7 @@ unsafe fn write_image_bytes_to_clipboard(hwnd: HWND, encoded_img: &[u8]) -> bool
             let _ = SetClipboardData(CF_DIB_ID, hdib);
         }
     }
+    apply_win32_local_only_privacy_formats(privacy_guard);
     let _ = CloseClipboard();
     true
 }
@@ -2526,11 +2591,25 @@ unsafe fn simulate_ctrl_v(send_tab_after: bool) {
 unsafe fn copy_only_item_in_place(hwnd: HWND, item_idx: usize) {
     let mut text_to_write: Option<String> = None;
     let mut image_path_to_write: Option<PathBuf> = None;
+    let mut privacy_guard = WinClipboardLocalOnlyGuard::default();
+    let mut scrub_45s = false;
 
     APP_STATE.with(|cell| {
         if let Some(st) = cell.borrow_mut().as_mut() {
             st.ignore_next_clipboard_seq = true;
             if let Some(item) = st.store.items.get(item_idx).cloned() {
+                let is_sensitive =
+                    item.detected_sensitive_kind().is_some() || item.is_burn_after_paste();
+                privacy_guard = WinClipboardLocalOnlyGuard {
+                    block_cloud_and_history: is_sensitive,
+                    cf_excl: st.cf_exclude_monitor,
+                    cf_can_hist: st.cf_can_include_history,
+                    cf_can_cloud: st.cf_can_upload_cloud,
+                };
+                if st.store.config.auto_clear_concealed_clipboard && !item.is_pinned && is_sensitive
+                {
+                    scrub_45s = true;
+                }
                 st.copied_flash_item_id = Some(item.id.clone());
                 let target_app = st.active_target_app_name.clone();
                 st.store
@@ -2555,16 +2634,26 @@ unsafe fn copy_only_item_in_place(hwnd: HWND, item_idx: usize) {
     });
 
     if let Some(txt) = text_to_write {
-        let _ = write_text_and_html_to_clipboard(hwnd, &txt, None);
+        let _ = write_text_and_html_to_clipboard_ext(hwnd, &txt, None, privacy_guard);
     } else if let Some(img_path) = image_path_to_write {
         if let (Some(dir), Some(fname)) = (
             img_path.parent(),
             img_path.file_name().and_then(|s| s.to_str()),
         ) {
             if let Some(bytes) = iclip_core::security::read_decrypted_image_from_dir(dir, fname) {
-                let _ = write_image_bytes_to_clipboard(hwnd, &bytes);
+                let _ = write_image_bytes_to_clipboard_ext(hwnd, &bytes, privacy_guard);
             }
         }
+    }
+
+    if scrub_45s {
+        let seq = GetClipboardSequenceNumber();
+        APP_STATE.with(|c| {
+            if let Some(st) = c.borrow_mut().as_mut() {
+                st.scrub_expected_seq_num = seq;
+            }
+        });
+        SetTimer(hwnd, TIMER_ID_CONCEALED_SCRUB, 45_000, None);
     }
 
     SetTimer(hwnd, TIMER_ID_COPY_FLASH_CLEAR, 1_150, None);
@@ -2578,6 +2667,7 @@ unsafe fn commit_paste_item_by_index(hwnd: HWND, item_idx: usize, force_plain: b
     let mut text_to_write: Option<String> = None;
     let mut image_path_to_write: Option<PathBuf> = None;
     let mut item_id_for_otp: Option<String> = None;
+    let mut privacy_guard = WinClipboardLocalOnlyGuard::default();
 
     APP_STATE.with(|cell| {
         if let Some(st) = cell.borrow_mut().as_mut() {
@@ -2586,6 +2676,14 @@ unsafe fn commit_paste_item_by_index(hwnd: HWND, item_idx: usize, force_plain: b
             target_fg = st.previous_foreground;
             st.ignore_next_clipboard_seq = true;
             if let Some(item) = st.store.items.get(item_idx).cloned() {
+                let is_sensitive =
+                    item.detected_sensitive_kind().is_some() || item.is_burn_after_paste();
+                privacy_guard = WinClipboardLocalOnlyGuard {
+                    block_cloud_and_history: is_sensitive,
+                    cf_excl: st.cf_exclude_monitor,
+                    cf_can_hist: st.cf_can_include_history,
+                    cf_can_cloud: st.cf_can_upload_cloud,
+                };
                 item_id_for_otp = Some(item.id.clone());
                 let target_app = st.active_target_app_name.clone();
                 st.store
@@ -2646,45 +2744,45 @@ unsafe fn commit_paste_item_by_index(hwnd: HWND, item_idx: usize, force_plain: b
     });
 
     if let Some(txt) = text_to_write {
-        let _ = write_text_and_html_to_clipboard(hwnd, &txt, None);
+        let _ = write_text_and_html_to_clipboard_ext(hwnd, &txt, None, privacy_guard);
     } else if let Some(img_path) = image_path_to_write {
         if let (Some(dir), Some(fname)) = (
             img_path.parent(),
             img_path.file_name().and_then(|s| s.to_str()),
         ) {
             if let Some(bytes) = iclip_core::security::read_decrypted_image_from_dir(dir, fname) {
-                let _ = write_image_bytes_to_clipboard(hwnd, &bytes);
+                let _ = write_image_bytes_to_clipboard_ext(hwnd, &bytes, privacy_guard);
             }
         }
     }
 
-    let mut scrub_unpinned_secret = false;
+    let mut scrub_delay_ms: Option<u32> = None;
     if let Some(id) = item_id_for_otp {
         APP_STATE.with(|c| {
             if let Some(st) = c.borrow_mut().as_mut() {
                 st.store.schedule_otp_expire_if_needed(&id, 30);
-                st.store.schedule_burn_after_paste_if_needed(&id, 5);
-                if st.store.config.auto_clear_concealed_clipboard {
+                let is_burn = st.store.schedule_burn_after_paste_if_needed(&id, 5);
+                if is_burn {
+                    // 粘贴即焚 5 秒后同步擦除 Windows 系统剪贴板（序号锁保证不误删后续新复制）
+                    scrub_delay_ms = Some(5_000);
+                } else if st.store.config.auto_clear_concealed_clipboard {
                     if let Some(cur) = st.store.items.iter().find(|i| i.id == id) {
-                        if !cur.is_pinned
-                            && !cur.is_burn_after_paste()
-                            && cur.detected_sensitive_kind().is_some()
-                        {
-                            scrub_unpinned_secret = true;
+                        if !cur.is_pinned && cur.detected_sensitive_kind().is_some() {
+                            scrub_delay_ms = Some(45_000);
                         }
                     }
                 }
             }
         });
     }
-    if scrub_unpinned_secret {
+    if let Some(delay_ms) = scrub_delay_ms {
         let seq = GetClipboardSequenceNumber();
         APP_STATE.with(|c| {
             if let Some(st) = c.borrow_mut().as_mut() {
                 st.scrub_expected_seq_num = seq;
             }
         });
-        SetTimer(hwnd, TIMER_ID_CONCEALED_SCRUB, 45_000, None);
+        SetTimer(hwnd, TIMER_ID_CONCEALED_SCRUB, delay_ms, None);
     }
 
     if always_top {
@@ -2847,12 +2945,24 @@ unsafe fn handle_queue_pop_shortcut(hwnd: HWND) {
         hide_panel(hwnd, true);
     }
 
+    let q_privacy_guard = APP_STATE.with(|c| {
+        c.borrow()
+            .as_ref()
+            .map(|st| WinClipboardLocalOnlyGuard {
+                block_cloud_and_history: item.detected_sensitive_kind().is_some()
+                    || item.is_burn_after_paste(),
+                cf_excl: st.cf_exclude_monitor,
+                cf_can_hist: st.cf_can_include_history,
+                cf_can_cloud: st.cf_can_upload_cloud,
+            })
+            .unwrap_or_default()
+    });
     if let Some(txt) = &item.text {
-        let _ = write_text_and_html_to_clipboard(hwnd, txt, None);
+        let _ = write_text_and_html_to_clipboard_ext(hwnd, txt, None, q_privacy_guard);
     } else if item.kind == ClipContentType::Image {
         if let Some(f) = &item.image_file_name {
             if let Some(bytes) = iclip_core::security::read_decrypted_image_from_dir(&img_dir, f) {
-                let _ = write_image_bytes_to_clipboard(hwnd, &bytes);
+                let _ = write_image_bytes_to_clipboard_ext(hwnd, &bytes, q_privacy_guard);
             }
         }
     }

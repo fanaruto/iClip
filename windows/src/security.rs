@@ -747,6 +747,31 @@ pub fn is_terminal_app(app_name: Option<&str>) -> bool {
 // 2. 离线微秒级敏感凭据嗅探与防肩窥圆点雾化遮罩（零高度抖动）
 // ============================================================================
 
+pub fn is_webhook_url(raw: &str) -> bool {
+    if raw.is_empty() {
+        return false;
+    }
+    let sample = if raw.len() > 2048 {
+        let mut end = 2048;
+        while end > 0 && !raw.is_char_boundary(end) {
+            end -= 1;
+        }
+        &raw[..end]
+    } else {
+        raw
+    };
+    static WEBHOOK_RE: OnceLock<Regex> = OnceLock::new();
+    let re = WEBHOOK_RE.get_or_init(|| {
+        Regex::new(r"(?i)https?://(?:open\.(?:feishu\.cn|larksuite\.com)/open-apis/bot/v2/hook/|qyapi\.weixin\.qq\.com/cgi-bin/webhook/send\?(?:[^&#\s]+&)*key=|hooks\.slack\.com/services/[A-Z0-9]{8,}/[A-Z0-9]{8,}/|(?:ptb\.|canary\.)?discord(?:app)?\.com/api/webhooks/\d{10,}/)[A-Za-z0-9_\-]{12,}").unwrap()
+    });
+    if re.is_match(sample) {
+        return true;
+    }
+    sample
+        .to_ascii_lowercase()
+        .contains("oapi.dingtalk.com/robot/send")
+}
+
 pub fn classify_sensitive_text(raw: &str) -> Option<SensitiveSecretKind> {
     if raw.is_empty() {
         return None;
@@ -761,7 +786,16 @@ pub fn classify_sensitive_text(raw: &str) -> Option<SensitiveSecretKind> {
         raw
     };
 
-    if sample.contains("-----BEGIN ") && sample.contains("PRIVATE KEY-----") {
+    if sample.contains("-----BEGIN ")
+        && (sample.contains("PRIVATE KEY-----") || sample.contains("PRIVATE KEY BLOCK-----"))
+    {
+        return Some(SensitiveSecretKind::PrivateKey);
+    }
+
+    static AGE_KEY_RE: OnceLock<Regex> = OnceLock::new();
+    let age_re =
+        AGE_KEY_RE.get_or_init(|| Regex::new(r"\bAGE-SECRET-KEY-1[A-Z0-9]{50,}\b").unwrap());
+    if age_re.is_match(sample) {
         return Some(SensitiveSecretKind::PrivateKey);
     }
 
@@ -824,6 +858,7 @@ pub fn classify_sensitive_text(raw: &str) -> Option<SensitiveSecretKind> {
         || bearer_re.is_match(sample)
         || url_q_re.is_match(sample)
         || basic_re.is_match(sample)
+        || is_webhook_url(sample)
         || http_hdr_re.is_match(sample)
         || http_basic_hdr_re.is_match(sample)
         || json_sec_re.is_match(sample)

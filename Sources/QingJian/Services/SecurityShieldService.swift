@@ -513,7 +513,13 @@ enum SensitiveCredentialVeil {
         pattern: #"(?<![0-9A-Za-z])(?:62\d{14,17}|4\d{15}|5[1-5]\d{14}|3[47]\d{13})(?![0-9A-Za-z])"#
     )
     private static let pemBlockRegex = try! NSRegularExpression(
-        pattern: #"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----"#
+        pattern: #"-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----"#
+    )
+    private static let ageSecretKeyRegex = try! NSRegularExpression(
+        pattern: #"\bAGE-SECRET-KEY-1[A-Z0-9]{50,}\b"#
+    )
+    private static let webhookSecretRegex = try! NSRegularExpression(
+        pattern: #"(?i)(https?://(?:open\.(?:feishu\.cn|larksuite\.com)/open-apis/bot/v2/hook/|qyapi\.weixin\.qq\.com/cgi-bin/webhook/send\?(?:[^&#\s]+&)*key=|hooks\.slack\.com/services/[A-Z0-9]{8,}/[A-Z0-9]{8,}/|(?:ptb\.|canary\.)?discord(?:app)?\.com/api/webhooks/\d{10,}/))([A-Za-z0-9_\-]{12,})"#
     )
     private static let envSecretRegex = try! NSRegularExpression(
         pattern: ##"(?im)^(\s*(?:export\s+)?[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY|AUTH_TOKEN|CLIENT_SECRET)[A-Z0-9_]*\s*[:=]\s*['"]?)([^\s'"#]{6,})(['"]?)"##
@@ -534,14 +540,27 @@ enum SensitiveCredentialVeil {
         pattern: ##"(?i)("(?:password|passwd|secret|client_secret|api_key|apikey|access_token|refresh_token|id_token|session_token|private_key)"\s*:\s*")([^"\r\n]{6,})(")"##
     )
 
+    static func isWebhookURL(_ rawText: String) -> Bool {
+        guard !rawText.isEmpty else { return false }
+        let sample: String = rawText.utf8.count > 2_048 ? String(rawText.prefix(1_024)) : rawText
+        let nsRange = NSRange(sample.startIndex..<sample.endIndex, in: sample)
+        if webhookSecretRegex.firstMatch(in: sample, range: nsRange) != nil {
+            return true
+        }
+        return sample.lowercased().contains("oapi.dingtalk.com/robot/send")
+    }
+
     /// 仅扫描首 2,048 UTF-8 字节，2MB 超大文本耗时 < 0.03ms
     static func classify(_ rawText: String) -> SensitiveSecretKind? {
         guard !rawText.isEmpty else { return nil }
         let sample: String = rawText.utf8.count > 2_048 ? String(rawText.prefix(1_024)) : rawText
-        if sample.contains("-----BEGIN ") && sample.contains("PRIVATE KEY-----") {
+        if sample.contains("-----BEGIN ") && (sample.contains("PRIVATE KEY-----") || sample.contains("PRIVATE KEY BLOCK-----")) {
             return .privateKey
         }
         let nsRange = NSRange(sample.startIndex..<sample.endIndex, in: sample)
+        if ageSecretKeyRegex.firstMatch(in: sample, range: nsRange) != nil {
+            return .privateKey
+        }
         if apiKeyRegex.firstMatch(in: sample, range: nsRange) != nil {
             return .apiKey
         }
@@ -552,6 +571,7 @@ enum SensitiveCredentialVeil {
             || bearerRegex.firstMatch(in: sample, range: nsRange) != nil
             || urlQuerySecretRegex.firstMatch(in: sample, range: nsRange) != nil
             || httpBasicAuthRegex.firstMatch(in: sample, range: nsRange) != nil
+            || webhookSecretRegex.firstMatch(in: sample, range: nsRange) != nil
             || httpHeaderAuthCookieRegex.firstMatch(in: sample, range: nsRange) != nil
             || httpBasicHeaderRegex.firstMatch(in: sample, range: nsRange) != nil
             || jsonSecretFieldRegex.firstMatch(in: sample, range: nsRange) != nil {
@@ -645,7 +665,7 @@ enum SensitiveCredentialVeil {
     static func redactForExternalSharing(_ rawText: String) -> String {
         guard !rawText.isEmpty, rawText.utf8.count <= 131_072 else { return rawText }
         var out = rawText
-        if out.contains("-----BEGIN ") && out.contains("PRIVATE KEY-----") {
+        if out.contains("-----BEGIN ") && (out.contains("PRIVATE KEY-----") || out.contains("PRIVATE KEY BLOCK-----")) {
             let r = NSRange(out.startIndex..<out.endIndex, in: out)
             out = pemBlockRegex.stringByReplacingMatches(
                 in: out,
@@ -653,6 +673,11 @@ enum SensitiveCredentialVeil {
                 withTemplate: "-----BEGIN PRIVATE KEY-----\n[REDACTED_BY_iCLIP]\n-----END PRIVATE KEY-----"
             )
         }
+        out = ageSecretKeyRegex.stringByReplacingMatches(
+            in: out,
+            range: NSRange(out.startIndex..<out.endIndex, in: out),
+            withTemplate: "AGE-SECRET-KEY-1***REDACTED***"
+        )
         out = apiKeyRegex.stringByReplacingMatches(
             in: out,
             range: NSRange(out.startIndex..<out.endIndex, in: out),
@@ -676,6 +701,11 @@ enum SensitiveCredentialVeil {
                 in: out,
                 range: NSRange(out.startIndex..<out.endIndex, in: out),
                 withTemplate: "$1***REDACTED***$3"
+            )
+            out = webhookSecretRegex.stringByReplacingMatches(
+                in: out,
+                range: NSRange(out.startIndex..<out.endIndex, in: out),
+                withTemplate: "$1***WEBHOOK_REDACTED***"
             )
         }
         if out.contains("?") || out.contains("&") {
@@ -822,6 +852,17 @@ enum OutboundLinkSafety {
 
 /// 3. 行业标准密码管理器与自动化临时剪贴板协议全覆盖识别器
 enum PasteboardPrivacyStandards {
+    static let localOnlyType = NSPasteboard.PasteboardType("org.nspasteboard.LocalOnlyType")
+    static let universalConcealedType = NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")
+
+    /// 当 iClip 将敏感密钥或粘贴即焚条目写回系统剪贴板供粘贴时，注入本机隔离与隐秘标记：
+    /// 1. `org.nspasteboard.LocalOnlyType`：物理阻断 macOS `sharingd` 通用剪贴板（Handoff）跨蓝牙/Wi-Fi 广播至周边设备；
+    /// 2. `org.nspasteboard.ConcealedType`：阻止同机第三方剪贴板监听工具录制该敏感输出。
+    static func applyLocalOnlyConcealedProtection(to pasteboard: NSPasteboard) {
+        pasteboard.setData(Data(), forType: localOnlyType)
+        pasteboard.setData(Data(), forType: universalConcealedType)
+    }
+
     private static let concealedTypes: Set<NSPasteboard.PasteboardType> = [
         NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType"),
         NSPasteboard.PasteboardType("com.agilebits.onepassword"),

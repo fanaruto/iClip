@@ -1170,4 +1170,75 @@ mod tests {
 
         let _ = fs::remove_dir_all(tmp_dir);
     }
+
+    #[test]
+    fn test_webhook_pgp_age_redaction_and_granular_security_search_tags() {
+        use crate::engines::redact_secrets;
+        use crate::security::{classify_sensitive_text, is_webhook_url, SensitiveSecretKind};
+
+        let feishu_hook = concat!(
+            "https://open.",
+            "feishu.cn/open-apis/bot/v2/hook/",
+            "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        );
+        let wecom_hook = concat!(
+            "https://qyapi.",
+            "weixin.qq.com/cgi-bin/webhook/send?key=",
+            "693a91f6-7xxx-4bc4-97a0-0ec2sifa5aaa"
+        );
+        let slack_hook = concat!(
+            "https://hooks.",
+            "slack.com/services/",
+            "T00000000/B00000000/",
+            "XXXXXXXXXXXXXXXXXXXXXXXX"
+        );
+        let discord_hook = concat!(
+            "https://discord.",
+            "com/api/webhooks/123456789012345678/",
+            "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"
+        );
+        let pgp_block = concat!(
+            "-----BEGIN PGP ",
+            "PRIVATE KEY BLOCK-----\nlQOYBGTestSecretPayload==\n-----END PGP ",
+            "PRIVATE KEY BLOCK-----"
+        );
+        let age_key = concat!(
+            "AGE-SECRET-KEY-1",
+            "QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7LQPZRY9X8GF2TVDW0S3JN54KHCE"
+        );
+
+        for hook in [feishu_hook, wecom_hook, slack_hook, discord_hook] {
+            assert_eq!(
+                classify_sensitive_text(hook),
+                Some(SensitiveSecretKind::ConnectionSecret)
+            );
+            assert!(is_webhook_url(hook));
+            let red = redact_secrets(hook);
+            assert!(red.contains("***WEBHOOK_REDACTED***"));
+            assert_ne!(red, hook);
+        }
+
+        assert_eq!(
+            classify_sensitive_text(pgp_block),
+            Some(SensitiveSecretKind::PrivateKey)
+        );
+        assert_eq!(
+            classify_sensitive_text(age_key),
+            Some(SensitiveSecretKind::PrivateKey)
+        );
+        assert!(redact_secrets(age_key).contains("AGE-SECRET-KEY-1***REDACTED***"));
+
+        let hook_item = ClipItem::new_text(feishu_hook.to_string(), Some("Feishu".to_string()));
+        let key_item = ClipItem::new_text(age_key.to_string(), Some("Terminal".to_string()));
+        let jwt_item = ClipItem::new_text(
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1MSJ9.sig1234567890".to_string(),
+            None,
+        );
+        assert!(hook_item.matches_query("@webhook"));
+        assert!(hook_item.matches_query("@apikey"));
+        assert!(!hook_item.matches_query("@私钥"));
+        assert!(key_item.matches_query("@私钥"));
+        assert!(!key_item.matches_query("@jwt"));
+        assert!(jwt_item.matches_query("@jwt"));
+    }
 }

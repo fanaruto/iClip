@@ -568,6 +568,34 @@ impl ClipItem {
                 }
                 return self.detected_sensitive_kind().is_some() || self.is_burn_after_paste();
             }
+            "私钥" | "@私钥" | "@privatekey" => {
+                return self.detected_sensitive_kind()
+                    == Some(crate::security::SensitiveSecretKind::PrivateKey)
+            }
+            "@jwt" | "jwt" => {
+                return self.detected_sensitive_kind()
+                    == Some(crate::security::SensitiveSecretKind::JwtToken)
+            }
+            "@apikey" | "apikey" | "@token" => {
+                return matches!(
+                    self.detected_sensitive_kind(),
+                    Some(
+                        crate::security::SensitiveSecretKind::ApiKey
+                            | crate::security::SensitiveSecretKind::ConnectionSecret
+                    )
+                )
+            }
+            "身份证" | "@身份证" | "银行卡" | "@银行卡" | "@idcard" => {
+                return self.detected_sensitive_kind()
+                    == Some(crate::security::SensitiveSecretKind::PersonalIdentity)
+            }
+            "webhook" | "@webhook" => {
+                return self
+                    .text
+                    .as_deref()
+                    .map(crate::security::is_webhook_url)
+                    .unwrap_or(false)
+            }
             "风险" | "@风险" | "@毒" | "@poison" | "poison" => {
                 return self.detected_poison_threat().is_some()
                     || self.detected_link_risk().is_some()

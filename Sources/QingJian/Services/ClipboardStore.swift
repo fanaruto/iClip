@@ -1962,9 +1962,6 @@ final class ClipboardStore: ObservableObject {
         if shouldAutoPaste {
             scheduleOTPAutoExpireIfNeeded(for: item)
             scheduleBurnAfterPasteIfNeeded(for: item)
-            if !item.isPinned && !item.isBurnAfterPaste && item.detectedSensitiveKind != nil {
-                scheduleConcealedPasteboardScrubIfNeeded(capturedChangeCount: pasteboard.changeCount, delaySeconds: 45.0)
-            }
         }
 
         refreshAccessibilityStatus()
@@ -2220,8 +2217,16 @@ final class ClipboardStore: ObservableObject {
             }
         }
 
+        if item.detectedSensitiveKind != nil || item.isBurnAfterPaste {
+            PasteboardPrivacyStandards.applyLocalOnlyConcealedProtection(to: pasteboard)
+        }
+
         ignoreNextChangeCount = pasteboard.changeCount
         lastChangeCount = pasteboard.changeCount
+
+        if !item.isPinned && !item.isBurnAfterPaste && item.detectedSensitiveKind != nil {
+            scheduleConcealedPasteboardScrubIfNeeded(capturedChangeCount: pasteboard.changeCount, delaySeconds: 45.0)
+        }
     }
 
     func togglePin(_ item: ClipItem) {

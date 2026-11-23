@@ -202,7 +202,10 @@ enum SemanticEngine {
             ("HTTP Cookie/Key", [":"], ##"(?i)(\b(?:cookie|set-cookie|x-api-key|x-auth-token|x-csrf-token)\s*:\s*)([^\r\n'"]{8,})"##, "$1***REDACTED***"),
             ("HTTP Basic Auth", ["Basic", "basic", "BASIC"], #"(?i)(\b(?:authorization|proxy-authorization)\s*:\s*basic\s+)([A-Za-z0-9+/=]{8,})"#, "$1***REDACTED***"),
             // JSON 载荷中的敏感口令与 Token 键值
-            ("JSON Secret", ["\":", "\" :"], ##"(?i)("(?:password|passwd|secret|client_secret|api_key|apikey|access_token|refresh_token|id_token|session_token|private_key)"\s*:\s*")([^"\r\n]{6,})(")"##, "$1***REDACTED***$3")
+            ("JSON Secret", ["\":", "\" :"], ##"(?i)("(?:password|passwd|secret|client_secret|api_key|apikey|access_token|refresh_token|id_token|session_token|private_key)"\s*:\s*")([^"\r\n]{6,})(")"##, "$1***REDACTED***$3"),
+            // 企业群机器人 Webhook（飞书 / Lark / 企微 / Slack / Discord）与 Age 私钥
+            ("Webhook Secret", ["://"], #"(?i)(https?://(?:open\.(?:feishu\.cn|larksuite\.com)/open-apis/bot/v2/hook/|qyapi\.weixin\.qq\.com/cgi-bin/webhook/send\?(?:[^&#\s]+&)*key=|hooks\.slack\.com/services/[A-Z0-9]{8,}/[A-Z0-9]{8,}/|(?:ptb\.|canary\.)?discord(?:app)?\.com/api/webhooks/\d{10,}/))([A-Za-z0-9_\-]{12,})"#, "$1***WEBHOOK_REDACTED***"),
+            ("Age Secret Key", ["AGE-SECRET-KEY-1"], #"\bAGE-SECRET-KEY-1[A-Z0-9]{50,}\b"#, "AGE-SECRET-KEY-1***REDACTED***")
         ]
         return specs.compactMap { name, hints, pattern, replacement in
             guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
@@ -786,9 +789,9 @@ enum SemanticEngine {
 
     static func redactSecrets(in text: String) -> String {
         var result = text
-        if result.contains("-----BEGIN ") && result.contains("PRIVATE KEY-----"),
+        if result.contains("-----BEGIN ") && (result.contains("PRIVATE KEY-----") || result.contains("PRIVATE KEY BLOCK-----")),
            let pemRegex = try? NSRegularExpression(
-               pattern: #"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----"#
+               pattern: #"-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----"#
            ) {
             let fullRange = NSRange(result.startIndex..<result.endIndex, in: result)
             result = pemRegex.stringByReplacingMatches(

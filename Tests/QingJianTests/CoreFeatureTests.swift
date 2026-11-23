@@ -2299,4 +2299,53 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertEqual(expiredCheck.isUnexpired, false)
         #endif
     }
+
+    // MARK: - 47. 跨设备通用剪贴板（Handoff）隔离、全平台群机器人 Webhook / PGP / Age 私钥脱敏与细分 `@标签` 检索测试
+
+    @MainActor
+    func testLocalOnlyPasteboardShieldWebhookRedactionAndGranularSecuritySearch() throws {
+        // 1. 验证独立测试 Pasteboard 注入 LocalOnlyType 与 ConcealedType 本机隔离标记（阻断 Handoff 广播）
+        let testPB = NSPasteboard.withUniqueName()
+        defer { testPB.releaseGlobally() }
+        testPB.clearContents()
+        testPB.setString("sk-proj-LocalOnlyTestSecret1234567890", forType: .string)
+        PasteboardPrivacyStandards.applyLocalOnlyConcealedProtection(to: testPB)
+        let pbTypes = Set(testPB.types ?? [])
+        XCTAssertTrue(pbTypes.contains(PasteboardPrivacyStandards.localOnlyType))
+        XCTAssertTrue(pbTypes.contains(PasteboardPrivacyStandards.universalConcealedType))
+
+        // 2. 验证飞书 / 企微 / Slack / Discord 机器人 Webhook、PGP 私钥块与 Age 私钥识别及无损脱敏（拆分为拼接字面量防止触发仓库静态密钥扫描误报）
+        let feishuHook = "https://open." + "feishu.cn/open-apis/bot/v2/hook/" + "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        let wecomHook = "https://qyapi." + "weixin.qq.com/cgi-bin/webhook/send?key=" + "693a91f6-7xxx-4bc4-97a0-0ec2sifa5aaa"
+        let slackHook = "https://hooks." + "slack.com/services/" + "T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX"
+        let discordHook = "https://discord." + "com/api/webhooks/123456789012345678/" + "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"
+        let pgpBlock = "-----BEGIN PGP " + "PRIVATE KEY BLOCK-----\nlQOYBGTestSecretPayload==\n-----END PGP " + "PRIVATE KEY BLOCK-----"
+        let ageKey = "AGE-SECRET-KEY-1" + "QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7LQPZRY9X8GF2TVDW0S3JN54KHCE"
+
+        for hook in [feishuHook, wecomHook, slackHook, discordHook] {
+            XCTAssertEqual(SensitiveCredentialVeil.classify(hook), .connectionSecret)
+            XCTAssertTrue(SensitiveCredentialVeil.isWebhookURL(hook))
+            let redacted = SensitiveCredentialVeil.redactForExternalSharing(hook)
+            XCTAssertTrue(redacted.contains("***WEBHOOK_REDACTED***"))
+            XCTAssertNotEqual(redacted, hook)
+        }
+        XCTAssertEqual(SensitiveCredentialVeil.classify(pgpBlock), .privateKey)
+        XCTAssertEqual(SensitiveCredentialVeil.classify(ageKey), .privateKey)
+        XCTAssertTrue(SensitiveCredentialVeil.redactForExternalSharing(ageKey).contains("AGE-SECRET-KEY-1***REDACTED***"))
+
+        // 3. 验证细分安全标签（`@webhook` / `@私钥` / `@jwt` / `@apikey`）精准快筛
+        let hookItem = ClipItem(type: .link, text: feishuHook, contentHash: "link:feishu")
+        let keyItem = ClipItem(type: .text, text: ageKey, contentHash: "text:age")
+        let jwtItem = ClipItem(
+            type: .text,
+            text: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1MSJ9.sig1234567890",
+            contentHash: "text:jwt"
+        )
+        XCTAssertTrue(hookItem.matches(query: "@webhook"))
+        XCTAssertTrue(hookItem.matches(query: "@apikey"))
+        XCTAssertFalse(hookItem.matches(query: "@私钥"))
+        XCTAssertTrue(keyItem.matches(query: "@私钥"))
+        XCTAssertFalse(keyItem.matches(query: "@jwt"))
+        XCTAssertTrue(jwtItem.matches(query: "@jwt"))
+    }
 }

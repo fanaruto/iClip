@@ -608,6 +608,16 @@ enum EpisodicQueryMatcher {
             if case .pastejackingOrBidi = item.detectedPoisonThreat { return true }
             if item.detectedLinkRisk != nil { return true }
             return item.detectedSensitiveKind != nil || item.isBurnAfterPaste
+        case "私钥", "@私钥", "@privatekey":
+            return item.detectedSensitiveKind == .privateKey
+        case "@jwt", "jwt":
+            return item.detectedSensitiveKind == .jwtToken
+        case "@apikey", "apikey", "@token":
+            return item.detectedSensitiveKind == .apiKey || item.detectedSensitiveKind == .connectionSecret
+        case "身份证", "@身份证", "银行卡", "@银行卡", "@idcard":
+            return item.detectedSensitiveKind == .personalIdentity
+        case "webhook", "@webhook":
+            return item.text.map { SensitiveCredentialVeil.isWebhookURL($0) } ?? false
         case "风险", "@风险", "@毒", "@poison", "poison":
             return item.detectedPoisonThreat != nil || item.detectedLinkRisk != nil
         case "即焚", "@即焚", "@burn", "burn":
@@ -640,6 +650,10 @@ enum EpisodicQueryMatcher {
              "本周", "一周", "7d", "week", "@7d", "@week",
              "二维码", "qrcode", "@qr",
              "敏感", "@敏感", "@密钥", "@隐私", "@secret", "secret",
+             "私钥", "@私钥", "@privatekey", "@jwt", "jwt",
+             "@apikey", "apikey", "@token",
+             "身份证", "@身份证", "银行卡", "@银行卡", "@idcard",
+             "webhook", "@webhook",
              "风险", "@风险", "@毒", "@poison", "poison",
              "即焚", "@即焚", "@burn", "burn":
             return true

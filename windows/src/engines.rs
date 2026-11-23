@@ -1698,9 +1698,11 @@ pub fn contains_sensitive_secret(text: &str) -> bool {
 
 pub fn redact_secrets(text: &str) -> String {
     let mut out = text.to_string();
-    if out.contains("-----BEGIN ") && out.contains("PRIVATE KEY-----") {
+    if out.contains("-----BEGIN ")
+        && (out.contains("PRIVATE KEY-----") || out.contains("PRIVATE KEY BLOCK-----"))
+    {
         let pem_re = Regex::new(
-            r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----",
+            r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----",
         )
         .unwrap();
         out = pem_re
@@ -1708,6 +1710,21 @@ pub fn redact_secrets(text: &str) -> String {
                 &out,
                 "-----BEGIN PRIVATE KEY-----\n[REDACTED_BY_iCLIP]\n-----END PRIVATE KEY-----",
             )
+            .into_owned();
+    }
+    if out.contains("AGE-SECRET-KEY-1") {
+        let age_re = Regex::new(r"\bAGE-SECRET-KEY-1[A-Z0-9]{50,}\b").unwrap();
+        out = age_re
+            .replace_all(&out, "AGE-SECRET-KEY-1***REDACTED***")
+            .into_owned();
+    }
+    if out.contains("://") {
+        let webhook_re = Regex::new(
+            r"(?i)(https?://(?:open\.(?:feishu\.cn|larksuite\.com)/open-apis/bot/v2/hook/|qyapi\.weixin\.qq\.com/cgi-bin/webhook/send\?(?:[^&#\s]+&)*key=|hooks\.slack\.com/services/[A-Z0-9]{8,}/[A-Z0-9]{8,}/|(?:ptb\.|canary\.)?discord(?:app)?\.com/api/webhooks/\d{10,}/))([A-Za-z0-9_\-]{12,})",
+        )
+        .unwrap();
+        out = webhook_re
+            .replace_all(&out, "${1}***WEBHOOK_REDACTED***")
             .into_owned();
     }
 
