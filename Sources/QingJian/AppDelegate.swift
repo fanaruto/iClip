@@ -10,6 +10,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        AppInstallHelper.clearSelfQuarantineIfWritable()
 
         _ = ClipboardStore.shared
         panelController = FloatingPanelController()
@@ -21,6 +22,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !ProcessInfo.processInfo.arguments.contains("--demo") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
                 self?.showFromStatusItem()
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.85) {
+                AppInstallHelper.promptMoveToApplicationsIfNeeded()
             }
         }
 
@@ -47,15 +51,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #endif
         guard let button = statusItem.button else { return }
 
-        let symbol = AppRoleEdition.installed == .developer ? "doc.on.clipboard" : "list.clipboard"
-        if let image = NSImage(systemSymbolName: symbol, accessibilityDescription: "iClip") {
-            let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
-            button.image = image.withSymbolConfiguration(config)
-            button.image?.isTemplate = true
-            button.imagePosition = .imageLeading
-        } else {
-            button.title = "iClip"
-        }
+        let logoImage = BrandLogo.menuBarTemplateImage(pointSize: 17)
+        button.image = logoImage
+        button.image?.isTemplate = true
+        button.imagePosition = .imageLeading
 
         updateStatusTooltip()
         button.action = #selector(statusItemClicked(_:))

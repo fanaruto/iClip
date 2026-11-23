@@ -114,6 +114,7 @@ const CMD_QUIT_APP: usize = 3011;
 const CMD_TOGGLE_QUEUE_MODE: usize = 3012;
 const CMD_OPEN_TODO_LIST: usize = 3013;
 const CMD_PIN_TODO_BOARD: usize = 3014;
+const CMD_INSTALL_TO_SYSTEM: usize = 3015;
 
 const CF_UNICODETEXT_ID: u32 = 13;
 const CF_DIB_ID: u32 = 8;
@@ -300,8 +301,50 @@ unsafe fn query_windows_system_dark_mode() -> bool {
     status == 0 && data == 0
 }
 
+unsafe fn load_embedded_app_icon(hinstance: HMODULE, metric: WINDOWS_SYSTEM_METRICS_INDEX) -> HICON {
+    let sz = GetSystemMetrics(metric).max(16);
+    let h = LoadImageW(hinstance, 1usize as *const u16, IMAGE_ICON, sz, sz, 0) as HICON;
+    if !h.is_null() {
+        return h;
+    }
+    let fallback = LoadIconW(hinstance, 1usize as *const u16);
+    if !fallback.is_null() {
+        return fallback;
+    }
+    LoadIconW(null_mut(), IDI_APPLICATION)
+}
+
+fn strip_self_zone_identifier() {
+    if let Ok(exe) = std::env::current_exe() {
+        let ads = format!("{}:Zone.Identifier", exe.display());
+        let _ = std::fs::remove_file(ads);
+    }
+}
+
+fn preferred_windows_install_exe() -> Option<std::path::PathBuf> {
+    let local_app_data = std::env::var_os("LOCALAPPDATA")?;
+    Some(
+        std::path::PathBuf::from(local_app_data)
+            .join("Programs")
+            .join("iClip")
+            .join("iClip.exe"),
+    )
+}
+
+fn is_installed_in_system_dir() -> bool {
+    let Ok(cur) = std::env::current_exe() else {
+        return true;
+    };
+    let Some(target) = preferred_windows_install_exe() else {
+        return true;
+    };
+    cur.to_string_lossy()
+        .eq_ignore_ascii_case(&target.to_string_lossy())
+}
+
 pub fn run_windows_app() -> i32 {
     unsafe {
+        strip_self_zone_identifier();
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let hinstance = GetModuleHandleW(null());
         let class_name = to_wide("iClipNativeWindowClass");
@@ -313,12 +356,12 @@ pub fn run_windows_app() -> i32 {
             cbClsExtra: 0,
             cbWndExtra: 0,
             hInstance: hinstance,
-            hIcon: LoadIconW(null_mut(), IDI_APPLICATION),
+            hIcon: load_embedded_app_icon(hinstance, SM_CXICON),
             hCursor: LoadCursorW(null_mut(), IDC_ARROW),
             hbrBackground: null_mut(),
             lpszMenuName: null(),
             lpszClassName: class_name.as_ptr(),
-            hIconSm: LoadIconW(null_mut(), IDI_APPLICATION),
+            hIconSm: load_embedded_app_icon(hinstance, SM_CXSMICON),
         };
         RegisterClassExW(&wc);
 
@@ -432,6 +475,10 @@ pub fn run_windows_self_test() -> Result<(), String> {
         let t0 = Instant::now();
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let hinstance = GetModuleHandleW(null());
+        let embedded_ico = LoadImageW(hinstance, 1usize as *const u16, IMAGE_ICON, 32, 32, 0);
+        if embedded_ico.is_null() {
+            return Err("Embedded iClip.ico PE resource (ID 1) missing".to_string());
+        }
         let class_name = to_wide("iClipSelfTestWindowClass");
 
         let wc = WNDCLASSEXW {
@@ -7714,7 +7761,8 @@ unsafe fn install_or_update_tray_icon(hwnd: HWND, is_modify: bool) {
     nid.uID = 1;
     nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     nid.uCallbackMessage = WM_TRAYICON;
-    nid.hIcon = LoadIconW(null_mut(), IDI_APPLICATION);
+    let hinst = GetModuleHandleW(null());
+    nid.hIcon = load_embedded_app_icon(hinst, SM_CXSMICON);
     let tip = to_wide(&format!(
         "iClip · {} ({hk_disp} 呼出)",
         ClipboardStore::edition_title()
@@ -7772,6 +7820,14 @@ unsafe fn show_tray_context_menu(hwnd: HWND) {
         CMD_OPEN_PANEL,
         to_wide(&format!("打开 iClip 面板 ({hk_disp})")).as_ptr(),
     );
+    if !is_installed_in_system_dir() {
+        AppendMenuW(
+            hmenu,
+            MF_STRING,
+            CMD_INSTALL_TO_SYSTEM,
+            to_wide("一键安装至系统并生成开始菜单图标").as_ptr(),
+        );
+    }
     if !minimal {
         let todo_label = if pending_todos > 0 {
             format!("打开待办清单 ({pending_todos} 项未完成 · Alt+2)")
@@ -7966,6 +8022,7 @@ unsafe fn handle_menu_command(hwnd: HWND, cmd: usize) {
                 }
             });
         }
+        CMD_INSTALL_TO_SYSTEM => install_self_to_system_and_shortcuts(hwnd),
         CMD_EXPORT_ARCHIVE => export_archive_via_dialog(hwnd),
         CMD_IMPORT_ARCHIVE => import_archive_via_dialog(hwnd),
         CMD_CLEAR_UNPINNED => {
@@ -8143,4 +8200,66 @@ unsafe fn set_autostart_enabled(enable: bool) {
         let _ = RegDeleteValueW(hkey, val_name.as_ptr());
     }
     let _ = RegCloseKey(hkey);
+}
+
+unsafe fn install_self_to_system_and_shortcuts(hwnd: HWND) {
+    let Ok(cur_exe) = std::env::current_exe() else {
+        set_toast(hwnd, "无法读取当前程序路径".to_string());
+        return;
+    };
+    let Some(target_exe) = preferred_windows_install_exe() else {
+        set_toast(hwnd, "无法定位系统应用目录".to_string());
+        return;
+    };
+    if let Some(parent) = target_exe.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            set_toast(hwnd, format!("创建安装目录失败：{e}"));
+            return;
+        }
+    }
+    if !cur_exe
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&target_exe.to_string_lossy())
+    {
+        if let Err(e) = std::fs::copy(&cur_exe, &target_exe) {
+            set_toast(hwnd, format!("复制程序文件失败：{e}"));
+            return;
+        }
+    }
+    let _ = std::fs::remove_file(format!("{}:Zone.Identifier", target_exe.display()));
+
+    // 若已开启开机自启，同步把注册表启动路径修正为正式目录
+    if is_autostart_enabled() {
+        let subkey = to_wide("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+        let val_name = to_wide("iClip");
+        let mut hkey = null_mut();
+        if RegOpenKeyExW(HKEY_CURRENT_USER, subkey.as_ptr(), 0, KEY_SET_VALUE, &mut hkey) == 0 {
+            let quoted = format!("\"{}\"", target_exe.display());
+            let wide = to_wide(&quoted);
+            let _ = RegSetValueExW(
+                hkey,
+                val_name.as_ptr(),
+                0,
+                REG_SZ,
+                wide.as_ptr() as *const u8,
+                (wide.len() * 2) as u32,
+            );
+            let _ = RegCloseKey(hkey);
+        }
+    }
+
+    // 静默生成开始菜单快捷方式
+    let target_escaped = target_exe.display().to_string().replace('\'', "''");
+    let work_dir = target_exe
+        .parent()
+        .map(|p| p.display().to_string().replace('\'', "''"))
+        .unwrap_or_default();
+    let ps_cmd = format!(
+        "$s=(New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path ([Environment]::GetFolderPath('Programs')) 'iClip.lnk'));$s.TargetPath='{target_escaped}';$s.WorkingDirectory='{work_dir}';$s.IconLocation='{target_escaped},0';$s.Save()"
+    );
+    let _ = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &ps_cmd])
+        .spawn();
+
+    set_toast(hwnd, "已安装至本机并创建开始菜单图标".to_string());
 }

@@ -622,8 +622,11 @@ struct ClipboardPopoverView: View {
 
                 Spacer()
 
-                Text("iClip 设置 · \(AppRoleEdition.installed.title)")
-                    .font(.system(size: 14, weight: .semibold))
+                HStack(spacing: 7) {
+                    BrandAppIconBadge(size: 20)
+                    Text("iClip 设置 · \(AppRoleEdition.installed.title)")
+                        .font(.system(size: 14, weight: .semibold))
+                }
 
                 Spacer()
 
@@ -3281,8 +3284,11 @@ struct ClipboardPopoverView: View {
 
                 Spacer()
 
-                Text("iClip 设置 · \(AppRoleEdition.installed.title)")
-                    .font(.system(size: 14, weight: .semibold))
+                HStack(spacing: 7) {
+                    BrandAppIconBadge(size: 20)
+                    Text("iClip 设置 · \(AppRoleEdition.installed.title)")
+                        .font(.system(size: 14, weight: .semibold))
+                }
 
                 Spacer()
 

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-labelledby="title">
+  <title id="title">iClip Concept D — Cursor Portal</title>
+  <g id="symbol">
+  <path fill="#111827" d="M 202 96 V 78 A 48 48 0 0 0 154 30 H 78 A 48 48 0 0 0 30 78 V 154 A 48 48 0 0 0 78 202 H 96 A 17 17 0 0 0 96 168 H 86 A 22 22 0 0 1 64 146 V 86 A 22 22 0 0 1 86 64 H 146 A 22 22 0 0 1 168 86 V 96 A 17 17 0 0 0 202 96 Z"/>
+  <path fill="#111827" d="M 129 120 L 222 154 A 8 8 0 0 1 222 169 L 186 186 L 169 222 A 8 8 0 0 1 154 222 L 120 129 A 7 7 0 0 1 129 120 Z"/>
+  </g>
+</svg>

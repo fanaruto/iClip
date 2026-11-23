@@ -8,15 +8,19 @@
   <img src="assets/demo.gif" alt="iClip 实机运行演示：鼠标旁唤醒、原生液态玻璃/云母材质、图片悬停放大与双击键入" width="760" />
 </p>
 
-> 📥 **iClip v2.1 双平台 × 双角色专属安装包（极致低功耗 + 极简纯净开关 + 跨平台 `.iclip` 收藏互通）**：
-> 前往 [GitHub Releases](https://github.com/fanaruto/iClip/releases/latest) 按你的操作系统与主力场景下载，随时可按 **`⌘E`（macOS）/ `Ctrl+E`（Windows）** 一键切换为**极简纯净模式（基础功能版）**：
-> - 🍎 **macOS 原生版**（支持应用内一键跨角色 OTA 热切换，保留历史与辅助功能权限）：
->   - `iClip-Dev-macOS.zip`（极客开发与 AI 版，849 KB）
->   - `iClip-Flow-macOS.zip`（商务与心流办公版，864 KB）
-> - 🪟 **Windows 10/11 纯原生单文件绿色版**（免安装双击即用，零 WebView2/Electron 依赖，`AddClipboardFormatListener` 内核级监听 **0.00% 待机 CPU**）：
->   - `iClip-Dev-Windows-x64.zip`（极客开发与 AI 版）
->   - `iClip-Flow-Windows-x64.zip`（商务与心流办公版）
-> - 🧰 **v2.1 全行业痛点工具箱（极简模式下自动静默隐藏）**：AI 密钥/内网隐私掩码脱敏、零误差人民币会计大写与多行账单求和、PDF 断行智能愈合与盘古中英排版、Markdown 表格 ↔ Excel `CF_HTML` 多协议自动分列直粘、截图白底瘦身与柔光圆角阴影样机衬底、身份证/企业税号/银行卡国标真伪校验与 `O/0` 手误纠错、会议逐字稿去时间轴与短信验证码 30 秒阅后即焚、置顶收藏 `.iclip` 跨 Mac/Windows 无损互导。
+> 📥 **iClip v2.6 双平台 × 双角色丝滑免证书极速安装**：
+> - ⚡ **macOS 一键免证书直装（零「未验证开发者」弹窗 · 3 秒装入应用程序并自启动）**：
+>   ```zsh
+>   # 极客开发版（默认）
+>   curl -fsSL https://app.webfooo.com/iClip/install.sh | zsh
+>   # 心流办公版（Flow）
+>   curl -fsSL https://app.webfooo.com/iClip/install.sh | EDITION=flow zsh
+>   ```
+> - ⚡ **Windows 10/11 一键免拦截直装（零 SmartScreen 蓝屏弹窗 · 自动生成开始菜单图标）**：
+>   ```powershell
+>   irm https://app.webfooo.com/iClip/install.ps1 | iex
+>   ```
+> - 📦 亦可前往 [官网高速下载页](https://app.webfooo.com/iClip) 或 [GitHub Releases](https://github.com/fanaruto/iClip/releases/latest) 直接下载 `.dmg` 可视化拖拽安装镜像与 `.zip` 便携包，随时按 **`⌘E`（macOS）/ `Ctrl+E`（Windows）** 一键切换**极简纯净模式**。
 
 ---
 

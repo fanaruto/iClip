@@ -307,7 +307,8 @@ final class UpdateManager: NSObject, ObservableObject {
                 fi
 
                 if mv "$NEW_APP" "$TARGET_APP"; then
-                  xattr -dr com.apple.quarantine "$TARGET_APP" 2>/dev/null || true
+                  xattr -cr "$TARGET_APP" 2>/dev/null || true
+                  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$TARGET_APP" >/dev/null 2>&1 || true
                   rm -rf "$BACKUP_APP"
                   open -n "$TARGET_APP"
                 else
