@@ -193,17 +193,17 @@ struct RoleAndOTASettingsSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            // 置顶：极简纯净模式（基础功能版）一键总开关
+            // 极简纯净模式（基础功能版）一键总开关
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 5) {
                         Image(systemName: "leaf.fill")
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(store.minimalModeEnabled ? Color.green : .secondary)
-                        Text("极简纯净模式（基础功能版）")
-                            .font(.system(size: 13.5, weight: .semibold))
+                        Text("极简纯净模式（⌘E）")
+                            .font(.system(size: 13.5, weight: .medium))
                     }
-                    Text("关闭全部行业增强栏、后台 OCR 与语义扫描，仅保留纯粹复制粘贴（⌘E）")
+                    Text("隐藏行业增强动作与智能浮标，仅保留纯粹复制粘贴")
                         .font(.system(size: 11.5))
                         .foregroundStyle(.secondary)
                 }
@@ -239,7 +239,7 @@ struct RoleAndOTASettingsSection: View {
                                     Spacer(minLength: 0)
 
                                     if isInstalled {
-                                        Text("运行中")
+                                        Text("当前")
                                             .font(.system(size: 9.5, weight: .bold))
                                             .foregroundStyle(Color.green)
                                             .padding(.horizontal, 5.5)
@@ -253,10 +253,6 @@ struct RoleAndOTASettingsSection: View {
                                     .foregroundStyle(.secondary)
                                     .lineLimit(2)
                                     .fixedSize(horizontal: false, vertical: true)
-
-                                Text("OTA 通道：\(edition.expectedAssetName)")
-                                    .font(.system(size: 9.5, design: .monospaced))
-                                    .foregroundStyle(.secondary.opacity(0.8))
                             }
                             .padding(9)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -287,19 +283,13 @@ struct RoleAndOTASettingsSection: View {
         switch updater.state {
         case .idle:
             HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(switching
-                         ? "待切换至「\(store.targetRoleEdition.title)」"
-                         : "当前运行：\(installed.title) v\(updater.currentVersion)")
-                        .font(.system(size: 13, weight: .medium))
-                    Text(switching
-                         ? "点击右侧获取 \(store.targetRoleEdition.expectedAssetName) 原地热替换（历史与权限完整保留）"
-                         : "已绑定专属更新包 \(installed.expectedAssetName)")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                }
+                Text(switching
+                     ? "待切换至「\(store.targetRoleEdition.title)」"
+                     : "\(installed.title) · v\(updater.currentVersion)")
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundStyle(switching ? .primary : .secondary)
                 Spacer()
-                Button(switching ? "获取该角色版本" : "检查更新") {
+                Button(switching ? "立即切换版本" : "检查更新") {
                     updater.checkForUpdates(targetEdition: store.targetRoleEdition, silent: false)
                 }
                 .buttonStyle(.bordered)

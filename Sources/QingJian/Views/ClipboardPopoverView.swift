@@ -222,6 +222,7 @@ struct ClipboardPopoverView: View {
     @State private var previewHideWorkItem: DispatchWorkItem? = nil
     @State private var aliasEditingItem: ClipItem? = nil
     @State private var aliasDraftText: String = ""
+    @State private var showShortcutReference: Bool = false
     @FocusState private var isAliasFieldFocused: Bool
 
     var filteredItems: [ClipItem] {
@@ -1266,115 +1267,61 @@ struct ClipboardPopoverView: View {
     private var settingsView: some View {
         ScrollView(.vertical, showsIndicators: false) {
             VStack(spacing: 14) {
-                // 角色版本选择与差异化 GitHub OTA 通道
-                settingsGroup(title: "使用角色与专属版本（GitHub OTA）") {
+                if !store.isAccessibilityGranted {
+                    settingsGroup(title: "辅助功能权限") {
+                        HStack(spacing: 8) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("开启一键直接键入权限")
+                                    .font(.system(size: 13.5, weight: .medium))
+                                Text("授权后双击或按回车即可直接粘贴至当前光标位置")
+                                    .font(.system(size: 11.5))
+                                    .foregroundStyle(.orange)
+                            }
+                            Spacer()
+                            Button {
+                                store.refreshAccessibilityStatus()
+                                if store.isAccessibilityGranted {
+                                    store.showToast("已检测到辅助功能授权")
+                                } else {
+                                    store.showToast("仍未生效：若已勾选旧版，请减号移除后重勾")
+                                }
+                            } label: {
+                                Image(systemName: "arrow.clockwise")
+                                    .font(.system(size: 11.5, weight: .semibold))
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 24, height: 24)
+                                    .background(Circle().fill(Color.primary.opacity(0.07)))
+                            }
+                            .buttonStyle(.plain)
+                            .help("立即重新检测权限状态")
+
+                            Button("前往开启") {
+                                store.requestAccessibilityPermission()
+                                store.openAccessibilitySettings()
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                        }
+                    }
+                }
+
+                // 苹果官方风格液态玻璃背景模糊浓度（单一滑块 + 实时实景折射预览）
+                settingsGroup(title: "液态玻璃") {
+                    LiquidGlassBlurStyleCard(blurConcentration: $store.liquidGlassMaskOpacity)
+                }
+
+                // 模式与角色版本切换
+                settingsGroup(title: "模式与版本") {
                     RoleAndOTASettingsSection(store: store, updater: updater)
                 }
 
-                // 核心功能重点速览入口
-                settingsGroup(title: "核心功能速览") {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("查看 3 大核心功能亮点")
-                                .font(.system(size: 13.5, weight: .medium))
-                            Text("双向自由拖拽、官方级液态玻璃与全键盘瞬时流转")
-                                .font(.system(size: 11.5))
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Button("查看重点") {
-                            nav.showSettings = false
-                            playground.showHighlights()
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                    }
-                }
-
-                // 自适应心智学习与自然语言建议采纳中心
-                if !store.minimalModeEnabled {
-                    settingsGroup(title: "自适应心智与建议采纳") {
-                        AdaptiveIntelligenceSettingsSection(store: store)
-                    }
-                }
-
-                // 外观材质分组（苹果官方液态玻璃 / 毛玻璃，支持官方透明/着色档位与蒙版浓度无级调节）
-                settingsGroup(title: "外观与边缘材质") {
-                    HStack {
-                        Text("窗口材质")
-                            .font(.system(size: 13.5, weight: .medium))
-                        Spacer()
-                        Picker("", selection: $store.surfaceStyle) {
-                            ForEach(PanelSurfaceStyle.allCases) { style in
-                                Text(style.title).tag(style)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-                        .labelsHidden()
-                        .frame(width: 176)
-                    }
-
-                    if store.surfaceStyle == .liquidGlass {
-                        Divider().opacity(0.35)
-
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("液态风格")
-                                    .font(.system(size: 13.5, weight: .medium))
-                                Text("原生 Liquid Glass（透明 .clear / 标准 .regular），浓度 0% 为纯原味")
-                                    .font(.system(size: 11.5))
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            Picker("", selection: $store.liquidGlassAppearance) {
-                                ForEach(LiquidGlassAppearance.allCases) { mode in
-                                    Text(mode.title).tag(mode)
-                                }
-                            }
-                            .pickerStyle(.segmented)
-                            .labelsHidden()
-                            .frame(width: 128)
-                        }
-
-                        VStack(alignment: .leading, spacing: 6) {
-                            HStack {
-                                Text("液态蒙版浓度")
-                                    .font(.system(size: 13, weight: .medium))
-                                Spacer()
-                                Text("\(Int(round(store.liquidGlassMaskOpacity * 100)))%")
-                                    .font(.system(size: 12, weight: .medium))
-                                    .monospacedDigit()
-                                    .foregroundStyle(.secondary)
-                            }
-                            Slider(value: $store.liquidGlassMaskOpacity, in: 0.0...1.0)
-                                .controlSize(.small)
-                        }
-                    }
-
-                    Divider().opacity(0.35)
-
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("纯净无边框")
-                                .font(.system(size: 13.5, weight: .medium))
-                            Text("去除外框与卡片描边，只保留纯粹玻璃质感")
-                                .font(.system(size: 11.5))
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Toggle("", isOn: $store.borderlessPanel)
-                            .toggleStyle(.switch)
-                            .labelsHidden()
-                    }
-                }
-
-                // 通用与快捷键分组（始终在前 + 开机自启 + 自定义全局快捷键）
+                // 通用与快捷键
                 settingsGroup(title: "通用与快捷键") {
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("窗口始终在前（⌘P）")
                                 .font(.system(size: 13.5, weight: .medium))
-                            Text("固定面板置顶，切窗口与连续粘贴时不自动收起")
+                            Text("固定面板置顶，切换窗口与连续粘贴时不自动收起")
                                 .font(.system(size: 11.5))
                                 .foregroundStyle(.secondary)
                         }
@@ -1401,6 +1348,22 @@ struct ClipboardPopoverView: View {
                         ))
                         .toggleStyle(.switch)
                         .labelsHidden()
+                    }
+
+                    Divider().opacity(0.35)
+
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("交互音效反馈")
+                                .font(.system(size: 13.5, weight: .medium))
+                            Text("键入、收藏与转换时播放轻柔微音效（关闭后仍保留触控板震动）")
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Toggle("", isOn: $store.soundEffectsEnabled)
+                            .toggleStyle(.switch)
+                            .labelsHidden()
                     }
 
                     Divider().opacity(0.35)
@@ -1532,204 +1495,24 @@ struct ClipboardPopoverView: View {
                     }
                 }
 
-                // 行为分组
-                settingsGroup(title: "粘贴行为") {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("双击直接键入光标处")
-                                .font(.system(size: 13.5, weight: .medium))
-                            Text("双击卡片或按回车后自动键入当前应用光标所在位置")
-                                .font(.system(size: 11.5))
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Toggle("", isOn: $store.autoPasteEnabled)
-                            .toggleStyle(.switch)
-                            .labelsHidden()
-                    }
-
-                    Divider().opacity(0.35)
-
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("交互微音效反馈")
-                                .font(.system(size: 13.5, weight: .medium))
-                            Text("为悬停、键入、收藏、转换与删除提供温润微声学反馈，并与触控板多级震动联动")
-                                .font(.system(size: 11.5))
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Toggle("", isOn: $store.soundEffectsEnabled)
-                            .toggleStyle(.switch)
-                            .labelsHidden()
-                    }
-
-                    Divider().opacity(0.35)
-
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("顺序出队后自动按 Tab 跳格")
-                                .font(.system(size: 13.5, weight: .medium))
-                            Text("连续按 \(store.queuePopShortcut.compactDisplayString) 填表时自动跳往下一个输入框")
-                                .font(.system(size: 11.5))
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Toggle("", isOn: $store.queueAutoTabEnabled)
-                            .toggleStyle(.switch)
-                            .labelsHidden()
-                    }
-
-                    Divider().opacity(0.35)
-
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("验证码粘贴后自动无痕销毁")
-                                .font(.system(size: 13.5, weight: .medium))
-                            Text("粘贴短信/邮件一次性验证码 30 秒后自动从历史移除")
-                                .font(.system(size: 11.5))
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Toggle("", isOn: $store.autoExpireOTP)
-                            .toggleStyle(.switch)
-                            .labelsHidden()
-                    }
-
-                    Divider().opacity(0.4)
-
-                    HStack(spacing: 8) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("辅助功能权限")
-                                .font(.system(size: 13.5, weight: .medium))
-                            Text(store.isAccessibilityGranted ? "已授权，支持一键直接粘贴" : "未授权，当前仅复制到剪贴板")
-                                .font(.system(size: 11.5))
-                                .foregroundStyle(store.isAccessibilityGranted ? .green : .orange)
-                        }
-                        Spacer()
-                        if store.isAccessibilityGranted {
-                            Image(systemName: "checkmark.circle.fill")
-                                .foregroundStyle(.green)
-                                .font(.system(size: 17))
-                        } else {
-                            Button {
-                                store.refreshAccessibilityStatus()
-                                if store.isAccessibilityGranted {
-                                    store.showToast("已检测到辅助功能授权")
-                                } else {
-                                    store.showToast("仍未生效：若已勾选旧版，请减号移除后重勾")
-                                }
-                            } label: {
-                                Image(systemName: "arrow.clockwise")
-                                    .font(.system(size: 11.5, weight: .semibold))
-                                    .foregroundStyle(.secondary)
-                                    .frame(width: 24, height: 24)
-                                    .background(Circle().fill(Color.primary.opacity(0.07)))
-                            }
-                            .buttonStyle(.plain)
-                            .help("立即重新检测权限状态")
-
-                            Button("前往开启") {
-                                store.requestAccessibilityPermission()
-                                store.openAccessibilitySettings()
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.small)
-                        }
+                // 智能辅助（极简模式下自动隐藏）
+                if !store.minimalModeEnabled {
+                    settingsGroup(title: "智能辅助") {
+                        AdaptiveIntelligenceSettingsSection(store: store)
                     }
                 }
 
-                // 隐私忽略应用白名单分组
-                settingsGroup(title: "隐私忽略应用") {
-                    Text("来自以下应用的复制内容将被自动忽略，不会记录到历史")
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(.secondary)
-
-                    let visibleIgnoredApps = store.ignoredApps.filter {
-                        ClipboardStore.isAppAvailableOnSystem(bundleIdentifier: $0.bundleIdentifier)
-                    }
-
-                    if visibleIgnoredApps.isEmpty {
-                        Text("暂未设置忽略应用")
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary.opacity(0.8))
-                            .padding(.vertical, 4)
-                    } else {
-                        VStack(spacing: 6) {
-                            ForEach(visibleIgnoredApps) { app in
-                                HStack(spacing: 8) {
-                                    if let icon = store.appIcon(forBundleID: app.bundleIdentifier) {
-                                        Image(nsImage: icon)
-                                            .resizable()
-                                            .scaledToFit()
-                                            .frame(width: 18, height: 18)
-                                    }
-
-                                    Text(app.displayName)
-                                        .font(.system(size: 12.5, weight: .medium))
-                                        .lineLimit(1)
-
-                                    Spacer()
-
-                                    Button {
-                                        withAnimation(.easeOut(duration: 0.16)) {
-                                            store.removeIgnoredApp(bundleIdentifier: app.bundleIdentifier)
-                                        }
-                                    } label: {
-                                        Image(systemName: "xmark.circle.fill")
-                                            .font(.system(size: 13))
-                                            .foregroundStyle(.secondary.opacity(0.75))
-                                    }
-                                    .buttonStyle(.plain)
-                                    .help("移出忽略名单")
-                                }
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 5)
-                                .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.primary.opacity(0.045)))
-                            }
+                // 隐私与存储整合分组
+                settingsGroup(title: "隐私与存储") {
+                    VStack(alignment: .leading, spacing: 7) {
+                        HStack {
+                            Text("历史保留上限")
+                                .font(.system(size: 13.5, weight: .medium))
+                            Spacer()
+                            Text("收藏记录永不清理")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
                         }
-                    }
-
-                    HStack(spacing: 8) {
-                        Menu {
-                            let candidates = store.runningCandidateAppsForIgnore()
-                            if candidates.isEmpty {
-                                Text("暂无可添加的运行中应用")
-                            } else {
-                                ForEach(candidates) { candidate in
-                                    Button(candidate.displayName) {
-                                        store.addIgnoredApp(
-                                            bundleIdentifier: candidate.bundleIdentifier,
-                                            displayName: candidate.displayName
-                                        )
-                                    }
-                                }
-                            }
-                        } label: {
-                            Label("添加运行中应用", systemImage: "plus.circle")
-                                .font(.system(size: 12, weight: .medium))
-                        }
-                        .menuStyle(.borderlessButton)
-                        .fixedSize()
-
-                        Spacer()
-
-                        Button("选择应用...") {
-                            pickAppToIgnore()
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                    }
-                }
-
-
-
-                // 存储与资产归档分组
-                settingsGroup(title: "存储与收藏资产迁移") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("保留最近未收藏记录数（收藏记录不受限制）")
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
                         Picker("", selection: $store.maxHistoryCount) {
                             Text("50 条").tag(50)
                             Text("100 条").tag(100)
@@ -1742,11 +1525,89 @@ struct ClipboardPopoverView: View {
 
                     Divider().opacity(0.35)
 
+                    VStack(alignment: .leading, spacing: 7) {
+                        Text("隐私忽略应用（不记录其复制内容）")
+                            .font(.system(size: 12.5, weight: .medium))
+
+                        let visibleIgnoredApps = store.ignoredApps.filter {
+                            ClipboardStore.isAppAvailableOnSystem(bundleIdentifier: $0.bundleIdentifier)
+                        }
+
+                        if !visibleIgnoredApps.isEmpty {
+                            VStack(spacing: 5) {
+                                ForEach(visibleIgnoredApps) { app in
+                                    HStack(spacing: 8) {
+                                        if let icon = store.appIcon(forBundleID: app.bundleIdentifier) {
+                                            Image(nsImage: icon)
+                                                .resizable()
+                                                .scaledToFit()
+                                                .frame(width: 18, height: 18)
+                                        }
+
+                                        Text(app.displayName)
+                                            .font(.system(size: 12.5, weight: .medium))
+                                            .lineLimit(1)
+
+                                        Spacer()
+
+                                        Button {
+                                            withAnimation(.easeOut(duration: 0.16)) {
+                                                store.removeIgnoredApp(bundleIdentifier: app.bundleIdentifier)
+                                            }
+                                        } label: {
+                                            Image(systemName: "xmark.circle.fill")
+                                                .font(.system(size: 13))
+                                                .foregroundStyle(.secondary.opacity(0.75))
+                                        }
+                                        .buttonStyle(.plain)
+                                        .help("移出忽略名单")
+                                    }
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 5)
+                                    .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.primary.opacity(0.045)))
+                                }
+                            }
+                        }
+
+                        HStack(spacing: 8) {
+                            Menu {
+                                let candidates = store.runningCandidateAppsForIgnore()
+                                if candidates.isEmpty {
+                                    Text("暂无可添加的运行中应用")
+                                } else {
+                                    ForEach(candidates) { candidate in
+                                        Button(candidate.displayName) {
+                                            store.addIgnoredApp(
+                                                bundleIdentifier: candidate.bundleIdentifier,
+                                                displayName: candidate.displayName
+                                            )
+                                        }
+                                    }
+                                }
+                            } label: {
+                                Label("添加运行中应用", systemImage: "plus.circle")
+                                    .font(.system(size: 12, weight: .medium))
+                            }
+                            .menuStyle(.borderlessButton)
+                            .fixedSize()
+
+                            Spacer()
+
+                            Button("选择应用...") {
+                                pickAppToIgnore()
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                        }
+                    }
+
+                    Divider().opacity(0.35)
+
                     HStack(spacing: 8) {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("收藏与模板离线归档")
+                            Text("收藏资产归档迁移")
                                 .font(.system(size: 13.5, weight: .medium))
-                            Text("当前已收藏 \(store.pinnedItemCount) 条（含分组、备注与常用图），支持跨机迁移")
+                            Text("已收藏 \(store.pinnedItemCount) 条，支持跨设备导入导出")
                                 .font(.system(size: 11.5))
                                 .foregroundStyle(.secondary)
                         }
@@ -1766,29 +1627,46 @@ struct ClipboardPopoverView: View {
                     }
                 }
 
-                // 快捷键说明
-                settingsGroup(title: "快捷键与交互") {
-                    shortcutRow("鼠标旁呼出 / 隐藏", store.hotKeyShortcut.displayString)
-                    Divider().opacity(0.35)
-                    shortcutRow("直接键入光标所在区域", "双击 / ↵")
-                    Divider().opacity(0.35)
-                    shortcutRow("左 / 右切换内容类目", "⇧⇥ / ⇥")
-                    Divider().opacity(0.35)
-                    shortcutRow("图片网格直观方向导航", "↑ ↓ ← →")
-                    Divider().opacity(0.35)
-                    shortcutRow("加入 / 移出顺序粘贴队列", "⌘ K")
-                    Divider().opacity(0.35)
-                    shortcutRow("按顺序键入队首下一项", "⇥ Tab")
-                    Divider().opacity(0.35)
-                    shortcutRow("提取图片实况文本键入", "⇧ ↵")
-                    Divider().opacity(0.35)
-                    shortcutRow("勾选多条记录合并摘录", "⌘ 单击 / ⌘ M / ⇧↑↓")
-                    Divider().opacity(0.35)
-                    shortcutRow("将已勾选记录合并键入", "⌘ ↵")
-                    Divider().opacity(0.35)
-                    shortcutRow("快速键入前 9 条", "⌘ 1 ~ 9")
-                    Divider().opacity(0.35)
-                    shortcutRow("删除当前选中项", "⌘ ⌫")
+                // 按需展开的键盘快捷键速查表（默认折叠，告别长列表刷屏）
+                settingsGroup(title: "帮助") {
+                    Button {
+                        withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
+                            showShortcutReference.toggle()
+                        }
+                    } label: {
+                        HStack {
+                            Text("键盘快捷键速查")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(.primary)
+                            Spacer()
+                            Image(systemName: showShortcutReference ? "chevron.up" : "chevron.down")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+
+                    if showShortcutReference {
+                        Divider().opacity(0.35)
+                        shortcutRow("鼠标旁呼出 / 隐藏", store.hotKeyShortcut.displayString)
+                        Divider().opacity(0.35)
+                        shortcutRow("直接键入光标所在区域", "双击 / ↵")
+                        Divider().opacity(0.35)
+                        shortcutRow("左 / 右切换内容类目", "⇧⇥ / ⇥")
+                        Divider().opacity(0.35)
+                        shortcutRow("图片网格方向导航", "↑ ↓ ← →")
+                        Divider().opacity(0.35)
+                        shortcutRow("加入 / 移出顺序粘贴队列", "⌘ K")
+                        Divider().opacity(0.35)
+                        shortcutRow("提取图片实况文本键入", "⇧ ↵")
+                        Divider().opacity(0.35)
+                        shortcutRow("勾选多条记录合并键入", "⌘ M → ⌘ ↵")
+                        Divider().opacity(0.35)
+                        shortcutRow("快速键入前 9 条", "⌘ 1 ~ 9")
+                        Divider().opacity(0.35)
+                        shortcutRow("删除当前选中项", "⌘ ⌫")
+                    }
                 }
 
                 // 底部操作
@@ -2692,6 +2570,7 @@ struct ClipboardPopoverView: View {
     @State private var templateDraftText: String = "请帮我审查以下代码并指出潜在问题：\n\n{{clip_redacted}}"
     @State private var aliasEditingItem: ClipItem? = nil
     @State private var aliasDraftText: String = ""
+    @State private var showShortcutReference: Bool = false
     @FocusState private var isAliasFieldFocused: Bool
 
     var filteredItems: [ClipItem] {
@@ -3621,115 +3500,61 @@ struct ClipboardPopoverView: View {
     private var settingsView: some View {
         ScrollView(.vertical, showsIndicators: false) {
             VStack(spacing: 14) {
-                // 角色版本选择与差异化 GitHub OTA 通道
-                settingsGroup(title: "使用角色与专属版本（GitHub OTA）") {
+                if !store.isAccessibilityGranted {
+                    settingsGroup(title: "辅助功能权限") {
+                        HStack(spacing: 8) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("开启一键直接键入权限")
+                                    .font(.system(size: 13.5, weight: .medium))
+                                Text("授权后双击或按回车即可直接粘贴至当前光标位置")
+                                    .font(.system(size: 11.5))
+                                    .foregroundStyle(.orange)
+                            }
+                            Spacer()
+                            Button {
+                                store.refreshAccessibilityStatus()
+                                if store.isAccessibilityGranted {
+                                    store.showToast("已检测到辅助功能授权")
+                                } else {
+                                    store.showToast("仍未生效：若已勾选旧版，请减号移除后重勾")
+                                }
+                            } label: {
+                                Image(systemName: "arrow.clockwise")
+                                    .font(.system(size: 11.5, weight: .semibold))
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 24, height: 24)
+                                    .background(Circle().fill(Color.primary.opacity(0.07)))
+                            }
+                            .buttonStyle(.plain)
+                            .help("立即重新检测权限状态")
+
+                            Button("前往开启") {
+                                store.requestAccessibilityPermission()
+                                store.openAccessibilitySettings()
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                        }
+                    }
+                }
+
+                // 苹果官方风格液态玻璃背景模糊浓度（单一滑块 + 实时实景折射预览）
+                settingsGroup(title: "液态玻璃") {
+                    LiquidGlassBlurStyleCard(blurConcentration: $store.liquidGlassMaskOpacity)
+                }
+
+                // 模式与角色版本切换
+                settingsGroup(title: "模式与版本") {
                     RoleAndOTASettingsSection(store: store, updater: updater)
                 }
 
-                // 核心功能重点速览入口
-                settingsGroup(title: "核心功能速览") {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("查看 3 大核心功能亮点")
-                                .font(.system(size: 13.5, weight: .medium))
-                            Text("双向自由拖拽、官方级液态玻璃与全键盘瞬时流转")
-                                .font(.system(size: 11.5))
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Button("查看重点") {
-                            nav.showSettings = false
-                            playground.showHighlights()
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                    }
-                }
-
-                // 自适应心智学习与自然语言建议采纳中心
-                if !store.minimalModeEnabled {
-                    settingsGroup(title: "自适应心智与建议采纳") {
-                        AdaptiveIntelligenceSettingsSection(store: store)
-                    }
-                }
-
-                // 外观材质分组（苹果官方液态玻璃 / 毛玻璃，支持官方透明/着色档位与蒙版浓度无级调节）
-                settingsGroup(title: "外观与边缘材质") {
-                    HStack {
-                        Text("窗口材质")
-                            .font(.system(size: 13.5, weight: .medium))
-                        Spacer()
-                        Picker("", selection: $store.surfaceStyle) {
-                            ForEach(PanelSurfaceStyle.allCases) { style in
-                                Text(style.title).tag(style)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-                        .labelsHidden()
-                        .frame(width: 176)
-                    }
-
-                    if store.surfaceStyle == .liquidGlass {
-                        Divider().opacity(0.35)
-
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("液态风格")
-                                    .font(.system(size: 13.5, weight: .medium))
-                                Text("原生 Liquid Glass（透明 .clear / 标准 .regular），浓度 0% 为纯原味")
-                                    .font(.system(size: 11.5))
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            Picker("", selection: $store.liquidGlassAppearance) {
-                                ForEach(LiquidGlassAppearance.allCases) { mode in
-                                    Text(mode.title).tag(mode)
-                                }
-                            }
-                            .pickerStyle(.segmented)
-                            .labelsHidden()
-                            .frame(width: 128)
-                        }
-
-                        VStack(alignment: .leading, spacing: 6) {
-                            HStack {
-                                Text("液态蒙版浓度")
-                                    .font(.system(size: 13, weight: .medium))
-                                Spacer()
-                                Text("\(Int(round(store.liquidGlassMaskOpacity * 100)))%")
-                                    .font(.system(size: 12, weight: .medium))
-                                    .monospacedDigit()
-                                    .foregroundStyle(.secondary)
-                            }
-                            Slider(value: $store.liquidGlassMaskOpacity, in: 0.0...1.0)
-                                .controlSize(.small)
-                        }
-                    }
-
-                    Divider().opacity(0.35)
-
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("纯净无边框")
-                                .font(.system(size: 13.5, weight: .medium))
-                            Text("去除外框与卡片描边，只保留纯粹玻璃质感")
-                                .font(.system(size: 11.5))
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Toggle("", isOn: $store.borderlessPanel)
-                            .toggleStyle(.switch)
-                            .labelsHidden()
-                    }
-                }
-
-                // 通用与快捷键分组（始终在前 + 开机自启 + 自定义全局快捷键）
+                // 通用与快捷键
                 settingsGroup(title: "通用与快捷键") {
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("窗口始终在前（⌘P）")
                                 .font(.system(size: 13.5, weight: .medium))
-                            Text("固定面板置顶，切窗口与连续粘贴时不自动收起")
+                            Text("固定面板置顶，切换窗口与连续粘贴时不自动收起")
                                 .font(.system(size: 11.5))
                                 .foregroundStyle(.secondary)
                         }
@@ -3756,6 +3581,22 @@ struct ClipboardPopoverView: View {
                         ))
                         .toggleStyle(.switch)
                         .labelsHidden()
+                    }
+
+                    Divider().opacity(0.35)
+
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("交互音效反馈")
+                                .font(.system(size: 13.5, weight: .medium))
+                            Text("键入、收藏与转换时播放轻柔微音效（关闭后仍保留触控板震动）")
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Toggle("", isOn: $store.soundEffectsEnabled)
+                            .toggleStyle(.switch)
+                            .labelsHidden()
                     }
 
                     Divider().opacity(0.35)
@@ -3822,220 +3663,24 @@ struct ClipboardPopoverView: View {
                     }
                 }
 
-                // 行为分组
-                settingsGroup(title: "粘贴行为") {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("双击直接键入光标处")
-                                .font(.system(size: 13.5, weight: .medium))
-                            Text("双击卡片或按回车后自动键入当前应用光标所在位置")
-                                .font(.system(size: 11.5))
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Toggle("", isOn: $store.autoPasteEnabled)
-                            .toggleStyle(.switch)
-                            .labelsHidden()
-                    }
-
-                    Divider().opacity(0.35)
-
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("交互微音效反馈")
-                                .font(.system(size: 13.5, weight: .medium))
-                            Text("为悬停、键入、收藏、转换与删除提供温润微声学反馈，并与触控板多级震动联动")
-                                .font(.system(size: 11.5))
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Toggle("", isOn: $store.soundEffectsEnabled)
-                            .toggleStyle(.switch)
-                            .labelsHidden()
-                    }
-
-                    Divider().opacity(0.35)
-
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("复制链接时自动剥离追踪参数")
-                                .font(.system(size: 13.5, weight: .medium))
-                            Text("自动移除 utm_source、spm、fbclid 等营销尾巴")
-                                .font(.system(size: 11.5))
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Toggle("", isOn: $store.autoCleanTrackingURL)
-                            .toggleStyle(.switch)
-                            .labelsHidden()
-                    }
-
-                    Divider().opacity(0.35)
-
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("敏感凭据自动脱敏守护")
-                                .font(.system(size: 13.5, weight: .medium))
-                            Text("双击/回车粘贴含密钥文本时自动掩码（按 ⌥↵ 才贴明文）")
-                                .font(.system(size: 11.5))
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Toggle("", isOn: $store.autoRedactOnPaste)
-                            .toggleStyle(.switch)
-                            .labelsHidden()
-                    }
-
-                    Divider().opacity(0.35)
-
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("验证码粘贴后自动无痕销毁")
-                                .font(.system(size: 13.5, weight: .medium))
-                            Text("粘贴短信/邮件一次性验证码 30 秒后自动从历史移除")
-                                .font(.system(size: 11.5))
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Toggle("", isOn: $store.autoExpireOTP)
-                            .toggleStyle(.switch)
-                            .labelsHidden()
-                    }
-
-                    Divider().opacity(0.4)
-
-                    HStack(spacing: 8) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("辅助功能权限")
-                                .font(.system(size: 13.5, weight: .medium))
-                            Text(store.isAccessibilityGranted ? "已授权，支持一键直接粘贴" : "未授权，当前仅复制到剪贴板")
-                                .font(.system(size: 11.5))
-                                .foregroundStyle(store.isAccessibilityGranted ? .green : .orange)
-                        }
-                        Spacer()
-                        if store.isAccessibilityGranted {
-                            Image(systemName: "checkmark.circle.fill")
-                                .foregroundStyle(.green)
-                                .font(.system(size: 17))
-                        } else {
-                            Button {
-                                store.refreshAccessibilityStatus()
-                                if store.isAccessibilityGranted {
-                                    store.showToast("已检测到辅助功能授权")
-                                } else {
-                                    store.showToast("仍未生效：若已勾选旧版，请减号移除后重勾")
-                                }
-                            } label: {
-                                Image(systemName: "arrow.clockwise")
-                                    .font(.system(size: 11.5, weight: .semibold))
-                                    .foregroundStyle(.secondary)
-                                    .frame(width: 24, height: 24)
-                                    .background(Circle().fill(Color.primary.opacity(0.07)))
-                            }
-                            .buttonStyle(.plain)
-                            .help("立即重新检测权限状态")
-
-                            Button("前往开启") {
-                                store.requestAccessibilityPermission()
-                                store.openAccessibilitySettings()
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.small)
-                        }
+                // 智能辅助（极简模式下自动隐藏）
+                if !store.minimalModeEnabled {
+                    settingsGroup(title: "智能辅助") {
+                        AdaptiveIntelligenceSettingsSection(store: store)
                     }
                 }
 
-                // 隐私忽略应用白名单分组
-                settingsGroup(title: "隐私忽略应用") {
-                    Text("来自以下应用的复制内容将被自动忽略，不会记录到历史")
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(.secondary)
-
-                    let visibleIgnoredApps = store.ignoredApps.filter {
-                        ClipboardStore.isAppAvailableOnSystem(bundleIdentifier: $0.bundleIdentifier)
-                    }
-
-                    if visibleIgnoredApps.isEmpty {
-                        Text("暂未设置忽略应用")
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary.opacity(0.8))
-                            .padding(.vertical, 4)
-                    } else {
-                        VStack(spacing: 6) {
-                            ForEach(visibleIgnoredApps) { app in
-                                HStack(spacing: 8) {
-                                    if let icon = store.appIcon(forBundleID: app.bundleIdentifier) {
-                                        Image(nsImage: icon)
-                                            .resizable()
-                                            .scaledToFit()
-                                            .frame(width: 18, height: 18)
-                                    }
-
-                                    Text(app.displayName)
-                                        .font(.system(size: 12.5, weight: .medium))
-                                        .lineLimit(1)
-
-                                    Spacer()
-
-                                    Button {
-                                        withAnimation(.easeOut(duration: 0.16)) {
-                                            store.removeIgnoredApp(bundleIdentifier: app.bundleIdentifier)
-                                        }
-                                    } label: {
-                                        Image(systemName: "xmark.circle.fill")
-                                            .font(.system(size: 13))
-                                            .foregroundStyle(.secondary.opacity(0.75))
-                                    }
-                                    .buttonStyle(.plain)
-                                    .help("移出忽略名单")
-                                }
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 5)
-                                .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.primary.opacity(0.045)))
-                            }
+                // 隐私与存储整合分组
+                settingsGroup(title: "隐私与存储") {
+                    VStack(alignment: .leading, spacing: 7) {
+                        HStack {
+                            Text("历史保留上限")
+                                .font(.system(size: 13.5, weight: .medium))
+                            Spacer()
+                            Text("收藏记录永不清理")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
                         }
-                    }
-
-                    HStack(spacing: 8) {
-                        Menu {
-                            let candidates = store.runningCandidateAppsForIgnore()
-                            if candidates.isEmpty {
-                                Text("暂无可添加的运行中应用")
-                            } else {
-                                ForEach(candidates) { candidate in
-                                    Button(candidate.displayName) {
-                                        store.addIgnoredApp(
-                                            bundleIdentifier: candidate.bundleIdentifier,
-                                            displayName: candidate.displayName
-                                        )
-                                    }
-                                }
-                            }
-                        } label: {
-                            Label("添加运行中应用", systemImage: "plus.circle")
-                                .font(.system(size: 12, weight: .medium))
-                        }
-                        .menuStyle(.borderlessButton)
-                        .fixedSize()
-
-                        Spacer()
-
-                        Button("选择应用...") {
-                            pickAppToIgnore()
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                    }
-                }
-
-
-
-                // 存储与资产归档分组
-                settingsGroup(title: "存储与收藏资产迁移") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("保留最近未收藏记录数（收藏记录不受限制）")
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
                         Picker("", selection: $store.maxHistoryCount) {
                             Text("50 条").tag(50)
                             Text("100 条").tag(100)
@@ -4048,11 +3693,89 @@ struct ClipboardPopoverView: View {
 
                     Divider().opacity(0.35)
 
+                    VStack(alignment: .leading, spacing: 7) {
+                        Text("隐私忽略应用（不记录其复制内容）")
+                            .font(.system(size: 12.5, weight: .medium))
+
+                        let visibleIgnoredApps = store.ignoredApps.filter {
+                            ClipboardStore.isAppAvailableOnSystem(bundleIdentifier: $0.bundleIdentifier)
+                        }
+
+                        if !visibleIgnoredApps.isEmpty {
+                            VStack(spacing: 5) {
+                                ForEach(visibleIgnoredApps) { app in
+                                    HStack(spacing: 8) {
+                                        if let icon = store.appIcon(forBundleID: app.bundleIdentifier) {
+                                            Image(nsImage: icon)
+                                                .resizable()
+                                                .scaledToFit()
+                                                .frame(width: 18, height: 18)
+                                        }
+
+                                        Text(app.displayName)
+                                            .font(.system(size: 12.5, weight: .medium))
+                                            .lineLimit(1)
+
+                                        Spacer()
+
+                                        Button {
+                                            withAnimation(.easeOut(duration: 0.16)) {
+                                                store.removeIgnoredApp(bundleIdentifier: app.bundleIdentifier)
+                                            }
+                                        } label: {
+                                            Image(systemName: "xmark.circle.fill")
+                                                .font(.system(size: 13))
+                                                .foregroundStyle(.secondary.opacity(0.75))
+                                        }
+                                        .buttonStyle(.plain)
+                                        .help("移出忽略名单")
+                                    }
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 5)
+                                    .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.primary.opacity(0.045)))
+                                }
+                            }
+                        }
+
+                        HStack(spacing: 8) {
+                            Menu {
+                                let candidates = store.runningCandidateAppsForIgnore()
+                                if candidates.isEmpty {
+                                    Text("暂无可添加的运行中应用")
+                                } else {
+                                    ForEach(candidates) { candidate in
+                                        Button(candidate.displayName) {
+                                            store.addIgnoredApp(
+                                                bundleIdentifier: candidate.bundleIdentifier,
+                                                displayName: candidate.displayName
+                                            )
+                                        }
+                                    }
+                                }
+                            } label: {
+                                Label("添加运行中应用", systemImage: "plus.circle")
+                                    .font(.system(size: 12, weight: .medium))
+                            }
+                            .menuStyle(.borderlessButton)
+                            .fixedSize()
+
+                            Spacer()
+
+                            Button("选择应用...") {
+                                pickAppToIgnore()
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                        }
+                    }
+
+                    Divider().opacity(0.35)
+
                     HStack(spacing: 8) {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("收藏与模板离线归档")
+                            Text("收藏资产归档迁移")
                                 .font(.system(size: 13.5, weight: .medium))
-                            Text("当前已收藏 \(store.pinnedItemCount) 条（含分组、备注与常用图），支持跨机迁移")
+                            Text("已收藏 \(store.pinnedItemCount) 条，支持跨设备导入导出")
                                 .font(.system(size: 11.5))
                                 .foregroundStyle(.secondary)
                         }
@@ -4072,29 +3795,50 @@ struct ClipboardPopoverView: View {
                     }
                 }
 
-                // 快捷键说明
-                settingsGroup(title: "快捷键与交互") {
-                    shortcutRow("鼠标旁呼出 / 隐藏", store.hotKeyShortcut.displayString)
-                    Divider().opacity(0.35)
-                    shortcutRow("直接键入光标所在区域", "双击 / ↵")
-                    Divider().opacity(0.35)
-                    shortcutRow("左 / 右切换内容类目", "⇧⇥ / ⇥")
-                    Divider().opacity(0.35)
-                    shortcutRow("图片网格直观方向导航", "↑ ↓ ← →")
-                    Divider().opacity(0.35)
-                    shortcutRow("首选智能变换 / 脱敏键入", "⇧ ↵")
-                    Divider().opacity(0.35)
-                    shortcutRow("直达第 1~3 个语义变换", "⌃ 1 ~ 3")
-                    Divider().opacity(0.35)
-                    shortcutRow("忽略守护强制贴原始明文", "⌥ ↵")
-                    Divider().opacity(0.35)
-                    shortcutRow("QuickLook 原文与变换对照速览", "Space / ⌘ Y")
-                    Divider().opacity(0.35)
-                    shortcutRow("按语义类型速筛", "@json / @secret / @color")
-                    Divider().opacity(0.35)
-                    shortcutRow("快速键入前 9 条", "⌘ 1 ~ 9")
-                    Divider().opacity(0.35)
-                    shortcutRow("删除当前选中项", "⌘ ⌫")
+                // 按需展开的键盘快捷键速查表（默认折叠，告别长列表刷屏）
+                settingsGroup(title: "帮助") {
+                    Button {
+                        withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
+                            showShortcutReference.toggle()
+                        }
+                    } label: {
+                        HStack {
+                            Text("键盘快捷键速查")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(.primary)
+                            Spacer()
+                            Image(systemName: showShortcutReference ? "chevron.up" : "chevron.down")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+
+                    if showShortcutReference {
+                        Divider().opacity(0.35)
+                        shortcutRow("鼠标旁呼出 / 隐藏", store.hotKeyShortcut.displayString)
+                        Divider().opacity(0.35)
+                        shortcutRow("直接键入光标所在区域", "双击 / ↵")
+                        Divider().opacity(0.35)
+                        shortcutRow("左 / 右切换内容类目", "⇧⇥ / ⇥")
+                        Divider().opacity(0.35)
+                        shortcutRow("图片网格方向导航", "↑ ↓ ← →")
+                        Divider().opacity(0.35)
+                        shortcutRow("首选智能变换 / 脱敏键入", "⇧ ↵")
+                        Divider().opacity(0.35)
+                        shortcutRow("直达第 1~3 个语义变换", "⌃ 1 ~ 3")
+                        Divider().opacity(0.35)
+                        shortcutRow("忽略守护强制贴原始明文", "⌥ ↵")
+                        Divider().opacity(0.35)
+                        shortcutRow("QuickLook 原文与变换对照速览", "Space / ⌘ Y")
+                        Divider().opacity(0.35)
+                        shortcutRow("按语义类型速筛", "@json / @secret / @color")
+                        Divider().opacity(0.35)
+                        shortcutRow("快速键入前 9 条", "⌘ 1 ~ 9")
+                        Divider().opacity(0.35)
+                        shortcutRow("删除当前选中项", "⌘ ⌫")
+                    }
                 }
 
                 // 底部操作

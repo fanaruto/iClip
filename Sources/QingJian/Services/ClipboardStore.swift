@@ -309,8 +309,15 @@ final class ClipboardStore: ObservableObject {
     @Published var liquidGlassAppearance: LiquidGlassAppearance {
         didSet { UserDefaults.standard.set(liquidGlassAppearance.rawValue, forKey: "liquidGlassAppearance") }
     }
+    /// 液态玻璃背景模糊浓度（0.0 清透透镜 ~ 1.0 浓厚柔焦，联动调整卡片衬底对比度）
     @Published var liquidGlassMaskOpacity: Double {
-        didSet { scheduleSaveAppearanceDefaults() }
+        didSet {
+            let derived: LiquidGlassAppearance = (liquidGlassMaskOpacity < 0.35) ? .clear : .tinted
+            if liquidGlassAppearance != derived {
+                liquidGlassAppearance = derived
+            }
+            scheduleSaveAppearanceDefaults()
+        }
     }
     @Published var borderlessPanel: Bool {
         didSet { UserDefaults.standard.set(borderlessPanel, forKey: "borderlessPanel") }
@@ -458,21 +465,16 @@ final class ClipboardStore: ObservableObject {
         self.minimalModeEnabled = UserDefaults.standard.bool(forKey: "minimalModeEnabled")
         self.alwaysOnTop = UserDefaults.standard.bool(forKey: "alwaysOnTop")
 
-        self.autoPasteEnabled = UserDefaults.standard.object(forKey: "autoPasteEnabled") as? Bool ?? true
+        self.autoPasteEnabled = true
         self.soundEffectsEnabled = UserDefaults.standard.object(forKey: TactileFeedbackEngine.soundEnabledDefaultsKey) as? Bool ?? true
-        self.autoExpireOTP = UserDefaults.standard.object(forKey: "autoExpireOTP") as? Bool ?? true
-        let savedStyle = UserDefaults.standard.string(forKey: "panelSurfaceStyle") ?? PanelSurfaceStyle.liquidGlass.rawValue
-        if savedStyle == "clearGlass" {
-            self.surfaceStyle = .liquidGlass
-            self.liquidGlassAppearance = .clear
-        } else {
-            self.surfaceStyle = PanelSurfaceStyle(rawValue: savedStyle) ?? .liquidGlass
-            let savedGlassMode = UserDefaults.standard.string(forKey: "liquidGlassAppearance") ?? LiquidGlassAppearance.tinted.rawValue
-            self.liquidGlassAppearance = LiquidGlassAppearance(rawValue: savedGlassMode) ?? .tinted
-        }
+        self.autoExpireOTP = true
+        // 统一既定视觉风格：默认固定原生液态玻璃与纯净无分割线布局，仅暴露单一「背景模糊浓度」调节
+        self.surfaceStyle = .liquidGlass
         let savedMask = UserDefaults.standard.object(forKey: "liquidGlassMaskOpacity") as? Double
-        self.liquidGlassMaskOpacity = min(max(savedMask ?? 0.38, 0.0), 1.0)
-        self.borderlessPanel = UserDefaults.standard.object(forKey: "borderlessPanel") as? Bool ?? true
+        let clampedBlur = min(max(savedMask ?? 0.45, 0.0), 1.0)
+        self.liquidGlassMaskOpacity = clampedBlur
+        self.liquidGlassAppearance = (clampedBlur < 0.35) ? .clear : .tinted
+        self.borderlessPanel = true
 
         if let shortcutData = UserDefaults.standard.data(forKey: "hotKeyShortcut"),
            let decodedShortcut = try? JSONDecoder().decode(HotKeyShortcut.self, from: shortcutData) {

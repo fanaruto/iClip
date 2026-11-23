@@ -115,6 +115,20 @@ final class LiquidGlassSurfaceHost {
         maskOpacity: Double
     ) {
         let cardFrame = NSRect(x: bleed, y: bleed, width: cardBounds.width, height: cardBounds.height)
+
+        // 底层：支持动态无级调节高斯模糊半径（0pt ~ 38pt）的连续圆角柔焦层，彻底消除传统半透明叠加导致的背后文字重影
+        let blurBackdrop = ConfigurableBlurVisualEffectView(frame: cardFrame)
+        blurBackdrop.autoresizingMask = bleed > 0 ? [] : [.width, .height]
+        blurBackdrop.material = .popover
+        blurBackdrop.blendingMode = .behindWindow
+        blurBackdrop.state = .active
+        blurBackdrop.maskImage = Self.continuousCornerMaskImage(size: cardBounds.size, radius: cornerRadius)
+        blurBackdrop.wantsLayer = true
+        blurBackdrop.layer?.cornerCurve = .continuous
+        blurBackdrop.layer?.cornerRadius = cornerRadius
+        blurBackdrop.layer?.masksToBounds = true
+
+        // 顶层：macOS 26 原生 NSGlassEffectView 光学透镜外壳，保留边缘折射与高光
         let glassView = NSGlassEffectView(frame: cardFrame)
         glassView.autoresizingMask = bleed > 0 ? [] : [.width, .height]
         glassView.cornerRadius = cornerRadius
@@ -141,26 +155,27 @@ final class LiquidGlassSurfaceHost {
         glassView.contentView = contentContainer
 
         self.containerView = contentContainer
-        self.backdropBlurView = nil
+        self.backdropBlurView = blurBackdrop
         self.activeGlassView = glassView
 
         panel.hasShadow = true
-        if bleed > 0 {
-            let windowBounds = NSRect(
-                x: 0,
-                y: 0,
-                width: cardBounds.width + bleed * 2,
-                height: cardBounds.height + bleed * 2
-            )
-            let bleedRoot = LiquidGlassBleedRootView(frame: windowBounds, cardFrame: cardFrame)
-            bleedRoot.addSubview(glassView)
-            panel.contentView = bleedRoot
-        } else {
-            panel.contentView = glassView
+        let windowBounds = NSRect(
+            x: 0,
+            y: 0,
+            width: cardBounds.width + bleed * 2,
+            height: cardBounds.height + bleed * 2
+        )
+        let bleedRoot = LiquidGlassBleedRootView(frame: windowBounds, cardFrame: cardFrame)
+        if bleed == 0 {
+            bleedRoot.autoresizingMask = [.width, .height]
         }
+        bleedRoot.addSubview(blurBackdrop)
+        bleedRoot.addSubview(glassView)
+        panel.contentView = bleedRoot
+
         applyCompositeParameters(
             glassView: glassView,
-            blurView: nil,
+            blurView: blurBackdrop,
             appearance: appearance,
             maskOpacity: maskOpacity
         )
@@ -232,15 +247,12 @@ final class LiquidGlassSurfaceHost {
     ) {
         let clamped = min(max(maskOpacity, 0.0), 1.0)
         let reduceTransparency = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
-        let isDark = glassView.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-
-        // 100% 遵循 macOS 26 Tahoe 官方 NSGlassEffectView 规范：
-        // - 透明 (.clear) 对应官方 .clear 高清透镜折射玻璃（Spotlight / Control Center 风格）
-        // - 着色 (.tinted) 对应官方 .regular 标准高可读液态玻璃
-        // - 滑块为 0% 时 tintColor = nil，完全保留系统原生光学透镜折射与环境光反射，不糊死通透感
-        glassView.style = (appearance == .clear) ? .clear : .regular
+        let effectiveApp = glassView.window?.effectiveAppearance ?? NSApp.effectiveAppearance
+        let isDark = effectiveApp.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
 
         if reduceTransparency {
+            blurView?.isHidden = true
+            blurView?.alphaValue = 0
             glassView.style = .regular
             glassView.tintColor = isDark
                 ? NSColor(srgbRed: 0.12, green: 0.13, blue: 0.15, alpha: 0.96)
@@ -248,21 +260,27 @@ final class LiquidGlassSurfaceHost {
             return
         }
 
+        // 驱动底层 CABackdropLayer 真实高斯模糊半径（0pt ~ 38pt），零文字重影、零档位跳变
+        glassView.style = .clear
+
         if clamped <= 0.01 {
+            (blurView as? ConfigurableBlurVisualEffectView)?.applyBlurConcentration(0)
+            blurView?.isHidden = true
             glassView.tintColor = nil
         } else {
-            // 黄金能见度配比：保留官方边缘透镜折射与通透感，同时柔和压制背后刺眼字符
-            let alpha: CGFloat
-            if appearance == .clear {
-                alpha = isDark
-                    ? CGFloat(0.10 + clamped * 0.42)
-                    : CGFloat(0.08 + clamped * 0.40)
-            } else {
-                alpha = CGFloat(clamped * 0.48)
+            blurView?.isHidden = false
+            blurView?.appearance = NSAppearance(named: isDark ? .darkAqua : .aqua)
+            blurView?.alphaValue = CGFloat(min(1.0, clamped / 0.18))
+            if let configurable = blurView as? ConfigurableBlurVisualEffectView {
+                configurable.applyBlurConcentration(clamped)
             }
+
+            let alpha: CGFloat = isDark
+                ? CGFloat(0.06 + clamped * 0.44)
+                : CGFloat(0.08 + clamped * 0.46)
             let tintBase = isDark
-                ? NSColor(srgbRed: 0.06, green: 0.07, blue: 0.09, alpha: 1.0)
-                : NSColor(srgbRed: 0.985, green: 0.988, blue: 0.995, alpha: 1.0)
+                ? NSColor(srgbRed: 0.08, green: 0.09, blue: 0.12, alpha: 1.0)
+                : NSColor(srgbRed: 0.985, green: 0.99, blue: 1.0, alpha: 1.0)
             glassView.tintColor = tintBase.withAlphaComponent(alpha)
         }
     }
@@ -328,6 +346,53 @@ final class LiquidGlassSurfaceHost {
         image.capInsets = NSEdgeInsets(top: radius, left: radius, bottom: radius, right: radius)
         image.resizingMode = .stretch
         return image
+    }
+}
+
+/// 支持实时无级控制底层 WindowServer `CABackdropLayer` 高斯模糊半径的原生视觉材质视图
+private final class ConfigurableBlurVisualEffectView: NSVisualEffectView {
+    private var concentration: Double = 0.45
+
+    func applyBlurConcentration(_ value: Double) {
+        concentration = min(max(value, 0.0), 1.0)
+        syncBackdropFilter()
+    }
+
+    override func layout() {
+        super.layout()
+        syncBackdropFilter()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        syncBackdropFilter()
+    }
+
+    override func updateLayer() {
+        super.updateLayer()
+        syncBackdropFilter()
+    }
+
+    private func syncBackdropFilter() {
+        guard let rootLayer = self.layer else { return }
+        // 真实高斯核半径：1% 约 1.2pt 微柔焦 -> 45% 约 17pt 标准柔焦 -> 100% 达 38pt 浓厚磨砂
+        let radius = concentration <= 0.01 ? 0.0 : (1.0 + pow(concentration, 1.08) * 37.0)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        applyRadiusRecursively(in: rootLayer, radius: radius, tintScale: CGFloat(concentration))
+        CATransaction.commit()
+    }
+
+    private func applyRadiusRecursively(in layer: CALayer, radius: Double, tintScale: CGFloat) {
+        let clsName = String(describing: type(of: layer))
+        if clsName.contains("Backdrop") {
+            if layer.value(forKeyPath: "filters.gaussianBlur.inputRadius") != nil {
+                layer.setValue(radius, forKeyPath: "filters.gaussianBlur.inputRadius")
+            }
+        }
+        for sub in layer.sublayers ?? [] {
+            applyRadiusRecursively(in: sub, radius: radius, tintScale: tintScale)
+        }
     }
 }
 
@@ -551,6 +616,337 @@ struct LiquidGlassPalette {
             }
         } else {
             return Color.clear
+        }
+    }
+}
+
+// MARK: - 苹果官方风格「液态玻璃」实景预览与背景模糊浓度单轴控制器
+
+/// 对标 macOS 系统设置「外观 -> Liquid Glass」：单一连续滑块调节背景模糊浓度，上方实景胶囊实时呈现折射与柔焦变化
+struct LiquidGlassBlurStyleCard: View {
+    @Binding var blurConcentration: Double
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var lastDetentIndex: Int? = nil
+
+    private var concentrationLabel: String {
+        let pct = Int(round(blurConcentration * 100))
+        if blurConcentration < 0.22 {
+            return "清透折射 · \(pct)%"
+        } else if blurConcentration < 0.68 {
+            return "均衡柔焦 · \(pct)%"
+        } else {
+            return "浓厚磨砂 · \(pct)%"
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("背景模糊浓度")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.primary)
+                Spacer()
+                Text(concentrationLabel)
+                    .font(.system(size: 11.5, weight: .medium))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+
+            // 实景光学折射与背景模糊预览窗
+            ZStack(alignment: .top) {
+                LiquidGlassScenicBackdrop(isDark: colorScheme == .dark)
+
+                // 与底层景物 100% 像素对齐的液态玻璃模糊采样层
+                ZStack {
+                    LiquidGlassScenicBackdrop(isDark: colorScheme == .dark)
+                        .scaleEffect(1.025 - blurConcentration * 0.02)
+                        .blur(radius: 1.4 + blurConcentration * 15.5)
+
+                    (colorScheme == .dark
+                        ? Color(red: 0.10, green: 0.12, blue: 0.16)
+                        : Color.white)
+                        .opacity(0.14 + blurConcentration * 0.62)
+                }
+                .mask(alignment: .top) {
+                    previewToolbarMask
+                        .padding(.horizontal, 12)
+                        .padding(.top, 11)
+                }
+
+                // 顶层悬浮胶囊高光切面与图标文字
+                previewToolbarForeground
+                    .padding(.horizontal, 12)
+                    .padding(.top, 11)
+            }
+            .frame(height: 124)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(colorScheme == .dark ? 0.14 : 0.08), lineWidth: 0.6)
+            )
+
+            // 苹果官方单轴滑块：左清透双框 -> 三档刻度滑轨 -> 右磨砂实心双框
+            HStack(alignment: .center, spacing: 10) {
+                Button {
+                    withAnimation(.spring(response: 0.24, dampingFraction: 0.84)) {
+                        blurConcentration = 0.08
+                    }
+                    TactileFeedbackEngine.shared.performNavigationStepHaptic()
+                } label: {
+                    OverlappingGlassSquaresGlyph(frosted: false)
+                        .frame(width: 18, height: 18)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("清透折射（低背景模糊）")
+
+                VStack(spacing: 3) {
+                    Slider(value: $blurConcentration, in: 0.0...1.0)
+                        .controlSize(.small)
+                        .onChange(of: blurConcentration) { _, newVal in
+                            let currentDetent: Int?
+                            if abs(newVal - 0.08) < 0.025 {
+                                currentDetent = 0
+                            } else if abs(newVal - 0.45) < 0.025 {
+                                currentDetent = 1
+                            } else if abs(newVal - 0.88) < 0.025 {
+                                currentDetent = 2
+                            } else {
+                                currentDetent = nil
+                            }
+                            if let d = currentDetent, d != lastDetentIndex {
+                                TactileFeedbackEngine.shared.performNavigationStepHaptic()
+                            }
+                            lastDetentIndex = currentDetent
+                        }
+
+                    // 三枚对齐官方的微刻度锚点（清透 · 均衡 · 浓厚柔焦）
+                    GeometryReader { geo in
+                        let w = geo.size.width
+                        ZStack(alignment: .leading) {
+                            ForEach([0.08, 0.45, 0.88], id: \.self) { pos in
+                                Circle()
+                                    .fill(Color.secondary.opacity(0.45))
+                                    .frame(width: 2.5, height: 2.5)
+                                    .offset(x: max(0, min(w - 2.5, (w - 14) * pos + 5.75)))
+                            }
+                        }
+                    }
+                    .frame(height: 3)
+                }
+
+                Button {
+                    withAnimation(.spring(response: 0.24, dampingFraction: 0.84)) {
+                        blurConcentration = 0.88
+                    }
+                    TactileFeedbackEngine.shared.performNavigationStepHaptic()
+                } label: {
+                    OverlappingGlassSquaresGlyph(frosted: true)
+                        .frame(width: 18, height: 18)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("浓厚磨砂（高背景模糊）")
+            }
+            .padding(.top, 1)
+        }
+    }
+
+    private var previewToolbarMask: some View {
+        HStack(spacing: 8) {
+            Capsule(style: .continuous)
+                .frame(width: 68, height: 32)
+            Circle()
+                .frame(width: 32, height: 32)
+            Capsule(style: .continuous)
+                .frame(maxWidth: .infinity)
+                .frame(height: 32)
+        }
+    }
+
+    private var previewToolbarForeground: some View {
+        let rimGradient = LinearGradient(
+            colors: [
+                Color.white.opacity(colorScheme == .dark ? 0.48 : 0.88),
+                Color.white.opacity(colorScheme == .dark ? 0.14 : 0.32),
+                Color.white.opacity(colorScheme == .dark ? 0.28 : 0.56)
+            ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+        let fgColor: Color = colorScheme == .dark ? .white : Color(white: 0.10)
+
+        return HStack(spacing: 8) {
+            HStack(spacing: 12) {
+                Image(systemName: "square.and.arrow.up")
+                    .font(.system(size: 12, weight: .semibold))
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 12, weight: .bold))
+            }
+            .foregroundStyle(fgColor)
+            .frame(width: 68, height: 32)
+            .overlay(Capsule(style: .continuous).strokeBorder(rimGradient, lineWidth: 0.85))
+            .shadow(color: .black.opacity(0.10), radius: 4, y: 2)
+
+            Image(systemName: "square.on.square")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(fgColor)
+                .frame(width: 32, height: 32)
+                .overlay(Circle().strokeBorder(rimGradient, lineWidth: 0.85))
+                .shadow(color: .black.opacity(0.10), radius: 4, y: 2)
+
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(fgColor.opacity(0.68))
+                Text("搜索")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(fgColor.opacity(0.68))
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 11)
+            .frame(maxWidth: .infinity)
+            .frame(height: 32)
+            .overlay(Capsule(style: .continuous).strokeBorder(rimGradient, lineWidth: 0.85))
+            .shadow(color: .black.opacity(0.10), radius: 4, y: 2)
+        }
+    }
+}
+
+/// 苹果官方风格双叠圆角方框刻度图标（左侧清透线框 / 右侧磨砂实心）
+private struct OverlappingGlassSquaresGlyph: View {
+    let frosted: Bool
+
+    var body: some View {
+        Canvas { ctx, size in
+            let backRect = CGRect(x: 1.5, y: 1.5, width: 10.5, height: 10.5)
+            let frontRect = CGRect(x: 6.0, y: 6.0, width: 10.5, height: 10.5)
+            let backPath = Path(roundedRect: backRect, cornerRadius: 2.8, style: .continuous)
+            let frontPath = Path(roundedRect: frontRect, cornerRadius: 2.8, style: .continuous)
+            let strokeColor = Color.secondary.opacity(0.85)
+
+            if frosted {
+                ctx.fill(backPath, with: .color(Color.secondary.opacity(0.30)))
+                ctx.stroke(backPath, with: .color(strokeColor), lineWidth: 1.15)
+                ctx.fill(frontPath, with: .color(Color.secondary.opacity(0.88)))
+            } else {
+                ctx.stroke(backPath, with: .color(strokeColor), lineWidth: 1.15)
+                ctx.fill(frontPath, with: .color(Color.secondary.opacity(0.08)))
+                ctx.stroke(frontPath, with: .color(strokeColor), lineWidth: 1.15)
+            }
+        }
+    }
+}
+
+/// 零外部位图体积的 macOS Tahoe 原生流光缎带与桌面文稿预览舞台（供液态玻璃胶囊实时折射与模糊采样）
+private struct LiquidGlassScenicBackdrop: View {
+    let isDark: Bool
+
+    var body: some View {
+        ZStack(alignment: .bottomLeading) {
+            Canvas { ctx, size in
+                let w = size.width
+                let h = size.height
+
+                // 1. macOS 原生晴空 / 午夜深海基底渐变
+                let baseColors: [Color] = isDark
+                    ? [Color(red: 0.06, green: 0.11, blue: 0.24), Color(red: 0.11, green: 0.21, blue: 0.42), Color(red: 0.18, green: 0.30, blue: 0.54)]
+                    : [Color(red: 0.24, green: 0.54, blue: 0.94), Color(red: 0.48, green: 0.74, blue: 0.98), Color(red: 0.84, green: 0.92, blue: 1.00)]
+                ctx.fill(
+                    Path(CGRect(origin: .zero, size: size)),
+                    with: .linearGradient(
+                        Gradient(colors: baseColors),
+                        startPoint: CGPoint(x: 0, y: 0),
+                        endPoint: CGPoint(x: w, y: h * 0.85)
+                    )
+                )
+
+                // 2. Tahoe 标志性多层流体色带（横贯顶部胶囊下方的青蓝、暖珀与靛紫光弧，清晰呈现折射过渡）
+                let ribbon1 = Path { p in
+                    p.move(to: CGPoint(x: -w * 0.08, y: h * 0.56))
+                    p.addCurve(
+                        to: CGPoint(x: w * 1.08, y: h * 0.08),
+                        control1: CGPoint(x: w * 0.28, y: h * 0.02),
+                        control2: CGPoint(x: w * 0.66, y: h * 0.62)
+                    )
+                    p.addLine(to: CGPoint(x: w * 1.08, y: h * 0.85))
+                    p.addLine(to: CGPoint(x: -w * 0.08, y: h * 0.85))
+                    p.closeSubpath()
+                }
+                ctx.fill(
+                    ribbon1,
+                    with: .linearGradient(
+                        Gradient(colors: isDark
+                            ? [Color(red: 0.16, green: 0.48, blue: 0.88).opacity(0.85), Color(red: 0.38, green: 0.26, blue: 0.78).opacity(0.80)]
+                            : [Color(red: 0.14, green: 0.66, blue: 0.96).opacity(0.82), Color(red: 0.32, green: 0.42, blue: 0.94).opacity(0.75)]
+                        ),
+                        startPoint: CGPoint(x: 0, y: h * 0.15),
+                        endPoint: CGPoint(x: w, y: h * 0.75)
+                    )
+                )
+
+                let ribbon2 = Path { p in
+                    p.move(to: CGPoint(x: w * 0.18, y: h * 0.85))
+                    p.addCurve(
+                        to: CGPoint(x: w * 1.06, y: h * 0.16),
+                        control1: CGPoint(x: w * 0.46, y: h * 0.18),
+                        control2: CGPoint(x: w * 0.78, y: h * 0.46)
+                    )
+                    p.addLine(to: CGPoint(x: w * 1.06, y: h * 0.85))
+                    p.closeSubpath()
+                }
+                ctx.fill(
+                    ribbon2,
+                    with: .linearGradient(
+                        Gradient(colors: isDark
+                            ? [Color(red: 0.92, green: 0.52, blue: 0.28).opacity(0.72), Color(red: 0.18, green: 0.62, blue: 0.68).opacity(0.78)]
+                            : [Color(red: 0.99, green: 0.68, blue: 0.36).opacity(0.86), Color(red: 0.22, green: 0.76, blue: 0.78).opacity(0.82)]
+                        ),
+                        startPoint: CGPoint(x: w * 0.25, y: h * 0.22),
+                        endPoint: CGPoint(x: w * 0.95, y: h * 0.78)
+                    )
+                )
+            }
+
+            // 右侧局部桌面文稿卡片（上沿穿过顶部搜索胶囊后方，直观检验锐利内容随滑块柔焦消融的过程）
+            VStack(alignment: .leading, spacing: 3.5) {
+                HStack(spacing: 4) {
+                    Circle().fill(Color(red: 1.0, green: 0.37, blue: 0.34)).frame(width: 5.5, height: 5.5)
+                    Circle().fill(Color(red: 1.0, green: 0.74, blue: 0.18)).frame(width: 5.5, height: 5.5)
+                    Circle().fill(Color(red: 0.16, green: 0.78, blue: 0.25)).frame(width: 5.5, height: 5.5)
+                    Text("Notes.md")
+                        .font(.system(size: 8.5, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+                Text("原生连续曲率与无级背景柔焦")
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .foregroundStyle(isDark ? Color.white.opacity(0.92) : Color(white: 0.14))
+                    .lineLimit(1)
+                Text("LiquidGlass(blur: smooth)")
+                    .font(.system(size: 8.5, weight: .medium, design: .monospaced))
+                    .foregroundStyle(Color.accentColor)
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 6.5)
+            .frame(width: 186, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(isDark ? Color(red: 0.13, green: 0.15, blue: 0.20).opacity(0.94) : Color.white.opacity(0.94))
+            )
+            .padding(.leading, 144)
+            .padding(.bottom, 38)
+
+            // 底部标题底栏
+            HStack {
+                Text("iClip 液态玻璃 · 实时背景柔焦预览")
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(isDark ? Color.white.opacity(0.90) : Color(white: 0.14))
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 25)
+            .background(isDark ? Color(red: 0.12, green: 0.13, blue: 0.16) : Color(red: 0.95, green: 0.95, blue: 0.96))
         }
     }
 }
