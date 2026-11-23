@@ -177,7 +177,6 @@ enum HitAction {
     ToggleQueueMode,
     ToggleQueueAutoTab,
     ToggleAutostart,
-    SelectGlassAppearance(GlassAppearance),
     AdjustBlurConcentration {
         track_left: i32,
         track_width: i32,
@@ -4065,63 +4064,29 @@ fn layout_and_draw_settings_view(
 
         let pct = st.store.config.blur_concentration_pct;
         texts.push(TextDrawCmd {
-            text: format!("液态玻璃 · 背景模糊浓度 {pct}%"),
+            text: "液态玻璃 · 背景模糊浓度".to_string(),
             rect: RECT {
                 left: pad + s(12),
                 top: y + s(8),
-                right: pad + s(220),
+                right: w - pad - s(70),
                 bottom: y + s(32),
             },
             color: palette.text_primary,
             font_kind: FontKind::CardTitle,
             flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE,
         });
-
-        let preset_x0 = w - pad - s(148);
-        let pw = s(44);
-        for (i, app_mode) in GlassAppearance::ALL.iter().enumerate() {
-            let gx = preset_x0 + (i as i32) * (pw + s(4));
-            let active = st.store.config.glass_appearance == *app_mode;
-            canvas.fill_round_rect(
-                gx,
-                y + s(9),
-                pw,
-                s(22),
-                sf(8.0),
-                if active {
-                    palette.cobalt
-                } else {
-                    palette.track_bg
-                },
-            );
-            let rc = RECT {
-                left: gx,
-                top: y + s(9),
-                right: gx + pw,
-                bottom: y + s(31),
-            };
-            let short_lbl = match app_mode {
-                GlassAppearance::Clear => "清透",
-                GlassAppearance::Tinted => "柔焦",
-                GlassAppearance::Solid => "浓雾",
-            };
-            texts.push(TextDrawCmd {
-                text: short_lbl.to_string(),
-                rect: rc,
-                color: if active {
-                    Color4::rgb(255, 255, 255)
-                } else {
-                    palette.text_secondary
-                },
-                font_kind: FontKind::Meta,
-                flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-            });
-            st.hit_regions.push(HitRegion {
-                rect: rc,
-                interactive_cursor: true,
-                action: HitAction::SelectGlassAppearance(*app_mode),
-            });
-        }
+        texts.push(TextDrawCmd {
+            text: format!("{pct}%"),
+            rect: RECT {
+                left: w - pad - s(66),
+                top: y + s(8),
+                right: w - pad - s(14),
+                bottom: y + s(32),
+            },
+            color: palette.text_secondary,
+            font_kind: FontKind::Mono,
+            flags: DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
+        });
 
         let sl_x = pad + s(14);
         let sl_w = content_w - s(28);
@@ -5174,22 +5139,6 @@ unsafe fn handle_left_click(hwnd: HWND, x: i32, y: i32, is_double: bool) {
                     st.autostart_cached = next;
                 }
             });
-            let _ = InvalidateRect(hwnd, null(), FALSE);
-        }
-        HitAction::SelectGlassAppearance(mode) => {
-            let pct = match mode {
-                GlassAppearance::Clear => 15,
-                GlassAppearance::Tinted => 38,
-                GlassAppearance::Solid => 96,
-            };
-            APP_STATE.with(|c| {
-                if let Some(st) = c.borrow_mut().as_mut() {
-                    st.store.config.glass_appearance = mode;
-                    st.store.config.blur_concentration_pct = pct;
-                    st.store.save_config();
-                }
-            });
-            apply_dwm_glass_style(hwnd, mode);
             let _ = InvalidateRect(hwnd, null(), FALSE);
         }
         HitAction::AdjustBlurConcentration {
