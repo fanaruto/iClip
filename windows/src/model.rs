@@ -272,12 +272,15 @@ impl ClipItem {
                 if raw.is_empty() {
                     return "空白文本".to_string();
                 }
-                let readable_cow = if self.kind == ClipContentType::Link && raw.contains('%') {
-                    crate::intelligence::decode_percent_readable_url(raw)
+                let prefix = safe_utf8_prefix(raw, 1_024);
+                let head: String = if self.kind == ClipContentType::Link && prefix.contains('%') {
+                    crate::intelligence::decode_percent_readable_url(prefix)
+                        .chars()
+                        .take(180)
+                        .collect()
                 } else {
-                    raw.clone()
+                    prefix.chars().take(180).collect()
                 };
-                let head: String = readable_cow.chars().take(180).collect();
                 let trimmed = head.trim();
                 if trimmed.is_empty() {
                     "空白文本".to_string()
