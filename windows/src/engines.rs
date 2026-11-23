@@ -39,6 +39,21 @@ pub fn analyze_text_actions(raw: &str, minimal_mode: bool) -> Vec<QuickAction> {
         }
     }
 
+    // 0.5 双角色共享：多行待办清单拆解动作
+    if inspect.contains('\n') {
+        let checklist = crate::intelligence::extract_checklist_items(raw);
+        if checklist.len() >= 2 {
+            actions.push(QuickAction {
+                id: "todo-split-checklist",
+                title: format!("拆为 {} 条待办", checklist.len()),
+                is_security: false,
+                result_text: raw.to_string(),
+                html_table_payload: None,
+                toast_text: format!("已拆解为 {} 条待办（Alt+2 查看）", checklist.len()),
+            });
+        }
+    }
+
     #[cfg(feature = "dev")]
     {
         // Dev 1: 敏感凭据与内网隐私脱敏

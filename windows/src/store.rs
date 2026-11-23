@@ -3,7 +3,9 @@ use crate::archive::{
 };
 use crate::engines::is_otp_message;
 use crate::hotkey::{WinHotKeyShortcut, WinSingleModifier};
-use crate::intelligence::{extract_suggestion_payload, parse_quick_capture, QuickCaptureIntent};
+use crate::intelligence::{
+    extract_checklist_items, extract_suggestion_payload, parse_quick_capture, QuickCaptureIntent,
+};
 use crate::model::{
     contains_case_insensitive, now_unix_secs, sha256_hex, ClipContentType, ClipFilterTab, ClipItem,
     PinCategory, QuickAction,
@@ -205,7 +207,7 @@ impl ClipboardStore {
         };
         Self::sort_items(&mut items);
 
-        let store = Self {
+        let mut store = Self {
             items,
             config,
             memory,
@@ -223,7 +225,8 @@ impl ClipboardStore {
             undo_stack: Vec::new(),
         };
 
-        if healed_from_backup {
+        let archived = store.archive_expired_completed_todos(now_unix_secs());
+        if healed_from_backup && archived == 0 {
             store.save_history();
         }
         store
@@ -354,11 +357,14 @@ impl ClipboardStore {
         }
     }
 
-    /// 搜索框 `> 备注 :: 正文` 一行闪念速记入库
+    /// 搜索框 `[] 事项` / `> 备注 :: 正文` 一行闪念入库
     pub fn capture_quick_note(&mut self, intent: &QuickCaptureIntent) -> Option<String> {
         let body = intent.body.trim();
         if body.is_empty() {
             return None;
+        }
+        if intent.default_todo {
+            return self.capture_quick_todo(body, intent.alias.as_deref());
         }
         let mut item = ClipItem::new_text(body.to_string(), Some("闪念速记".to_string()));
         if let Some(alias) = &intent.alias {
@@ -372,6 +378,156 @@ impl ClipboardStore {
                 PinCategory::infer(item.custom_alias.as_deref(), item.text.as_deref());
         }
         Some(self.insert_or_promote(item))
+    }
+
+    /// 闪念新建待办：直接落入待办清单且不冲掉当前系统剪贴板
+    pub fn capture_quick_todo(&mut self, raw_body: &str, alias: Option<&str>) -> Option<String> {
+        let body = raw_body.trim();
+        if body.is_empty() {
+            return None;
+        }
+        let probe = ClipItem::new_text(body.to_string(), Some("iClip 待办".to_string()));
+        let hash = probe.content_hash.clone();
+        let clean_alias = alias.map(|a| a.trim()).filter(|a| !a.is_empty());
+
+        let final_id =
+            if let Some(existing) = self.items.iter_mut().find(|it| it.content_hash == hash) {
+                existing.created_unix_secs = now_unix_secs();
+                existing.set_todo(true);
+                existing.todo_completed_unix_secs = None;
+                if let Some(al) = clean_alias {
+                    existing.custom_alias = Some(al.to_string());
+                }
+                existing.id.clone()
+            } else {
+                let mut item = probe;
+                item.set_todo(true);
+                if let Some(al) = clean_alias {
+                    item.custom_alias = Some(al.to_string());
+                }
+                let id = item.id.clone();
+                self.items.insert(0, item);
+                id
+            };
+        Self::sort_items(&mut self.items);
+        self.trim_history_if_needed();
+        self.save_history();
+        Some(final_id)
+    }
+
+    pub fn pending_todo_count(&self) -> usize {
+        self.items.iter().filter(|it| it.is_pending_todo()).count()
+    }
+
+    pub fn completed_todo_count(&self) -> usize {
+        self.items
+            .iter()
+            .filter(|it| it.is_todo_completed())
+            .count()
+    }
+
+    /// Ctrl+T 切换：非待办 -> 待办未完成 -> 待办已完成 -> 恢复未完成
+    pub fn toggle_todo(&mut self, item_id: &str) -> Option<&'static str> {
+        let now = now_unix_secs();
+        let item = self.items.iter_mut().find(|it| it.id == item_id)?;
+        self.pending_otp_expirations.retain(|(id, _)| id != item_id);
+        let msg = if !item.is_todo() {
+            item.set_todo(true);
+            item.todo_completed_unix_secs = None;
+            "已加入待办 · 按 Alt+2 查看"
+        } else if item.todo_completed_unix_secs.is_none() {
+            item.todo_completed_unix_secs = Some(now);
+            "✓ 已完成待办 · 24h 后自动归档"
+        } else {
+            item.todo_completed_unix_secs = None;
+            "已恢复为未完成待办"
+        };
+        self.save_history();
+        Some(msg)
+    }
+
+    pub fn mark_todo_completed_silently(&mut self, item_id: &str) -> bool {
+        if let Some(item) = self.items.iter_mut().find(|it| it.id == item_id) {
+            if item.is_pending_todo() {
+                item.todo_completed_unix_secs = Some(now_unix_secs());
+                self.save_history();
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn archive_completed_todos(&mut self) -> usize {
+        let mut count = 0usize;
+        for item in &mut self.items {
+            if item.is_todo_completed() {
+                item.set_todo(false);
+                count += 1;
+            }
+        }
+        if count > 0 {
+            self.save_history();
+        }
+        count
+    }
+
+    pub fn archive_expired_completed_todos(&mut self, now_secs: u64) -> usize {
+        let mut count = 0usize;
+        for item in &mut self.items {
+            if item.is_todo() {
+                if let Some(done_at) = item.todo_completed_unix_secs {
+                    if now_secs.saturating_sub(done_at) >= 86_400 {
+                        item.set_todo(false);
+                        count += 1;
+                    }
+                }
+            }
+        }
+        if count > 0 {
+            self.save_history();
+        }
+        count
+    }
+
+    pub fn split_checklist_into_todos(&mut self, item_id: &str) -> usize {
+        let Some((raw, src_app)) = self
+            .items
+            .iter()
+            .find(|it| it.id == item_id)
+            .and_then(|it| it.text.clone().map(|t| (t, it.source_app_name.clone())))
+        else {
+            return 0;
+        };
+        let lines = extract_checklist_items(&raw);
+        if lines.len() < 2 {
+            return 0;
+        }
+        let base_ts = now_unix_secs();
+        let mut count = 0usize;
+        for (offset, line) in lines.into_iter().rev().enumerate() {
+            let mut probe = ClipItem::new_text(
+                line,
+                src_app.clone().or_else(|| Some("清单拆解".to_string())),
+            );
+            probe.created_unix_secs = base_ts.saturating_add(offset as u64);
+            probe.set_todo(true);
+            if let Some(existing) = self
+                .items
+                .iter_mut()
+                .find(|it| it.content_hash == probe.content_hash)
+            {
+                existing.created_unix_secs = probe.created_unix_secs;
+                existing.set_todo(true);
+                existing.todo_completed_unix_secs = None;
+            } else {
+                self.items.insert(0, probe);
+            }
+            count += 1;
+        }
+        Self::sort_items(&mut self.items);
+        self.trim_history_if_needed();
+        self.save_history();
+        count
     }
 
     /// 修改卡片备注别名：输入非空备注时自动开启收藏保护并智能推断分组，防止被历史滚动挤掉
@@ -429,6 +585,7 @@ impl ClipboardStore {
             .filter(|(_, item)| {
                 let tab_ok = match tab {
                     ClipFilterTab::All => true,
+                    ClipFilterTab::Todo => item.is_todo(),
                     ClipFilterTab::Pinned => {
                         if let Some(cat) = pin_category {
                             item.is_pinned && item.pin_category == Some(cat)
@@ -445,6 +602,23 @@ impl ClipboardStore {
             })
             .map(|(i, _)| i)
             .collect();
+
+        if tab == ClipFilterTab::Todo {
+            matched.sort_by(|&a, &b| {
+                let ia = &self.items[a];
+                let ib = &self.items[b];
+                match (ia.is_todo_completed(), ib.is_todo_completed()) {
+                    (false, true) => std::cmp::Ordering::Less,
+                    (true, false) => std::cmp::Ordering::Greater,
+                    (false, false) => ib.created_unix_secs.cmp(&ia.created_unix_secs),
+                    (true, true) => ib
+                        .todo_completed_unix_secs
+                        .unwrap_or(ib.created_unix_secs)
+                        .cmp(&ia.todo_completed_unix_secs.unwrap_or(ia.created_unix_secs)),
+                }
+            });
+            return matched;
+        }
 
         if self.config.minimal_mode_enabled || matched.len() <= 1 {
             return matched;
@@ -787,7 +961,7 @@ impl ClipboardStore {
         let mut kept = Vec::new();
         let mut removed_batch = Vec::new();
         for item in self.items.drain(..) {
-            if item.is_pinned {
+            if item.is_pinned || item.is_pending_todo() {
                 kept.push(item);
             } else {
                 let mut img_bytes = None;
@@ -966,7 +1140,7 @@ impl ClipboardStore {
         let mut unpinned_seen = 0usize;
         let mut retained = Vec::with_capacity(self.items.len());
         for item in self.items.drain(..) {
-            if item.is_pinned {
+            if item.is_pinned || item.is_pending_todo() {
                 retained.push(item);
             } else if unpinned_seen < max_unpinned {
                 unpinned_seen += 1;

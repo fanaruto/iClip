@@ -37,6 +37,8 @@ pub struct ArchivedClipEntry {
     pub pin_category: Option<PinCategory>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub custom_alias: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_todo_item: Option<bool>,
 }
 
 /// `.iclip` 收藏资产归档包根结构
@@ -118,6 +120,7 @@ pub fn export_pinned_archive_data(
                 created_at: unix_secs_to_iso8601(item.created_unix_secs),
                 pin_category: item.pin_category,
                 custom_alias: item.custom_alias.clone(),
+                is_todo_item: item.is_todo_item,
             }
         })
         .collect();
@@ -166,6 +169,10 @@ pub fn merge_archive_data(
             let mut changed = false;
             if !existing.is_pinned {
                 existing.is_pinned = true;
+                changed = true;
+            }
+            if entry.is_todo_item == Some(true) && !existing.is_todo() {
+                existing.set_todo(true);
                 changed = true;
             }
             if existing.pin_category.is_none() && entry.pin_category.is_some() {
@@ -248,6 +255,8 @@ pub fn merge_archive_data(
                 is_pinned: true,
                 pin_category: entry.pin_category,
                 custom_alias: entry.custom_alias.clone(),
+                is_todo_item: entry.is_todo_item,
+                todo_completed_unix_secs: None,
             };
             working.push(restored);
             imported_new += 1;

@@ -1,7 +1,7 @@
 use crate::model::{ClipContentType, ClipItem, PinCategory};
 use crate::store::GlassAppearance;
 
-/// RGBA 颜色（底层写入 Win32 32-bit DIB 时自动转为 0xAARRGGBB 小端 BGRA）
+/// RGBA 颜色（底层写入 Win32 32-bit DIB 时自动转为 Porter-Duff 预乘 0xAARRGGBB 小端 BGRA）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Color4 {
     pub r: u8,
@@ -28,7 +28,7 @@ impl Color4 {
         }
     }
 
-    /// 转换为 Win32 GDI `SetTextColor` 所需的 `COLORREF` (`0x00BBGGRR`)
+    /// 转换为 Win32 GDI `COLORREF` (`0x00BBGGRR`)
     pub const fn to_colorref(self) -> u32 {
         (self.r as u32) | ((self.g as u32) << 8) | ((self.b as u32) << 16)
     }
@@ -45,24 +45,40 @@ impl Color4 {
     }
 }
 
-/// 对齐 macOS `v2.4` 液态玻璃深曜石与 DESIGN.md 电光钴蓝调色板（遵循 Tinted-Neutral 与 Single-Accent 铁律）
+/// 1:1 移植自 macOS `LiquidGlassSurface.swift` 的浅色冰晶 / 深色冷曜石双模语义表面色板
 #[derive(Debug, Clone, Copy)]
 pub struct GlassPalette {
+    pub is_dark: bool,
     pub window_bg: Color4,
     pub window_border: Color4,
     pub track_bg: Color4,
     pub track_border: Color4,
+    pub active_segment_fill: Color4,
+    pub active_segment_shadow: Color4,
     pub search_bg: Color4,
     pub search_border: Color4,
+    pub group_fill: Color4,
+    pub group_stroke: Color4,
+    pub nested_fill: Color4,
+    pub divider: Color4,
+    pub footer_backdrop: Color4,
     pub card_bg: Color4,
     pub card_hover_bg: Color4,
+    pub card_pinned_top: Color4,
+    pub card_pinned_bottom: Color4,
+    pub card_pinned_hover_top: Color4,
+    pub card_pinned_hover_bottom: Color4,
     pub card_pinned_bg: Color4,
     pub card_pinned_hover_bg: Color4,
     pub card_border: Color4,
+    pub card_hover_border: Color4,
     pub card_pinned_border: Color4,
+    pub chip_bg: Color4,
+    pub chip_hover_bg: Color4,
     pub select_top: Color4,
     pub select_bottom: Color4,
     pub select_border: Color4,
+    pub select_shadow: Color4,
     pub cobalt: Color4,
     pub cobalt_deep: Color4,
     pub emerald: Color4,
@@ -78,58 +94,136 @@ impl GlassPalette {
         let pct = match appearance {
             GlassAppearance::Clear => 15,
             GlassAppearance::Tinted => 38,
-            GlassAppearance::Solid => 98,
+            GlassAppearance::Solid => 95,
         };
-        Self::for_blur_concentration(pct)
+        Self::for_macos_liquid_glass(true, pct)
     }
 
-    /// 苹果官方风格液态玻璃单轴背景模糊浓度（0% 清澈折射 ~ 38% 柔焦默认 ~ 100% 实色浓雾）
     pub fn for_blur_concentration(pct: u8) -> Self {
+        Self::for_macos_liquid_glass(true, pct)
+    }
+
+    /// 严格复刻 macOS `LiquidGlassPalette` 浅色/深色与背景模糊浓度（0%..=100%）光学参数
+    pub fn for_macos_liquid_glass(is_dark: bool, pct: u8) -> Self {
         let t = (pct.min(100) as f32) / 100.0;
-        let win_a = (168.0 + t * 87.0).round() as u8;
-        let card_a = (182.0 + t * 73.0).round() as u8;
-        let hover_a = (206.0 + t * 49.0).round() as u8;
-        let track_a = (190.0 + t * 65.0).round() as u8;
 
-        let win_bg = Color4::rgba(13, 18, 30, win_a);
-        let card_bg = Color4::rgba(23, 30, 46, card_a);
-        let card_hover = Color4::rgba(31, 40, 60, hover_a);
-        let track_bg = Color4::rgba(19, 25, 40, track_a);
+        if is_dark {
+            // macOS 深色中性冷曜石基色 Color(red: 0.10, green: 0.11, blue: 0.135) -> rgb(26, 28, 35)
+            let win_a = (138.0 + t * 112.0).round() as u8;
+            let card_a = (132.0 + t * 82.0).round() as u8;
+            let hover_a = (168.0 + t * 62.0).round() as u8;
+            let ctrl_a = (146.0 + t * 72.0).round() as u8;
+            let group_a = (150.0 + t * 74.0).round() as u8;
 
-        Self {
-            window_bg: win_bg,
-            window_border: Color4::rgba(148, 172, 214, 36),
-            track_bg,
-            track_border: Color4::rgba(148, 172, 214, 28),
-            search_bg: Color4::rgba(25, 33, 50, 242),
-            search_border: Color4::rgba(148, 172, 214, 42),
-            card_bg,
-            card_hover_bg: card_hover,
-            card_pinned_bg: Color4::rgba(46, 36, 24, 232),
-            card_pinned_hover_bg: Color4::rgba(58, 45, 29, 244),
-            card_border: Color4::rgba(148, 172, 214, 28),
-            card_pinned_border: Color4::rgba(245, 158, 11, 110),
-            // DESIGN.md Electric Cobalt (#1e5eff -> #1549d6)
-            select_top: Color4::rgb(34, 98, 255),
-            select_bottom: Color4::rgb(21, 73, 214),
-            select_border: Color4::rgba(132, 176, 255, 168),
-            cobalt: Color4::rgb(30, 94, 255),
-            cobalt_deep: Color4::rgb(21, 73, 214),
-            emerald: Color4::rgb(16, 185, 129),
-            amber: Color4::rgb(245, 158, 11),
-            danger: Color4::rgb(225, 66, 78),
-            text_primary: Color4::rgb(244, 247, 253),
-            text_secondary: Color4::rgb(158, 172, 196),
-            text_muted: Color4::rgb(112, 126, 150),
+            let pin_top = Color4::rgba(62, 48, 30, (152.0 + t * 68.0).round() as u8);
+            let pin_bot = Color4::rgba(48, 40, 28, (146.0 + t * 68.0).round() as u8);
+            let pin_h_top = Color4::rgba(76, 58, 34, (176.0 + t * 60.0).round() as u8);
+            let pin_h_bot = Color4::rgba(60, 48, 32, (168.0 + t * 60.0).round() as u8);
+
+            Self {
+                is_dark: true,
+                window_bg: Color4::rgba(22, 24, 30, win_a),
+                window_border: Color4::rgba(255, 255, 255, 36),
+                track_bg: Color4::rgba(28, 31, 38, ctrl_a),
+                track_border: Color4::rgba(255, 255, 255, 34),
+                active_segment_fill: Color4::rgba(255, 255, 255, 58),
+                active_segment_shadow: Color4::rgba(0, 0, 0, 62),
+                search_bg: Color4::rgba(28, 31, 38, ctrl_a),
+                search_border: Color4::rgba(255, 255, 255, 38),
+                group_fill: Color4::rgba(30, 33, 41, group_a),
+                group_stroke: Color4::rgba(255, 255, 255, 32),
+                nested_fill: Color4::rgba(255, 255, 255, 18),
+                divider: Color4::rgba(255, 255, 255, 24),
+                footer_backdrop: Color4::rgba(26, 28, 35, (124.0 + t * 82.0).round() as u8),
+                card_bg: Color4::rgba(30, 33, 41, card_a),
+                card_hover_bg: Color4::rgba(40, 44, 54, hover_a),
+                card_pinned_top: pin_top,
+                card_pinned_bottom: pin_bot,
+                card_pinned_hover_top: pin_h_top,
+                card_pinned_hover_bottom: pin_h_bot,
+                card_pinned_bg: pin_top,
+                card_pinned_hover_bg: pin_h_top,
+                card_border: Color4::rgba(255, 255, 255, 28),
+                card_hover_border: Color4::rgba(255, 255, 255, 66),
+                card_pinned_border: Color4::rgba(255, 159, 10, 118),
+                chip_bg: Color4::rgba(255, 255, 255, 16),
+                chip_hover_bg: Color4::rgba(255, 255, 255, 26),
+                select_top: Color4::rgb(10, 132, 255),
+                select_bottom: Color4::rgb(0, 110, 236),
+                select_border: Color4::rgba(255, 255, 255, 84),
+                select_shadow: Color4::rgba(10, 132, 255, 72),
+                cobalt: Color4::rgb(10, 132, 255),
+                cobalt_deep: Color4::rgb(0, 106, 228),
+                emerald: Color4::rgb(48, 209, 88),
+                amber: Color4::rgb(255, 159, 10),
+                danger: Color4::rgb(255, 69, 58),
+                text_primary: Color4::rgb(245, 246, 250),
+                text_secondary: Color4::rgba(235, 238, 245, 162),
+                text_muted: Color4::rgba(235, 238, 245, 112),
+            }
+        } else {
+            // macOS 浅色冰晶瓷白液态玻璃（对标 CleanShot X / macOS Tahoe Light Liquid Glass）
+            let win_a = (162.0 + t * 90.0).round() as u8;
+            let card_a = (182.0 + t * 66.0).round() as u8;
+            let hover_a = (218.0 + t * 34.0).round() as u8;
+            let ctrl_a = (172.0 + t * 68.0).round() as u8;
+            let group_a = (188.0 + t * 60.0).round() as u8;
+
+            let pin_top = Color4::rgba(255, 243, 222, (202.0 + t * 46.0).round() as u8);
+            let pin_bot = Color4::rgba(255, 249, 232, (198.0 + t * 48.0).round() as u8);
+            let pin_h_top = Color4::rgba(255, 238, 208, 242);
+            let pin_h_bot = Color4::rgba(255, 246, 222, 242);
+
+            Self {
+                is_dark: false,
+                window_bg: Color4::rgba(241, 244, 249, win_a),
+                window_border: Color4::rgba(15, 23, 42, 24),
+                track_bg: Color4::rgba(226, 231, 240, ctrl_a),
+                track_border: Color4::rgba(15, 23, 42, 18),
+                active_segment_fill: Color4::rgba(255, 255, 255, 250),
+                active_segment_shadow: Color4::rgba(15, 23, 42, 24),
+                search_bg: Color4::rgba(255, 255, 255, ctrl_a),
+                search_border: Color4::rgba(15, 23, 42, 22),
+                group_fill: Color4::rgba(255, 255, 255, group_a),
+                group_stroke: Color4::rgba(15, 23, 42, 18),
+                nested_fill: Color4::rgba(15, 23, 42, 11),
+                divider: Color4::rgba(15, 23, 42, 20),
+                footer_backdrop: Color4::rgba(255, 255, 255, (168.0 + t * 72.0).round() as u8),
+                card_bg: Color4::rgba(255, 255, 255, card_a),
+                card_hover_bg: Color4::rgba(255, 255, 255, hover_a),
+                card_pinned_top: pin_top,
+                card_pinned_bottom: pin_bot,
+                card_pinned_hover_top: pin_h_top,
+                card_pinned_hover_bottom: pin_h_bot,
+                card_pinned_bg: pin_top,
+                card_pinned_hover_bg: pin_h_top,
+                card_border: Color4::rgba(15, 23, 42, 18),
+                card_hover_border: Color4::rgba(0, 122, 255, 58),
+                card_pinned_border: Color4::rgba(245, 158, 11, 118),
+                chip_bg: Color4::rgba(15, 23, 42, 14),
+                chip_hover_bg: Color4::rgba(15, 23, 42, 23),
+                select_top: Color4::rgb(0, 122, 255),
+                select_bottom: Color4::rgb(8, 106, 236),
+                select_border: Color4::rgba(255, 255, 255, 92),
+                select_shadow: Color4::rgba(0, 122, 255, 62),
+                cobalt: Color4::rgb(0, 122, 255),
+                cobalt_deep: Color4::rgb(0, 98, 214),
+                emerald: Color4::rgb(52, 199, 89),
+                amber: Color4::rgb(245, 158, 11),
+                danger: Color4::rgb(255, 59, 48),
+                text_primary: Color4::rgb(22, 24, 29),
+                text_secondary: Color4::rgba(60, 66, 78, 190),
+                text_muted: Color4::rgba(100, 108, 122, 168),
+            }
         }
     }
 
     pub fn pin_category_color(cat: PinCategory) -> Color4 {
         match cat {
-            PinCategory::Reply => Color4::rgb(56, 139, 253),
+            PinCategory::Reply => Color4::rgb(0, 122, 255),
             PinCategory::Invoice => Color4::rgb(245, 158, 11),
-            PinCategory::Contact => Color4::rgb(16, 185, 129),
-            PinCategory::Template => Color4::rgb(168, 108, 252),
+            PinCategory::Contact => Color4::rgb(52, 199, 89),
+            PinCategory::Template => Color4::rgb(175, 82, 222),
         }
     }
 }
@@ -138,7 +232,7 @@ impl GlassPalette {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DisplayRow {
     StandardCard { vis_pos: usize, store_idx: usize },
-    ImageGridRow { cells: Vec<(usize, usize)> }, // (vis_pos, store_idx)，每行 1..=3 张
+    ImageGridRow { cells: Vec<(usize, usize)> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,14 +244,23 @@ pub enum GridMoveDir {
 }
 
 pub fn build_display_rows(filtered_indices: &[usize], items: &[ClipItem]) -> Vec<DisplayRow> {
+    build_display_rows_ext(filtered_indices, items, true)
+}
+
+pub fn build_display_rows_ext(
+    filtered_indices: &[usize],
+    items: &[ClipItem],
+    collapse_images: bool,
+) -> Vec<DisplayRow> {
     let mut rows = Vec::with_capacity(filtered_indices.len());
     let mut img_buf: Vec<(usize, usize)> = Vec::with_capacity(3);
 
     for (vis_pos, &store_idx) in filtered_indices.iter().enumerate() {
-        let is_img = items
-            .get(store_idx)
-            .map(|it| it.kind == ClipContentType::Image)
-            .unwrap_or(false);
+        let is_img = collapse_images
+            && items
+                .get(store_idx)
+                .map(|it| it.kind == ClipContentType::Image)
+                .unwrap_or(false);
         if is_img {
             img_buf.push((vis_pos, store_idx));
             if img_buf.len() == 3 {
@@ -249,19 +352,33 @@ pub fn grid_move_selection(
     }
 }
 
-/// 零抖动卡片高度预算：高度仅取决于内容固有属性（是否含快捷胶囊），绝不随选中/悬停跳变！
+/// 零抖动卡片高度预算：高度仅取决于内容固有属性，切换选中/悬停 0.0px 零跳动
 pub fn standard_card_height(has_chips: bool, scale: f32) -> i32 {
     let base = if has_chips { 86.0 } else { 62.0 };
     (base * scale).round() as i32
 }
 
 pub fn image_grid_row_height(scale: f32) -> i32 {
-    (102.0 * scale).round() as i32
+    (98.0 * scale).round() as i32
 }
 
 // ============================================================================
-// 亚像素 SDF 抗锯齿 32-bit BGRA 内存画布（兼容 Win32 Top-Down CreateDIBSection）
+// 连续曲率 Squircle SDF 抗锯齿 + Porter-Duff 预乘 Alpha 32-bit BGRA 画布
 // ============================================================================
+
+#[inline]
+fn squircle_corner_dist(dx: f32, dy: f32, r: f32) -> f32 {
+    if dx > 0.0 && dy > 0.0 {
+        // 融合 L2 圆弧与 L2.4 连续超椭圆曲率（还原 Apple .continuous 圆角柔顺拐点，胶囊全圆时退化为标准正圆）
+        let l2 = (dx * dx + dy * dy).sqrt();
+        let nx = dx / r.max(1.0);
+        let ny = dy / r.max(1.0);
+        let sq = (nx.powf(2.25) + ny.powf(2.25)).powf(1.0 / 2.25) * r;
+        (l2 * 0.45 + sq * 0.55) - r
+    } else {
+        dx.max(dy) - r
+    }
+}
 
 pub struct PixelCanvas<'a> {
     pub pixels: &'a mut [u32],
@@ -281,45 +398,105 @@ impl<'a> PixelCanvas<'a> {
 
     #[inline]
     pub fn clear(&mut self, c: Color4) {
-        let packed = pack_premultiplied_bgra(c, 255);
+        let packed = pack_premultiplied_bgra(c);
         self.pixels[..(self.width * self.height) as usize].fill(packed);
     }
 
+    /// 公开的 Porter-Duff Source-Over 预乘 Alpha 像素混合（供几何原语与离屏灰阶字体合成器统一调用）
     #[inline]
-    fn blend_pixel(&mut self, x: i32, y: i32, c: Color4, coverage: f32) {
+    pub fn blend_pixel(&mut self, x: i32, y: i32, c: Color4, coverage: f32) {
         if x < 0 || y < 0 || x >= self.width || y >= self.height {
             return;
         }
-        let eff_a = ((c.a as f32) * coverage.clamp(0.0, 1.0)).round() as u32;
-        if eff_a == 0 {
+        let src_a = ((c.a as f32) * coverage.clamp(0.0, 1.0)).round() as u32;
+        if src_a == 0 {
             return;
         }
         let idx = (y * self.width + x) as usize;
-        if eff_a >= 255 {
+        if src_a >= 255 {
             self.pixels[idx] =
                 (255u32 << 24) | ((c.r as u32) << 16) | ((c.g as u32) << 8) | (c.b as u32);
             return;
         }
+
+        // 目标像素已是 Premultiplied BGRA: dst_rgb = true_rgb * dst_a / 255
         let dst = self.pixels[idx];
         let db = dst & 0xFF;
         let dg = (dst >> 8) & 0xFF;
         let dr = (dst >> 16) & 0xFF;
         let da = (dst >> 24) & 0xFF;
 
-        let inv = 255 - eff_a;
-        let out_r = ((c.r as u32) * eff_a + dr * inv + 127) / 255;
-        let out_g = ((c.g as u32) * eff_a + dg * inv + 127) / 255;
-        let out_b = ((c.b as u32) * eff_a + db * inv + 127) / 255;
-        let out_a = (eff_a + (da * inv + 127) / 255).min(255);
+        let sr_pre = ((c.r as u32) * src_a + 127) / 255;
+        let sg_pre = ((c.g as u32) * src_a + 127) / 255;
+        let sb_pre = ((c.b as u32) * src_a + 127) / 255;
+
+        let inv_sa = 255 - src_a;
+        let out_r = (sr_pre + (dr * inv_sa + 127) / 255).min(255);
+        let out_g = (sg_pre + (dg * inv_sa + 127) / 255).min(255);
+        let out_b = (sb_pre + (db * inv_sa + 127) / 255).min(255);
+        let out_a = (src_a + (da * inv_sa + 127) / 255).min(255);
         self.pixels[idx] = (out_a << 24) | (out_r << 16) | (out_g << 8) | out_b;
     }
 
-    /// 亚像素抗锯齿填充圆角矩形（中心区域走快速扫描线，四角走精确圆弧 SDF）
+    /// 解析式柔和偏移扩散阴影（对标 SwiftUI `.shadow(color:radius:y:)`）
+    pub fn draw_soft_shadow_round_rect(
+        &mut self,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        radius: f32,
+        offset_y: f32,
+        blur_radius: f32,
+        shadow_color: Color4,
+    ) {
+        if w <= 0 || h <= 0 || blur_radius <= 0.2 || shadow_color.a == 0 {
+            return;
+        }
+        let r = radius.clamp(0.0, (w.min(h) as f32) * 0.5);
+        let spread = (blur_radius * 1.85).ceil() as i32;
+        let sx = x;
+        let sy = (y as f32 + offset_y).round() as i32;
+        let x0 = (sx - spread).max(0);
+        let y0 = (sy - spread).max(0);
+        let x1 = (sx + w + spread).min(self.width);
+        let y1 = (sy + h + spread).min(self.height);
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+
+        let cx = (sx as f32) + (w as f32) * 0.5;
+        let cy = (y as f32) + offset_y + (h as f32) * 0.5;
+        let hx = (w as f32) * 0.5 - r;
+        let hy = (h as f32) * 0.5 - r;
+        let inv_blur = 1.0 / (blur_radius * 1.65);
+
+        for py in y0..y1 {
+            let dy = ((py as f32 + 0.5) - cy).abs() - hy;
+            for px in x0..x1 {
+                let dx = ((px as f32 + 0.5) - cx).abs() - hx;
+                let dist = if dx > 0.0 && dy > 0.0 {
+                    (dx * dx + dy * dy).sqrt() - r
+                } else {
+                    dx.max(dy) - r
+                };
+                if dist >= blur_radius * 1.65 {
+                    continue;
+                }
+                let u = (1.0 - (dist.max(-blur_radius * 0.35) + blur_radius * 0.35) * inv_blur)
+                    .clamp(0.0, 1.0);
+                let falloff = u * u * (3.0 - 2.0 * u);
+                if falloff > 0.004 {
+                    self.blend_pixel(px, py, shadow_color, falloff);
+                }
+            }
+        }
+    }
+
     pub fn fill_round_rect(&mut self, x: i32, y: i32, w: i32, h: i32, radius: f32, c: Color4) {
         self.fill_vgrad_round_rect(x, y, w, h, radius, c, c);
     }
 
-    /// 亚像素抗锯齿纵向渐变圆角矩形
     pub fn fill_vgrad_round_rect(
         &mut self,
         x: i32,
@@ -334,6 +511,7 @@ impl<'a> PixelCanvas<'a> {
             return;
         }
         let r = radius.clamp(0.0, (w.min(h) as f32) * 0.5);
+        let is_pill = (r - (w.min(h) as f32) * 0.5).abs() < 0.6;
         let x0 = x.max(0);
         let y0 = y.max(0);
         let x1 = (x + w).min(self.width);
@@ -357,12 +535,8 @@ impl<'a> PixelCanvas<'a> {
             };
             let dy = ((py as f32 + 0.5) - cy).abs() - hy;
 
-            // 若当前行不在上下圆角带内，整行中间全部满覆盖度极速填充！
-            if dy <= -0.75 && row_c.a == 255 && x >= 0 && (x + w) <= self.width {
-                let packed = (255u32 << 24)
-                    | ((row_c.r as u32) << 16)
-                    | ((row_c.g as u32) << 8)
-                    | (row_c.b as u32);
+            if dy <= -0.8 && row_c.a == 255 && x >= 0 && (x + w) <= self.width {
+                let packed = pack_premultiplied_bgra(row_c);
                 let row_start = (py * self.width + x0) as usize;
                 let row_end = (py * self.width + x1) as usize;
                 self.pixels[row_start..row_end].fill(packed);
@@ -371,10 +545,14 @@ impl<'a> PixelCanvas<'a> {
 
             for px in x0..x1 {
                 let dx = ((px as f32 + 0.5) - cx).abs() - hx;
-                let dist = if dx > 0.0 && dy > 0.0 {
-                    (dx * dx + dy * dy).sqrt() - r
+                let dist = if is_pill {
+                    if dx > 0.0 && dy > 0.0 {
+                        (dx * dx + dy * dy).sqrt() - r
+                    } else {
+                        dx.max(dy) - r
+                    }
                 } else {
-                    dx.max(dy) - r
+                    squircle_corner_dist(dx, dy, r)
                 };
                 let cov = (0.5 - dist).clamp(0.0, 1.0);
                 if cov > 0.0 {
@@ -384,7 +562,48 @@ impl<'a> PixelCanvas<'a> {
         }
     }
 
-    /// 1px~2px 丝滑抗锯齿内描边圆角矩形（严格落在 `[x..x+w, y..y+h]` 边界内，绝不向外溢出半像素）
+    /// 左上至右下对角微阶渐变连续圆角矩形（复刻 macOS 选中卡片与悬停链接徽标）
+    pub fn fill_diag_grad_round_rect(
+        &mut self,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        radius: f32,
+        tl_color: Color4,
+        br_color: Color4,
+    ) {
+        if w <= 0 || h <= 0 {
+            return;
+        }
+        let r = radius.clamp(0.0, (w.min(h) as f32) * 0.5);
+        let x0 = x.max(0);
+        let y0 = y.max(0);
+        let x1 = (x + w).min(self.width);
+        let y1 = (y + h).min(self.height);
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+        let cx = (x as f32) + (w as f32) * 0.5;
+        let cy = (y as f32) + (h as f32) * 0.5;
+        let hx = (w as f32) * 0.5 - r;
+        let hy = (h as f32) * 0.5 - r;
+        let denom = (w + h).max(2) as f32;
+
+        for py in y0..y1 {
+            let dy = ((py as f32 + 0.5) - cy).abs() - hy;
+            for px in x0..x1 {
+                let dx = ((px as f32 + 0.5) - cx).abs() - hx;
+                let dist = squircle_corner_dist(dx, dy, r);
+                let cov = (0.5 - dist).clamp(0.0, 1.0);
+                if cov > 0.0 {
+                    let t = (((px - x) + (py - y)) as f32 / denom).clamp(0.0, 1.0);
+                    self.blend_pixel(px, py, tl_color.lerp(br_color, t), cov);
+                }
+            }
+        }
+    }
+
     pub fn stroke_round_rect(
         &mut self,
         x: i32,
@@ -399,6 +618,7 @@ impl<'a> PixelCanvas<'a> {
             return;
         }
         let r = radius.clamp(0.0, (w.min(h) as f32) * 0.5);
+        let is_pill = (r - (w.min(h) as f32) * 0.5).abs() < 0.6;
         let x0 = x.max(0);
         let y0 = y.max(0);
         let x1 = (x + w).min(self.width);
@@ -411,7 +631,7 @@ impl<'a> PixelCanvas<'a> {
         let cy = (y as f32) + (h as f32) * 0.5;
         let hx = (w as f32) * 0.5 - r;
         let hy = (h as f32) * 0.5 - r;
-        let band = (r + thickness + 2.0).ceil() as i32;
+        let band = (r + thickness + 2.5).ceil() as i32;
 
         for py in y0..y1 {
             let in_y_band = (py - y) < band || (y + h - 1 - py) < band;
@@ -422,12 +642,16 @@ impl<'a> PixelCanvas<'a> {
                     continue;
                 }
                 let dx = ((px as f32 + 0.5) - cx).abs() - hx;
-                let dist_outer = if dx > 0.0 && dy > 0.0 {
-                    (dx * dx + dy * dy).sqrt() - r
+                let dist_outer = if is_pill {
+                    if dx > 0.0 && dy > 0.0 {
+                        (dx * dx + dy * dy).sqrt() - r
+                    } else {
+                        dx.max(dy) - r
+                    }
                 } else {
-                    dx.max(dy) - r
+                    squircle_corner_dist(dx, dy, r)
                 };
-                if dist_outer >= 0.5 || dist_outer <= -(thickness + 0.5) {
+                if dist_outer >= 0.55 || dist_outer <= -(thickness + 0.55) {
                     continue;
                 }
                 let outer_cov = (0.5 - dist_outer).clamp(0.0, 1.0);
@@ -478,9 +702,8 @@ impl<'a> PixelCanvas<'a> {
         }
     }
 
-    /// 胶囊端帽抗锯齿矢量线段（用于绘制全部 `1.7px` 精密几何图标）
     pub fn draw_line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, thickness: f32, c: Color4) {
-        let r = (thickness * 0.5).max(0.45);
+        let r = (thickness * 0.5).max(0.42);
         let min_x = (x0.min(x1) - r - 1.5).floor() as i32;
         let max_x = (x0.max(x1) + r + 1.5).ceil() as i32;
         let min_y = (y0.min(y1) - r - 1.5).floor() as i32;
@@ -510,7 +733,7 @@ impl<'a> PixelCanvas<'a> {
         }
     }
 
-    /// Aspect-Fill 居中裁剪 + 双线性插值圆角贴图（用于 3 列图片宫格与速览缩略图）
+    /// 双线性平滑插值 + 连续曲率圆角裁切缩略图贴图
     pub fn blit_rgba_round_rect(
         &mut self,
         x: i32,
@@ -561,11 +784,7 @@ impl<'a> PixelCanvas<'a> {
 
             for px in x0..x1 {
                 let dx = ((px as f32 + 0.5) - cx).abs() - hx;
-                let dist = if dx > 0.0 && dy > 0.0 {
-                    (dx * dx + dy * dy).sqrt() - r
-                } else {
-                    dx.max(dy) - r
-                };
+                let dist = squircle_corner_dist(dx, dy, r);
                 let cov = (0.5 - dist).clamp(0.0, 1.0);
                 if cov <= 0.0 {
                     continue;
@@ -584,14 +803,267 @@ impl<'a> PixelCanvas<'a> {
         }
     }
 
+    /// 1:1 移植 macOS `LiquidGlassScenicBackdrop` 实景流光色带与实时背景模糊折射预览舞台
+    pub fn draw_scenic_liquid_glass_preview(
+        &mut self,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        scale: f32,
+        is_dark: bool,
+        blur_pct: u8,
+    ) {
+        if w <= 16 || h <= 16 {
+            return;
+        }
+        let sf = |v: f32| v * scale;
+        let s = |v: i32| ((v as f32) * scale).round() as i32;
+        let footer_h = s(25);
+        let stage_h = (h - footer_h).max(8);
+        let blur_t = (blur_pct.min(100) as f32) / 100.0;
+
+        // 1. 生成底层晴空/午夜海蓝 + Tahoe 双流光缎带 + Notes.md 桌面文稿卡片离屏景物缓冲
+        let sw = w as usize;
+        let sh = stage_h as usize;
+        let mut scene = vec![Color4::rgb(0, 0, 0); sw * sh];
+
+        let (c0, c1, c2) = if is_dark {
+            (
+                Color4::rgb(15, 28, 61),
+                Color4::rgb(28, 54, 107),
+                Color4::rgb(46, 77, 138),
+            )
+        } else {
+            (
+                Color4::rgb(61, 138, 240),
+                Color4::rgb(122, 189, 250),
+                Color4::rgb(214, 235, 255),
+            )
+        };
+
+        let doc_x0 = (w as f32 * 0.39) as i32;
+        let doc_x1 = (w as f32 * 0.91) as i32;
+        let doc_y0 = (stage_h as f32 * 0.24) as i32;
+        let doc_y1 = (stage_h as f32 * 0.86) as i32;
+
+        for py in 0..stage_h {
+            let vf = py as f32 / (stage_h.max(1) as f32);
+            for px in 0..w {
+                let uf = px as f32 / (w.max(1) as f32);
+                let diag = (uf * 0.55 + vf * 0.65).clamp(0.0, 1.0);
+                let mut col = if diag < 0.5 {
+                    c0.lerp(c1, diag * 2.0)
+                } else {
+                    c1.lerp(c2, (diag - 0.5) * 2.0)
+                };
+
+                // Ribbon 1: S 型青蓝->靛紫流光缎带
+                let r1_top = 0.54 - 0.42 * uf + 0.16 * (uf * 4.5).sin();
+                if vf > r1_top {
+                    let rc1 = if is_dark {
+                        Color4::rgb(41, 122, 224).lerp(Color4::rgb(97, 66, 199), uf)
+                    } else {
+                        Color4::rgb(36, 168, 245).lerp(Color4::rgb(82, 107, 240), uf)
+                    };
+                    let edge = ((vf - r1_top) * 28.0).clamp(0.0, 0.82);
+                    col = col.lerp(rc1, edge);
+                }
+
+                // Ribbon 2: 暖珀->翠青光弧
+                let r2_top = 0.86 - 0.64 * uf - 0.10 * (uf * 3.6).sin();
+                if uf > 0.14 && vf > r2_top {
+                    let rc2 = if is_dark {
+                        Color4::rgb(235, 133, 71).lerp(Color4::rgb(46, 158, 173), uf)
+                    } else {
+                        Color4::rgb(252, 173, 92).lerp(Color4::rgb(56, 194, 199), uf)
+                    };
+                    let edge = ((vf - r2_top) * 24.0).clamp(0.0, 0.82);
+                    col = col.lerp(rc2, edge);
+                }
+
+                // 右侧局部桌面 Notes.md 卡片（上沿穿过搜索胶囊背后以直观检验柔焦消融）
+                if px >= doc_x0 && px < doc_x1 && py >= doc_y0 && py < doc_y1 {
+                    let card_c = if is_dark {
+                        Color4::rgb(33, 38, 51)
+                    } else {
+                        Color4::rgb(252, 253, 255)
+                    };
+                    col = col.lerp(card_c, 0.94);
+                    // 模拟窗口三圆点与锐利正文条纹（低模糊时清晰可见，高模糊时完全融化）
+                    let lx = px - doc_x0;
+                    let ly = py - doc_y0;
+                    if (s(6)..s(12)).contains(&ly) {
+                        if (s(8)..s(14)).contains(&lx) {
+                            col = Color4::rgb(255, 95, 87);
+                        } else if (s(17)..s(23)).contains(&lx) {
+                            col = Color4::rgb(254, 188, 46);
+                        } else if (s(26)..s(32)).contains(&lx) {
+                            col = Color4::rgb(40, 200, 64);
+                        }
+                    } else if (s(19)..s(24)).contains(&ly) && (s(9)..s(126)).contains(&lx) {
+                        col = if is_dark {
+                            Color4::rgb(228, 232, 242)
+                        } else {
+                            Color4::rgb(38, 44, 56)
+                        };
+                    } else if (s(30)..s(34)).contains(&ly) && (s(9)..s(98)).contains(&lx) {
+                        col = Color4::rgb(10, 132, 255);
+                    }
+                }
+
+                scene[(py as usize) * sw + (px as usize)] = col;
+            }
+        }
+
+        // 2. 生成随 blur_pct 动态改变核半径的两趟分离盒式高斯模糊缓冲（O(W*H) 毫秒级）
+        let radius = ((1.2 + blur_t * 14.0) * scale).round() as i32;
+        let blurred = box_blur_2pass(&scene, sw, sh, radius.max(1) as usize);
+
+        // 3. 将底层实景按圆角裁切绘入主画布
+        let r_card = sf(12.0);
+        let cx = (x as f32) + (w as f32) * 0.5;
+        let cy = (y as f32) + (h as f32) * 0.5;
+        let hx = (w as f32) * 0.5 - r_card;
+        let hy = (h as f32) * 0.5 - r_card;
+
+        for py in 0..h {
+            let gy = y + py;
+            if gy < 0 || gy >= self.height {
+                continue;
+            }
+            let dy = ((gy as f32 + 0.5) - cy).abs() - hy;
+            for px in 0..w {
+                let gx = x + px;
+                if gx < 0 || gx >= self.width {
+                    continue;
+                }
+                let dx = ((gx as f32 + 0.5) - cx).abs() - hx;
+                let dist = squircle_corner_dist(dx, dy, r_card);
+                let cov = (0.5 - dist).clamp(0.0, 1.0);
+                if cov <= 0.0 {
+                    continue;
+                }
+                let src_c = if py < stage_h {
+                    scene[(py as usize) * sw + (px as usize)]
+                } else if is_dark {
+                    Color4::rgb(31, 33, 41)
+                } else {
+                    Color4::rgb(243, 244, 247)
+                };
+                self.blend_pixel(gx, gy, src_c, cov);
+            }
+        }
+
+        // 4. 在顶部悬浮三枚液态玻璃预览胶囊内写入折射模糊像素 + 浓度遮罩 + 斜向高光切面框
+        let bar_y = s(11);
+        let bar_h = s(32);
+        let p1_x = s(12);
+        let p1_w = s(64);
+        let p2_x = p1_x + p1_w + s(8);
+        let p2_w = s(32);
+        let p3_x = p2_x + p2_w + s(8);
+        let p3_w = (w - s(12) - p3_x).max(s(40));
+
+        let tint_overlay = if is_dark {
+            Color4::rgba(26, 30, 41, ((0.14 + blur_t * 0.64) * 255.0).round() as u8)
+        } else {
+            Color4::rgba(
+                255,
+                255,
+                255,
+                ((0.16 + blur_t * 0.64) * 255.0).round() as u8,
+            )
+        };
+        let rim_c = if is_dark {
+            Color4::rgba(255, 255, 255, 110)
+        } else {
+            Color4::rgba(255, 255, 255, 224)
+        };
+
+        for (px0, pw) in [(p1_x, p1_w), (p2_x, p2_w), (p3_x, p3_w)] {
+            let pr = (bar_h as f32) * 0.5;
+            let pcx = (x + px0) as f32 + (pw as f32) * 0.5;
+            let pcy = (y + bar_y) as f32 + (bar_h as f32) * 0.5;
+            let phx = (pw as f32) * 0.5 - pr;
+            let phy = (bar_h as f32) * 0.5 - pr;
+
+            for ly in bar_y..(bar_y + bar_h).min(stage_h) {
+                let gy = y + ly;
+                let dy = ((gy as f32 + 0.5) - pcy).abs() - phy;
+                for lx in px0..(px0 + pw).min(w) {
+                    let gx = x + lx;
+                    let dx = ((gx as f32 + 0.5) - pcx).abs() - phx;
+                    let d = if dx > 0.0 && dy > 0.0 {
+                        (dx * dx + dy * dy).sqrt() - pr
+                    } else {
+                        dx.max(dy) - pr
+                    };
+                    let pcov = (0.5 - d).clamp(0.0, 1.0);
+                    if pcov > 0.0 {
+                        let bcol = blurred[(ly as usize) * sw + (lx as usize)];
+                        self.blend_pixel(gx, gy, bcol, pcov);
+                        self.blend_pixel(gx, gy, tint_overlay, pcov);
+                    }
+                }
+            }
+            self.stroke_round_rect(x + px0, y + bar_y, pw, bar_h, pr, sf(0.95), rim_c);
+        }
+
+        // 预览胶囊内的精致小图标（分享箭头 + 三圆点 / 叠放方框 / 搜索放大镜）
+        let fg = if is_dark {
+            Color4::rgb(255, 255, 255)
+        } else {
+            Color4::rgb(26, 28, 34)
+        };
+        let cy_bar = (y + bar_y + bar_h / 2) as f32;
+        self.draw_icon_external_link((x + p1_x + s(20)) as f32, cy_bar, sf(11.0), sf(1.5), fg);
+        for dot_i in -1..=1 {
+            self.fill_circle(
+                (x + p1_x + s(44)) as f32 + (dot_i as f32) * sf(4.2),
+                cy_bar,
+                sf(1.35),
+                fg,
+            );
+        }
+        self.draw_icon_overlapping_squares(
+            (x + p2_x + p2_w / 2) as f32 - sf(7.0),
+            cy_bar - sf(7.0),
+            sf(14.0),
+            fg,
+            false,
+        );
+        self.draw_icon_search(
+            (x + p3_x + s(16)) as f32,
+            cy_bar,
+            sf(11.5),
+            sf(1.45),
+            fg.with_alpha(180),
+        );
+
+        self.stroke_round_rect(
+            x,
+            y,
+            w,
+            h,
+            r_card,
+            sf(0.85),
+            if is_dark {
+                Color4::rgba(255, 255, 255, 36)
+            } else {
+                Color4::rgba(15, 23, 42, 22)
+            },
+        );
+    }
+
     // ========================================================================
-    // 1.7px 几何矢量图标集（100% 纯几何绘制，零 Emoji、零系统字体缺字方块）
+    // SF Symbols 级精密几何图标集（100% 亚像素抗锯齿矢量绘制）
     // ========================================================================
 
     pub fn draw_icon_search(&mut self, cx: f32, cy: f32, size: f32, stroke: f32, c: Color4) {
         let r = size * 0.34;
-        let ox = cx - size * 0.08;
-        let oy = cy - size * 0.08;
+        let ox = cx - size * 0.07;
+        let oy = cy - size * 0.07;
         self.stroke_circle(ox, oy, r, stroke, c);
         let diag = r * 0.72;
         self.draw_line(
@@ -605,35 +1077,75 @@ impl<'a> PixelCanvas<'a> {
     }
 
     pub fn draw_icon_close(&mut self, cx: f32, cy: f32, size: f32, stroke: f32, c: Color4) {
-        let d = size * 0.32;
+        let d = size * 0.30;
         self.draw_line(cx - d, cy - d, cx + d, cy + d, stroke, c);
         self.draw_line(cx + d, cy - d, cx - d, cy + d, stroke, c);
     }
 
-    /// 极简纯净模式绿叶图标
+    /// 顶栏顺序粘贴队列 `list.number` 图标
+    pub fn draw_icon_list_number(&mut self, cx: f32, cy: f32, size: f32, stroke: f32, c: Color4) {
+        let u = size * 0.42;
+        for row in [-1i32, 0, 1] {
+            let ry = cy + (row as f32) * u * 0.62;
+            self.fill_circle(cx - u * 0.72, ry, stroke * 0.65, c);
+            self.draw_line(cx - u * 0.25, ry, cx + u * 0.85, ry, stroke, c);
+        }
+    }
+
+    /// 顶栏暂停/恢复监听 `record.circle` / `pause.circle.fill` 图标
+    pub fn draw_icon_record_pause(
+        &mut self,
+        cx: f32,
+        cy: f32,
+        size: f32,
+        stroke: f32,
+        c: Color4,
+        paused: bool,
+    ) {
+        let r = size * 0.43;
+        self.stroke_circle(cx, cy, r, stroke, c);
+        if paused {
+            let dx = r * 0.28;
+            let dy = r * 0.38;
+            self.draw_line(cx - dx, cy - dy, cx - dx, cy + dy, stroke * 1.15, c);
+            self.draw_line(cx + dx, cy - dy, cx + dx, cy + dy, stroke * 1.15, c);
+        } else {
+            self.fill_circle(cx, cy, r * 0.38, c);
+        }
+    }
+
+    /// 极简纯净模式圆润树叶图标（用双三次平滑采样曲线绘制真实苹果叶弧度）
     pub fn draw_icon_leaf(&mut self, cx: f32, cy: f32, size: f32, stroke: f32, c: Color4) {
-        let r = size * 0.38;
-        // 叶片上下双弧折线逼近流线叶轮廓 + 对角叶脉
-        let p_tip = (cx + r * 0.85, cy - r * 0.85);
-        let p_base = (cx - r * 0.65, cy + r * 0.65);
-        let p_top = (cx - r * 0.25, cy - r * 0.72);
-        let p_right = (cx + r * 0.72, cy + r * 0.25);
-        self.draw_line(p_base.0, p_base.1, p_top.0, p_top.1, stroke, c);
-        self.draw_line(p_top.0, p_top.1, p_tip.0, p_tip.1, stroke, c);
-        self.draw_line(p_base.0, p_base.1, p_right.0, p_right.1, stroke, c);
-        self.draw_line(p_right.0, p_right.1, p_tip.0, p_tip.1, stroke, c);
-        // 叶柄与主叶脉
+        let r = size * 0.42;
+        let base = (cx - r * 0.68, cy + r * 0.62);
+        let tip = (cx + r * 0.82, cy - r * 0.78);
+        let mut prev_u = base;
+        let mut prev_l = base;
+        for step in 1..=10 {
+            let t = (step as f32) / 10.0;
+            let inv = 1.0 - t;
+            // 上叶弧控制点
+            let ux = inv * inv * base.0 + 2.0 * inv * t * (cx - r * 0.55) + t * t * tip.0;
+            let uy = inv * inv * base.1 + 2.0 * inv * t * (cy - r * 0.82) + t * t * tip.1;
+            // 下叶弧控制点
+            let lx = inv * inv * base.0 + 2.0 * inv * t * (cx + r * 0.82) + t * t * tip.0;
+            let ly = inv * inv * base.1 + 2.0 * inv * t * (cy + r * 0.55) + t * t * tip.1;
+            self.draw_line(prev_u.0, prev_u.1, ux, uy, stroke, c);
+            self.draw_line(prev_l.0, prev_l.1, lx, ly, stroke, c);
+            prev_u = (ux, uy);
+            prev_l = (lx, ly);
+        }
         self.draw_line(
-            cx - r * 0.92,
-            cy + r * 0.92,
-            cx + r * 0.32,
-            cy - r * 0.32,
-            stroke,
+            cx - r * 0.90,
+            cy + r * 0.86,
+            cx + r * 0.30,
+            cy - r * 0.28,
+            stroke * 0.95,
             c,
         );
     }
 
-    /// 窗口始终在前图钉图标
+    /// 窗口始终在前图钉图标（激活态自动带 -18° 灵动倾角，对齐 macOS AlwaysOnTopPinButton）
     pub fn draw_icon_pin(
         &mut self,
         cx: f32,
@@ -641,109 +1153,217 @@ impl<'a> PixelCanvas<'a> {
         size: f32,
         stroke: f32,
         c: Color4,
-        filled: bool,
+        tilted_and_filled: bool,
     ) {
+        let angle = if tilted_and_filled {
+            -18.0f32.to_radians()
+        } else {
+            0.0
+        };
+        let cos_a = angle.cos();
+        let sin_a = angle.sin();
+        let rot = |dx: f32, dy: f32| -> (f32, f32) {
+            (cx + dx * cos_a - dy * sin_a, cy + dx * sin_a + dy * cos_a)
+        };
+
         let u = size * 0.42;
-        // 顶帽横杠
-        self.draw_line(
-            cx - u * 0.55,
-            cy - u * 0.82,
-            cx + u * 0.55,
-            cy - u * 0.82,
-            stroke,
-            c,
-        );
-        // 锥腰梯形
-        self.draw_line(
-            cx - u * 0.40,
-            cy - u * 0.82,
-            cx - u * 0.68,
-            cy + u * 0.08,
-            stroke,
-            c,
-        );
-        self.draw_line(
-            cx + u * 0.40,
-            cy - u * 0.82,
-            cx + u * 0.68,
-            cy + u * 0.08,
-            stroke,
-            c,
-        );
-        self.draw_line(
-            cx - u * 0.78,
-            cy + u * 0.08,
-            cx + u * 0.78,
-            cy + u * 0.08,
-            stroke,
-            c,
-        );
-        if filled {
-            self.fill_circle(cx, cy - u * 0.36, u * 0.36, c);
+        let (tl_x, tl_y) = rot(-u * 0.52, -u * 0.80);
+        let (tr_x, tr_y) = rot(u * 0.52, -u * 0.80);
+        let (bl_x, bl_y) = rot(-u * 0.72, u * 0.08);
+        let (br_x, br_y) = rot(u * 0.72, u * 0.08);
+        let (ml_x, ml_y) = rot(-u * 0.38, -u * 0.80);
+        let (mr_x, mr_y) = rot(u * 0.38, -u * 0.80);
+        let (nb_x, nb_y) = rot(0.0, u * 0.08);
+        let (nt_x, nt_y) = rot(0.0, u * 0.92);
+
+        self.draw_line(tl_x, tl_y, tr_x, tr_y, stroke, c);
+        self.draw_line(ml_x, ml_y, bl_x, bl_y, stroke, c);
+        self.draw_line(mr_x, mr_y, br_x, br_y, stroke, c);
+        self.draw_line(bl_x, bl_y, br_x, br_y, stroke, c);
+        if tilted_and_filled {
+            let (fc_x, fc_y) = rot(0.0, -u * 0.34);
+            self.fill_circle(fc_x, fc_y, u * 0.36, c);
         }
-        // 下方针尖
-        self.draw_line(cx, cy + u * 0.08, cx, cy + u * 0.92, stroke, c);
+        self.draw_line(nb_x, nb_y, nt_x, nt_y, stroke, c);
     }
 
-    /// 偏好设置 6 齿齿轮图标
+    /// SF `gearshape` 8 齿正弦连续轮廓齿轮图标
     pub fn draw_icon_gear(&mut self, cx: f32, cy: f32, size: f32, stroke: f32, c: Color4) {
-        let r_mid = size * 0.30;
-        let r_tooth = size * 0.43;
-        self.stroke_circle(cx, cy, r_mid, stroke, c);
-        for i in 0..6 {
-            let angle = (i as f32) * std::f32::consts::PI / 3.0;
-            let cos_a = angle.cos();
-            let sin_a = angle.sin();
-            self.draw_line(
-                cx + cos_a * (r_mid - stroke * 0.2),
-                cy + sin_a * (r_mid - stroke * 0.2),
-                cx + cos_a * r_tooth,
-                cy + sin_a * r_tooth,
-                stroke * 1.15,
-                c,
-            );
+        let r_base = size * 0.35;
+        let amp = size * 0.075;
+        let steps = 48;
+        let mut prev = (0.0f32, 0.0f32);
+        for i in 0..=steps {
+            let theta = (i as f32) * std::f32::consts::TAU / (steps as f32);
+            let wave = (8.0 * theta).cos().clamp(-0.7, 0.7) / 0.7;
+            let rad = r_base + amp * wave;
+            let pt = (cx + theta.cos() * rad, cy + theta.sin() * rad);
+            if i > 0 {
+                self.draw_line(prev.0, prev.1, pt.0, pt.1, stroke * 0.92, c);
+            }
+            prev = pt;
         }
+        self.stroke_circle(cx, cy, size * 0.14, stroke * 0.92, c);
     }
 
-    /// 左返回尖括号 `<`
     pub fn draw_icon_back(&mut self, cx: f32, cy: f32, size: f32, stroke: f32, c: Color4) {
         let d = size * 0.34;
         self.draw_line(cx + d * 0.55, cy - d, cx - d * 0.55, cy, stroke, c);
         self.draw_line(cx - d * 0.55, cy, cx + d * 0.55, cy + d, stroke, c);
     }
 
-    /// 链接跃迁对角发射箭头 `↗`（对齐 macOS `arrow.up.forward.app`）
+    pub fn draw_icon_chevron_ud(
+        &mut self,
+        cx: f32,
+        cy: f32,
+        size: f32,
+        stroke: f32,
+        c: Color4,
+        up: bool,
+    ) {
+        let dx = size * 0.36;
+        let dy = size * 0.20 * if up { -1.0 } else { 1.0 };
+        self.draw_line(cx - dx, cy - dy, cx, cy + dy, stroke, c);
+        self.draw_line(cx, cy + dy, cx + dx, cy - dy, stroke, c);
+    }
+
+    /// 恢复默认 `arrow.uturn.backward` 图标
+    pub fn draw_icon_undo_ccw(&mut self, cx: f32, cy: f32, size: f32, stroke: f32, c: Color4) {
+        let u = size * 0.36;
+        self.draw_line(
+            cx - u * 0.85,
+            cy - u * 0.28,
+            cx + u * 0.25,
+            cy - u * 0.28,
+            stroke,
+            c,
+        );
+        self.draw_line(
+            cx + u * 0.25,
+            cy - u * 0.28,
+            cx + u * 0.72,
+            cy + u * 0.16,
+            stroke,
+            c,
+        );
+        self.draw_line(
+            cx + u * 0.72,
+            cy + u * 0.16,
+            cx + u * 0.25,
+            cy + u * 0.65,
+            stroke,
+            c,
+        );
+        self.draw_line(
+            cx - u * 0.45,
+            cy + u * 0.65,
+            cx + u * 0.25,
+            cy + u * 0.65,
+            stroke,
+            c,
+        );
+        // 左箭头尖
+        self.draw_line(
+            cx - u * 0.85,
+            cy - u * 0.28,
+            cx - u * 0.32,
+            cy - u * 0.76,
+            stroke,
+            c,
+        );
+        self.draw_line(
+            cx - u * 0.85,
+            cy - u * 0.28,
+            cx - u * 0.32,
+            cy + u * 0.18,
+            stroke,
+            c,
+        );
+    }
+
+    /// SF `link` 45° 双扣链环图标（用于链接卡片左侧徽标常态展示）
+    pub fn draw_icon_link_chain(&mut self, cx: f32, cy: f32, size: f32, stroke: f32, c: Color4) {
+        let r = size * 0.20;
+        let off = size * 0.16;
+        self.stroke_circle(cx - off, cy + off, r, stroke, c);
+        self.stroke_circle(cx + off, cy - off, r, stroke, c);
+        self.draw_line(
+            cx - off * 0.75,
+            cy + off * 0.75,
+            cx + off * 0.75,
+            cy - off * 0.75,
+            stroke * 1.05,
+            c,
+        );
+    }
+
+    /// 对角发射箭头 `↗`（用于链接徽标悬停态与右上角直达圆钮）
     pub fn draw_icon_external_link(&mut self, cx: f32, cy: f32, size: f32, stroke: f32, c: Color4) {
-        let d = size * 0.34;
+        let d = size * 0.33;
         let tx = cx + d;
         let ty = cy - d;
         let bx = cx - d;
         let by = cy + d;
         self.draw_line(bx, by, tx, ty, stroke, c);
-        self.draw_line(tx - d * 1.05, ty, tx, ty, stroke, c);
-        self.draw_line(tx, ty, tx, ty + d * 1.05, stroke, c);
+        self.draw_line(tx - d * 1.08, ty, tx, ty, stroke, c);
+        self.draw_line(tx, ty, tx, ty + d * 1.08, stroke, c);
     }
 
-    /// 本地文件文档折角图标
+    /// 回车折弯箭头 `↵`（用于图片选中角标）
+    pub fn draw_icon_return_arrow(&mut self, cx: f32, cy: f32, size: f32, stroke: f32, c: Color4) {
+        let u = size * 0.34;
+        self.draw_line(
+            cx + u * 0.75,
+            cy - u * 0.65,
+            cx + u * 0.75,
+            cy + u * 0.22,
+            stroke,
+            c,
+        );
+        self.draw_line(
+            cx + u * 0.75,
+            cy + u * 0.22,
+            cx - u * 0.75,
+            cy + u * 0.22,
+            stroke,
+            c,
+        );
+        self.draw_line(
+            cx - u * 0.75,
+            cy + u * 0.22,
+            cx - u * 0.22,
+            cy - u * 0.28,
+            stroke,
+            c,
+        );
+        self.draw_line(
+            cx - u * 0.75,
+            cy + u * 0.22,
+            cx - u * 0.22,
+            cy + u * 0.72,
+            stroke,
+            c,
+        );
+    }
+
+    /// Finder 风格圆角文件夹图标（用于文件卡片左侧徽标）
     pub fn draw_icon_file(&mut self, cx: f32, cy: f32, size: f32, stroke: f32, c: Color4) {
-        let w = size * 0.34;
-        let h = size * 0.42;
-        let fold = size * 0.22;
+        let w = size * 0.42;
+        let h = size * 0.32;
         let l = cx - w;
         let r = cx + w;
-        let t = cy - h;
+        let t = cy - h * 0.65;
         let b = cy + h;
-        self.draw_line(l, t, r - fold, t, stroke, c);
-        self.draw_line(r - fold, t, r, t + fold, stroke, c);
-        self.draw_line(r, t + fold, r, b, stroke, c);
+        let tab_t = cy - h * 1.05;
+        let tab_r = cx - w * 0.12;
+        self.draw_line(l, b, l, tab_t, stroke, c);
+        self.draw_line(l, tab_t, tab_r, tab_t, stroke, c);
+        self.draw_line(tab_r, tab_t, tab_r + w * 0.22, t, stroke, c);
+        self.draw_line(tab_r + w * 0.22, t, r, t, stroke, c);
+        self.draw_line(r, t, r, b, stroke, c);
         self.draw_line(r, b, l, b, stroke, c);
-        self.draw_line(l, b, l, t, stroke, c);
-        // 折角内折线
-        self.draw_line(r - fold, t, r - fold, t + fold, stroke * 0.85, c);
-        self.draw_line(r - fold, t + fold, r, t + fold, stroke * 0.85, c);
     }
 
-    /// 收藏五角星（支持实心抗锯齿填充与空心描边）
     pub fn draw_icon_star(
         &mut self,
         cx: f32,
@@ -769,7 +1389,6 @@ impl<'a> PixelCanvas<'a> {
             let max_y = (cy + r_out + 1.0).ceil() as i32;
             for py in min_y..=max_y {
                 for px in min_x..=max_x {
-                    // 2x2 超采样抗锯齿填充五角星
                     let mut hits = 0;
                     for sy in [0.25f32, 0.75] {
                         for sx in [0.25f32, 0.75] {
@@ -792,83 +1411,78 @@ impl<'a> PixelCanvas<'a> {
         }
     }
 
-    /// 精致垃圾桶矢量图标
     pub fn draw_icon_trash(&mut self, cx: f32, cy: f32, size: f32, stroke: f32, c: Color4) {
-        let u = size * 0.38;
-        // 顶盖与提手
+        let u = size * 0.36;
         self.draw_line(
-            cx - u * 0.92,
+            cx - u * 0.90,
             cy - u * 0.52,
-            cx + u * 0.92,
+            cx + u * 0.90,
             cy - u * 0.52,
             stroke,
             c,
         );
         self.draw_line(
-            cx - u * 0.35,
+            cx - u * 0.34,
             cy - u * 0.84,
-            cx + u * 0.35,
+            cx + u * 0.34,
             cy - u * 0.84,
             stroke,
             c,
         );
-        // 桶身外轮廓
         self.draw_line(
-            cx - u * 0.70,
+            cx - u * 0.68,
             cy - u * 0.48,
-            cx - u * 0.58,
+            cx - u * 0.56,
             cy + u * 0.88,
             stroke,
             c,
         );
         self.draw_line(
-            cx + u * 0.70,
+            cx + u * 0.68,
             cy - u * 0.48,
-            cx + u * 0.58,
+            cx + u * 0.56,
             cy + u * 0.88,
             stroke,
             c,
         );
         self.draw_line(
-            cx - u * 0.58,
+            cx - u * 0.56,
             cy + u * 0.88,
-            cx + u * 0.58,
+            cx + u * 0.56,
             cy + u * 0.88,
             stroke,
             c,
         );
-        // 桶内双竖线
         self.draw_line(
-            cx - u * 0.22,
-            cy - u * 0.12,
             cx - u * 0.20,
-            cy + u * 0.54,
+            cy - u * 0.10,
+            cx - u * 0.18,
+            cy + u * 0.52,
             stroke * 0.85,
             c,
         );
         self.draw_line(
-            cx + u * 0.22,
-            cy - u * 0.12,
             cx + u * 0.20,
-            cy + u * 0.54,
+            cy - u * 0.10,
+            cx + u * 0.18,
+            cy + u * 0.52,
             stroke * 0.85,
             c,
         );
     }
 
-    /// 快捷变换微闪电几何图标
     pub fn draw_icon_bolt(&mut self, cx: f32, cy: f32, size: f32, stroke: f32, c: Color4) {
-        let u = size * 0.40;
+        let u = size * 0.38;
         self.draw_line(
             cx + u * 0.15,
-            cy - u * 0.95,
-            cx - u * 0.55,
+            cy - u * 0.92,
+            cx - u * 0.52,
             cy + u * 0.06,
             stroke,
             c,
         );
         self.draw_line(
-            cx - u * 0.55,
+            cx - u * 0.52,
             cy + u * 0.06,
             cx + u * 0.12,
             cy + u * 0.06,
@@ -879,13 +1493,97 @@ impl<'a> PixelCanvas<'a> {
             cx + u * 0.12,
             cy + u * 0.06,
             cx - u * 0.15,
-            cy + u * 0.95,
+            cy + u * 0.92,
             stroke,
             c,
         );
     }
 
-    /// 原生质感胶囊拨动开关（对齐 macOS Toggle Switch）
+    /// 空状态中央剪贴板线性图标
+    pub fn draw_icon_clipboard(&mut self, cx: f32, cy: f32, size: f32, stroke: f32, c: Color4) {
+        let w = (size * 0.62).round() as i32;
+        let h = (size * 0.78).round() as i32;
+        let x = (cx - (w as f32) * 0.5).round() as i32;
+        let y = (cy - (h as f32) * 0.44).round() as i32;
+        self.stroke_round_rect(x, y, w, h, size * 0.12, stroke, c);
+        let cw = (size * 0.32).round() as i32;
+        let ch = (size * 0.14).round() as i32;
+        self.fill_round_rect(
+            (cx - (cw as f32) * 0.5).round() as i32,
+            y - ch / 2,
+            cw,
+            ch,
+            size * 0.05,
+            c,
+        );
+    }
+
+    /// 苹果官方双叠圆角方框刻度图标（复刻 `OverlappingGlassSquaresGlyph`）
+    pub fn draw_icon_overlapping_squares(
+        &mut self,
+        x: f32,
+        y: f32,
+        size: f32,
+        c: Color4,
+        frosted: bool,
+    ) {
+        let box_sz = (size * 0.58).round() as i32;
+        let bx1 = (x + size * 0.08).round() as i32;
+        let by1 = (y + size * 0.08).round() as i32;
+        let bx2 = (x + size * 0.34).round() as i32;
+        let by2 = (y + size * 0.34).round() as i32;
+        let r = size * 0.16;
+        let st = (size * 0.075).max(1.1);
+        let stroke_c = c.with_alpha(215);
+
+        if frosted {
+            self.fill_round_rect(bx1, by1, box_sz, box_sz, r, c.with_alpha(78));
+            self.stroke_round_rect(bx1, by1, box_sz, box_sz, r, st, stroke_c);
+            self.fill_round_rect(bx2, by2, box_sz, box_sz, r, c.with_alpha(224));
+        } else {
+            self.stroke_round_rect(bx1, by1, box_sz, box_sz, r, st, stroke_c);
+            self.fill_round_rect(bx2, by2, box_sz, box_sz, r, c.with_alpha(24));
+            self.stroke_round_rect(bx2, by2, box_sz, box_sz, r, st, stroke_c);
+        }
+    }
+
+    /// 待办圆环与对勾抗锯齿矢量图标（Things 3 风格）
+    pub fn draw_icon_check_circle(
+        &mut self,
+        cx: f32,
+        cy: f32,
+        size: f32,
+        stroke: f32,
+        ring_or_fill: Color4,
+        filled: bool,
+        check_color: Color4,
+    ) {
+        let r = size * 0.44;
+        if filled {
+            self.fill_circle(cx, cy, r, ring_or_fill);
+            let u = r * 0.55;
+            self.draw_line(
+                cx - u * 0.78,
+                cy + u * 0.05,
+                cx - u * 0.16,
+                cy + u * 0.68,
+                stroke * 1.15,
+                check_color,
+            );
+            self.draw_line(
+                cx - u * 0.16,
+                cy + u * 0.68,
+                cx + u * 0.88,
+                cy - u * 0.56,
+                stroke * 1.15,
+                check_color,
+            );
+        } else {
+            self.stroke_circle(cx, cy, r, stroke, ring_or_fill);
+        }
+    }
+
+    /// macOS / iOS 原生质感胶囊拨动开关
     pub fn draw_toggle_switch(
         &mut self,
         x: i32,
@@ -899,13 +1597,10 @@ impl<'a> PixelCanvas<'a> {
         let track_color = if is_on {
             accent
         } else {
-            Color4::rgba(62, 74, 98, 220)
+            Color4::rgba(120, 128, 142, 78)
         };
         self.fill_round_rect(x, y, w, h, r, track_color);
-        if !is_on {
-            self.stroke_round_rect(x, y, w, h, r, 1.0, Color4::rgba(148, 172, 214, 48));
-        }
-        let pad = ((h as f32) * 0.14).max(2.0);
+        let pad = ((h as f32) * 0.11).max(2.0);
         let knob_r = r - pad;
         let knob_cx = if is_on {
             (x + w) as f32 - r
@@ -913,10 +1608,11 @@ impl<'a> PixelCanvas<'a> {
             (x as f32) + r
         };
         let knob_cy = (y as f32) + r;
+        self.fill_circle(knob_cx, knob_cy + 0.8, knob_r, Color4::rgba(0, 0, 0, 38));
         self.fill_circle(knob_cx, knob_cy, knob_r, Color4::rgb(255, 255, 255));
     }
 
-    /// 液态玻璃背景模糊浓度无级滑杆（0% ~ 100%）
+    /// 苹果官方三档微刻度背景模糊浓度无级滑杆（0% ~ 100%）
     pub fn draw_concentration_slider(
         &mut self,
         x: i32,
@@ -926,26 +1622,93 @@ impl<'a> PixelCanvas<'a> {
         pct: u8,
         accent: Color4,
     ) {
-        let track_h = ((h as f32) * 0.30).round().max(4.0) as i32;
-        let ty = y + (h - track_h) / 2;
+        let track_h = ((h as f32) * 0.22).round().max(4.0) as i32;
+        let ty = y + (h - track_h) / 2 - 2;
         let tr = (track_h as f32) * 0.5;
-        self.fill_round_rect(x, ty, w, track_h, tr, Color4::rgba(62, 74, 98, 210));
+        self.fill_round_rect(x, ty, w, track_h, tr, Color4::rgba(128, 136, 150, 76));
         let ratio = (pct.min(100) as f32) / 100.0;
         let fill_w = ((w as f32) * ratio).round() as i32;
         if fill_w > 0 {
             self.fill_round_rect(x, ty, fill_w.max(track_h), track_h, tr, accent);
         }
-        let knob_r = ((h as f32) * 0.38).max(6.5);
+
+        // 下方三枚官方微刻度锚点（8% · 45% · 88%）
+        let tick_y = (ty + track_h) as f32 + (h as f32) * 0.22;
+        for anchor in [0.08f32, 0.45, 0.88] {
+            let tx = (x as f32) + (w as f32) * anchor;
+            self.fill_circle(
+                tx,
+                tick_y,
+                (track_h as f32 * 0.34).max(1.3),
+                Color4::rgba(128, 136, 150, 128),
+            );
+        }
+
+        let knob_r = ((h as f32) * 0.34).max(6.5);
         let knob_cx =
             (x as f32 + (w as f32) * ratio).clamp(x as f32 + knob_r, (x + w) as f32 - knob_r);
-        let knob_cy = (y as f32) + (h as f32) * 0.5;
+        let knob_cy = ty as f32 + (track_h as f32) * 0.5;
+        self.fill_circle(
+            knob_cx,
+            knob_cy + 1.0,
+            knob_r + 0.5,
+            Color4::rgba(0, 0, 0, 46),
+        );
         self.fill_circle(knob_cx, knob_cy, knob_r, Color4::rgb(255, 255, 255));
-        self.stroke_circle(knob_cx, knob_cy, knob_r, 1.2, accent);
+        self.stroke_circle(knob_cx, knob_cy, knob_r, 0.9, Color4::rgba(0, 0, 0, 26));
     }
 }
 
+fn box_blur_2pass(src: &[Color4], w: usize, h: usize, radius: usize) -> Vec<Color4> {
+    if radius == 0 || w == 0 || h == 0 {
+        return src.to_vec();
+    }
+    let mut tmp = vec![Color4::rgb(0, 0, 0); w * h];
+    let mut out = vec![Color4::rgb(0, 0, 0); w * h];
+    let r = radius.min(w.saturating_sub(1)).min(h.saturating_sub(1));
+    if r == 0 {
+        return src.to_vec();
+    }
+
+    // 水平滑动窗口均值模糊
+    for y in 0..h {
+        let row = y * w;
+        for x in 0..w {
+            let x0 = x.saturating_sub(r);
+            let x1 = (x + r).min(w - 1);
+            let cnt = (x1 - x0 + 1) as u32;
+            let (mut sr, mut sg, mut sb) = (0u32, 0u32, 0u32);
+            for k in x0..=x1 {
+                let c = src[row + k];
+                sr += c.r as u32;
+                sg += c.g as u32;
+                sb += c.b as u32;
+            }
+            tmp[row + x] = Color4::rgb((sr / cnt) as u8, (sg / cnt) as u8, (sb / cnt) as u8);
+        }
+    }
+
+    // 垂直滑动窗口均值模糊
+    for x in 0..w {
+        for y in 0..h {
+            let y0 = y.saturating_sub(r);
+            let y1 = (y + r).min(h - 1);
+            let cnt = (y1 - y0 + 1) as u32;
+            let (mut sr, mut sg, mut sb) = (0u32, 0u32, 0u32);
+            for k in y0..=y1 {
+                let c = tmp[k * w + x];
+                sr += c.r as u32;
+                sg += c.g as u32;
+                sb += c.b as u32;
+            }
+            out[y * w + x] = Color4::rgb((sr / cnt) as u8, (sg / cnt) as u8, (sb / cnt) as u8);
+        }
+    }
+    out
+}
+
 #[inline]
-fn pack_premultiplied_bgra(c: Color4, _unused: u8) -> u32 {
+fn pack_premultiplied_bgra(c: Color4) -> u32 {
     let a = c.a as u32;
     let r = ((c.r as u32) * a + 127) / 255;
     let g = ((c.g as u32) * a + 127) / 255;

@@ -535,10 +535,90 @@ mod tests {
         canvas.draw_icon_gear(392.0, 30.0, 15.0, 1.7, palette.text_primary);
         canvas.draw_icon_external_link(35.0, 127.0, 16.0, 1.8, Color4::rgb(255, 255, 255));
         canvas.draw_icon_star(360.0, 112.0, 14.0, 1.6, palette.amber, true);
+        canvas.draw_icon_check_circle(
+            26.0,
+            127.0,
+            18.0,
+            1.65,
+            palette.emerald,
+            true,
+            Color4::rgb(255, 255, 255),
+        );
         canvas.draw_icon_trash(388.0, 112.0, 14.0, 1.6, palette.danger);
         canvas.draw_toggle_switch(350, 220, 38, 22, true, palette.cobalt);
         // 故意传入负坐标与超出右底边界坐标，确保 100% 安全裁剪零 panic
         canvas.fill_round_rect(-20, -20, 60, 60, 12.0, palette.cobalt);
         canvas.stroke_round_rect(390, 530, 60, 60, 12.0, 1.5, palette.amber);
+    }
+
+    #[test]
+    fn test_todo_lifecycle_quick_capture_checklist_and_auto_archive() {
+        use crate::intelligence::{extract_checklist_items, parse_quick_capture};
+        use crate::model::ClipFilterTab;
+        use crate::store::ClipboardStore;
+
+        // 1. 闪念待办零歧义解析，且排除数学减法 `- 50` 与搜索词 `@todo`
+        let t1 = parse_quick_capture("[] 下午核对 Q3 报表").expect("应识别 [] 待办");
+        assert!(t1.default_todo && !t1.default_pin);
+        assert_eq!(t1.body, "下午核对 Q3 报表");
+
+        let t2 = parse_quick_capture("todo: 财务 :: 给王总发合同").expect("应识别带备注待办");
+        assert!(t2.default_todo);
+        assert_eq!(t2.alias.as_deref(), Some("财务"));
+        assert_eq!(t2.body, "给王总发合同");
+
+        let t3 = parse_quick_capture("- 修登录页圆角").expect("应识别短横线待办");
+        assert!(t3.default_todo);
+        assert_eq!(t3.body, "修登录页圆角");
+
+        assert!(parse_quick_capture("- 50").is_none());
+        assert!(parse_quick_capture("--help").is_none());
+        assert!(parse_quick_capture("@todo").is_none());
+
+        // 2. 多行清单提取（自动跳过已完成 `[x]` 项）
+        let md = "- [ ] 修复圆角溢出\n- [x] 已上线官网\n- [ ] 补齐双端单测";
+        let extracted = extract_checklist_items(md);
+        assert_eq!(extracted, vec!["修复圆角溢出", "补齐双端单测"]);
+
+        // 3. Store 待办排序（未完成在前、已完成沉底）、容量保护与 24h 自动归档
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "iclip_win_todo_test_{}",
+            crate::model::now_unix_secs()
+        ));
+        let mut store = ClipboardStore::new(tmp_dir.clone());
+        let id_a = store.capture_quick_todo("第一项待办", None).unwrap();
+        let id_b = store.capture_quick_todo("第二项待办", None).unwrap();
+        assert_eq!(store.pending_todo_count(), 2);
+
+        // 勾选 id_b 为已完成 -> 在 Todo 分类中未完成的 id_a 应自动排在前面
+        store.toggle_todo(&id_b);
+        assert_eq!(store.pending_todo_count(), 1);
+        assert_eq!(store.completed_todo_count(), 1);
+        let todo_indices = store.filtered_indices(ClipFilterTab::Todo, "");
+        assert_eq!(todo_indices.len(), 2);
+        assert_eq!(store.items[todo_indices[0]].id, id_a);
+        assert_eq!(store.items[todo_indices[1]].id, id_b);
+
+        // 清空未收藏记录时，未完成待办 id_a 必须受保护保留
+        store.clear_unpinned();
+        assert!(store
+            .items
+            .iter()
+            .any(|it| it.id == id_a && it.is_pending_todo()));
+
+        // 重新添加已完成项并测试满 24h 自动归档
+        let id_c = store.capture_quick_todo("已完成旧待办", None).unwrap();
+        store.toggle_todo(&id_c);
+        let done_ts = store
+            .items
+            .iter()
+            .find(|it| it.id == id_c)
+            .and_then(|it| it.todo_completed_unix_secs)
+            .unwrap();
+        assert_eq!(store.archive_expired_completed_todos(done_ts + 3600), 0);
+        assert_eq!(store.archive_expired_completed_todos(done_ts + 86_401), 1);
+        assert_eq!(store.completed_todo_count(), 0);
+
+        let _ = std::fs::remove_dir_all(tmp_dir);
     }
 }

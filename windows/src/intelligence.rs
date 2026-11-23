@@ -647,19 +647,39 @@ fn eval_expr(input: &str) -> Option<f64> {
     }
 }
 
-/// 一行闪念速记解析器（支持 `> 备注名 :: 正文`、`> 正文`、`+收藏 备注 :: 正文`）
+/// 一行闪念速记与待办解析器（支持 `[] 事项`、`- 事项`、`+待办 事项`、`todo: 事项`、`> 备注名 :: 正文`）
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuickCaptureIntent {
     pub alias: Option<String>,
     pub body: String,
     pub default_pin: bool,
+    pub default_todo: bool,
 }
 
 pub fn parse_quick_capture(query: &str) -> Option<QuickCaptureIntent> {
-    let trimmed = query.trim();
+    let trimmed = query.trim_start_matches([' ', '\t']);
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some(todo_rest) = extract_todo_capture_payload(trimmed) {
+        let (alias, body) = split_alias_and_body(todo_rest);
+        return Some(QuickCaptureIntent {
+            alias,
+            body,
+            default_pin: false,
+            default_todo: true,
+        });
+    }
+
+    let trimmed = trimmed.trim();
     let (rest, force_pin) = if let Some(r) = trimmed.strip_prefix(">>") {
         (r.trim(), true)
     } else if let Some(r) = trimmed.strip_prefix('>') {
+        // 防误伤 `>= 100`
+        if r.starts_with('=') {
+            return None;
+        }
         (r.trim(), false)
     } else if let Some(r) = trimmed.strip_prefix("+收藏 ") {
         (r.trim(), true)
@@ -672,29 +692,191 @@ pub fn parse_quick_capture(query: &str) -> Option<QuickCaptureIntent> {
             alias: None,
             body: String::new(),
             default_pin: force_pin,
+            default_todo: false,
         });
     }
 
-    if let Some((left, right)) = rest.split_once("::") {
-        let alias_clean = left.trim();
-        let body_clean = right.trim();
+    let (alias, body) = split_alias_and_body(rest);
+    if alias.is_some() {
         Some(QuickCaptureIntent {
-            alias: if alias_clean.is_empty() {
-                None
-            } else {
-                Some(alias_clean.to_string())
-            },
-            body: body_clean.to_string(),
-            default_pin: force_pin || !alias_clean.is_empty(),
+            alias,
+            body,
+            default_pin: true,
+            default_todo: false,
         })
     } else {
-        let is_tpl = rest.contains("{{") && rest.contains("}}");
+        let is_tpl = body.contains("{{") && body.contains("}}");
         Some(QuickCaptureIntent {
             alias: None,
-            body: rest.to_string(),
+            body,
             default_pin: force_pin || is_tpl,
+            default_todo: false,
         })
     }
+}
+
+pub fn split_alias_and_body(text: &str) -> (Option<String>, String) {
+    for sep in ["::", "：："] {
+        if let Some((left, right)) = text.split_once(sep) {
+            let l = left.trim();
+            let r = right.trim();
+            if !l.is_empty() && !r.is_empty() {
+                return (Some(l.to_string()), r.to_string());
+            }
+        }
+    }
+    (None, text.trim().to_string())
+}
+
+fn extract_todo_capture_payload(s: &str) -> Option<&str> {
+    for marker in ["- [ ]", "* [ ]", "[ ]", "[]", "【 】", "【】"] {
+        if s.trim_end() == marker {
+            return Some("");
+        }
+        if let Some(rest) = s.strip_prefix(marker) {
+            if rest.starts_with(' ') || rest.starts_with('\t') || marker == "[]" || marker == "【】"
+            {
+                return Some(rest.trim());
+            }
+        }
+    }
+    let lower = s.to_lowercase();
+    for p in ["+待办", "@加待办", "@新建待办", "+todo"] {
+        if lower.starts_with(p) {
+            let rest = &s[p.len()..];
+            if rest.trim().is_empty() {
+                return Some("");
+            }
+            if rest.starts_with(' ') || rest.starts_with('\t') {
+                return Some(rest.trim());
+            }
+        }
+    }
+    for p in ["todo:", "todo：", "待办:", "待办："] {
+        if lower.starts_with(p) {
+            return Some(s[p.len()..].trim());
+        }
+    }
+    if let Some(rest) = s.strip_prefix("- ").or_else(|| s.strip_prefix("－ ")) {
+        let clean = rest.trim();
+        if clean.is_empty() {
+            return Some("");
+        }
+        if let Some(ch) = clean.chars().next() {
+            if !ch.is_ascii_digit() && !matches!(ch, '.' | '(' | '-' | '+') {
+                return Some(clean);
+            }
+        }
+    }
+    None
+}
+
+/// 从多行剪贴文本中拆解可独立勾选的待办事项（自动跳过已完成 `[x]` 项，排除代码与纯金额账单）
+pub fn extract_checklist_items(raw_text: &str) -> Vec<String> {
+    if raw_text.len() > 16_384 {
+        return Vec::new();
+    }
+    let lines: Vec<&str> = raw_text
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+    if lines.len() < 2 || lines.len() > 30 {
+        return Vec::new();
+    }
+
+    let unchecked = [
+        "- [ ]", "* [ ]", "+ [ ]", "[ ]", "[]", "【 】", "【】", "□", "☐",
+    ];
+    let checked = [
+        "- [x]", "- [X]", "* [x]", "* [X]", "[x]", "[X]", "☑", "✅", "✓",
+    ];
+
+    let mut explicit_unchecked = Vec::new();
+    let mut explicit_total = 0usize;
+    for &line in &lines {
+        if checked.iter().any(|m| line.starts_with(m)) {
+            explicit_total += 1;
+            continue;
+        }
+        if let Some(marker) = unchecked.iter().find(|&&m| line.starts_with(m)) {
+            let body = line[marker.len()..].trim();
+            if !body.is_empty() {
+                explicit_total += 1;
+                if !explicit_unchecked.iter().any(|x| x == body) {
+                    explicit_unchecked.push(body.to_string());
+                }
+            }
+        }
+    }
+    if explicit_total >= 2 && explicit_unchecked.len() >= 2 {
+        return explicit_unchecked;
+    }
+
+    if lines.len() > 20 || (raw_text.contains('{') && raw_text.contains('}')) {
+        return Vec::new();
+    }
+    for noise in [
+        "func ", "fn ", "struct ", "class ", "import ", "SELECT ", "INSERT ", "curl ",
+    ] {
+        if raw_text.contains(noise) {
+            return Vec::new();
+        }
+    }
+
+    let mut bullets = Vec::new();
+    for &line in &lines {
+        let Some(body) = strip_bullet_or_num_prefix(line) else {
+            return Vec::new();
+        };
+        let char_cnt = body.chars().count();
+        if !(2..=120).contains(&char_cnt)
+            || !body
+                .chars()
+                .any(|c| c.is_ascii_alphabetic() || ('\u{4E00}'..='\u{9FFF}').contains(&c))
+        {
+            return Vec::new();
+        }
+        if !bullets.iter().any(|x| x == body) {
+            bullets.push(body.to_string());
+        }
+    }
+    if bullets.len() >= 2 {
+        bullets
+    } else {
+        Vec::new()
+    }
+}
+
+fn strip_bullet_or_num_prefix(line: &str) -> Option<&str> {
+    for b in ["- ", "* ", "• ", "· "] {
+        if let Some(r) = line.strip_prefix(b) {
+            let t = r.trim();
+            return if t.is_empty() { None } else { Some(t) };
+        }
+    }
+    let digit_bytes = line.bytes().take_while(|b| b.is_ascii_digit()).count();
+    if (1..=3).contains(&digit_bytes) {
+        let rest_after_num = &line[digit_bytes..];
+        for sep in [".", "、", ")", "）"] {
+            if let Some(after_sep) = rest_after_num.strip_prefix(sep) {
+                let t = after_sep.trim();
+                if t.is_empty() {
+                    return None;
+                }
+                if sep == "."
+                    && t.bytes()
+                        .next()
+                        .map(|b| b.is_ascii_digit())
+                        .unwrap_or(false)
+                {
+                    return None;
+                }
+                return Some(t);
+            }
+        }
+    }
+    None
 }
 
 /// 提取 `@建议 ...` / `@suggest ...` 自然语言偏好指令

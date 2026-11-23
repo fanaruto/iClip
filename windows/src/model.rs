@@ -109,6 +109,7 @@ impl ClipContentType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClipFilterTab {
     All,
+    Todo,
     Pinned,
     Text,
     Link,
@@ -117,7 +118,17 @@ pub enum ClipFilterTab {
 }
 
 impl ClipFilterTab {
-    pub const ALL_TABS: [ClipFilterTab; 6] = [
+    pub const ALL_TABS: [ClipFilterTab; 7] = [
+        Self::All,
+        Self::Todo,
+        Self::Pinned,
+        Self::Text,
+        Self::Link,
+        Self::Image,
+        Self::File,
+    ];
+
+    pub const MINIMAL_TABS: [ClipFilterTab; 6] = [
         Self::All,
         Self::Pinned,
         Self::Text,
@@ -126,9 +137,18 @@ impl ClipFilterTab {
         Self::File,
     ];
 
+    pub fn visible_tabs(minimal_mode: bool) -> &'static [ClipFilterTab] {
+        if minimal_mode {
+            &Self::MINIMAL_TABS
+        } else {
+            &Self::ALL_TABS
+        }
+    }
+
     pub fn title(self) -> &'static str {
         match self {
             Self::All => "全部",
+            Self::Todo => "待办",
             Self::Pinned => "收藏",
             Self::Text => "文本",
             Self::Link => "链接",
@@ -170,9 +190,34 @@ pub struct ClipItem {
     pub is_pinned: bool,
     pub pin_category: Option<PinCategory>,
     pub custom_alias: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_todo_item: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub todo_completed_unix_secs: Option<u64>,
 }
 
 impl ClipItem {
+    pub fn is_todo(&self) -> bool {
+        self.is_todo_item == Some(true)
+    }
+
+    pub fn is_pending_todo(&self) -> bool {
+        self.is_todo() && self.todo_completed_unix_secs.is_none()
+    }
+
+    pub fn is_todo_completed(&self) -> bool {
+        self.is_todo() && self.todo_completed_unix_secs.is_some()
+    }
+
+    pub fn set_todo(&mut self, enabled: bool) {
+        if enabled {
+            self.is_todo_item = Some(true);
+        } else {
+            self.is_todo_item = None;
+            self.todo_completed_unix_secs = None;
+        }
+    }
+
     pub fn new_text(raw: String, source_app: Option<String>) -> Self {
         let trimmed = raw.trim();
         let is_link = is_valid_web_url(trimmed);
@@ -197,6 +242,8 @@ impl ClipItem {
             is_pinned: false,
             pin_category: None,
             custom_alias: None,
+            is_todo_item: None,
+            todo_completed_unix_secs: None,
         }
     }
 
@@ -224,6 +271,8 @@ impl ClipItem {
             is_pinned: false,
             pin_category: None,
             custom_alias: None,
+            is_todo_item: None,
+            todo_completed_unix_secs: None,
         }
     }
 
@@ -246,6 +295,8 @@ impl ClipItem {
             is_pinned: false,
             pin_category: None,
             custom_alias: None,
+            is_todo_item: None,
+            todo_completed_unix_secs: None,
         }
     }
 
@@ -399,6 +450,14 @@ impl ClipItem {
     }
 
     fn matches_single_token(&self, token: &str) -> bool {
+        let token_lower = token.to_lowercase();
+        match token_lower.as_str() {
+            "收藏" | "@pin" | "@star" | "pinned" | "starred" => return self.is_pinned,
+            "待办" | "todo" | "@todo" | "@待办" => return self.is_todo(),
+            "未完成" | "@pending" => return self.is_pending_todo(),
+            "已完成" | "@done" => return self.is_todo_completed(),
+            _ => {}
+        }
         if let Some(text) = &self.text {
             let window = safe_utf8_prefix(text, 65_536);
             if contains_case_insensitive(window, token) {

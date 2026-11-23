@@ -89,4 +89,5 @@ jobs:
             dist-win/iClip-Windows-x64.zip
             dist-win/selftest-dev.json
             dist-win/selftest-flow.json
+            dist-win/preview-*.png
           if-no-files-found: error
