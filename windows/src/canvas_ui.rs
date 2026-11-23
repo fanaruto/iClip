@@ -384,6 +384,8 @@ pub struct PixelCanvas<'a> {
     pub pixels: &'a mut [u32],
     pub width: i32,
     pub height: i32,
+    pub clip_y0: i32,
+    pub clip_y1: i32,
 }
 
 impl<'a> PixelCanvas<'a> {
@@ -393,7 +395,21 @@ impl<'a> PixelCanvas<'a> {
             pixels,
             width,
             height,
+            clip_y0: 0,
+            clip_y1: height,
         }
+    }
+
+    #[inline]
+    pub fn set_vertical_clip(&mut self, y0: i32, y1: i32) {
+        self.clip_y0 = y0.clamp(0, self.height);
+        self.clip_y1 = y1.clamp(self.clip_y0, self.height);
+    }
+
+    #[inline]
+    pub fn reset_vertical_clip(&mut self) {
+        self.clip_y0 = 0;
+        self.clip_y1 = self.height;
     }
 
     #[inline]
@@ -405,7 +421,7 @@ impl<'a> PixelCanvas<'a> {
     /// 公开的 Porter-Duff Source-Over 预乘 Alpha 像素混合（供几何原语与离屏灰阶字体合成器统一调用）
     #[inline]
     pub fn blend_pixel(&mut self, x: i32, y: i32, c: Color4, coverage: f32) {
-        if x < 0 || y < 0 || x >= self.width || y >= self.height {
+        if x < 0 || y < self.clip_y0 || x >= self.width || y >= self.clip_y1 {
             return;
         }
         let src_a = ((c.a as f32) * coverage.clamp(0.0, 1.0)).round() as u32;
@@ -513,9 +529,9 @@ impl<'a> PixelCanvas<'a> {
         let r = radius.clamp(0.0, (w.min(h) as f32) * 0.5);
         let is_pill = (r - (w.min(h) as f32) * 0.5).abs() < 0.6;
         let x0 = x.max(0);
-        let y0 = y.max(0);
+        let y0 = y.max(self.clip_y0);
         let x1 = (x + w).min(self.width);
-        let y1 = (y + h).min(self.height);
+        let y1 = (y + h).min(self.clip_y1);
         if x0 >= x1 || y0 >= y1 {
             return;
         }

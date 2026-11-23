@@ -2569,6 +2569,7 @@ unsafe fn composite_texts_premultiplied_alpha(
     canvas: &mut PixelCanvas,
     texts: &[TextDrawCmd],
     scale: f32,
+    scroll_clip: Option<(usize, i32, i32)>,
 ) {
     if texts.is_empty() {
         return;
@@ -2614,8 +2615,14 @@ unsafe fn composite_texts_premultiplied_alpha(
         }
     }
 
+    canvas.reset_vertical_clip();
     let old_font = SelectObject(mask_dc, f_title);
-    for cmd in texts {
+    for (cmd_idx, cmd) in texts.iter().enumerate() {
+        if let Some((start_idx, cy0, cy1)) = scroll_clip {
+            if cmd_idx >= start_idx {
+                canvas.set_vertical_clip(cy0, cy1);
+            }
+        }
         if cmd.text.is_empty() || cmd.color.a == 0 {
             continue;
         }
@@ -2663,6 +2670,7 @@ unsafe fn composite_texts_premultiplied_alpha(
             }
         }
     }
+    canvas.reset_vertical_clip();
 
     SelectObject(mask_dc, old_font);
     DeleteObject(f_head);
@@ -2697,6 +2705,8 @@ unsafe fn render_panel_frame_dib(
     let mut base_texts: Vec<TextDrawCmd> = Vec::with_capacity(110);
     let mut overlay_texts: Vec<TextDrawCmd> = Vec::with_capacity(32);
 
+    let mut base_scroll_clip: Option<(usize, i32, i32)> = None;
+
     {
         let mut canvas = PixelCanvas::new(dib_pixels, w, h);
         if let Some(bg) = wallpaper_sim_bg {
@@ -2719,7 +2729,7 @@ unsafe fn render_panel_frame_dib(
                 layout_and_draw_main_view(&mut canvas, &mut base_texts, w, h, scale, &palette, st);
             }
             ActiveViewMode::Settings => {
-                layout_and_draw_settings_view(
+                base_scroll_clip = Some(layout_and_draw_settings_view(
                     &mut canvas,
                     &mut base_texts,
                     w,
@@ -2727,7 +2737,7 @@ unsafe fn render_panel_frame_dib(
                     scale,
                     &palette,
                     st,
-                );
+                ));
             }
         }
     }
@@ -2735,7 +2745,7 @@ unsafe fn render_panel_frame_dib(
     // 先将主视图/设置页文字以无黑边灰阶 Alpha 合成进画布
     {
         let mut canvas = PixelCanvas::new(dib_pixels, w, h);
-        composite_texts_premultiplied_alpha(hdc, &mut canvas, &base_texts, scale);
+        composite_texts_premultiplied_alpha(hdc, &mut canvas, &base_texts, scale, base_scroll_clip);
     }
 
     // 再叠加悬浮 Toast 灵动胶囊或原位速览浮层（确保浮层遮罩自然压暗下层正文！）
@@ -2774,7 +2784,7 @@ unsafe fn render_panel_frame_dib(
                 "已删除记录 · Ctrl+Z 可恢复",
             );
         }
-        composite_texts_premultiplied_alpha(hdc, &mut canvas, &overlay_texts, scale);
+        composite_texts_premultiplied_alpha(hdc, &mut canvas, &overlay_texts, scale, None);
     }
 
     let _ = GdiFlush();
@@ -4926,7 +4936,7 @@ fn layout_and_draw_settings_view(
     scale: f32,
     palette: &GlassPalette,
     st: &mut WinAppState,
-) {
+) -> (usize, i32, i32) {
     let s = |v: i32| ((v as f32) * scale).round() as i32;
     let sf = |v: f32| v * scale;
     let pad = s(14);
@@ -4989,20 +4999,23 @@ fn layout_and_draw_settings_view(
         flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
     });
 
-    let view_top = top_y + back_h + s(10);
+    let view_top = top_y + back_h + s(8);
     let view_bottom = h - s(10);
     let mut y = view_top - st.settings_scroll_px;
 
-    let visible_block =
-        |by: i32, bh: i32| -> bool { by >= view_top - s(6) && (by + bh) <= view_bottom + s(6) };
+    let scroll_text_start = texts.len();
+    let scroll_hit_start = st.hit_regions.len();
+    canvas.set_vertical_clip(view_top, view_bottom);
+
+    let visible_block = |by: i32, bh: i32| -> bool { (by + bh) > view_top && by < view_bottom };
 
     // ── 分组 1：液态玻璃（含 Tahoe 实景流光色带折射预览窗 + 三档微刻度滑杆）──
-    if visible_block(y, s(18)) {
-        draw_group_header(texts, pad, y, content_w, s(18), "液态玻璃", palette);
+    if visible_block(y, s(17)) {
+        draw_group_header(texts, pad, y, content_w, s(17), "液态玻璃", palette);
     }
-    y += s(22);
+    y += s(19);
 
-    let g1_h = s(196);
+    let g1_h = s(184);
     if visible_block(y, g1_h) {
         canvas.fill_round_rect(pad, y, content_w, g1_h, sf(14.0), palette.group_fill);
         canvas.stroke_round_rect(
@@ -5027,9 +5040,9 @@ fn layout_and_draw_settings_view(
             text: "背景模糊浓度".to_string(),
             rect: RECT {
                 left: pad + s(12),
-                top: y + s(9),
+                top: y + s(8),
                 right: pad + s(160),
-                bottom: y + s(30),
+                bottom: y + s(28),
             },
             color: palette.text_primary,
             font_kind: FontKind::CardTitle,
@@ -5039,20 +5052,20 @@ fn layout_and_draw_settings_view(
             text: stage_label,
             rect: RECT {
                 left: w - pad - s(140),
-                top: y + s(9),
+                top: y + s(8),
                 right: w - pad - s(12),
-                bottom: y + s(30),
+                bottom: y + s(28),
             },
             color: palette.text_secondary,
             font_kind: FontKind::Meta,
             flags: DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
         });
 
-        // 116px 实景流光色带折射预览舞台
+        // 112px 实景流光色带折射预览舞台
         let pv_x = pad + s(12);
-        let pv_y = y + s(34);
+        let pv_y = y + s(32);
         let pv_w = content_w - s(24);
-        let pv_h = s(116);
+        let pv_h = s(112);
         canvas.draw_scenic_liquid_glass_preview(
             pv_x,
             pv_y,
@@ -5082,7 +5095,7 @@ fn layout_and_draw_settings_view(
             text: "iClip 液态玻璃 · 实时背景柔焦预览".to_string(),
             rect: RECT {
                 left: pv_x + s(12),
-                top: pv_y + pv_h - s(25),
+                top: pv_y + pv_h - s(24),
                 right: pv_x + pv_w - s(12),
                 bottom: pv_y + pv_h,
             },
@@ -5092,7 +5105,7 @@ fn layout_and_draw_settings_view(
         });
 
         // 底部官方单轴滑块：左清透双叠方框 + 三档刻度滑杆 + 右磨砂双叠方框
-        let sl_row_y = pv_y + pv_h + s(10);
+        let sl_row_y = pv_y + pv_h + s(8);
         let gl_sz = s(18);
         let left_gx = pv_x;
         let right_gx = pv_x + pv_w - gl_sz;
@@ -5108,7 +5121,7 @@ fn layout_and_draw_settings_view(
                 left: left_gx - s(2),
                 top: sl_row_y,
                 right: left_gx + gl_sz + s(4),
-                bottom: sl_row_y + s(26),
+                bottom: sl_row_y + s(24),
             },
             interactive_cursor: true,
             action: HitAction::SetBlurPreset(8),
@@ -5126,7 +5139,7 @@ fn layout_and_draw_settings_view(
                 left: right_gx - s(4),
                 top: sl_row_y,
                 right: right_gx + gl_sz + s(2),
-                bottom: sl_row_y + s(26),
+                bottom: sl_row_y + s(24),
             },
             interactive_cursor: true,
             action: HitAction::SetBlurPreset(88),
@@ -5134,13 +5147,13 @@ fn layout_and_draw_settings_view(
 
         let track_x = left_gx + gl_sz + s(10);
         let track_w_sl = right_gx - s(10) - track_x;
-        canvas.draw_concentration_slider(track_x, sl_row_y, track_w_sl, s(26), pct, palette.cobalt);
+        canvas.draw_concentration_slider(track_x, sl_row_y, track_w_sl, s(24), pct, palette.cobalt);
         st.hit_regions.push(HitRegion {
             rect: RECT {
                 left: track_x - s(4),
                 top: sl_row_y - s(2),
                 right: track_x + track_w_sl + s(4),
-                bottom: sl_row_y + s(28),
+                bottom: sl_row_y + s(26),
             },
             interactive_cursor: true,
             action: HitAction::AdjustBlurConcentration {
@@ -5149,17 +5162,17 @@ fn layout_and_draw_settings_view(
             },
         });
     }
-    y += g1_h + s(14);
+    y += g1_h + s(12);
 
     // ── 分组 2：通用与快捷键（单张分组卡片 + 内部分割线，复刻 ClipboardPopoverView.swift:1435）──
-    if visible_block(y, s(18)) {
-        draw_group_header(texts, pad, y, content_w, s(18), "通用与快捷键", palette);
+    if visible_block(y, s(17)) {
+        draw_group_header(texts, pad, y, content_w, s(17), "通用与快捷键", palette);
     }
-    y += s(22);
+    y += s(19);
 
-    let row_h = s(46);
+    let row_h = s(42);
     let g2_rows = 6;
-    let g2_h = s(10) + row_h * g2_rows;
+    let g2_h = s(8) + row_h * g2_rows;
     if visible_block(y, g2_h) {
         canvas.fill_round_rect(pad, y, content_w, g2_h, sf(14.0), palette.group_fill);
         canvas.stroke_round_rect(
@@ -5825,9 +5838,26 @@ fn layout_and_draw_settings_view(
     }
     y += b_row_h + s(18);
 
+    canvas.reset_vertical_clip();
+
+    // 裁剪设置滚动区点击热区至视口范围，防止滚出视口外的隐形行误触顶栏
+    let mut clipped_hits = Vec::with_capacity(st.hit_regions.len());
+    for (idx, mut hit) in st.hit_regions.drain(..).enumerate() {
+        if idx >= scroll_hit_start {
+            hit.rect.top = hit.rect.top.max(view_top);
+            hit.rect.bottom = hit.rect.bottom.min(view_bottom);
+            if hit.rect.bottom <= hit.rect.top {
+                continue;
+            }
+        }
+        clipped_hits.push(hit);
+    }
+    st.hit_regions = clipped_hits;
+
     let total_content_h = (y + st.settings_scroll_px) - view_top;
     let visible_h = (view_bottom - view_top).max(1);
     st.settings_max_scroll_px = (total_content_h - visible_h).max(0);
+    (scroll_text_start, view_top, view_bottom)
 }
 
 fn draw_group_header(
