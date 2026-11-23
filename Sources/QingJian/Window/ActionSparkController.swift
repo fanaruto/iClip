@@ -407,6 +407,8 @@ final class ActionSparkController {
         let doneMsg: String
         if promoteToAuto {
             doneMsg = "已开启自动处理 · 直接 ⌘V"
+        } else if candidate.actionID == "todo-mark-item" || candidate.actionID == "todo-split-checklist" {
+            doneMsg = "✓ 已加入待办（⌥2 查看）"
         } else if triggeredByDoubleCopy && candidate.actionID != "habit-pin-frequent" {
             doneMsg = "已智变 · ⌘V 粘贴（再 ⌘C 还原）"
         } else {

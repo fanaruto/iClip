@@ -623,6 +623,19 @@ enum SemanticEngine {
         }
 
         if raw.utf8.count <= 32_768 && trimmed.contains("\n") && primaryKind != .json && primaryKind != .curlCommand && primaryKind != .pdfTypography {
+            if !item.isTodo {
+                let checklist = TodoChecklistExtractor.extractChecklistItems(from: raw)
+                if checklist.count >= 2 {
+                    actions.append(TransformAction(
+                        id: "todo-split-checklist",
+                        title: "拆为 \(checklist.count) 条待办",
+                        symbolName: "checklist",
+                        isSecurityAction: false,
+                        resultText: raw,
+                        toastText: "已拆解为 \(checklist.count) 条待办"
+                    ))
+                }
+            }
             let rawLines = raw.components(separatedBy: .newlines)
             let cleanItems = rawLines
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }

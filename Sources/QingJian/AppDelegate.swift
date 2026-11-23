@@ -144,6 +144,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(switchRoleItem)
 
         let store = ClipboardStore.shared
+        if !store.minimalModeEnabled {
+            let pendingCount = store.pendingTodoCount
+            let todoMenuTitle = pendingCount > 0 ? "打开待办清单（\(pendingCount) 项未完成）" : "打开待办清单（⌥2）"
+            let openTodoItem = NSMenuItem(title: todoMenuTitle, action: #selector(menuOpenTodoList), keyEquivalent: "")
+            openTodoItem.target = self
+            menu.addItem(openTodoItem)
+
+            let pinTodoItem = NSMenuItem(title: "钉住待办悬浮板（始终在前）", action: #selector(menuPinTodoBoard), keyEquivalent: "")
+            pinTodoItem.state = (store.alwaysOnTop && panelController.nav.selectedTab == .todo) ? .on : .off
+            pinTodoItem.target = self
+            menu.addItem(pinTodoItem)
+        }
+
         let alwaysOnTopItem = NSMenuItem(
             title: "窗口始终在前",
             action: #selector(menuToggleAlwaysOnTop),
@@ -186,6 +199,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func menuOpenPanel() {
         showFromStatusItem()
+    }
+
+    @objc private func menuOpenTodoList() {
+        let store = ClipboardStore.shared
+        if store.minimalModeEnabled {
+            store.minimalModeEnabled = false
+        }
+        panelController.nav.selectedTab = .todo
+        showFromStatusItem()
+    }
+
+    @objc private func menuPinTodoBoard() {
+        let store = ClipboardStore.shared
+        if store.minimalModeEnabled {
+            store.minimalModeEnabled = false
+        }
+        if !store.alwaysOnTop {
+            store.alwaysOnTop = true
+        }
+        panelController.nav.selectedTab = .todo
+        showFromStatusItem()
+        store.showToast("已钉住待办悬浮板（⌘P 可取消置顶）")
     }
 
     @objc private func menuOpenRoleSettings() {

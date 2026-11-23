@@ -8,6 +8,7 @@ import UniformTypeIdentifiers
 enum ClipDisplayRow: Identifiable {
     case standard(index: Int, item: ClipItem)
     case imageGrid(entries: [(index: Int, item: ClipItem)])
+    case todoCompletedHeader(count: Int)
 
     var id: String {
         switch self {
@@ -15,6 +16,8 @@ enum ClipDisplayRow: Identifiable {
             return "row-\(item.id.uuidString)"
         case .imageGrid(let entries):
             return "grid-\(entries.first?.item.id.uuidString ?? "empty")"
+        case .todoCompletedHeader:
+            return "todo-completed-section-header"
         }
     }
 }
@@ -43,6 +46,9 @@ final class PanelNavigationModel: ObservableObject {
     @Published var quickLookDraftText: String = ""
     @Published var demoPreviewIndex: Int? = nil
     @Published var isDragTargeted: Bool = false
+    /// Things 3 风格勾选驻留池：刚勾选完成的待办在原位停留 520ms 供视觉确认与随时撤回，随后平滑沉底
+    @Published var settlingCompletedTodoIDs: Set<UUID> = []
+    private var settlingWorkItems: [UUID: DispatchWorkItem] = [:]
     var suppressAutoHide: Bool = false
 
     private(set) var cachedFilteredItems: [ClipItem] = []
@@ -64,17 +70,48 @@ final class PanelNavigationModel: ObservableObject {
             }
             .store(in: &cancellables)
 
-        Publishers.Merge(
+        $settlingCompletedTodoIDs
+            .dropFirst()
+            .sink { [weak self] _ in
+                guard let self, let s = self.storeRef else { return }
+                self.rebuildCache(items: s.items, tab: self.selectedTab, pinCat: self.selectedPinCategory, query: self.searchText)
+            }
+            .store(in: &cancellables)
+
+        Publishers.Merge3(
             resolvedStore.$activeTargetAppName.dropFirst().map { _ in () },
+            resolvedStore.$minimalModeEnabled.dropFirst().map { _ in () },
             AdaptiveIntelligenceEngine.shared.$revision.dropFirst().map { _ in () }
         )
         .receive(on: RunLoop.main)
         .sink { [weak self] _ in
             guard let self, let s = self.storeRef else { return }
-            guard self.selectedTab == .pinned || !self.searchText.isEmpty else { return }
+            if s.minimalModeEnabled && self.selectedTab == .todo {
+                self.selectedTab = .all
+                return
+            }
             self.rebuildCache(items: s.items, tab: self.selectedTab, pinCat: self.selectedPinCategory, query: self.searchText)
         }
         .store(in: &cancellables)
+    }
+
+    func registerTodoCompletionSettle(for itemID: UUID, isNowCompleted: Bool) {
+        settlingWorkItems[itemID]?.cancel()
+        settlingWorkItems.removeValue(forKey: itemID)
+        if isNowCompleted {
+            settlingCompletedTodoIDs.insert(itemID)
+            let work = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.settlingWorkItems.removeValue(forKey: itemID)
+                withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
+                    _ = self.settlingCompletedTodoIDs.remove(itemID)
+                }
+            }
+            settlingWorkItems[itemID] = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.52, execute: work)
+        } else {
+            settlingCompletedTodoIDs.remove(itemID)
+        }
     }
 
     private func rebuildCache(items: [ClipItem], tab: ClipFilterTab, pinCat: PinCategory?, query: String) {
@@ -86,6 +123,7 @@ final class PanelNavigationModel: ObservableObject {
             let tabMatches: Bool
             switch tab {
             case .all: tabMatches = true
+            case .todo: tabMatches = item.isTodo
             case .pinned:
                 if let pinCat {
                     tabMatches = item.isPinned && item.pinCategory == pinCat
@@ -100,8 +138,23 @@ final class PanelNavigationModel: ObservableObject {
             return tabMatches && item.matches(query: effectiveQuery)
         }
 
+        let settling = self.settlingCompletedTodoIDs
         let filtered: [ClipItem]
-        if resolvedStore.minimalModeEnabled {
+        if tab == .todo {
+            filtered = rawMatched.sorted { lhs, rhs in
+                let lhsSunk = lhs.isTodoCompleted && !settling.contains(lhs.id)
+                let rhsSunk = rhs.isTodoCompleted && !settling.contains(rhs.id)
+                if lhsSunk != rhsSunk {
+                    return !lhsSunk
+                }
+                if lhsSunk {
+                    let ld = lhs.todoCompletedAt ?? lhs.createdAt
+                    let rd = rhs.todoCompletedAt ?? rhs.createdAt
+                    return ld > rd
+                }
+                return lhs.createdAt > rhs.createdAt
+            }
+        } else if resolvedStore.minimalModeEnabled {
             filtered = rawMatched
         } else if !effectiveQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             filtered = SmartSearchRanker.rankSearchResults(
@@ -121,11 +174,19 @@ final class PanelNavigationModel: ObservableObject {
         }
 
         var rows: [ClipDisplayRow] = []
-        rows.reserveCapacity(filtered.count)
+        rows.reserveCapacity(filtered.count + 1)
         var imageBuffer: [(index: Int, item: ClipItem)] = []
+        let sunkDoneCount = (tab == .todo) ? filtered.filter { $0.isTodoCompleted && !settling.contains($0.id) }.count : 0
+        var hasInsertedDoneHeader = false
 
         for (index, item) in filtered.enumerated() {
-            if item.type == .image {
+            if tab == .todo && !hasInsertedDoneHeader && sunkDoneCount > 0 && item.isTodoCompleted && !settling.contains(item.id) {
+                hasInsertedDoneHeader = true
+                if index > 0 {
+                    rows.append(.todoCompletedHeader(count: sunkDoneCount))
+                }
+            }
+            if item.type == .image && tab != .todo {
                 imageBuffer.append((index: index, item: item))
             } else {
                 if !imageBuffer.isEmpty {
@@ -142,7 +203,7 @@ final class PanelNavigationModel: ObservableObject {
         self.cachedFilteredItems = filtered
         self.cachedDisplayRows = rows
         self.cachedVisualRows = GridNavigationHelper.buildVisualRows(count: filtered.count, imageColumns: 3) {
-            filtered[$0].type == .image
+            tab != .todo && filtered[$0].type == .image
         }
     }
 
@@ -277,12 +338,20 @@ struct ClipboardPopoverView: View {
                             intent: capture,
                             onCommitDefault: {
                                 guard !capture.isEmptyBody else { return }
-                                store.captureQuickNote(body: capture.bodyText, alias: capture.customAlias, pin: capture.defaultPin)
+                                if capture.defaultTodo {
+                                    store.captureQuickTodo(body: capture.bodyText, alias: capture.customAlias, copyToClipboard: false)
+                                } else {
+                                    store.captureQuickNote(body: capture.bodyText, alias: capture.customAlias, pin: capture.defaultPin)
+                                }
                                 nav.searchText = ""
                             },
                             onCommitForcePin: {
                                 guard !capture.isEmptyBody else { return }
-                                store.captureQuickNote(body: capture.bodyText, alias: capture.customAlias, pin: true)
+                                if capture.defaultTodo {
+                                    store.captureQuickTodo(body: capture.bodyText, alias: capture.customAlias, copyToClipboard: true)
+                                } else {
+                                    store.captureQuickNote(body: capture.bodyText, alias: capture.customAlias, pin: true)
+                                }
                                 nav.searchText = ""
                             }
                         )
@@ -306,6 +375,20 @@ struct ClipboardPopoverView: View {
                         .padding(.horizontal, 14)
                         .padding(.bottom, 8)
                         .transition(.opacity.combined(with: .move(edge: .top)))
+                    } else if nav.selectedTab == .todo,
+                              !nav.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                              !nav.searchText.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("@") {
+                        todoInlineCreateBanner
+                            .padding(.horizontal, 14)
+                            .padding(.bottom, 8)
+                            .transition(.opacity.combined(with: .move(edge: .top)))
+                    }
+
+                    if !store.minimalModeEnabled && nav.selectedTab == .todo && (!filteredItems.isEmpty || store.completedTodoCount > 0) {
+                        todoSummaryBar
+                            .padding(.horizontal, 14)
+                            .padding(.bottom, 8)
+                            .transition(.opacity.combined(with: .move(edge: .top)))
                     }
 
                     if !store.minimalModeEnabled && nav.selectedTab == .pinned {
@@ -551,7 +634,10 @@ struct ClipboardPopoverView: View {
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(.secondary)
 
-                    TextField("搜索剪贴历史...", text: $nav.searchText)
+                    TextField(
+                        nav.selectedTab == .todo ? "搜索待办，或直接输入事项按 ↵ 新建..." : "搜索剪贴历史...",
+                        text: $nav.searchText
+                    )
                         .textFieldStyle(.plain)
                         .font(.system(size: 13.5))
                         .focused($isSearchFocused)
@@ -684,8 +770,9 @@ struct ClipboardPopoverView: View {
     // MARK: - iOS 滑动胶囊分类条（独立隔离渲染 + 常驻 GPU 硬件偏移滑块，120Hz 满帧零列表重绘干扰）
 
     private var filterBar: some View {
-        let tabs = ClipFilterTab.allCases
+        let tabs = ClipFilterTab.visibleTabs(minimalMode: store.minimalModeEnabled)
         let selectedIdx = tabs.firstIndex(of: nav.selectedTab) ?? 0
+        let pendingTodos = store.pendingTodoCount
 
         return GeometryReader { geo in
             let inset: CGFloat = 3
@@ -712,14 +799,22 @@ struct ClipboardPopoverView: View {
                             guard nav.selectedTab != tab else { return }
                             nav.selectedTab = tab
                         } label: {
-                            Text(tab.title)
-                                .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
-                                .foregroundStyle(isSelected ? Color.primary : Color.secondary)
-                                .frame(width: pillWidth, height: 28)
-                                .contentShape(Rectangle())
+                            HStack(spacing: 2.5) {
+                                Text(tab.title)
+                                    .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
+                                    .foregroundStyle(isSelected ? Color.primary : Color.secondary)
+                                if tab == .todo && pendingTodos > 0 {
+                                    Text("\(min(pendingTodos, 99))")
+                                        .font(.system(size: 10, weight: .bold))
+                                        .monospacedDigit()
+                                        .foregroundStyle(isSelected ? Color.accentColor : Color.accentColor.opacity(0.9))
+                                }
+                            }
+                            .frame(width: pillWidth, height: 28)
+                            .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        .help("\(tab.title)（\(tab.optionShortcutLabel)）")
+                        .help("\(tab.title)（\(tab.optionShortcutLabel(minimalMode: store.minimalModeEnabled))）")
                     }
                 }
                 .padding(.horizontal, inset)
@@ -735,6 +830,148 @@ struct ClipboardPopoverView: View {
             )
         }
         .frame(height: 34)
+    }
+
+    private var todoSummaryBar: some View {
+        let pending = store.pendingTodoCount
+        let done = store.completedTodoCount
+        return HStack(spacing: 6) {
+            Circle()
+                .fill(pending > 0 ? Color.accentColor : Color(red: 0.06, green: 0.72, blue: 0.51))
+                .frame(width: 6.5, height: 6.5)
+
+            Text(pending > 0 ? "待完成 \(pending) 项" : "待办已全部完成")
+                .font(.system(size: 11, weight: .semibold))
+                .monospacedDigit()
+                .foregroundStyle(pending > 0 ? Color.primary.opacity(0.88) : Color(red: 0.06, green: 0.72, blue: 0.51))
+
+            Text("· ⌘T 勾销 · ⌘P 钉桌面")
+                .font(.system(size: 10.5))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+
+            Spacer(minLength: 4)
+
+            if pending + done > 0 {
+                Button {
+                    _ = store.copyTodosAsMarkdownChecklist()
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: "list.clipboard")
+                            .font(.system(size: 9.5, weight: .semibold))
+                        Text("复制清单")
+                            .font(.system(size: 10.5, weight: .medium))
+                    }
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3.5)
+                    .background(Capsule().fill(Color.primary.opacity(0.06)))
+                }
+                .buttonStyle(.plain)
+                .help("导出为 Markdown 任务清单（- [ ] / - [x]），一键贴入周报或飞书")
+            }
+
+            if done > 0 {
+                Button {
+                    withAnimation(.spring(response: 0.24, dampingFraction: 0.85)) {
+                        _ = store.archiveCompletedTodos()
+                        clampSelection()
+                    }
+                } label: {
+                    Text("归档已完成 (\(done))")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .monospacedDigit()
+                        .foregroundStyle(Color.accentColor)
+                        .padding(.horizontal, 8.5)
+                        .padding(.vertical, 3.5)
+                        .background(Capsule().fill(Color.accentColor.opacity(0.11)))
+                }
+                .buttonStyle(.plain)
+                .help("将已完成事项移出待办清单（保留原剪贴记录）")
+            }
+        }
+    }
+
+    private var todoInlineCreateBanner: some View {
+        let trimmed = nav.searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let (alias, body) = QuickCaptureParser.splitAliasAndBody(trimmed)
+        let isEmptyMatch = filteredItems.isEmpty
+        return HStack(spacing: 8) {
+            Image(systemName: "plus.circle.fill")
+                .font(.system(size: 13.5, weight: .semibold))
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 22, height: 22)
+
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 4) {
+                    if let alias {
+                        Text(alias)
+                            .font(.system(size: 10.5, weight: .bold))
+                            .foregroundStyle(Color.accentColor)
+                        Text("·")
+                            .foregroundStyle(.secondary)
+                    }
+                    Text(body)
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                }
+                Text(isEmptyMatch ? "按 ↵ 直接新建为待办（保留当前剪贴板）" : "按 ⌘↵ 新建为待办（按 ↵ 粘贴下方匹配项）")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 4)
+
+            Button {
+                _ = commitEmptySearchCaptureIfApplicable(forcePin: false, allowNonEmptyMatchInTodo: true)
+            } label: {
+                Text(isEmptyMatch ? "新建 ↵" : "新建 ⌘↵")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4)
+                    .background(Capsule().fill(Color.accentColor))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .fill(Color.accentColor.opacity(0.09))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .strokeBorder(Color.accentColor.opacity(0.24), lineWidth: 0.65)
+        )
+    }
+
+    private func todoCompletedSectionHeader(count: Int) -> some View {
+        HStack(spacing: 7) {
+            Text("已完成 · \(count)")
+                .font(.system(size: 10.5, weight: .semibold))
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+            Rectangle()
+                .fill(Color.primary.opacity(0.08))
+                .frame(height: 0.75)
+            Button {
+                withAnimation(.spring(response: 0.24, dampingFraction: 0.85)) {
+                    _ = store.archiveCompletedTodos()
+                    clampSelection()
+                }
+            } label: {
+                Text("清空已完成")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 4)
+        .padding(.top, 4)
+        .padding(.bottom, 1)
     }
 
     private var pinCategoryBar: some View {
@@ -974,11 +1211,38 @@ struct ClipboardPopoverView: View {
                                         onEditAlias: {
                                             beginAliasEdit(for: item)
                                         },
+                                        onToggleTodo: {
+                                            let willComplete = item.isPendingTodo
+                                            if nav.selectedTab == .todo {
+                                                nav.registerTodoCompletionSettle(for: item.id, isNowCompleted: willComplete)
+                                            }
+                                            withAnimation(.spring(response: 0.26, dampingFraction: 0.84)) {
+                                                store.toggleTodo(item)
+                                            }
+                                        },
+                                        onToggleTodoCompletion: {
+                                            let willComplete = item.isPendingTodo
+                                            if nav.selectedTab == .todo {
+                                                nav.registerTodoCompletionSettle(for: item.id, isNowCompleted: willComplete)
+                                            }
+                                            withAnimation(.spring(response: 0.26, dampingFraction: 0.84)) {
+                                                store.toggleTodoCompletion(item)
+                                            }
+                                        },
+                                        onRemoveTodo: {
+                                            withAnimation(.spring(response: 0.24, dampingFraction: 0.85)) {
+                                                store.removeFromTodo(item)
+                                                clampSelection()
+                                            }
+                                        },
                                         onOpenQuickLook: {
                                             nav.selectedIndex = index
                                             withAnimation(.spring(response: 0.24, dampingFraction: 0.88)) {
                                                 nav.showQuickLook = true
                                             }
+                                        },
+                                        onImageThumbnailHover: { hovering, rect in
+                                            handleImageHover(item: item, hovering: hovering, tileRect: rect)
                                         },
                                         onDelete: {
                                             withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
@@ -1042,6 +1306,17 @@ struct ClipboardPopoverView: View {
                                                         store.togglePin(entry.item)
                                                     }
                                                 },
+                                                onToggleTodo: {
+                                                    withAnimation(.spring(response: 0.26, dampingFraction: 0.84)) {
+                                                        store.toggleTodo(entry.item)
+                                                    }
+                                                },
+                                                onRemoveTodo: {
+                                                    withAnimation(.spring(response: 0.24, dampingFraction: 0.85)) {
+                                                        store.removeFromTodo(entry.item)
+                                                        clampSelection()
+                                                    }
+                                                },
                                                 onEditAlias: {
                                                     beginAliasEdit(for: entry.item)
                                                 },
@@ -1073,6 +1348,9 @@ struct ClipboardPopoverView: View {
                                         }
                                     }
                                     .padding(.vertical, 2)
+
+                                case .todoCompletedHeader(let count):
+                                    todoCompletedSectionHeader(count: count)
                                 }
                             }
                         }
@@ -1093,23 +1371,28 @@ struct ClipboardPopoverView: View {
     }
 
     private var emptyStateView: some View {
-        VStack(spacing: 10) {
+        let isTodoTab = (nav.selectedTab == .todo)
+        return VStack(spacing: 10) {
             ZStack {
                 Circle()
                     .fill(Color.primary.opacity(0.05))
                     .frame(width: 64, height: 64)
-                Image(systemName: nav.searchText.isEmpty ? "clipboard" : "magnifyingglass")
+                Image(systemName: nav.searchText.isEmpty ? (isTodoTab ? "checkmark.circle" : "clipboard") : "magnifyingglass")
                     .font(.system(size: 26, weight: .light))
                     .foregroundStyle(.secondary)
             }
-            Text(nav.searchText.isEmpty ? "暂无剪贴记录" : "未找到匹配的内容")
+            Text(nav.searchText.isEmpty ? (isTodoTab ? "暂无待办事项" : "暂无剪贴记录") : "未找到匹配的内容")
                 .font(.system(size: 14, weight: .medium))
                 .foregroundStyle(.primary.opacity(0.8))
-            Text(nav.searchText.isEmpty ? "复制文本、链接、图片或文件后将自动出现在这里" : "试试更换关键词，或将上方输入直接沉淀为新剪贴记录")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 36)
+            Text(
+                nav.searchText.isEmpty
+                    ? (isTodoTab ? "对任意剪贴记录按 ⌘T 加入待办，或在上方输入 - 事项 回车速记" : "复制文本、链接、图片或文件后将自动出现在这里")
+                    : (isTodoTab ? "按回车将上方输入直接添加为新待办事项" : "试试更换关键词，或将上方输入直接沉淀为新剪贴记录")
+            )
+            .font(.system(size: 12))
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, 36)
 
             let trimmedSearch = nav.searchText.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmedSearch.isEmpty && !trimmedSearch.hasPrefix("@") {
@@ -1117,7 +1400,7 @@ struct ClipboardPopoverView: View {
                     Button {
                         _ = commitEmptySearchCaptureIfApplicable(forcePin: false)
                     } label: {
-                        Text("存为新记录 ⌘↵")
+                        Text(isTodoTab ? "新建待办 ↵" : "存为新记录 ⌘↵")
                             .font(.system(size: 11.5, weight: .semibold))
                             .foregroundStyle(.white)
                             .padding(.horizontal, 11)
@@ -1126,17 +1409,19 @@ struct ClipboardPopoverView: View {
                     }
                     .buttonStyle(.plain)
 
-                    Button {
-                        _ = commitEmptySearchCaptureIfApplicable(forcePin: true)
-                    } label: {
-                        Text("直接收藏 ⇧⌘↵")
-                            .font(.system(size: 11.5, weight: .semibold))
-                            .foregroundStyle(Color.orange)
-                            .padding(.horizontal, 11)
-                            .padding(.vertical, 5.5)
-                            .background(Capsule().fill(Color.orange.opacity(0.14)))
+                    if !isTodoTab {
+                        Button {
+                            _ = commitEmptySearchCaptureIfApplicable(forcePin: true)
+                        } label: {
+                            Text("直接收藏 ⇧⌘↵")
+                                .font(.system(size: 11.5, weight: .semibold))
+                                .foregroundStyle(Color.orange)
+                                .padding(.horizontal, 11)
+                                .padding(.vertical, 5.5)
+                                .background(Capsule().fill(Color.orange.opacity(0.14)))
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
                 .padding(.top, 4)
             }
@@ -1896,7 +2181,7 @@ struct ClipboardPopoverView: View {
     }
 
     func stepFilterTab(delta: Int) {
-        let tabs = ClipFilterTab.allCases
+        let tabs = ClipFilterTab.visibleTabs(minimalMode: store.minimalModeEnabled)
         guard let currentIdx = tabs.firstIndex(of: nav.selectedTab) else { return }
         let nextIdx = (currentIdx + delta + tabs.count) % tabs.count
         selectFilterTab(tabs[nextIdx])
@@ -1969,8 +2254,15 @@ struct ClipboardPopoverView: View {
         }
         if let capture = QuickCaptureParser.parse(from: nav.searchText) {
             guard !capture.isEmptyBody else { return }
-            store.captureQuickNote(body: capture.bodyText, alias: capture.customAlias, pin: capture.defaultPin)
+            if capture.defaultTodo {
+                store.captureQuickTodo(body: capture.bodyText, alias: capture.customAlias, copyToClipboard: false)
+            } else {
+                store.captureQuickNote(body: capture.bodyText, alias: capture.customAlias, pin: capture.defaultPin)
+            }
             nav.searchText = ""
+            return
+        }
+        if nav.selectedTab == .todo && filteredItems.isEmpty && commitEmptySearchCaptureIfApplicable(forcePin: false) {
             return
         }
         if let math = InstantMathEvaluator.evaluate(nav.searchText, latestClipboardText: store.items.first?.text),
@@ -2072,13 +2364,18 @@ struct ClipboardPopoverView: View {
     }
 
     @discardableResult
-    func commitEmptySearchCaptureIfApplicable(forcePin: Bool) -> Bool {
-        guard filteredItems.isEmpty else { return false }
+    func commitEmptySearchCaptureIfApplicable(forcePin: Bool, allowNonEmptyMatchInTodo: Bool = true) -> Bool {
+        let canProceed = filteredItems.isEmpty || (allowNonEmptyMatchInTodo && nav.selectedTab == .todo && !forcePin)
+        guard canProceed else { return false }
         let trimmed = nav.searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !trimmed.hasPrefix("@") else { return false }
         let (alias, body) = QuickCaptureParser.splitAliasAndBody(trimmed)
         guard !body.isEmpty else { return false }
-        store.captureQuickNote(body: body, alias: alias, pin: forcePin || (alias != nil))
+        if nav.selectedTab == .todo && !forcePin {
+            store.captureQuickTodo(body: body, alias: alias, copyToClipboard: false)
+        } else {
+            store.captureQuickNote(body: body, alias: alias, pin: forcePin || (alias != nil))
+        }
         nav.searchText = ""
         return true
     }
@@ -2139,7 +2436,11 @@ struct ClipboardPopoverView: View {
     func pasteSecondaryActionForSelected() {
         if let capture = QuickCaptureParser.parse(from: nav.searchText) {
             guard !capture.isEmptyBody else { return }
-            store.captureQuickNote(body: capture.bodyText, alias: capture.customAlias, pin: true)
+            if capture.defaultTodo {
+                store.captureQuickTodo(body: capture.bodyText, alias: capture.customAlias, copyToClipboard: true)
+            } else {
+                store.captureQuickNote(body: capture.bodyText, alias: capture.customAlias, pin: true)
+            }
             nav.searchText = ""
             return
         }
@@ -2194,6 +2495,29 @@ struct ClipboardPopoverView: View {
         withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
             store.togglePin(item)
         }
+    }
+
+    func toggleTodoForSelected() {
+        guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return }
+        let item = filteredItems[nav.selectedIndex]
+        let willComplete = item.isPendingTodo
+        if nav.selectedTab == .todo {
+            nav.registerTodoCompletionSettle(for: item.id, isNowCompleted: willComplete)
+        }
+        withAnimation(.spring(response: 0.26, dampingFraction: 0.84)) {
+            store.toggleTodo(item)
+        }
+    }
+
+    @discardableResult
+    func pasteAndCompleteTodoIfApplicable() -> Bool {
+        guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return false }
+        let item = filteredItems[nav.selectedIndex]
+        guard item.isPendingTodo else { return false }
+        store.markTodoCompletedSilently(item)
+        store.copyAndOptionallyPaste(item, plainTextOnly: false, shouldAutoPaste: true, onBeforePaste: onDismiss)
+        store.showToast("✓ 已键入并完成待办")
+        return true
     }
 
     func deleteSelected() {
@@ -2343,6 +2667,7 @@ import UniformTypeIdentifiers
 enum ClipDisplayRow: Identifiable {
     case standard(index: Int, item: ClipItem)
     case imageGrid(entries: [(index: Int, item: ClipItem)])
+    case todoCompletedHeader(count: Int)
 
     var id: String {
         switch self {
@@ -2350,6 +2675,8 @@ enum ClipDisplayRow: Identifiable {
             return "row-\(item.id.uuidString)"
         case .imageGrid(let entries):
             return "grid-\(entries.first?.item.id.uuidString ?? "empty")"
+        case .todoCompletedHeader:
+            return "todo-completed-section-header"
         }
     }
 }
@@ -2377,6 +2704,8 @@ final class PanelNavigationModel: ObservableObject {
     @Published var isCreatingTemplate: Bool = false
     @Published var demoPreviewIndex: Int? = nil
     @Published var isDragTargeted: Bool = false
+    @Published var settlingCompletedTodoIDs: Set<UUID> = []
+    private var settlingWorkItems: [UUID: DispatchWorkItem] = [:]
     var suppressAutoHide: Bool = false
 
     private(set) var cachedFilteredItems: [ClipItem] = []
@@ -2398,17 +2727,48 @@ final class PanelNavigationModel: ObservableObject {
             }
             .store(in: &cancellables)
 
-        Publishers.Merge(
+        $settlingCompletedTodoIDs
+            .dropFirst()
+            .sink { [weak self] _ in
+                guard let self, let s = self.storeRef else { return }
+                self.rebuildCache(items: s.items, tab: self.selectedTab, query: self.searchText)
+            }
+            .store(in: &cancellables)
+
+        Publishers.Merge3(
             resolvedStore.$activeTargetAppName.dropFirst().map { _ in () },
+            resolvedStore.$minimalModeEnabled.dropFirst().map { _ in () },
             AdaptiveIntelligenceEngine.shared.$revision.dropFirst().map { _ in () }
         )
         .receive(on: RunLoop.main)
         .sink { [weak self] _ in
             guard let self, let s = self.storeRef else { return }
-            guard self.selectedTab == .pinned || !self.searchText.isEmpty else { return }
+            if s.minimalModeEnabled && self.selectedTab == .todo {
+                self.selectedTab = .all
+                return
+            }
             self.rebuildCache(items: s.items, tab: self.selectedTab, query: self.searchText)
         }
         .store(in: &cancellables)
+    }
+
+    func registerTodoCompletionSettle(for itemID: UUID, isNowCompleted: Bool) {
+        settlingWorkItems[itemID]?.cancel()
+        settlingWorkItems.removeValue(forKey: itemID)
+        if isNowCompleted {
+            settlingCompletedTodoIDs.insert(itemID)
+            let work = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.settlingWorkItems.removeValue(forKey: itemID)
+                withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
+                    _ = self.settlingCompletedTodoIDs.remove(itemID)
+                }
+            }
+            settlingWorkItems[itemID] = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.52, execute: work)
+        } else {
+            settlingCompletedTodoIDs.remove(itemID)
+        }
     }
 
     private func rebuildCache(items: [ClipItem], tab: ClipFilterTab, query: String) {
@@ -2433,6 +2793,7 @@ final class PanelNavigationModel: ObservableObject {
             let tabMatches: Bool
             switch tab {
             case .all: tabMatches = true
+            case .todo: tabMatches = item.isTodo
             case .pinned: tabMatches = item.isPinned
             case .text: tabMatches = item.type == .text
             case .link: tabMatches = item.type == .link
@@ -2447,8 +2808,23 @@ final class PanelNavigationModel: ObservableObject {
             return item.matches(query: textQuery)
         }
 
+        let settling = self.settlingCompletedTodoIDs
         let filtered: [ClipItem]
-        if resolvedStore.minimalModeEnabled {
+        if tab == .todo {
+            filtered = rawMatched.sorted { lhs, rhs in
+                let lhsSunk = lhs.isTodoCompleted && !settling.contains(lhs.id)
+                let rhsSunk = rhs.isTodoCompleted && !settling.contains(rhs.id)
+                if lhsSunk != rhsSunk {
+                    return !lhsSunk
+                }
+                if lhsSunk {
+                    let ld = lhs.todoCompletedAt ?? lhs.createdAt
+                    let rd = rhs.todoCompletedAt ?? rhs.createdAt
+                    return ld > rd
+                }
+                return lhs.createdAt > rhs.createdAt
+            }
+        } else if resolvedStore.minimalModeEnabled {
             filtered = rawMatched
         } else if !textQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             filtered = SmartSearchRanker.rankSearchResults(
@@ -2468,11 +2844,19 @@ final class PanelNavigationModel: ObservableObject {
         }
 
         var rows: [ClipDisplayRow] = []
-        rows.reserveCapacity(filtered.count)
+        rows.reserveCapacity(filtered.count + 1)
         var imageBuffer: [(index: Int, item: ClipItem)] = []
+        let sunkDoneCount = (tab == .todo) ? filtered.filter { $0.isTodoCompleted && !settling.contains($0.id) }.count : 0
+        var hasInsertedDoneHeader = false
 
         for (index, item) in filtered.enumerated() {
-            if item.type == .image {
+            if tab == .todo && !hasInsertedDoneHeader && sunkDoneCount > 0 && item.isTodoCompleted && !settling.contains(item.id) {
+                hasInsertedDoneHeader = true
+                if index > 0 {
+                    rows.append(.todoCompletedHeader(count: sunkDoneCount))
+                }
+            }
+            if item.type == .image && tab != .todo {
                 imageBuffer.append((index: index, item: item))
             } else {
                 if !imageBuffer.isEmpty {
@@ -2489,7 +2873,7 @@ final class PanelNavigationModel: ObservableObject {
         self.cachedFilteredItems = filtered
         self.cachedDisplayRows = rows
         self.cachedVisualRows = GridNavigationHelper.buildVisualRows(count: filtered.count, imageColumns: 3) {
-            filtered[$0].type == .image
+            tab != .todo && filtered[$0].type == .image
         }
     }
 
@@ -2625,12 +3009,20 @@ struct ClipboardPopoverView: View {
                             intent: capture,
                             onCommitDefault: {
                                 guard !capture.isEmptyBody else { return }
-                                store.captureQuickNote(body: capture.bodyText, alias: capture.customAlias, pin: capture.defaultPin)
+                                if capture.defaultTodo {
+                                    store.captureQuickTodo(body: capture.bodyText, alias: capture.customAlias, copyToClipboard: false)
+                                } else {
+                                    store.captureQuickNote(body: capture.bodyText, alias: capture.customAlias, pin: capture.defaultPin)
+                                }
                                 nav.searchText = ""
                             },
                             onCommitForcePin: {
                                 guard !capture.isEmptyBody else { return }
-                                store.captureQuickNote(body: capture.bodyText, alias: capture.customAlias, pin: true)
+                                if capture.defaultTodo {
+                                    store.captureQuickTodo(body: capture.bodyText, alias: capture.customAlias, copyToClipboard: true)
+                                } else {
+                                    store.captureQuickNote(body: capture.bodyText, alias: capture.customAlias, pin: true)
+                                }
                                 nav.searchText = ""
                             }
                         )
@@ -2656,6 +3048,19 @@ struct ClipboardPopoverView: View {
                         .transition(.opacity.combined(with: .move(edge: .top)))
                     } else if !store.minimalModeEnabled && nav.searchText.trimmingCharacters(in: .whitespaces).hasPrefix("@") {
                         semanticTokenHintBar
+                            .padding(.horizontal, 14)
+                            .padding(.bottom, 8)
+                            .transition(.opacity.combined(with: .move(edge: .top)))
+                    } else if nav.selectedTab == .todo,
+                              !nav.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        todoInlineCreateBanner
+                            .padding(.horizontal, 14)
+                            .padding(.bottom, 8)
+                            .transition(.opacity.combined(with: .move(edge: .top)))
+                    }
+
+                    if !store.minimalModeEnabled && nav.selectedTab == .todo && (!filteredItems.isEmpty || store.completedTodoCount > 0) {
+                        todoSummaryBar
                             .padding(.horizontal, 14)
                             .padding(.bottom, 8)
                             .transition(.opacity.combined(with: .move(edge: .top)))
@@ -2888,7 +3293,12 @@ struct ClipboardPopoverView: View {
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(.secondary)
 
-                    TextField(store.minimalModeEnabled ? "搜索剪贴历史..." : "搜索历史或输入 @rmb @json @secret...", text: $nav.searchText)
+                    TextField(
+                        nav.selectedTab == .todo
+                            ? "搜索待办，或直接输入事项按 ↵ 新建..."
+                            : (store.minimalModeEnabled ? "搜索剪贴历史..." : "搜索历史或输入 @rmb @json @secret..."),
+                        text: $nav.searchText
+                    )
                         .textFieldStyle(.plain)
                         .font(.system(size: 13.5))
                         .focused($isSearchFocused)
@@ -2989,8 +3399,9 @@ struct ClipboardPopoverView: View {
     // MARK: - iOS 滑动胶囊分类条（独立隔离渲染 + 常驻 GPU 硬件偏移滑块，120Hz 满帧零列表重绘干扰）
 
     private var filterBar: some View {
-        let tabs = ClipFilterTab.allCases
+        let tabs = ClipFilterTab.visibleTabs(minimalMode: store.minimalModeEnabled)
         let selectedIdx = tabs.firstIndex(of: nav.selectedTab) ?? 0
+        let pendingTodos = store.pendingTodoCount
 
         return GeometryReader { geo in
             let inset: CGFloat = 3
@@ -3017,14 +3428,22 @@ struct ClipboardPopoverView: View {
                             guard nav.selectedTab != tab else { return }
                             nav.selectedTab = tab
                         } label: {
-                            Text(tab.title)
-                                .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
-                                .foregroundStyle(isSelected ? Color.primary : Color.secondary)
-                                .frame(width: pillWidth, height: 28)
-                                .contentShape(Rectangle())
+                            HStack(spacing: 2.5) {
+                                Text(tab.title)
+                                    .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
+                                    .foregroundStyle(isSelected ? Color.primary : Color.secondary)
+                                if tab == .todo && pendingTodos > 0 {
+                                    Text("\(min(pendingTodos, 99))")
+                                        .font(.system(size: 10, weight: .bold))
+                                        .monospacedDigit()
+                                        .foregroundStyle(isSelected ? Color.accentColor : Color.accentColor.opacity(0.9))
+                                }
+                            }
+                            .frame(width: pillWidth, height: 28)
+                            .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        .help("\(tab.title)（\(tab.optionShortcutLabel)）")
+                        .help("\(tab.title)（\(tab.optionShortcutLabel(minimalMode: store.minimalModeEnabled))）")
                     }
                 }
                 .padding(.horizontal, inset)
@@ -3040,6 +3459,148 @@ struct ClipboardPopoverView: View {
             )
         }
         .frame(height: 34)
+    }
+
+    private var todoSummaryBar: some View {
+        let pending = store.pendingTodoCount
+        let done = store.completedTodoCount
+        return HStack(spacing: 6) {
+            Circle()
+                .fill(pending > 0 ? Color.accentColor : Color(red: 0.06, green: 0.72, blue: 0.51))
+                .frame(width: 6.5, height: 6.5)
+
+            Text(pending > 0 ? "待完成 \(pending) 项" : "待办已全部完成")
+                .font(.system(size: 11, weight: .semibold))
+                .monospacedDigit()
+                .foregroundStyle(pending > 0 ? Color.primary.opacity(0.88) : Color(red: 0.06, green: 0.72, blue: 0.51))
+
+            Text("· ⌘T 勾销 · ⌘P 钉桌面")
+                .font(.system(size: 10.5))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+
+            Spacer(minLength: 4)
+
+            if pending + done > 0 {
+                Button {
+                    _ = store.copyTodosAsMarkdownChecklist()
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: "list.clipboard")
+                            .font(.system(size: 9.5, weight: .semibold))
+                        Text("复制清单")
+                            .font(.system(size: 10.5, weight: .medium))
+                    }
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3.5)
+                    .background(Capsule().fill(Color.primary.opacity(0.06)))
+                }
+                .buttonStyle(.plain)
+                .help("导出为 Markdown 任务清单（- [ ] / - [x]），一键贴入周报或飞书")
+            }
+
+            if done > 0 {
+                Button {
+                    withAnimation(.spring(response: 0.24, dampingFraction: 0.85)) {
+                        _ = store.archiveCompletedTodos()
+                        clampSelection()
+                    }
+                } label: {
+                    Text("归档已完成 (\(done))")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .monospacedDigit()
+                        .foregroundStyle(Color.accentColor)
+                        .padding(.horizontal, 8.5)
+                        .padding(.vertical, 3.5)
+                        .background(Capsule().fill(Color.accentColor.opacity(0.11)))
+                }
+                .buttonStyle(.plain)
+                .help("将已完成事项移出待办清单（保留原剪贴记录）")
+            }
+        }
+    }
+
+    private var todoInlineCreateBanner: some View {
+        let trimmed = nav.searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let (alias, body) = QuickCaptureParser.splitAliasAndBody(trimmed)
+        let isEmptyMatch = filteredItems.isEmpty
+        return HStack(spacing: 8) {
+            Image(systemName: "plus.circle.fill")
+                .font(.system(size: 13.5, weight: .semibold))
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 22, height: 22)
+
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 4) {
+                    if let alias {
+                        Text(alias)
+                            .font(.system(size: 10.5, weight: .bold))
+                            .foregroundStyle(Color.accentColor)
+                        Text("·")
+                            .foregroundStyle(.secondary)
+                    }
+                    Text(body)
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                }
+                Text(isEmptyMatch ? "按 ↵ 直接新建为待办（保留当前剪贴板）" : "按 ⌘↵ 新建为待办（按 ↵ 粘贴下方匹配项）")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 4)
+
+            Button {
+                _ = commitEmptySearchCaptureIfApplicable(forcePin: false, allowNonEmptyMatchInTodo: true)
+            } label: {
+                Text(isEmptyMatch ? "新建 ↵" : "新建 ⌘↵")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4)
+                    .background(Capsule().fill(Color.accentColor))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .fill(Color.accentColor.opacity(0.09))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .strokeBorder(Color.accentColor.opacity(0.24), lineWidth: 0.65)
+        )
+    }
+
+    private func todoCompletedSectionHeader(count: Int) -> some View {
+        HStack(spacing: 7) {
+            Text("已完成 · \(count)")
+                .font(.system(size: 10.5, weight: .semibold))
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+            Rectangle()
+                .fill(Color.primary.opacity(0.08))
+                .frame(height: 0.75)
+            Button {
+                withAnimation(.spring(response: 0.24, dampingFraction: 0.85)) {
+                    _ = store.archiveCompletedTodos()
+                    clampSelection()
+                }
+            } label: {
+                Text("清空已完成")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 4)
+        .padding(.top, 4)
+        .padding(.bottom, 1)
     }
 
     private var semanticTokenHintBar: some View {
@@ -3268,11 +3829,38 @@ struct ClipboardPopoverView: View {
                                         onEditAlias: {
                                             beginAliasEdit(for: item)
                                         },
+                                        onToggleTodo: {
+                                            let willComplete = item.isPendingTodo
+                                            if nav.selectedTab == .todo {
+                                                nav.registerTodoCompletionSettle(for: item.id, isNowCompleted: willComplete)
+                                            }
+                                            withAnimation(.spring(response: 0.26, dampingFraction: 0.84)) {
+                                                store.toggleTodo(item)
+                                            }
+                                        },
+                                        onToggleTodoCompletion: {
+                                            let willComplete = item.isPendingTodo
+                                            if nav.selectedTab == .todo {
+                                                nav.registerTodoCompletionSettle(for: item.id, isNowCompleted: willComplete)
+                                            }
+                                            withAnimation(.spring(response: 0.26, dampingFraction: 0.84)) {
+                                                store.toggleTodoCompletion(item)
+                                            }
+                                        },
+                                        onRemoveTodo: {
+                                            withAnimation(.spring(response: 0.24, dampingFraction: 0.85)) {
+                                                store.removeFromTodo(item)
+                                                clampSelection()
+                                            }
+                                        },
                                         onOpenQuickLook: {
                                             nav.selectedIndex = index
                                             withAnimation(.spring(response: 0.24, dampingFraction: 0.88)) {
                                                 nav.showQuickLook = true
                                             }
+                                        },
+                                        onImageThumbnailHover: { hovering, rect in
+                                            handleImageHover(item: item, hovering: hovering, tileRect: rect)
                                         },
                                         onDelete: {
                                             withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
@@ -3330,6 +3918,17 @@ struct ClipboardPopoverView: View {
                                                         store.togglePin(entry.item)
                                                     }
                                                 },
+                                                onToggleTodo: {
+                                                    withAnimation(.spring(response: 0.26, dampingFraction: 0.84)) {
+                                                        store.toggleTodo(entry.item)
+                                                    }
+                                                },
+                                                onRemoveTodo: {
+                                                    withAnimation(.spring(response: 0.24, dampingFraction: 0.85)) {
+                                                        store.removeFromTodo(entry.item)
+                                                        clampSelection()
+                                                    }
+                                                },
                                                 onEditAlias: {
                                                     beginAliasEdit(for: entry.item)
                                                 },
@@ -3361,6 +3960,9 @@ struct ClipboardPopoverView: View {
                                         }
                                     }
                                     .padding(.vertical, 2)
+
+                                case .todoCompletedHeader(let count):
+                                    todoCompletedSectionHeader(count: count)
                                 }
                             }
                         }
@@ -3381,23 +3983,28 @@ struct ClipboardPopoverView: View {
     }
 
     private var emptyStateView: some View {
-        VStack(spacing: 10) {
+        let isTodoTab = (nav.selectedTab == .todo)
+        return VStack(spacing: 10) {
             ZStack {
                 Circle()
                     .fill(Color.primary.opacity(0.05))
                     .frame(width: 64, height: 64)
-                Image(systemName: nav.searchText.isEmpty ? "clipboard" : "magnifyingglass")
+                Image(systemName: nav.searchText.isEmpty ? (isTodoTab ? "checkmark.circle" : "clipboard") : "magnifyingglass")
                     .font(.system(size: 26, weight: .light))
                     .foregroundStyle(.secondary)
             }
-            Text(nav.searchText.isEmpty ? "暂无剪贴记录" : "未找到匹配的内容")
+            Text(nav.searchText.isEmpty ? (isTodoTab ? "暂无待办事项" : "暂无剪贴记录") : "未找到匹配的内容")
                 .font(.system(size: 14, weight: .medium))
                 .foregroundStyle(.primary.opacity(0.8))
-            Text(nav.searchText.isEmpty ? "复制文本、链接、图片或文件后将自动出现在这里" : "试试更换关键词，或将上方输入直接沉淀为新剪贴记录")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 36)
+            Text(
+                nav.searchText.isEmpty
+                    ? (isTodoTab ? "对任意剪贴记录按 ⌘T 加入待办，或在上方输入 - 事项 回车速记" : "复制文本、链接、图片或文件后将自动出现在这里")
+                    : (isTodoTab ? "按回车将上方输入直接添加为新待办事项" : "试试更换关键词，或将上方输入直接沉淀为新剪贴记录")
+            )
+            .font(.system(size: 12))
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, 36)
 
             let trimmedSearch = nav.searchText.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmedSearch.isEmpty && !trimmedSearch.hasPrefix("@") {
@@ -3405,7 +4012,7 @@ struct ClipboardPopoverView: View {
                     Button {
                         _ = commitEmptySearchCaptureIfApplicable(forcePin: false)
                     } label: {
-                        Text("存为新记录 ⌘↵")
+                        Text(isTodoTab ? "新建待办 ↵" : "存为新记录 ⌘↵")
                             .font(.system(size: 11.5, weight: .semibold))
                             .foregroundStyle(.white)
                             .padding(.horizontal, 11)
@@ -3414,17 +4021,19 @@ struct ClipboardPopoverView: View {
                     }
                     .buttonStyle(.plain)
 
-                    Button {
-                        _ = commitEmptySearchCaptureIfApplicable(forcePin: true)
-                    } label: {
-                        Text("直接收藏 ⇧⌘↵")
-                            .font(.system(size: 11.5, weight: .semibold))
-                            .foregroundStyle(Color.orange)
-                            .padding(.horizontal, 11)
-                            .padding(.vertical, 5.5)
-                            .background(Capsule().fill(Color.orange.opacity(0.14)))
+                    if !isTodoTab {
+                        Button {
+                            _ = commitEmptySearchCaptureIfApplicable(forcePin: true)
+                        } label: {
+                            Text("直接收藏 ⇧⌘↵")
+                                .font(.system(size: 11.5, weight: .semibold))
+                                .foregroundStyle(Color.orange)
+                                .padding(.horizontal, 11)
+                                .padding(.vertical, 5.5)
+                                .background(Capsule().fill(Color.orange.opacity(0.14)))
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
                 .padding(.top, 4)
             }
@@ -4068,7 +4677,7 @@ struct ClipboardPopoverView: View {
     }
 
     func stepFilterTab(delta: Int) {
-        let tabs = ClipFilterTab.allCases
+        let tabs = ClipFilterTab.visibleTabs(minimalMode: store.minimalModeEnabled)
         guard let currentIdx = tabs.firstIndex(of: nav.selectedTab) else { return }
         let nextIdx = (currentIdx + delta + tabs.count) % tabs.count
         selectFilterTab(tabs[nextIdx])
@@ -4120,8 +4729,15 @@ struct ClipboardPopoverView: View {
         }
         if let capture = QuickCaptureParser.parse(from: nav.searchText) {
             guard !capture.isEmptyBody else { return }
-            store.captureQuickNote(body: capture.bodyText, alias: capture.customAlias, pin: capture.defaultPin)
+            if capture.defaultTodo {
+                store.captureQuickTodo(body: capture.bodyText, alias: capture.customAlias, copyToClipboard: false)
+            } else {
+                store.captureQuickNote(body: capture.bodyText, alias: capture.customAlias, pin: capture.defaultPin)
+            }
             nav.searchText = ""
+            return
+        }
+        if nav.selectedTab == .todo && filteredItems.isEmpty && commitEmptySearchCaptureIfApplicable(forcePin: false) {
             return
         }
         if let math = InstantMathEvaluator.evaluate(nav.searchText, latestClipboardText: store.items.first?.text),
@@ -4234,13 +4850,18 @@ struct ClipboardPopoverView: View {
     }
 
     @discardableResult
-    func commitEmptySearchCaptureIfApplicable(forcePin: Bool) -> Bool {
-        guard filteredItems.isEmpty else { return false }
+    func commitEmptySearchCaptureIfApplicable(forcePin: Bool, allowNonEmptyMatchInTodo: Bool = true) -> Bool {
+        let canProceed = filteredItems.isEmpty || (allowNonEmptyMatchInTodo && nav.selectedTab == .todo && !forcePin)
+        guard canProceed else { return false }
         let trimmed = nav.searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !trimmed.hasPrefix("@") else { return false }
         let (alias, body) = QuickCaptureParser.splitAliasAndBody(trimmed)
         guard !body.isEmpty else { return false }
-        store.captureQuickNote(body: body, alias: alias, pin: forcePin || (alias != nil))
+        if nav.selectedTab == .todo && !forcePin {
+            store.captureQuickTodo(body: body, alias: alias, copyToClipboard: false)
+        } else {
+            store.captureQuickNote(body: body, alias: alias, pin: forcePin || (alias != nil))
+        }
         nav.searchText = ""
         return true
     }
@@ -4309,7 +4930,11 @@ struct ClipboardPopoverView: View {
     func pasteSmartTransformedSelected() {
         if let capture = QuickCaptureParser.parse(from: nav.searchText) {
             guard !capture.isEmptyBody else { return }
-            store.captureQuickNote(body: capture.bodyText, alias: capture.customAlias, pin: true)
+            if capture.defaultTodo {
+                store.captureQuickTodo(body: capture.bodyText, alias: capture.customAlias, copyToClipboard: true)
+            } else {
+                store.captureQuickNote(body: capture.bodyText, alias: capture.customAlias, pin: true)
+            }
             nav.searchText = ""
             return
         }
@@ -4352,6 +4977,29 @@ struct ClipboardPopoverView: View {
         withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
             store.togglePin(item)
         }
+    }
+
+    func toggleTodoForSelected() {
+        guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return }
+        let item = filteredItems[nav.selectedIndex]
+        let willComplete = item.isPendingTodo
+        if nav.selectedTab == .todo {
+            nav.registerTodoCompletionSettle(for: item.id, isNowCompleted: willComplete)
+        }
+        withAnimation(.spring(response: 0.26, dampingFraction: 0.84)) {
+            store.toggleTodo(item)
+        }
+    }
+
+    @discardableResult
+    func pasteAndCompleteTodoIfApplicable() -> Bool {
+        guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return false }
+        let item = filteredItems[nav.selectedIndex]
+        guard item.isPendingTodo else { return false }
+        store.markTodoCompletedSilently(item)
+        store.copyAndOptionallyPaste(item, plainTextOnly: false, shouldAutoPaste: true, onBeforePaste: onDismiss)
+        store.showToast("✓ 已键入并完成待办")
+        return true
     }
 
     func deleteSelected() {

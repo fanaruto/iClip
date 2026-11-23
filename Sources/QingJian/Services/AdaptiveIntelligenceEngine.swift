@@ -89,6 +89,8 @@ struct AdaptiveSparkCandidate: Equatable {
         case mockupImage(itemID: UUID)
         case extractImageOCR(itemID: UUID)
         case pinFrequentItem(itemID: UUID)
+        case markAsTodo(itemID: UUID)
+        case splitChecklistIntoTodos(itemID: UUID)
     }
 
     let actionID: String
@@ -664,26 +666,54 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
         #if !ICLIP_EDITION_FLOW
         let snap = SemanticEngine.analyze(item)
         let ranked = rankActions(snap.actions, idOf: \.id, sourceApp: item.sourceAppName)
-        guard let top = ranked.first else { return nil }
-        let cat = Self.categoryKey(forActionID: top.id)
-        guard !isCategoryCoolingDown(cat) else { return nil }
+        if let top = ranked.first {
+            let cat = Self.categoryKey(forActionID: top.id)
+            guard !isCategoryCoolingDown(cat) else { return nil }
+            if top.id == "todo-split-checklist" {
+                return AdaptiveSparkCandidate(
+                    actionID: top.id,
+                    categoryKey: "todo_capture",
+                    sourceApp: item.sourceAppName,
+                    symbolName: "checklist",
+                    shortTitle: top.title,
+                    badgeHint: nil,
+                    promotableRule: nil,
+                    payload: .splitChecklistIntoTodos(itemID: item.id)
+                )
+            }
 
-        let result = top.resultText
-        guard !result.isEmpty else { return nil }
-        let html = (top.id == "tbl-md-to-excel") ? TableBridgeEngine.toHTMLTable(fromTSV: result) : nil
-        let promo = promotableRuleIfEligible(forActionID: top.id)
-        let preferred = isHabitPreferred(actionID: top.id, sourceApp: item.sourceAppName)
+            let result = top.resultText
+            guard !result.isEmpty else { return nil }
+            let html = (top.id == "tbl-md-to-excel") ? TableBridgeEngine.toHTMLTable(fromTSV: result) : nil
+            let promo = promotableRuleIfEligible(forActionID: top.id)
+            let preferred = isHabitPreferred(actionID: top.id, sourceApp: item.sourceAppName)
 
-        return AdaptiveSparkCandidate(
-            actionID: top.id,
-            categoryKey: cat,
-            sourceApp: item.sourceAppName,
-            symbolName: top.symbolName,
-            shortTitle: top.title,
-            badgeHint: preferred ? "习惯首选" : nil,
-            promotableRule: promo,
-            payload: .replaceClipboardText(text: result, htmlTable: html, toast: top.toastText)
-        )
+            return AdaptiveSparkCandidate(
+                actionID: top.id,
+                categoryKey: cat,
+                sourceApp: item.sourceAppName,
+                symbolName: top.symbolName,
+                shortTitle: top.title,
+                badgeHint: preferred ? "习惯首选" : nil,
+                promotableRule: promo,
+                payload: .replaceClipboardText(text: result, htmlTable: html, toast: top.toastText)
+            )
+        }
+        if item.type == .text, !item.isTodo, let raw = item.text,
+           TodoChecklistExtractor.hasActionableSingleTodoIntent(raw),
+           !isCategoryCoolingDown("todo_capture") {
+            return AdaptiveSparkCandidate(
+                actionID: "todo-mark-item",
+                categoryKey: "todo_capture",
+                sourceApp: item.sourceAppName,
+                symbolName: "checkmark.circle",
+                shortTitle: "设为待办",
+                badgeHint: nil,
+                promotableRule: nil,
+                payload: .markAsTodo(itemID: item.id)
+            )
+        }
+        return nil
         #else
         if item.type == .link, let raw = item.text?.trimmingCharacters(in: .whitespacesAndNewlines),
            let cleaned = URLTrackingCleaner.cleanTrackingURL(raw), cleaned != raw {
@@ -703,6 +733,22 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
         }
 
         guard let raw = item.text else { return nil }
+        if !item.isTodo {
+            let checklist = TodoChecklistExtractor.extractChecklistItems(from: raw)
+            if checklist.count >= 2, !isCategoryCoolingDown("todo_capture") {
+                return AdaptiveSparkCandidate(
+                    actionID: "todo-split-checklist",
+                    categoryKey: "todo_capture",
+                    sourceApp: item.sourceAppName,
+                    symbolName: "checklist",
+                    shortTitle: "拆为 \(checklist.count) 条待办",
+                    badgeHint: nil,
+                    promotableRule: nil,
+                    payload: .splitChecklistIntoTodos(itemID: item.id)
+                )
+            }
+        }
+
         var actions = MeetingAndEphemeralEngine.analyze(raw)
         if actions.isEmpty { actions = ComplianceCodeEngine.analyze(raw) }
         if actions.isEmpty { actions = TableBridgeEngine.analyze(raw) }
@@ -710,24 +756,41 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
         if actions.isEmpty { actions = DocumentTypographyEngine.analyze(raw) }
 
         let ranked = rankActions(actions, idOf: \.id, sourceApp: item.sourceAppName)
-        guard let top = ranked.first else { return nil }
-        let cat = Self.categoryKey(forActionID: top.id)
-        guard !isCategoryCoolingDown(cat) else { return nil }
+        if let top = ranked.first {
+            let cat = Self.categoryKey(forActionID: top.id)
+            guard !isCategoryCoolingDown(cat) else { return nil }
 
-        let html = (top.id == "tbl-md-to-excel") ? TableBridgeEngine.toHTMLTable(fromTSV: top.resultText) : nil
-        let promo = promotableRuleIfEligible(forActionID: top.id)
-        let preferred = isHabitPreferred(actionID: top.id, sourceApp: item.sourceAppName)
+            let html = (top.id == "tbl-md-to-excel") ? TableBridgeEngine.toHTMLTable(fromTSV: top.resultText) : nil
+            let promo = promotableRuleIfEligible(forActionID: top.id)
+            let preferred = isHabitPreferred(actionID: top.id, sourceApp: item.sourceAppName)
 
-        return AdaptiveSparkCandidate(
-            actionID: top.id,
-            categoryKey: cat,
-            sourceApp: item.sourceAppName,
-            symbolName: top.symbolName,
-            shortTitle: top.title,
-            badgeHint: preferred ? "习惯首选" : nil,
-            promotableRule: promo,
-            payload: .replaceClipboardText(text: top.resultText, htmlTable: html, toast: top.toastText)
-        )
+            return AdaptiveSparkCandidate(
+                actionID: top.id,
+                categoryKey: cat,
+                sourceApp: item.sourceAppName,
+                symbolName: top.symbolName,
+                shortTitle: top.title,
+                badgeHint: preferred ? "习惯首选" : nil,
+                promotableRule: promo,
+                payload: .replaceClipboardText(text: top.resultText, htmlTable: html, toast: top.toastText)
+            )
+        }
+
+        if item.type == .text, !item.isTodo,
+           TodoChecklistExtractor.hasActionableSingleTodoIntent(raw),
+           !isCategoryCoolingDown("todo_capture") {
+            return AdaptiveSparkCandidate(
+                actionID: "todo-mark-item",
+                categoryKey: "todo_capture",
+                sourceApp: item.sourceAppName,
+                symbolName: "checkmark.circle",
+                shortTitle: "设为待办",
+                badgeHint: nil,
+                promotableRule: nil,
+                payload: .markAsTodo(itemID: item.id)
+            )
+        }
+        return nil
         #endif
     }
 

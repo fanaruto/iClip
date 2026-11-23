@@ -20,6 +20,8 @@ struct ClipImageGridTile: View {
     let onToggleQueue: () -> Void
     let onExtractOCR: (Bool) -> Void
     let onTogglePin: () -> Void
+    var onToggleTodo: (() -> Void)? = nil
+    var onRemoveTodo: (() -> Void)? = nil
     var onEditAlias: (() -> Void)? = nil
     var onOpenQuickLook: (() -> Void)? = nil
     let onDelete: () -> Void
@@ -146,6 +148,18 @@ struct ClipImageGridTile: View {
                             kind: .ocr,
                             helpText: hasQR ? "提取二维码内容并键入（⇧↵）" : "提取图中文字并键入（⇧↵）",
                             action: { onExtractOCR(true) }
+                        )
+                    }
+
+                    if !ClipboardStore.shared.minimalModeEnabled, let onToggleTodo {
+                        HoverActionCircleButton(
+                            symbolName: item.isTodoCompleted ? "checkmark.circle.fill" : (item.isTodo ? "circle.inset.filled" : "checkmark.circle"),
+                            size: 22,
+                            iconSize: 10,
+                            surface: .onImageTile,
+                            kind: .todo(isTodo: item.isTodo, isCompleted: item.isTodoCompleted),
+                            helpText: item.isTodoCompleted ? "已完成 · 点击恢复未完成（⌘T）" : (item.isTodo ? "标记待办已完成（⌘T）" : "加入待办清单（⌘T）"),
+                            action: onToggleTodo
                         )
                     }
 
@@ -320,6 +334,16 @@ struct ClipImageGridTile: View {
             Divider()
             Button(queueRank != nil ? "移出顺序队列（⌘K）" : "加入顺序队列（⌘K）") {
                 onToggleQueue()
+            }
+            if !ClipboardStore.shared.minimalModeEnabled, let onToggleTodo {
+                Button(!item.isTodo ? "加入待办清单（⌘T）" : (item.isPendingTodo ? "✓ 标记待办已完成（⌘T）" : "恢复为未完成待办（⌘T）")) {
+                    onToggleTodo()
+                }
+                if item.isTodo, let onRemoveTodo {
+                    Button("移出待办清单") {
+                        onRemoveTodo()
+                    }
+                }
             }
             Button(item.isPinned ? "取消收藏" : "收藏") {
                 onTogglePin()
@@ -523,6 +547,8 @@ struct ClipImageGridTile: View {
     let onCopyOnly: () -> Void
     var onExtractOCR: ((Bool) -> Void)? = nil
     let onTogglePin: () -> Void
+    var onToggleTodo: (() -> Void)? = nil
+    var onRemoveTodo: (() -> Void)? = nil
     var onEditAlias: (() -> Void)? = nil
     var onOpenQuickLook: (() -> Void)? = nil
     let onDelete: () -> Void
@@ -640,6 +666,18 @@ struct ClipImageGridTile: View {
                             kind: .ocr,
                             helpText: hasQR ? "提取二维码内容并键入（⇧↵）" : "提取图中文字并键入（⇧↵）",
                             action: { onExtractOCR(true) }
+                        )
+                    }
+
+                    if !ClipboardStore.shared.minimalModeEnabled, let onToggleTodo {
+                        HoverActionCircleButton(
+                            symbolName: item.isTodoCompleted ? "checkmark.circle.fill" : (item.isTodo ? "circle.inset.filled" : "checkmark.circle"),
+                            size: 22,
+                            iconSize: 10,
+                            surface: .onImageTile,
+                            kind: .todo(isTodo: item.isTodo, isCompleted: item.isTodoCompleted),
+                            helpText: item.isTodoCompleted ? "已完成 · 点击恢复未完成（⌘T）" : (item.isTodo ? "标记待办已完成（⌘T）" : "加入待办清单（⌘T）"),
+                            action: onToggleTodo
                         )
                     }
 
@@ -811,6 +849,16 @@ struct ClipImageGridTile: View {
                 }
                 Button("圆角阴影加壳（生成苹果风样机图）") {
                     ClipboardStore.shared.pasteAppleMockupImage(for: item, shouldAutoPaste: false)
+                }
+            }
+            if !ClipboardStore.shared.minimalModeEnabled, let onToggleTodo {
+                Button(!item.isTodo ? "加入待办清单（⌘T）" : (item.isPendingTodo ? "✓ 标记待办已完成（⌘T）" : "恢复为未完成待办（⌘T）")) {
+                    onToggleTodo()
+                }
+                if item.isTodo, let onRemoveTodo {
+                    Button("移出待办清单") {
+                        onRemoveTodo()
+                    }
                 }
             }
             Button(item.isPinned ? "取消收藏" : "收藏") {

@@ -1206,14 +1206,24 @@ final class CoreFeatureTests: XCTestCase {
         guardState.unlock()
         XCTAssertFalse(guardState.isLocked)
 
-        // 2. ⌥1 ~ ⌥6 虚拟键码精确映射（特别验证 macOS kVK_ANSI_5=23 与 kVK_ANSI_6=22 顺序）
+        // 2. ⌥1 ~ ⌥7 标准模式与 ⌥1 ~ ⌥6 极简模式虚拟键码精确映射（特别验证 macOS kVK_ANSI_5=23、6=22、7=26）
         XCTAssertEqual(ClipFilterTab.fromOptionKeyCode(18), .all)
-        XCTAssertEqual(ClipFilterTab.fromOptionKeyCode(19), .pinned)
-        XCTAssertEqual(ClipFilterTab.fromOptionKeyCode(20), .text)
-        XCTAssertEqual(ClipFilterTab.fromOptionKeyCode(21), .link)
-        XCTAssertEqual(ClipFilterTab.fromOptionKeyCode(23), .image)
-        XCTAssertEqual(ClipFilterTab.fromOptionKeyCode(22), .file)
-        XCTAssertNil(ClipFilterTab.fromOptionKeyCode(26))
+        XCTAssertEqual(ClipFilterTab.fromOptionKeyCode(19), .todo)
+        XCTAssertEqual(ClipFilterTab.fromOptionKeyCode(20), .pinned)
+        XCTAssertEqual(ClipFilterTab.fromOptionKeyCode(21), .text)
+        XCTAssertEqual(ClipFilterTab.fromOptionKeyCode(23), .link)
+        XCTAssertEqual(ClipFilterTab.fromOptionKeyCode(22), .image)
+        XCTAssertEqual(ClipFilterTab.fromOptionKeyCode(26), .file)
+
+        // 开启极简纯净模式时，「待办」分类自动隐身，回归纯粹 6 分类
+        XCTAssertEqual(ClipFilterTab.fromOptionKeyCode(18, minimalMode: true), .all)
+        XCTAssertEqual(ClipFilterTab.fromOptionKeyCode(19, minimalMode: true), .pinned)
+        XCTAssertEqual(ClipFilterTab.fromOptionKeyCode(20, minimalMode: true), .text)
+        XCTAssertEqual(ClipFilterTab.fromOptionKeyCode(21, minimalMode: true), .link)
+        XCTAssertEqual(ClipFilterTab.fromOptionKeyCode(23, minimalMode: true), .image)
+        XCTAssertEqual(ClipFilterTab.fromOptionKeyCode(22, minimalMode: true), .file)
+        XCTAssertNil(ClipFilterTab.fromOptionKeyCode(26, minimalMode: true))
+        XCTAssertNil(ClipFilterTab.fromOptionKeyCode(28))
 
         // 3. 主 history.json 断电损坏时从 history.backup.json 零损自愈，并隔离损坏现场
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("iclip-selfheal-\(UUID().uuidString)", isDirectory: true)
@@ -1685,5 +1695,87 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertEqual(rep.colorAt(x: 1, y: 1)?.alphaComponent ?? 1, 0, accuracy: 0.001)
         XCTAssertEqual(rep.colorAt(x: rep.pixelsWide - 2, y: rep.pixelsHigh - 2)?.alphaComponent ?? 1, 0, accuracy: 0.001)
         XCTAssertEqual(rep.colorAt(x: rep.pixelsWide / 2, y: rep.pixelsHigh / 2)?.alphaComponent ?? 0, 1, accuracy: 0.001)
+    }
+
+    // MARK: - 40. 剪贴即待办（闪念待办零歧义解析、多行清单拆解、搜索词匹配与旧版 JSON 兼容）测试
+
+    func testTodoLifecycleQuickCaptureChecklistAndLegacyCompat() throws {
+        // 1. 闪念待办语法解析与数学减法 / 搜索词零冲突
+        let t1 = try XCTUnwrap(QuickCaptureParser.parse(from: "[] 下午核对 Q3 报表"))
+        XCTAssertTrue(t1.defaultTodo)
+        XCTAssertFalse(t1.defaultPin)
+        XCTAssertEqual(t1.bodyText, "下午核对 Q3 报表")
+
+        let t2 = try XCTUnwrap(QuickCaptureParser.parse(from: "todo: 财务 :: 给法务发补充协议"))
+        XCTAssertTrue(t2.defaultTodo)
+        XCTAssertEqual(t2.customAlias, "财务")
+        XCTAssertEqual(t2.bodyText, "给法务发补充协议")
+
+        let t3 = try XCTUnwrap(QuickCaptureParser.parse(from: "- 修复圆角裁剪"))
+        XCTAssertTrue(t3.defaultTodo)
+        XCTAssertEqual(t3.bodyText, "修复圆角裁剪")
+
+        // 数学续算减法、CLI 参数与搜索过滤词绝不误判为新建待办
+        XCTAssertNil(QuickCaptureParser.parse(from: "- 50"))
+        XCTAssertNil(QuickCaptureParser.parse(from: "-3.14"))
+        XCTAssertNil(QuickCaptureParser.parse(from: "--help"))
+        XCTAssertNil(QuickCaptureParser.parse(from: "@todo"))
+        XCTAssertNil(QuickCaptureParser.parse(from: "@待办"))
+
+        // 2. 多行清单提取（自动过滤已完成 `[x]` 项，排除代码块与纯金额）
+        let markdownList = """
+        - [ ] 核对发票税号
+        - [x] 已同步官网下载包
+        - [ ] 回复客户报价单
+        """
+        XCTAssertEqual(
+            TodoChecklistExtractor.extractChecklistItems(from: markdownList),
+            ["核对发票税号", "回复客户报价单"]
+        )
+        let numberedList = "1. 检查签名公证\n2. 运行双端回归测试\n3. 发布版本说明"
+        XCTAssertEqual(TodoChecklistExtractor.extractChecklistItems(from: numberedList).count, 3)
+        XCTAssertTrue(TodoChecklistExtractor.extractChecklistItems(from: "func test() {\n  return 1\n}").isEmpty)
+
+        // 3. 单条行动意图识别
+        XCTAssertTrue(TodoChecklistExtractor.hasActionableSingleTodoIntent("记得下班前把报销单发给财务"))
+        XCTAssertFalse(TodoChecklistExtractor.hasActionableSingleTodoIntent("https://app.webfooo.com/iClip"))
+
+        // 4. 待办状态检索词（@todo / 未完成 / 已完成）与持久化无损编码
+        var item = ClipItem(type: .text, text: "回访重点客户", contentHash: "text:todo-1")
+        XCTAssertFalse(item.isTodo)
+        item.isTodo = true
+        XCTAssertTrue(item.isPendingTodo)
+        XCTAssertTrue(item.matches(query: "@todo"))
+        XCTAssertTrue(item.matches(query: "未完成"))
+        XCTAssertFalse(item.matches(query: "已完成"))
+
+        let doneDate = Date(timeIntervalSince1970: 1_760_000_000)
+        item.todoCompletedAt = doneDate
+        XCTAssertTrue(item.isTodoCompleted)
+        XCTAssertTrue(item.matches(query: "已完成"))
+        XCTAssertFalse(item.matches(query: "未完成"))
+
+        let encoded = try JSONEncoder().encode(item)
+        let decoded = try JSONDecoder().decode(ClipItem.self, from: encoded)
+        XCTAssertTrue(decoded.isTodoCompleted)
+        XCTAssertEqual(decoded.todoCompletedAt, doneDate)
+
+        // 5. 原位编辑（updatedItem）必须无损保留待办状态，且 Markdown 清单导出按「未完成 → 已完成」整齐输出
+        let editedTodo = try XCTUnwrap(ClipboardStore.updatedItem(from: decoded, withNewText: "回访重点客户（已发合同）"))
+        XCTAssertTrue(editedTodo.isTodoCompleted)
+
+        let pendingLink = ClipItem(
+            type: .link,
+            text: "https://github.com/fanaruto/iClip/issues/1",
+            contentHash: "link:issue-1",
+            createdAt: Date(timeIntervalSince1970: 1_760_000_500),
+            customAlias: "处理线上反馈",
+            isTodoItem: true
+        )
+        let markdownOut = try XCTUnwrap(ClipboardStore.formatTodosAsMarkdownChecklist(from: [editedTodo, pendingLink]))
+        XCTAssertEqual(
+            markdownOut,
+            "- [ ] 处理线上反馈 — https://github.com/fanaruto/iClip/issues/1\n- [x] 回访重点客户（已发合同）"
+        )
     }
 }

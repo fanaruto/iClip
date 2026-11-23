@@ -619,6 +619,14 @@ mod tests {
         assert_eq!(store.archive_expired_completed_todos(done_ts + 86_401), 1);
         assert_eq!(store.completed_todo_count(), 0);
 
+        // 待办添加备注说明不强制塞入收藏夹，且支持一键导出标准 Markdown 任务清单
+        store.set_custom_alias(&id_a, "优先复盘");
+        let item_a = store.items.iter().find(|it| it.id == id_a).unwrap();
+        assert!(!item_a.is_pinned);
+        let (md_out, md_cnt) = store.format_todos_as_markdown().expect("应导出 Markdown 清单");
+        assert_eq!(md_cnt, 1);
+        assert_eq!(md_out, "- [ ] 优先复盘 — 第一项待办");
+
         let _ = std::fs::remove_dir_all(tmp_dir);
     }
 }

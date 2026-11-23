@@ -5,13 +5,22 @@ struct QuickCaptureIntent: Equatable {
     let customAlias: String?
     let bodyText: String
     let defaultPin: Bool
+    let defaultTodo: Bool
+
+    init(customAlias: String?, bodyText: String, defaultPin: Bool, defaultTodo: Bool = false) {
+        self.customAlias = customAlias
+        self.bodyText = bodyText
+        self.defaultPin = defaultPin
+        self.defaultTodo = defaultTodo
+    }
 
     var isEmptyBody: Bool {
         bodyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 }
 
-/// 搜索框一行速记解析器：
+/// 搜索框一行速记与闪念待办解析器：
+/// - 支持 `[] 待办事项` / `- 待办事项` / `+待办 事项` / `todo: 事项`（↵ 直接入待办库且不冲掉当前剪贴板，⇧↵ 存入待办并复制）
 /// - 支持 `> 临时备忘` / `@记 临时备忘`（↵ 存入剪贴板与历史，⇧↵ 直接收藏）
 /// - 支持 `> 备注名 :: 正文内容` 或 `@新建 正文`（↵ 直接创建带备注收藏并复制）
 enum QuickCaptureParser {
@@ -20,6 +29,17 @@ enum QuickCaptureParser {
         guard !leadingTrimmed.isEmpty else { return nil }
         let s = String(leadingTrimmed)
         let lower = s.lowercased()
+
+        // 1. 优先识别零歧义闪念待办前缀（严密避开负数数学运算如 `- 50` / `-3.14` 及纯搜索词 `@todo`）
+        if let todoPayload = extractTodoPayload(from: s, lower: lower) {
+            let (alias, body) = splitAliasAndBody(todoPayload)
+            return QuickCaptureIntent(
+                customAlias: alias,
+                bodyText: body,
+                defaultPin: false,
+                defaultTodo: true
+            )
+        }
 
         var payload: String? = nil
         var forcePin = false
@@ -56,8 +76,58 @@ enum QuickCaptureParser {
         return QuickCaptureIntent(
             customAlias: alias,
             bodyText: body,
-            defaultPin: shouldDefaultPin
+            defaultPin: shouldDefaultPin,
+            defaultTodo: false
         )
+    }
+
+    private static func extractTodoPayload(from s: String, lower: String) -> String? {
+        let exactBoxMarkers = ["- [ ]", "* [ ]", "[ ]", "[]", "【 】", "【】"]
+        for marker in exactBoxMarkers {
+            if s == marker {
+                return ""
+            }
+            if s.hasPrefix(marker + " ") || s.hasPrefix(marker + "\t") {
+                return String(s.dropFirst(marker.count)).trimmingCharacters(in: .whitespaces)
+            }
+        }
+        // 紧凑复选框如 `[]下午核对报表` 或 `【】下午核对报表`
+        for compactMarker in ["[]", "【】"] where s.hasPrefix(compactMarker) && s.count > compactMarker.count {
+            return String(s.dropFirst(compactMarker.count)).trimmingCharacters(in: .whitespaces)
+        }
+
+        let explicitPrefixes = ["+待办", "@加待办", "@新建待办", "+todo"]
+        for p in explicitPrefixes where lower.hasPrefix(p) {
+            let rest = String(s.dropFirst(p.count))
+            if rest.isEmpty || rest.hasPrefix(" ") || rest.hasPrefix("\t") {
+                return rest.trimmingCharacters(in: .whitespaces)
+            }
+        }
+
+        let colonPrefixes = ["todo:", "todo：", "待办:", "待办："]
+        for p in colonPrefixes where lower.hasPrefix(p) {
+            return String(s.dropFirst(p.count)).trimmingCharacters(in: .whitespaces)
+        }
+
+        // 短横线闪念待办 `- 下午回电话`：严格排除数学减法 `- 50` / `-3.14` / `-(1+2)` 与 CLI flag `--help`
+        if s.hasPrefix("- ") || s.hasPrefix("－ ") {
+            let rest = String(s.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+            if rest.isEmpty {
+                return ""
+            }
+            if let first = rest.unicodeScalars.first {
+                let isMathOrFlag = (first.value >= 48 && first.value <= 57)
+                    || first == "."
+                    || first == "("
+                    || first == "-"
+                    || first == "+"
+                if !isMathOrFlag {
+                    return rest
+                }
+            }
+        }
+
+        return nil
     }
 
     /// 拆分可选的「备注名 :: 正文」（兼容中文全角 `：：`）
@@ -73,6 +143,152 @@ enum QuickCaptureParser {
             }
         }
         return (nil, text.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+}
+
+/// 剪贴板多行清单拆解与单条行动意图嗅探引擎（双角色共享，纯本地 O(N) 扫描）
+enum TodoChecklistExtractor {
+    private static let uncheckedMarkers = ["- [ ]", "* [ ]", "+ [ ]", "[ ]", "[]", "【 】", "【】", "□", "☐"]
+    private static let checkedMarkers = ["- [x]", "- [X]", "* [x]", "* [X]", "[x]", "[X]", "☑", "✅", "✓"]
+    private static let codeNoiseHints = ["func ", "struct ", "class ", "import ", "const ", "return ", "SELECT ", "INSERT ", "CREATE TABLE", "curl ", "docker ", "git "]
+
+    /// 从多行剪贴文本中提取可独立勾选的待办事项列表（至少 2 条未完成项时才返回，已完成 `[x]` 项自动跳过）
+    static func extractChecklistItems(from rawText: String) -> [String] {
+        guard rawText.utf8.count <= 16_384 else { return [] }
+        let rawLines = rawText
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        guard rawLines.count >= 2 && rawLines.count <= 30 else { return [] }
+
+        // 形态 A：显式复选框清单（如 Markdown / 飞书 / Notion `- [ ] xxx`）
+        var explicitUnchecked: [String] = []
+        var explicitTotalCount = 0
+        for line in rawLines {
+            if checkedMarkers.contains(where: { line.hasPrefix($0) }) {
+                explicitTotalCount += 1
+                continue
+            }
+            if let stripped = stripUncheckedMarker(line), !stripped.isEmpty {
+                explicitTotalCount += 1
+                explicitUnchecked.append(stripped)
+            }
+        }
+        if explicitTotalCount >= 2 && explicitUnchecked.count >= 2 {
+            return deduplicatePreservingOrder(explicitUnchecked)
+        }
+
+        // 形态 B：整齐项目符号或编号行动清单（排除代码块、JSON、终端脚本与纯数字账单）
+        guard rawLines.count <= 20 else { return [] }
+        for hint in codeNoiseHints where rawText.contains(hint) {
+            return []
+        }
+        if rawText.contains("{") && rawText.contains("}") {
+            return []
+        }
+
+        var bulletExtracted: [String] = []
+        for line in rawLines {
+            guard let body = stripBulletOrNumberPrefix(line),
+                  body.count >= 2 && body.count <= 120,
+                  !isPureNumberOrCurrency(body) else {
+                return []
+            }
+            bulletExtracted.append(body)
+        }
+        let unique = deduplicatePreservingOrder(bulletExtracted)
+        return unique.count >= 2 ? unique : []
+    }
+
+    /// 识别单条短文本是否包含明确的待办行动交代（用于光标角微星标一键转待办）
+    static func hasActionableSingleTodoIntent(_ rawText: String) -> Bool {
+        guard rawText.utf8.count <= 420 else { return false }
+        let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let charCount = trimmed.count
+        guard charCount >= 4 && charCount <= 110 else { return false }
+        if trimmed.contains("\n") && trimmed.components(separatedBy: .newlines).count > 2 {
+            return false
+        }
+        if trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") || trimmed.contains("{") {
+            return false
+        }
+        let lower = trimmed.lowercased()
+        let leadingTriggers = ["todo:", "todo：", "fixme:", "待办:", "待办：", "[] ", "[ ] ", "□ "]
+        if leadingTriggers.contains(where: { lower.hasPrefix($0) }) {
+            return true
+        }
+        let actionPhrases = [
+            "记得", "别忘了", "下班前", "中午前", "今晚前", "发给", "提交给",
+            "麻烦把", "请把", "核对一下", "跟进一下", "回复一下", "待处理"
+        ]
+        return actionPhrases.contains(where: { trimmed.contains($0) })
+    }
+
+    /// 清洗单条转待办时的前导复选符号（如复制了 `- [ ] 交周报` 按 ⌘T 时展示干净正文）
+    static func cleanLeadingCheckboxIfPresent(_ rawText: String) -> String {
+        let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let stripped = stripUncheckedMarker(trimmed), !stripped.isEmpty {
+            return stripped
+        }
+        return rawText
+    }
+
+    private static func stripUncheckedMarker(_ line: String) -> String? {
+        for marker in uncheckedMarkers where line.hasPrefix(marker) {
+            let rest = String(line.dropFirst(marker.count)).trimmingCharacters(in: .whitespaces)
+            return rest
+        }
+        return nil
+    }
+
+    private static func stripBulletOrNumberPrefix(_ line: String) -> String? {
+        for bullet in ["- ", "* ", "• ", "· "] where line.hasPrefix(bullet) {
+            let rest = String(line.dropFirst(bullet.count)).trimmingCharacters(in: .whitespaces)
+            return rest.isEmpty ? nil : rest
+        }
+        // 匹配 `1. xxx` / `1、xxx` / `1) xxx`
+        var digits = 0
+        var idx = line.startIndex
+        while idx < line.endIndex, let scalar = line[idx].unicodeScalars.first, scalar.value >= 48 && scalar.value <= 57, digits < 3 {
+            digits += 1
+            idx = line.index(after: idx)
+        }
+        if digits > 0 && idx < line.endIndex {
+            let sep = line[idx]
+            if sep == "." || sep == "、" || sep == ")" || sep == "）" {
+                let afterSep = line.index(after: idx)
+                let rest = String(line[afterSep...]).trimmingCharacters(in: .whitespaces)
+                if !rest.isEmpty {
+                    // 避免把 `3.14` 浮点数误判为编号
+                    if sep == ".", let firstRest = rest.unicodeScalars.first, firstRest.value >= 48 && firstRest.value <= 57 {
+                        return nil
+                    }
+                    return rest
+                }
+            }
+        }
+        return nil
+    }
+
+    private static func isPureNumberOrCurrency(_ s: String) -> Bool {
+        var hasLetterOrHan = false
+        for scalar in s.unicodeScalars {
+            let v = scalar.value
+            if (v >= 65 && v <= 90) || (v >= 97 && v <= 122) || (v >= 0x4E00 && v <= 0x9FFF) {
+                hasLetterOrHan = true
+                break
+            }
+        }
+        return !hasLetterOrHan
+    }
+
+    private static func deduplicatePreservingOrder(_ list: [String]) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for item in list where seen.insert(item).inserted {
+            result.append(item)
+        }
+        return result
     }
 }
 

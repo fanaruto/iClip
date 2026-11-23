@@ -426,6 +426,50 @@ impl ClipboardStore {
             .count()
     }
 
+    /// 导出当前所有待办为标准 Markdown 任务清单（未完成 `- [ ]` 在前，已完成 `- [x]` 在后）
+    pub fn format_todos_as_markdown(&self) -> Option<(String, usize)> {
+        let mut todos: Vec<&ClipItem> = self.items.iter().filter(|it| it.is_todo()).collect();
+        if todos.is_empty() {
+            return None;
+        }
+        todos.sort_by(|a, b| match (a.is_todo_completed(), b.is_todo_completed()) {
+            (false, true) => std::cmp::Ordering::Less,
+            (true, false) => std::cmp::Ordering::Greater,
+            (false, false) => b.created_unix_secs.cmp(&a.created_unix_secs),
+            (true, true) => b
+                .todo_completed_unix_secs
+                .unwrap_or(b.created_unix_secs)
+                .cmp(&a.todo_completed_unix_secs.unwrap_or(a.created_unix_secs)),
+        });
+        let count = todos.len();
+        let lines: Vec<String> = todos
+            .into_iter()
+            .map(|it| {
+                let prefix = if it.is_todo_completed() {
+                    "- [x] "
+                } else {
+                    "- [ ] "
+                };
+                let raw_flat = it.raw_content_preview().replace(" ↵ ", " ");
+                let raw_clean = raw_flat.trim();
+                if let Some(alias) = it.custom_alias.as_deref().map(|s| s.trim()) {
+                    if !alias.is_empty() {
+                        if it.kind == ClipContentType::Link
+                            || (it.kind == ClipContentType::Text
+                                && alias != raw_clean
+                                && raw_clean.chars().count() <= 100)
+                        {
+                            return format!("{prefix}{alias} — {raw_clean}");
+                        }
+                        return format!("{prefix}{alias}");
+                    }
+                }
+                format!("{prefix}{raw_clean}")
+            })
+            .collect();
+        Some((lines.join("\r\n"), count))
+    }
+
     /// Ctrl+T 切换：非待办 -> 待办未完成 -> 待办已完成 -> 恢复未完成
     pub fn toggle_todo(&mut self, item_id: &str) -> Option<&'static str> {
         let now = now_unix_secs();
@@ -539,12 +583,12 @@ impl ClipboardStore {
             item.custom_alias = None;
         } else {
             item.custom_alias = Some(clean.to_string());
-            if !item.is_pinned {
+            if !item.is_pinned && !item.is_todo() {
                 item.is_pinned = true;
                 auto_pinned = true;
                 self.pending_otp_expirations.retain(|(id, _)| id != item_id);
             }
-            if item.pin_category.is_none() {
+            if item.is_pinned && item.pin_category.is_none() {
                 item.pin_category = PinCategory::infer(Some(clean), item.text.as_deref());
             }
         }

@@ -185,27 +185,33 @@ struct QuickSuggestionCommandBanner: View {
     }
 }
 
-/// 搜索框快捷速记与模板创建横幅（输入 `> 内容` 或 `> 备注 :: 正文` / `@新建 ...` 即时入库或收藏）
+/// 搜索框快捷速记、闪念待办与模板创建横幅（输入 `[] 事项` / `- 事项` / `> 内容` 或 `> 备注 :: 正文` 即时入库）
 struct QuickCaptureCommandBanner: View {
     let intent: QuickCaptureIntent
     let onCommitDefault: () -> Void
     let onCommitForcePin: () -> Void
 
     var body: some View {
+        let isTodo = intent.defaultTodo
+        let accent: Color = isTodo ? Color.accentColor : (intent.defaultPin ? Color.orange : Color.accentColor)
+        let iconName = isTodo
+            ? "checkmark.circle.fill"
+            : (intent.defaultPin ? "star.circle.fill" : "square.and.pencil")
+
         HStack(spacing: 8) {
-            Image(systemName: intent.defaultPin ? "star.circle.fill" : "square.and.pencil")
+            Image(systemName: iconName)
                 .font(.system(size: 13.5, weight: .semibold))
-                .foregroundStyle(intent.defaultPin ? Color.orange : Color.accentColor)
+                .foregroundStyle(accent)
                 .frame(width: 24, height: 24)
-                .background(Circle().fill((intent.defaultPin ? Color.orange : Color.accentColor).opacity(0.14)))
+                .background(Circle().fill(accent.opacity(0.14)))
 
             VStack(alignment: .leading, spacing: 1.5) {
                 if intent.isEmptyBody {
-                    Text("一行闪念速记与常用模板直存")
+                    Text(isTodo ? "一行闪念待办直存（保留当前剪贴板）" : "一行闪念速记与常用模板直存")
                         .font(.system(size: 11.5, weight: .semibold))
                         .foregroundStyle(.primary)
                         .lineLimit(1)
-                    Text("例：> 下午4点领发票 · > 税号 :: 913100... · 支持 {{date}} {{weekday}} {{clip}}")
+                    Text(isTodo ? "例：[] 下午核对报表 · - 给客户回电话 · todo: 财务 :: 审合同" : "例：> 下午4点领发票 · > 税号 :: 913100... · 支持 {{date}} {{weekday}} {{clip}}")
                         .font(.system(size: 10.5))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -214,7 +220,7 @@ struct QuickCaptureCommandBanner: View {
                         if let alias = intent.customAlias {
                             Text("备注：\(alias)")
                                 .font(.system(size: 10.5, weight: .bold))
-                                .foregroundStyle(Color.orange)
+                                .foregroundStyle(isTodo ? Color.accentColor : Color.orange)
                                 .lineLimit(1)
                             Text("·")
                                 .foregroundStyle(.secondary)
@@ -224,37 +230,63 @@ struct QuickCaptureCommandBanner: View {
                             .foregroundStyle(.primary)
                             .lineLimit(1)
                     }
-                    Text(intent.defaultPin ? "按 ↵ 直接存入收藏夹并复制到剪贴板" : "按 ↵ 存入剪贴板与历史 · 按 ⇧↵ 直接收藏")
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                    Text(
+                        isTodo
+                            ? "按 ↵ 加入待办（不冲掉当前剪贴板） · 按 ⇧↵ 加入并复制"
+                            : (intent.defaultPin ? "按 ↵ 直接存入收藏夹并复制到剪贴板" : "按 ↵ 存入剪贴板与历史 · 按 ⇧↵ 直接收藏")
+                    )
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
                 }
             }
 
             Spacer(minLength: 4)
 
             if !intent.isEmptyBody {
-                if !intent.defaultPin {
+                if isTodo {
                     Button(action: onCommitForcePin) {
-                        Text("收藏 ⇧↵")
+                        Text("并复制 ⇧↵")
                             .font(.system(size: 10.5, weight: .semibold))
-                            .foregroundStyle(Color.orange)
+                            .foregroundStyle(Color.accentColor)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 4)
-                            .background(Capsule().fill(Color.orange.opacity(0.14)))
+                            .background(Capsule().fill(Color.accentColor.opacity(0.14)))
+                    }
+                    .buttonStyle(.plain)
+
+                    Button(action: onCommitDefault) {
+                        Text("加待办 ↵")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 4.5)
+                            .background(Capsule().fill(Color.accentColor))
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    if !intent.defaultPin {
+                        Button(action: onCommitForcePin) {
+                            Text("收藏 ⇧↵")
+                                .font(.system(size: 10.5, weight: .semibold))
+                                .foregroundStyle(Color.orange)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(Capsule().fill(Color.orange.opacity(0.14)))
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    Button(action: onCommitDefault) {
+                        Text(intent.defaultPin ? "收藏 ↵" : "存入 ↵")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 4.5)
+                            .background(Capsule().fill(intent.defaultPin ? Color.orange : Color.accentColor))
                     }
                     .buttonStyle(.plain)
                 }
-
-                Button(action: onCommitDefault) {
-                    Text(intent.defaultPin ? "收藏 ↵" : "存入 ↵")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 4.5)
-                        .background(Capsule().fill(intent.defaultPin ? Color.orange : Color.accentColor))
-                }
-                .buttonStyle(.plain)
             }
         }
         .padding(.horizontal, 10)

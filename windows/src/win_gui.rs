@@ -112,6 +112,8 @@ const CMD_TOGGLE_AUTOSTART: usize = 3009;
 const CMD_CLEAR_UNPINNED: usize = 3010;
 const CMD_QUIT_APP: usize = 3011;
 const CMD_TOGGLE_QUEUE_MODE: usize = 3012;
+const CMD_OPEN_TODO_LIST: usize = 3013;
+const CMD_PIN_TODO_BOARD: usize = 3014;
 
 const CF_UNICODETEXT_ID: u32 = 13;
 const CF_DIB_ID: u32 = 8;
@@ -170,6 +172,8 @@ enum HitAction {
     TogglePin(String),
     ToggleTodo(String),
     ArchiveCompletedTodos,
+    CopyTodosMarkdown,
+    CreateInlineTodo,
     ClearQueue,
     DeleteItem(String),
     UndoDelete,
@@ -2868,7 +2872,11 @@ fn layout_and_draw_main_view(
 
     texts.push(TextDrawCmd {
         text: if st.search_query.is_empty() {
-            "搜索剪贴历史...".to_string()
+            if st.selected_tab == ClipFilterTab::Todo {
+                "搜索待办，或直接输入事项按 Enter 新建...".to_string()
+            } else {
+                "搜索剪贴历史...".to_string()
+            }
         } else {
             st.search_query.clone()
         },
@@ -3444,6 +3452,55 @@ fn layout_and_draw_main_view(
                 action: HitAction::CommitMathResult(math.plain_value),
             });
             cur_y += bh + s(8);
+        } else if st.selected_tab == ClipFilterTab::Todo {
+            let trimmed_q = st.search_query.trim();
+            if !trimmed_q.is_empty() && !trimmed_q.starts_with('@') {
+                let bh = s(40);
+                canvas.fill_round_rect(pad, cur_y, track_w, bh, sf(11.0), palette.cobalt.with_alpha(26));
+                canvas.stroke_round_rect(
+                    pad,
+                    cur_y,
+                    track_w,
+                    bh,
+                    sf(11.0),
+                    sf(0.8),
+                    palette.cobalt.with_alpha(86),
+                );
+                let cur_matches = st.store.filtered_indices_ext(
+                    st.selected_tab,
+                    st.selected_pin_category,
+                    &st.search_query,
+                    st.active_target_app_name.as_deref(),
+                );
+                let hint_txt = if cur_matches.is_empty() {
+                    format!("+ 新建待办：「{trimmed_q}」 · 按 Enter 直接入库")
+                } else {
+                    format!("+ 新建待办：「{trimmed_q}」 · 按 Ctrl+Enter 新建")
+                };
+                texts.push(TextDrawCmd {
+                    text: hint_txt,
+                    rect: RECT {
+                        left: pad + s(12),
+                        top: cur_y,
+                        right: w - pad - s(12),
+                        bottom: cur_y + bh,
+                    },
+                    color: palette.cobalt,
+                    font_kind: FontKind::BadgeBold,
+                    flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                });
+                st.hit_regions.push(HitRegion {
+                    rect: RECT {
+                        left: pad,
+                        top: cur_y,
+                        right: w - pad,
+                        bottom: cur_y + bh,
+                    },
+                    interactive_cursor: true,
+                    action: HitAction::CreateInlineTodo,
+                });
+                cur_y += bh + s(8);
+            }
         }
     }
 
@@ -3464,16 +3521,17 @@ fn layout_and_draw_main_view(
                 dot_c,
             );
             let status_txt = if pending_todos > 0 {
-                format!("待完成 {pending_todos} 项 · Ctrl+T 勾销 · Ctrl+P 钉桌面")
+                format!("待完成 {pending_todos} 项 · Ctrl+T 勾销")
             } else {
                 "待办已全部完成 · Ctrl+T 可还原".to_string()
             };
+            let right_btns_w = if done_todos > 0 { s(168) } else { s(66) };
             texts.push(TextDrawCmd {
                 text: status_txt,
                 rect: RECT {
                     left: pad + s(13),
                     top: cur_y,
-                    right: w - pad - s(106),
+                    right: w - pad - right_btns_w,
                     bottom: cur_y + sub_h,
                 },
                 color: palette.text_secondary,
@@ -3481,9 +3539,11 @@ fn layout_and_draw_main_view(
                 flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
             });
 
+            let mut right_edge = w - pad;
             if done_todos > 0 {
-                let bw = s(100);
-                let bx = w - pad - bw;
+                let bw = s(98);
+                let bx = right_edge - bw;
+                right_edge = bx - s(5);
                 canvas.fill_round_rect(
                     bx,
                     cur_y,
@@ -3515,6 +3575,32 @@ fn layout_and_draw_main_view(
                     action: HitAction::ArchiveCompletedTodos,
                 });
             }
+
+            let md_w = s(62);
+            let md_x = right_edge - md_w;
+            canvas.fill_round_rect(md_x, cur_y, md_w, sub_h, sf(12.0), palette.track_bg);
+            texts.push(TextDrawCmd {
+                text: "复制清单".to_string(),
+                rect: RECT {
+                    left: md_x,
+                    top: cur_y,
+                    right: md_x + md_w,
+                    bottom: cur_y + sub_h,
+                },
+                color: palette.text_secondary,
+                font_kind: FontKind::Meta,
+                flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            });
+            st.hit_regions.push(HitRegion {
+                rect: RECT {
+                    left: md_x,
+                    top: cur_y,
+                    right: md_x + md_w,
+                    bottom: cur_y + sub_h,
+                },
+                interactive_cursor: true,
+                action: HitAction::CopyTodosMarkdown,
+            });
             cur_y += sub_h + s(8);
         }
     }
@@ -6642,6 +6728,38 @@ unsafe fn handle_left_click(hwnd: HWND, x: i32, y: i32, is_double: bool) {
                 set_toast(hwnd, format!("已归档 {cnt} 项已完成待办"));
             }
         }
+        HitAction::CopyTodosMarkdown => {
+            let exported = APP_STATE.with(|c| {
+                let mut b = c.borrow_mut();
+                let st = b.as_mut()?;
+                let pair = st.store.format_todos_as_markdown()?;
+                st.ignore_next_clipboard_seq = true;
+                Some(pair)
+            });
+            if let Some((md, cnt)) = exported {
+                let _ = write_text_and_html_to_clipboard(hwnd, &md, None);
+                set_toast(hwnd, format!("✓ 已复制 {cnt} 条 Markdown 待办清单"));
+            }
+        }
+        HitAction::CreateInlineTodo => {
+            let created = APP_STATE.with(|c| {
+                let mut b = c.borrow_mut();
+                let st = b.as_mut()?;
+                let q = st.search_query.trim().to_string();
+                if q.is_empty() || q.starts_with('@') {
+                    return None;
+                }
+                let (alias, body) = iclip_core::intelligence::split_alias_and_body(&q);
+                let id = st.store.capture_quick_todo(&body, alias.as_deref())?;
+                st.search_query.clear();
+                st.selected_visible_pos = 0;
+                st.scroll_row_offset = 0;
+                Some(id)
+            });
+            if created.is_some() {
+                set_toast(hwnd, "✓ 已加入待办清单".to_string());
+            }
+        }
         HitAction::ClearQueue => {
             APP_STATE.with(|c| {
                 if let Some(st) = c.borrow_mut().as_mut() {
@@ -7450,8 +7568,40 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32) {
             return;
         }
 
+        let inline_todo_created = APP_STATE.with(|c| {
+            let mut b = c.borrow_mut();
+            let st = b.as_mut()?;
+            if st.selected_tab != ClipFilterTab::Todo {
+                return None;
+            }
+            let q = st.search_query.trim().to_string();
+            if q.is_empty() || q.starts_with('@') {
+                return None;
+            }
+            let filtered = st.store.filtered_indices_ext(
+                st.selected_tab,
+                st.selected_pin_category,
+                &st.search_query,
+                st.active_target_app_name.as_deref(),
+            );
+            if !filtered.is_empty() && !ctrl_down {
+                return None;
+            }
+            let (alias, body) = iclip_core::intelligence::split_alias_and_body(&q);
+            let id = st.store.capture_quick_todo(&body, alias.as_deref())?;
+            st.search_query.clear();
+            st.selected_visible_pos = 0;
+            st.scroll_row_offset = 0;
+            Some(id)
+        });
+        if inline_todo_created.is_some() {
+            set_toast(hwnd, "✓ 已加入待办清单".to_string());
+            return;
+        }
+
         let mut selected_store_idx = None;
         let mut first_quick_action = None;
+        let mut mark_todo_done_id: Option<String> = None;
         APP_STATE.with(|c| {
             if let Some(st) = c.borrow().as_ref() {
                 let filtered = st.store.filtered_indices_ext(
@@ -7462,7 +7612,9 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32) {
                 );
                 if let Some(&idx) = filtered.get(st.selected_visible_pos) {
                     selected_store_idx = Some(idx);
-                    if shift_down && !st.store.config.minimal_mode_enabled {
+                    if ctrl_down && !shift_down && st.store.items[idx].is_pending_todo() {
+                        mark_todo_done_id = Some(st.store.items[idx].id.clone());
+                    } else if shift_down && !st.store.config.minimal_mode_enabled {
                         if let Some(raw) = &st.store.items[idx].text {
                             first_quick_action = st
                                 .store
@@ -7477,6 +7629,13 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32) {
                 }
             }
         });
+        if let Some(done_id) = mark_todo_done_id {
+            APP_STATE.with(|c| {
+                if let Some(st) = c.borrow_mut().as_mut() {
+                    st.store.mark_todo_completed_silently(&done_id);
+                }
+            });
+        }
         if let (Some(idx), Some(act)) = (selected_store_idx, first_quick_action) {
             commit_quick_action(hwnd, idx, &act);
         } else if let Some(idx) = selected_store_idx {
@@ -7579,7 +7738,7 @@ unsafe fn show_tray_context_menu(hwnd: HWND) {
         return;
     }
 
-    let (minimal, always_top, otp_exp, paused, pinned_cnt, queue_active, hk_disp) =
+    let (minimal, always_top, otp_exp, paused, pinned_cnt, pending_todos, queue_active, hk_disp) =
         APP_STATE.with(|c| {
             let b = c.borrow();
             let st = b.as_ref().unwrap();
@@ -7589,6 +7748,7 @@ unsafe fn show_tray_context_menu(hwnd: HWND) {
                 st.store.config.auto_expire_otp,
                 st.store.is_paused,
                 st.store.pinned_count(),
+                st.store.pending_todo_count(),
                 st.store.queue_mode_active,
                 st.store.config.hotkey_toggle.display_string(),
             )
@@ -7612,6 +7772,25 @@ unsafe fn show_tray_context_menu(hwnd: HWND) {
         CMD_OPEN_PANEL,
         to_wide(&format!("打开 iClip 面板 ({hk_disp})")).as_ptr(),
     );
+    if !minimal {
+        let todo_label = if pending_todos > 0 {
+            format!("打开待办清单 ({pending_todos} 项未完成 · Alt+2)")
+        } else {
+            "打开待办清单 (Alt+2)".to_string()
+        };
+        AppendMenuW(
+            hmenu,
+            MF_STRING,
+            CMD_OPEN_TODO_LIST,
+            to_wide(&todo_label).as_ptr(),
+        );
+        AppendMenuW(
+            hmenu,
+            MF_STRING,
+            CMD_PIN_TODO_BOARD,
+            to_wide("钉住待办悬浮板 (始终在前)").as_ptr(),
+        );
+    }
     AppendMenuW(
         hmenu,
         MF_STRING,
@@ -7709,6 +7888,39 @@ unsafe fn show_tray_context_menu(hwnd: HWND) {
 unsafe fn handle_menu_command(hwnd: HWND, cmd: usize) {
     match cmd {
         CMD_OPEN_PANEL => show_panel_near_cursor(hwnd),
+        CMD_OPEN_TODO_LIST => {
+            APP_STATE.with(|c| {
+                if let Some(st) = c.borrow_mut().as_mut() {
+                    st.store.config.minimal_mode_enabled = false;
+                    st.view_mode = ActiveViewMode::MainList;
+                    st.selected_tab = ClipFilterTab::Todo;
+                    st.seg_pill_target_ratio = 1.0;
+                    st.seg_pill_ratio = 1.0;
+                    st.selected_visible_pos = 0;
+                    st.scroll_row_offset = 0;
+                }
+            });
+            show_panel_near_cursor(hwnd);
+        }
+        CMD_PIN_TODO_BOARD => {
+            let need_pin = APP_STATE.with(|c| {
+                let mut b = c.borrow_mut();
+                let Some(st) = b.as_mut() else { return false };
+                st.store.config.minimal_mode_enabled = false;
+                st.view_mode = ActiveViewMode::MainList;
+                st.selected_tab = ClipFilterTab::Todo;
+                st.seg_pill_target_ratio = 1.0;
+                st.seg_pill_ratio = 1.0;
+                st.selected_visible_pos = 0;
+                st.scroll_row_offset = 0;
+                !st.store.config.always_on_top
+            });
+            show_panel_near_cursor(hwnd);
+            if need_pin {
+                toggle_always_on_top(hwnd);
+            }
+            set_toast(hwnd, "已钉住待办悬浮板 (Ctrl+P 可取消置顶)".to_string());
+        }
         CMD_OPEN_SETTINGS => {
             show_panel_near_cursor(hwnd);
             APP_STATE.with(|c| {

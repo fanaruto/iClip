@@ -86,6 +86,7 @@ enum ClipContentType: String, Codable, CaseIterable, Identifiable {
 /// 顶部分类筛选标签
 enum ClipFilterTab: String, CaseIterable, Identifiable {
     case all
+    case todo
     case pinned
     case text
     case link
@@ -97,6 +98,7 @@ enum ClipFilterTab: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .all: return "全部"
+        case .todo: return "待办"
         case .pinned: return "收藏"
         case .text: return "文本"
         case .link: return "链接"
@@ -108,6 +110,7 @@ enum ClipFilterTab: String, CaseIterable, Identifiable {
     var symbolName: String {
         switch self {
         case .all: return "square.grid.2x2"
+        case .todo: return "checkmark.circle"
         case .pinned: return "star.fill"
         case .text: return "text.alignleft"
         case .link: return "safari"
@@ -116,29 +119,32 @@ enum ClipFilterTab: String, CaseIterable, Identifiable {
         }
     }
 
-    /// 对应 ⌥1 ~ ⌥6 全键盘类目直达快捷键文案
-    var optionShortcutLabel: String {
-        switch self {
-        case .all: return "⌥1"
-        case .pinned: return "⌥2"
-        case .text: return "⌥3"
-        case .link: return "⌥4"
-        case .image: return "⌥5"
-        case .file: return "⌥6"
+    /// 根据是否开启极简纯净模式返回可见分类序列（极简模式自动隐去「待办」，回归 6 分类）
+    static func visibleTabs(minimalMode: Bool) -> [ClipFilterTab] {
+        if minimalMode {
+            return [.all, .pinned, .text, .link, .image, .file]
         }
+        return [.all, .todo, .pinned, .text, .link, .image, .file]
     }
 
-    /// 将 macOS 主键盘数字键虚拟键码（kVK_ANSI_1...6）映射为分类标签，免受输入法或 Option 特殊符号干扰
-    static func fromOptionKeyCode(_ keyCode: UInt16) -> ClipFilterTab? {
-        switch keyCode {
-        case 18: return .all     // ⌥1
-        case 19: return .pinned  // ⌥2
-        case 20: return .text    // ⌥3
-        case 21: return .link    // ⌥4
-        case 23: return .image   // ⌥5 (kVK_ANSI_5 = 0x17)
-        case 22: return .file    // ⌥6 (kVK_ANSI_6 = 0x16)
-        default: return nil
+    /// 对应 ⌥1 ~ ⌥7（极简模式下为 ⌥1 ~ ⌥6）全键盘类目直达快捷键文案
+    func optionShortcutLabel(minimalMode: Bool) -> String {
+        let tabs = Self.visibleTabs(minimalMode: minimalMode)
+        guard let idx = tabs.firstIndex(of: self) else { return "" }
+        return "⌥\(idx + 1)"
+    }
+
+    var optionShortcutLabel: String {
+        optionShortcutLabel(minimalMode: false)
+    }
+
+    /// 将 macOS 主键盘数字键虚拟键码映射为当前可见分类标签，免受输入法或 Option 特殊符号干扰
+    static func fromOptionKeyCode(_ keyCode: UInt16, minimalMode: Bool = false) -> ClipFilterTab? {
+        let tabs = visibleTabs(minimalMode: minimalMode)
+        guard let digit = digitFromKeyCode(keyCode), digit >= 1, digit <= tabs.count else {
+            return nil
         }
+        return tabs[digit - 1]
     }
 
     /// 将 macOS 主键盘或小键盘数字 1...9 虚拟键码解析为序号 1...9（不受 Shift/Option 特殊字符影响）
@@ -181,6 +187,28 @@ struct ClipItem: Identifiable, Codable, Equatable {
     var pinCategory: PinCategory?
     /// 用户自定义备注标题（仅用于展示与检索，粘贴仍输出原文）
     var customAlias: String?
+    /// 是否加入待办清单（可选存储字段以无损兼容历史 JSON）
+    var isTodoItem: Bool?
+    /// 待办完成时间戳（nil 表示未完成；非 nil 表示已完成，满 24 小时自动归档回普通历史）
+    var todoCompletedAt: Date?
+
+    var isTodo: Bool {
+        get { isTodoItem == true }
+        set {
+            isTodoItem = newValue ? true : nil
+            if !newValue {
+                todoCompletedAt = nil
+            }
+        }
+    }
+
+    var isPendingTodo: Bool {
+        isTodo && todoCompletedAt == nil
+    }
+
+    var isTodoCompleted: Bool {
+        isTodo && todoCompletedAt != nil
+    }
 
     init(
         id: UUID = UUID(),
@@ -198,7 +226,9 @@ struct ClipItem: Identifiable, Codable, Equatable {
         createdAt: Date = Date(),
         isPinned: Bool = false,
         pinCategory: PinCategory? = nil,
-        customAlias: String? = nil
+        customAlias: String? = nil,
+        isTodoItem: Bool? = nil,
+        todoCompletedAt: Date? = nil
     ) {
         self.id = id
         self.type = type
@@ -216,6 +246,8 @@ struct ClipItem: Identifiable, Codable, Equatable {
         self.isPinned = isPinned
         self.pinCategory = pinCategory
         self.customAlias = customAlias
+        self.isTodoItem = isTodoItem
+        self.todoCompletedAt = todoCompletedAt
     }
 
     /// 标题/主要预览文案（若有备注标题则优先展示备注名）
@@ -482,6 +514,12 @@ enum EpisodicQueryMatcher {
         switch tokenLower {
         case "收藏", "@pin", "@star", "pinned", "starred":
             return item.isPinned
+        case "待办", "todo", "@todo", "@待办":
+            return item.isTodo
+        case "未完成", "@pending":
+            return item.isPendingTodo
+        case "已完成", "@done":
+            return item.isTodoCompleted
         case "二维码", "qrcode", "@qr":
             return !(item.qrCodePayload?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
         case "今天", "今日", "today", "@today":

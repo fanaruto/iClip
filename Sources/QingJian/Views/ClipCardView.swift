@@ -24,7 +24,11 @@ struct ClipCardView: View {
     let onTogglePin: () -> Void
     let onSelectPinCategory: (PinCategory?) -> Void
     let onEditAlias: () -> Void
+    var onToggleTodo: (() -> Void)? = nil
+    var onToggleTodoCompletion: (() -> Void)? = nil
+    var onRemoveTodo: (() -> Void)? = nil
     var onOpenQuickLook: (() -> Void)? = nil
+    var onImageThumbnailHover: ((Bool, CGRect) -> Void)? = nil
     let onDelete: () -> Void
 
     @Environment(\.colorScheme) private var colorScheme
@@ -32,6 +36,7 @@ struct ClipCardView: View {
     @State private var asyncThumbnail: NSImage? = nil
     @State private var lastTapUptime: TimeInterval = 0
     @State private var showCopiedInlineFlash: Bool = false
+    @State private var thumbFrameInPanel: CGRect = .zero
 
     private var glassPalette: LiquidGlassPalette {
         LiquidGlassPalette(colorScheme: colorScheme, surfaceStyle: surfaceStyle, appearance: liquidGlassAppearance)
@@ -52,9 +57,24 @@ struct ClipCardView: View {
         item.type != .text || hasEmbeddedWebLink
     }
 
+    private var showsTodoCheckbox: Bool {
+        !minimalMode && item.isTodo
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .center, spacing: 12) {
+            HStack(alignment: .center, spacing: 11) {
+                if showsTodoCheckbox {
+                    TodoLeadingCheckboxButton(
+                        isCompleted: item.isTodoCompleted,
+                        isSelected: isSelected,
+                        isHovered: isHovered,
+                        action: {
+                            (onToggleTodoCompletion ?? onToggleTodo)?()
+                        }
+                    )
+                }
+
                 if hasLeadingVisual {
                     leadingThumbnail
                 }
@@ -64,6 +84,8 @@ struct ClipCardView: View {
                         .font(.system(size: 13.5, weight: .medium))
                         .lineSpacing(2.5)
                         .foregroundStyle(isSelected ? Color.white : Color.primary)
+                        .strikethrough(showsTodoCheckbox && item.isTodoCompleted, color: isSelected ? Color.white.opacity(0.75) : Color.secondary)
+                        .opacity((showsTodoCheckbox && item.isTodoCompleted) ? 0.54 : 1.0)
                         .lineLimit(2)
                         .multilineTextAlignment(.leading)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -74,6 +96,17 @@ struct ClipCardView: View {
                             Image(systemName: "star.fill")
                                 .font(.system(size: 9.5, weight: .semibold))
                                 .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.orange)
+                        }
+
+                        if showsTodoCheckbox {
+                            Text(item.isTodoCompleted ? "已完成" : "待办")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(
+                                    isSelected
+                                        ? Color.white.opacity(0.95)
+                                        : (item.isTodoCompleted ? Color.green : Color.accentColor)
+                                )
+                            Text("·")
                         }
 
                         if !minimalMode, let cat = item.pinCategory {
@@ -190,7 +223,7 @@ struct ClipCardView: View {
                         }
                     }
                 }
-                .padding(.leading, hasLeadingVisual ? 58 : 0)
+                .padding(.leading, (showsTodoCheckbox ? 29 : 0) + (hasLeadingVisual ? 58 : 0))
             }
         }
         .padding(.horizontal, hasLeadingVisual ? 12 : 14)
@@ -285,6 +318,19 @@ struct ClipCardView: View {
                             .strokeBorder(Color.white.opacity(0.25), lineWidth: 0.8)
                     )
                     .shadow(color: Color.black.opacity(0.08), radius: 3, y: 1)
+                    .background(
+                        GeometryReader { proxy in
+                            Color.clear.onAppear {
+                                thumbFrameInPanel = proxy.frame(in: .named("panelRoot"))
+                            }
+                            .onChange(of: proxy.frame(in: .named("panelRoot"))) { _, rect in
+                                thumbFrameInPanel = rect
+                            }
+                        }
+                    )
+                    .onHover { hovering in
+                        onImageThumbnailHover?(hovering, thumbFrameInPanel)
+                    }
             } else {
                 iconBadge(symbol: "photo", tint: .purple)
                     .task(id: item.id) {
@@ -430,6 +476,30 @@ struct ClipCardView: View {
                     helpText: queueRank != nil ? "移出顺序粘贴队列" : "加入顺序粘贴队列（⌘K）",
                     action: onToggleQueue
                 )
+
+                if item.isTodo {
+                    HoverActionCircleButton(
+                        symbolName: "pencil",
+                        size: 24,
+                        iconSize: 10.5,
+                        surface: surface,
+                        kind: .alias,
+                        helpText: (item.customAlias?.isEmpty == false) ? "修改待办标题（⌘R）" : "添加待办标题说明（⌘R）",
+                        action: onEditAlias
+                    )
+                }
+
+                if let onToggleTodo {
+                    HoverActionCircleButton(
+                        symbolName: item.isTodoCompleted ? "checkmark.circle.fill" : (item.isTodo ? "circle.inset.filled" : "checkmark.circle"),
+                        size: 24,
+                        iconSize: 11,
+                        surface: surface,
+                        kind: .todo(isTodo: item.isTodo, isCompleted: item.isTodoCompleted),
+                        helpText: item.isTodoCompleted ? "已完成 · 点击恢复未完成（⌘T）" : (item.isTodo ? "标记待办已完成（⌘T）" : "加入待办清单（⌘T）"),
+                        action: onToggleTodo
+                    )
+                }
             }
 
             HoverActionCircleButton(
@@ -608,6 +678,32 @@ struct ClipCardView: View {
 
         Divider()
 
+        if !minimalMode, let onToggleTodo {
+            if !item.isTodo {
+                Button("加入待办清单（⌘T）") {
+                    onToggleTodo()
+                }
+            } else if item.isPendingTodo {
+                Button("✓ 标记待办已完成（⌘T）") {
+                    onToggleTodo()
+                }
+                if let onRemoveTodo {
+                    Button("移出待办清单") {
+                        onRemoveTodo()
+                    }
+                }
+            } else {
+                Button("恢复为未完成待办（⌘T）") {
+                    onToggleTodo()
+                }
+                if let onRemoveTodo {
+                    Button("移出待办清单") {
+                        onRemoveTodo()
+                    }
+                }
+            }
+        }
+
         Button(item.isPinned ? "取消收藏" : "收藏") {
             onTogglePin()
         }
@@ -662,7 +758,11 @@ struct ClipCardView: View {
     let onApplyTransform: (TransformAction, Bool) -> Void
     let onTogglePin: () -> Void
     var onEditAlias: (() -> Void)? = nil
+    var onToggleTodo: (() -> Void)? = nil
+    var onToggleTodoCompletion: (() -> Void)? = nil
+    var onRemoveTodo: (() -> Void)? = nil
     var onOpenQuickLook: (() -> Void)? = nil
+    var onImageThumbnailHover: ((Bool, CGRect) -> Void)? = nil
     let onDelete: () -> Void
 
     @Environment(\.colorScheme) private var colorScheme
@@ -670,6 +770,7 @@ struct ClipCardView: View {
     @State private var asyncThumbnail: NSImage? = nil
     @State private var lastTapUptime: TimeInterval = 0
     @State private var showCopiedInlineFlash: Bool = false
+    @State private var thumbFrameInPanel: CGRect = .zero
 
     private var glassPalette: LiquidGlassPalette {
         LiquidGlassPalette(colorScheme: colorScheme, surfaceStyle: surfaceStyle, appearance: liquidGlassAppearance)
@@ -693,9 +794,24 @@ struct ClipCardView: View {
         return true
     }
 
+    private var showsTodoCheckbox: Bool {
+        !ClipboardStore.shared.minimalModeEnabled && item.isTodo
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .center, spacing: 12) {
+            HStack(alignment: .center, spacing: 11) {
+                if showsTodoCheckbox {
+                    TodoLeadingCheckboxButton(
+                        isCompleted: item.isTodoCompleted,
+                        isSelected: isSelected,
+                        isHovered: isHovered,
+                        action: {
+                            (onToggleTodoCompletion ?? onToggleTodo)?()
+                        }
+                    )
+                }
+
                 if hasLeadingVisual {
                     leadingThumbnail
                 }
@@ -705,6 +821,8 @@ struct ClipCardView: View {
                         .font(.system(size: 13.5, weight: .medium))
                         .lineSpacing(2.5)
                         .foregroundStyle(isSelected ? Color.white : Color.primary)
+                        .strikethrough(showsTodoCheckbox && item.isTodoCompleted, color: isSelected ? Color.white.opacity(0.75) : Color.secondary)
+                        .opacity((showsTodoCheckbox && item.isTodoCompleted) ? 0.54 : 1.0)
                         .lineLimit(2)
                         .multilineTextAlignment(.leading)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -715,6 +833,17 @@ struct ClipCardView: View {
                             Image(systemName: "star.fill")
                                 .font(.system(size: 9.5, weight: .semibold))
                                 .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.orange)
+                        }
+
+                        if showsTodoCheckbox {
+                            Text(item.isTodoCompleted ? "已完成" : "待办")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(
+                                    isSelected
+                                        ? Color.white.opacity(0.95)
+                                        : (item.isTodoCompleted ? Color.green : Color.accentColor)
+                                )
+                            Text("·")
                         }
 
                         if let kind = semantic.primaryKind {
@@ -788,7 +917,7 @@ struct ClipCardView: View {
             if !semantic.actions.isEmpty {
                 transformActionStrip(actions: semantic.actions)
                     .opacity((isSelected || isHovered) ? 1.0 : 0.78)
-                    .padding(.leading, hasLeadingVisual ? (item.type == .text ? 48 : 54) : 0)
+                    .padding(.leading, (showsTodoCheckbox ? 29 : 0) + (hasLeadingVisual ? (item.type == .text ? 48 : 54) : 0))
             }
         }
         .padding(.horizontal, hasLeadingVisual ? 12 : 14)
@@ -937,6 +1066,19 @@ struct ClipCardView: View {
                             .strokeBorder(Color.white.opacity(0.25), lineWidth: 0.8)
                     )
                     .shadow(color: Color.black.opacity(0.08), radius: 3, y: 1)
+                    .background(
+                        GeometryReader { proxy in
+                            Color.clear.onAppear {
+                                thumbFrameInPanel = proxy.frame(in: .named("panelRoot"))
+                            }
+                            .onChange(of: proxy.frame(in: .named("panelRoot"))) { _, rect in
+                                thumbFrameInPanel = rect
+                            }
+                        }
+                    )
+                    .onHover { hovering in
+                        onImageThumbnailHover?(hovering, thumbFrameInPanel)
+                    }
             } else {
                 iconBadge(symbol: "photo", tint: .purple)
                     .task(id: item.id) {
@@ -1035,6 +1177,30 @@ struct ClipCardView: View {
                     kind: .openURL,
                     helpText: "在浏览器中打开链接（⌘O / ⌘单击）",
                     action: { _ = ClipboardStore.shared.openItemExternally(item) }
+                )
+            }
+
+            if !ClipboardStore.shared.minimalModeEnabled, item.isTodo, let onEditAlias {
+                HoverActionCircleButton(
+                    symbolName: "pencil",
+                    size: 24,
+                    iconSize: 10.5,
+                    surface: surface,
+                    kind: .alias,
+                    helpText: (item.customAlias?.isEmpty == false) ? "修改待办标题（⌘R）" : "添加待办标题说明（⌘R）",
+                    action: onEditAlias
+                )
+            }
+
+            if !ClipboardStore.shared.minimalModeEnabled, let onToggleTodo {
+                HoverActionCircleButton(
+                    symbolName: item.isTodoCompleted ? "checkmark.circle.fill" : (item.isTodo ? "circle.inset.filled" : "checkmark.circle"),
+                    size: 24,
+                    iconSize: 11,
+                    surface: surface,
+                    kind: .todo(isTodo: item.isTodo, isCompleted: item.isTodoCompleted),
+                    helpText: item.isTodoCompleted ? "已完成 · 点击恢复未完成（⌘T）" : (item.isTodo ? "标记待办已完成（⌘T）" : "加入待办清单（⌘T）"),
+                    action: onToggleTodo
                 )
             }
 
@@ -1188,6 +1354,32 @@ struct ClipCardView: View {
 
         Divider()
 
+        if !ClipboardStore.shared.minimalModeEnabled, let onToggleTodo {
+            if !item.isTodo {
+                Button("加入待办清单（⌘T）") {
+                    onToggleTodo()
+                }
+            } else if item.isPendingTodo {
+                Button("✓ 标记待办已完成（⌘T）") {
+                    onToggleTodo()
+                }
+                if let onRemoveTodo {
+                    Button("移出待办清单") {
+                        onRemoveTodo()
+                    }
+                }
+            } else {
+                Button("恢复为未完成待办（⌘T）") {
+                    onToggleTodo()
+                }
+                if let onRemoveTodo {
+                    Button("移出待办清单") {
+                        onRemoveTodo()
+                    }
+                }
+            }
+        }
+
         Button(item.isPinned ? "取消收藏" : "收藏") {
             onTogglePin()
         }
@@ -1223,10 +1415,62 @@ enum HoverActionSurface {
 enum HoverActionKind: Equatable {
     case merge(isActive: Bool)
     case queue(isActive: Bool)
+    case todo(isTodo: Bool, isCompleted: Bool)
+    case alias
     case star(isPinned: Bool)
     case delete
     case ocr
     case openURL
+}
+
+/// 待办卡片左侧 Things 3 风格原生圆环复选框（独立高优先级点击热区，0.0px 尺寸零抖动）
+struct TodoLeadingCheckboxButton: View {
+    let isCompleted: Bool
+    let isSelected: Bool
+    let isHovered: Bool
+    let action: () -> Void
+
+    @State private var checkboxHovered: Bool = false
+
+    var body: some View {
+        ZStack {
+            if isCompleted {
+                Circle()
+                    .fill(isSelected ? Color.white : Color(red: 0.06, green: 0.72, blue: 0.51))
+                    .frame(width: 18, height: 18)
+                Image(systemName: "checkmark")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(isSelected ? Color.accentColor : Color.white)
+            } else {
+                Circle()
+                    .fill(checkboxHovered ? Color.accentColor.opacity(isSelected ? 0.22 : 0.10) : Color.clear)
+                    .frame(width: 18, height: 18)
+                    .overlay(
+                        Circle()
+                            .strokeBorder(
+                                isSelected
+                                    ? Color.white.opacity(checkboxHovered ? 1.0 : 0.85)
+                                    : Color.accentColor.opacity(checkboxHovered ? 0.95 : (isHovered ? 0.78 : 0.56)),
+                                lineWidth: 1.65
+                            )
+                    )
+            }
+        }
+        .frame(width: 24, height: 24)
+        .contentShape(Circle())
+        .scaleEffect(checkboxHovered ? 1.08 : 1.0)
+        .animation(.spring(response: 0.18, dampingFraction: 0.74), value: checkboxHovered)
+        .animation(.spring(response: 0.22, dampingFraction: 0.76), value: isCompleted)
+        .onHover { hovering in
+            checkboxHovered = hovering
+        }
+        .highPriorityGesture(
+            TapGesture().onEnded {
+                action()
+            }
+        )
+        .help(isCompleted ? "已完成 · 点击恢复未完成（⌘T）" : "点击标记待办已完成（⌘T）")
+    }
 }
 
 private struct IconMotionKeyframes {
@@ -1284,6 +1528,10 @@ struct HoverActionCircleButton: View {
             return surface == .onSelectedCard ? .white : .green
         case .queue(let isActive) where isActive:
             return surface == .onSelectedCard ? .white : .accentColor
+        case .todo(_, let isCompleted) where isCompleted:
+            return surface == .onSelectedCard ? .white : Color(red: 0.06, green: 0.72, blue: 0.51)
+        case .todo(let isTodo, _) where isTodo:
+            return surface == .onSelectedCard ? .white : .accentColor
         default:
             switch surface {
             case .onSelectedCard, .onImageTile:
@@ -1301,6 +1549,12 @@ struct HoverActionCircleButton: View {
                 return Color(red: 0.15, green: 0.76, blue: 0.46).opacity(0.94)
             case .queue:
                 return Color(red: 0.16, green: 0.54, blue: 0.98).opacity(0.94)
+            case .todo(_, let isCompleted):
+                return isCompleted
+                    ? Color(red: 0.06, green: 0.72, blue: 0.51).opacity(0.94)
+                    : Color(red: 0.12, green: 0.37, blue: 1.0).opacity(0.94)
+            case .alias:
+                return Color(red: 0.14, green: 0.52, blue: 0.98).opacity(0.94)
             case .star:
                 return Color(red: 0.98, green: 0.64, blue: 0.12).opacity(0.94)
             case .delete:
@@ -1342,6 +1596,9 @@ struct HoverActionCircleButton: View {
         switch kind {
         case .merge:  return Color(red: 0.12, green: 0.72, blue: 0.42).opacity(0.38)
         case .queue:  return Color(red: 0.14, green: 0.50, blue: 0.96).opacity(0.38)
+        case .todo(_, let isCompleted):
+            return isCompleted ? Color.green.opacity(0.38) : Color.blue.opacity(0.38)
+        case .alias:  return Color.blue.opacity(0.36)
         case .star:   return Color.orange.opacity(0.42)
         case .delete: return Color.red.opacity(0.42)
         case .ocr:    return Color.cyan.opacity(0.38)

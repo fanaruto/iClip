@@ -14,6 +14,37 @@ struct ArchivedClipEntry: Codable, Equatable {
     let createdAt: Date
     let pinCategory: PinCategory?
     let customAlias: String?
+    let isTodoItem: Bool?
+
+    init(
+        type: ClipContentType,
+        text: String?,
+        imageWidth: Int?,
+        imageHeight: Int?,
+        ocrText: String?,
+        embeddedPNGBase64: String?,
+        filePaths: [String]?,
+        contentHash: String,
+        sourceAppName: String?,
+        createdAt: Date,
+        pinCategory: PinCategory?,
+        customAlias: String?,
+        isTodoItem: Bool? = nil
+    ) {
+        self.type = type
+        self.text = text
+        self.imageWidth = imageWidth
+        self.imageHeight = imageHeight
+        self.ocrText = ocrText
+        self.embeddedPNGBase64 = embeddedPNGBase64
+        self.filePaths = filePaths
+        self.contentHash = contentHash
+        self.sourceAppName = sourceAppName
+        self.createdAt = createdAt
+        self.pinCategory = pinCategory
+        self.customAlias = customAlias
+        self.isTodoItem = isTodoItem
+    }
 }
 
 /// `.iclip` 收藏资产归档包根结构（双角色 100% 互通）
@@ -92,7 +123,8 @@ enum ArchiveBackupService {
                 sourceAppName: item.sourceAppName,
                 createdAt: item.createdAt,
                 pinCategory: item.pinCategory,
-                customAlias: item.customAlias
+                customAlias: item.customAlias,
+                isTodoItem: item.isTodoItem
             )
         }
 
@@ -147,6 +179,10 @@ enum ArchiveBackupService {
 
                 if !current.isPinned {
                     current.isPinned = true
+                    didChange = true
+                }
+                if entry.isTodoItem == true && !current.isTodo {
+                    current.isTodo = true
                     didChange = true
                 }
                 if current.pinCategory == nil, let cat = entry.pinCategory {
@@ -217,7 +253,8 @@ enum ArchiveBackupService {
                     createdAt: entry.createdAt,
                     isPinned: true,
                     pinCategory: entry.pinCategory,
-                    customAlias: entry.customAlias
+                    customAlias: entry.customAlias,
+                    isTodoItem: entry.isTodoItem
                 )
                 working.append(restored)
                 importedNew += 1

@@ -690,8 +690,8 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             }
         }
 
-        // ⌥1 ~ ⌥6：全键盘一键直达顶部分类（全部 / 收藏 / 文本 / 链接 / 图片 / 文件）
-        if flags == .option, let targetTab = ClipFilterTab.fromOptionKeyCode(event.keyCode) {
+        // ⌥1 ~ ⌥7（极简模式下 ⌥1 ~ ⌥6）：全键盘一键直达顶部分类
+        if flags == .option, let targetTab = ClipFilterTab.fromOptionKeyCode(event.keyCode, minimalMode: store.minimalModeEnabled) {
             rootView.selectFilterTab(targetTab)
             return nil
         }
@@ -705,6 +705,12 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         // ⌘P (keyCode 35)：一键切换窗口「始终在前（Always on Top）」
         if flags == .command, event.keyCode == 35 {
             store.toggleAlwaysOnTop()
+            return nil
+        }
+
+        // ⌘T (keyCode 17)：一键加入待办 / 标记完成 / 恢复未完成
+        if !store.minimalModeEnabled, flags == .command, event.keyCode == 17 {
+            rootView.toggleTodoForSelected()
             return nil
         }
 
@@ -783,6 +789,9 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             }
             if flags.contains(.command),
                rootView.commitEmptySearchCaptureIfApplicable(forcePin: flags.contains(.shift)) {
+                return nil
+            }
+            if flags == .command, rootView.pasteAndCompleteTodoIfApplicable() {
                 return nil
             }
             if flags.contains(.shift) {
@@ -1474,8 +1483,8 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             }
         }
 
-        // ⌥1 ~ ⌥6：全键盘一键直达顶部分类（全部 / 收藏 / 文本 / 链接 / 图片 / 文件）
-        if flags == .option, let targetTab = ClipFilterTab.fromOptionKeyCode(event.keyCode) {
+        // ⌥1 ~ ⌥7（极简模式下 ⌥1 ~ ⌥6）：全键盘一键直达顶部分类
+        if flags == .option, let targetTab = ClipFilterTab.fromOptionKeyCode(event.keyCode, minimalMode: store.minimalModeEnabled) {
             rootView.selectFilterTab(targetTab)
             return nil
         }
@@ -1494,6 +1503,12 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         // ⌘P (keyCode 35)：一键切换窗口「始终在前（Always on Top）」
         if flags == .command, event.keyCode == 35 {
             store.toggleAlwaysOnTop()
+            return nil
+        }
+
+        // ⌘T (keyCode 17)：一键加入待办 / 标记完成 / 恢复未完成
+        if !store.minimalModeEnabled, flags == .command, event.keyCode == 17 {
+            rootView.toggleTodoForSelected()
             return nil
         }
 
@@ -1557,6 +1572,9 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             }
             if flags.contains(.command),
                rootView.commitEmptySearchCaptureIfApplicable(forcePin: flags.contains(.shift)) {
+                return nil
+            }
+            if flags == .command, rootView.pasteAndCompleteTodoIfApplicable() {
                 return nil
             }
             if flags.contains(.shift) {

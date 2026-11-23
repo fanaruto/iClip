@@ -574,6 +574,7 @@ final class ClipboardStore: ObservableObject {
 
         ensureDirectories()
         loadHistory()
+        archiveExpiredCompletedTodos()
         startMonitoring()
         scheduleOrphanedImageCleanup()
         if !minimalModeEnabled {
@@ -648,6 +649,16 @@ final class ClipboardStore: ObservableObject {
         case .pinFrequentItem(let itemID):
             if let target = items.first(where: { $0.id == itemID }), !target.isPinned {
                 togglePin(target)
+            }
+
+        case .markAsTodo(let itemID):
+            if let target = items.first(where: { $0.id == itemID }), !target.isTodo {
+                toggleTodo(target)
+            }
+
+        case .splitChecklistIntoTodos(let itemID):
+            if let target = items.first(where: { $0.id == itemID }) {
+                _ = splitChecklistIntoTodos(from: target)
             }
         }
     }
@@ -785,6 +796,7 @@ final class ClipboardStore: ObservableObject {
     func onPanelShown(visibleItems: [ClipItem]) {
         cacheTrimWorkItem?.cancel()
         cacheTrimWorkItem = nil
+        archiveExpiredCompletedTodos()
         bumpPollingActivity()
         refreshAccessibilityStatus()
         thumbnailCache.countLimit = 80
@@ -1640,15 +1652,15 @@ final class ClipboardStore: ObservableObject {
     }
 
     private func trimHistoryIfNeeded() {
-        let pinned = items.filter { $0.isPinned }
-        var unpinned = items.filter { !$0.isPinned }
-        if unpinned.count > maxHistoryCount {
-            let removed = unpinned[maxHistoryCount...]
+        let protectedItems = items.filter { $0.isPinned || $0.isPendingTodo }
+        var unprotected = items.filter { !$0.isPinned && !$0.isPendingTodo }
+        if unprotected.count > maxHistoryCount {
+            let removed = unprotected[maxHistoryCount...]
             for item in removed {
                 deleteImageFileIfNeeded(for: item)
             }
-            unpinned = Array(unpinned.prefix(maxHistoryCount))
-            items = sortItems(pinned + unpinned)
+            unprotected = Array(unprotected.prefix(maxHistoryCount))
+            items = sortItems(protectedItems + unprotected)
             saveHistory()
         }
     }
@@ -1945,14 +1957,14 @@ final class ClipboardStore: ObservableObject {
     }
 
     func clearUnpinned() {
-        let toRemove = items.filter { !$0.isPinned }
+        let toRemove = items.filter { !$0.isPinned && !$0.isPendingTodo }
         guard !toRemove.isEmpty else { return }
         #if ICLIP_EDITION_FLOW
         let removedIDs = Set(toRemove.map(\.id))
         pasteQueueIDs.removeAll { removedIDs.contains($0) }
         selectedMergeIDs.removeAll { removedIDs.contains($0) }
         #endif
-        items = items.filter { $0.isPinned }
+        items = items.filter { $0.isPinned || $0.isPendingTodo }
         saveHistory(allowEmptyBackup: true)
         TactileFeedbackEngine.shared.perform(.deleteItem)
         stageDeletionUndoBuffer(toRemove)
@@ -2110,6 +2122,10 @@ final class ClipboardStore: ObservableObject {
             actionID: action.id,
             sourceApp: item.sourceAppName
         )
+        if action.id == "todo-split-checklist" {
+            _ = splitChecklistIntoTodos(from: item)
+            return
+        }
         let htmlPayload = (action.id == "tbl-md-to-excel") ? TableBridgeEngine.toHTMLTable(fromTSV: action.resultText) : nil
         pasteCustomString(
             action.resultText,
@@ -2207,6 +2223,263 @@ final class ClipboardStore: ObservableObject {
         return true
     }
 
+    // MARK: - 轻量直觉待办清单（复制即收件 · 用完即勾销 · 24h 自动新陈代谢）
+
+    var pendingTodoCount: Int {
+        items.reduce(0) { $0 + ($1.isPendingTodo ? 1 : 0) }
+    }
+
+    var completedTodoCount: Int {
+        items.reduce(0) { $0 + ($1.isTodoCompleted ? 1 : 0) }
+    }
+
+    /// 纯函数：将所有待办按「未完成 `- [ ]` → 已完成 `- [x]`」渲染为干净的 Markdown 任务清单，方便贴入周报/飞书
+    nonisolated static func formatTodosAsMarkdownChecklist(from sourceItems: [ClipItem]) -> String? {
+        let todos = sourceItems.filter(\.isTodo)
+        guard !todos.isEmpty else { return nil }
+        let ordered = todos.sorted { lhs, rhs in
+            if lhs.isTodoCompleted != rhs.isTodoCompleted {
+                return !lhs.isTodoCompleted
+            }
+            if lhs.isTodoCompleted {
+                return (lhs.todoCompletedAt ?? lhs.createdAt) > (rhs.todoCompletedAt ?? rhs.createdAt)
+            }
+            return lhs.createdAt > rhs.createdAt
+        }
+        let lines: [String] = ordered.map { item in
+            let prefix = item.isTodoCompleted ? "- [x] " : "- [ ] "
+            let alias = item.customAlias?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let rawFlat = item.rawContentPreview
+                .replacingOccurrences(of: "\r", with: "")
+                .replacingOccurrences(of: "\n", with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if let alias, !alias.isEmpty {
+                if item.type == .link || (item.type == .text && alias != rawFlat && rawFlat.count <= 100) {
+                    return "\(prefix)\(alias) — \(rawFlat)"
+                }
+                return "\(prefix)\(alias)"
+            }
+            return "\(prefix)\(rawFlat)"
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// 一键将当前待办清单复制为标准 Markdown 任务列表（静默防自吞，不污染剪贴历史顶部）
+    @discardableResult
+    func copyTodosAsMarkdownChecklist() -> Int {
+        guard let md = Self.formatTodosAsMarkdownChecklist(from: items) else { return 0 }
+        let total = items.reduce(0) { $0 + ($1.isTodo ? 1 : 0) }
+        pasteboard.clearContents()
+        pasteboard.setString(md, forType: .string)
+        ignoreNextChangeCount = pasteboard.changeCount
+        lastChangeCount = pasteboard.changeCount
+        TactileFeedbackEngine.shared.perform(.pasteCommit)
+        showToast("✓ 已复制 \(total) 条 Markdown 待办清单")
+        return total
+    }
+
+    /// 搜索框闪念直存待办：默认不覆盖系统剪贴板，避免冲掉用户手头正在粘贴的代码或资料
+    @discardableResult
+    func captureQuickTodo(body: String, alias: String?, copyToClipboard: Bool = false) -> Bool {
+        let rawTrimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanedBody = TodoChecklistExtractor.cleanLeadingCheckboxIfPresent(rawTrimmed)
+        guard !cleanedBody.isEmpty else { return false }
+
+        let cleanAlias: String? = {
+            guard let a = alias?.trimmingCharacters(in: .whitespacesAndNewlines), !a.isEmpty else { return nil }
+            return a
+        }()
+        let isLink = isValidWebURL(cleanedBody)
+        let prefix = isLink ? "link" : "text"
+        let contentHash = "\(prefix):\(Self.sha256(cleanedBody))"
+
+        if copyToClipboard {
+            pasteboard.clearContents()
+            pasteboard.setString(cleanedBody, forType: .string)
+            if isLink {
+                pasteboard.setString(cleanedBody, forType: .URL)
+            }
+            ignoreNextChangeCount = pasteboard.changeCount
+            lastChangeCount = pasteboard.changeCount
+        }
+
+        if let existingIdx = items.firstIndex(where: { $0.contentHash == contentHash }) {
+            items[existingIdx].createdAt = Date()
+            items[existingIdx].isTodo = true
+            items[existingIdx].todoCompletedAt = nil
+            if let cleanAlias {
+                items[existingIdx].customAlias = cleanAlias
+            }
+            items = sortItems(items)
+            saveHistory()
+        } else {
+            let newItem = ClipItem(
+                type: isLink ? .link : .text,
+                text: cleanedBody,
+                contentHash: contentHash,
+                sourceAppName: "iClip 待办",
+                isTodoItem: true,
+                todoCompletedAt: nil
+            )
+            var finalItem = newItem
+            finalItem.customAlias = cleanAlias
+            items.insert(finalItem, at: 0)
+            items = sortItems(items)
+            trimHistoryIfNeeded()
+            saveHistory()
+        }
+
+        TactileFeedbackEngine.shared.perform(.favoriteOn)
+        showToast(copyToClipboard ? "✓ 已加入待办并复制到剪贴板" : "✓ 已加入待办（⌥2 查看）")
+        return true
+    }
+
+    /// ⌘T 核心循环：普通记录 → 未完成待办 → 已完成待办 → 恢复未完成
+    func toggleTodo(_ item: ClipItem) {
+        guard let idx = items.firstIndex(where: { $0.id == item.id }) else { return }
+        pendingOTPExpirationTasks[item.id]?.cancel()
+        pendingOTPExpirationTasks.removeValue(forKey: item.id)
+
+        if !items[idx].isTodo {
+            items[idx].isTodo = true
+            items[idx].todoCompletedAt = nil
+            saveHistory()
+            TactileFeedbackEngine.shared.perform(.favoriteOn)
+            showToast("已加入待办 · 按 ⌥2 查看")
+        } else if items[idx].todoCompletedAt == nil {
+            items[idx].todoCompletedAt = Date()
+            saveHistory()
+            TactileFeedbackEngine.shared.perform(.pasteCommit)
+            showToast("✓ 已完成待办 · 24h 后自动归档")
+        } else {
+            items[idx].todoCompletedAt = nil
+            saveHistory()
+            TactileFeedbackEngine.shared.perform(.favoriteOn)
+            showToast("已恢复为未完成待办")
+        }
+    }
+
+    /// 点击待办卡片左侧圆环勾选框：直接切换未完成 / 已完成
+    func toggleTodoCompletion(_ item: ClipItem) {
+        guard let idx = items.firstIndex(where: { $0.id == item.id }) else { return }
+        if !items[idx].isTodo {
+            items[idx].isTodo = true
+            items[idx].todoCompletedAt = nil
+            saveHistory()
+            TactileFeedbackEngine.shared.perform(.favoriteOn)
+            return
+        }
+        if items[idx].todoCompletedAt == nil {
+            items[idx].todoCompletedAt = Date()
+            saveHistory()
+            TactileFeedbackEngine.shared.perform(.pasteCommit)
+        } else {
+            items[idx].todoCompletedAt = nil
+            saveHistory()
+            TactileFeedbackEngine.shared.perform(.favoriteOn)
+        }
+    }
+
+    /// 粘贴待办并顺手标记已完成（⌘↵）
+    func markTodoCompletedSilently(_ item: ClipItem) {
+        guard let idx = items.firstIndex(where: { $0.id == item.id }), items[idx].isPendingTodo else { return }
+        items[idx].todoCompletedAt = Date()
+        saveHistory()
+    }
+
+    /// 从待办清单移出（保留原剪贴历史不误删）
+    func removeFromTodo(_ item: ClipItem) {
+        guard let idx = items.firstIndex(where: { $0.id == item.id }), items[idx].isTodo else { return }
+        items[idx].isTodo = false
+        items[idx].todoCompletedAt = nil
+        saveHistory()
+        TactileFeedbackEngine.shared.perform(.favoriteOff)
+        showToast("已移出待办清单")
+    }
+
+    /// 一键归档所有已完成的待办（退回普通历史列表）
+    @discardableResult
+    func archiveCompletedTodos() -> Int {
+        var count = 0
+        for idx in items.indices where items[idx].isTodoCompleted {
+            items[idx].isTodo = false
+            items[idx].todoCompletedAt = nil
+            count += 1
+        }
+        guard count > 0 else { return 0 }
+        saveHistory()
+        TactileFeedbackEngine.shared.perform(.tabSwitch)
+        showToast("已归档 \(count) 条已完成待办")
+        return count
+    }
+
+    /// 自动新陈代谢：完成满 24 小时的待办静默退回普通历史记录，保持清单清爽不积灰
+    @discardableResult
+    func archiveExpiredCompletedTodos(now: Date = Date(), maxCompletedAge: TimeInterval = 86_400) -> Int {
+        var archived = 0
+        for idx in items.indices {
+            if items[idx].isTodo,
+               let doneAt = items[idx].todoCompletedAt,
+               now.timeIntervalSince(doneAt) >= maxCompletedAge {
+                items[idx].isTodo = false
+                items[idx].todoCompletedAt = nil
+                archived += 1
+            }
+        }
+        if archived > 0 {
+            saveHistory()
+        }
+        return archived
+    }
+
+    /// 将多行清单剪贴记录一键拆解为多条独立可勾选的待办事项
+    @discardableResult
+    func splitChecklistIntoTodos(from item: ClipItem) -> Int {
+        guard let raw = item.text else { return 0 }
+        let extracted = TodoChecklistExtractor.extractChecklistItems(from: raw)
+        guard extracted.count >= 2 else { return 0 }
+
+        let baseDate = Date()
+        var createdCount = 0
+        // 逆序插入并错开微秒时间戳，使原清单第 1 行排在待办顶部第 1 条
+        for (revOffset, line) in extracted.reversed().enumerated() {
+            let isLink = isValidWebURL(line)
+            let prefix = isLink ? "link" : "text"
+            let hash = "\(prefix):\(Self.sha256(line))"
+            let itemDate = baseDate.addingTimeInterval(Double(revOffset) * 0.001)
+
+            if let existingIdx = items.firstIndex(where: { $0.contentHash == hash }) {
+                items[existingIdx].createdAt = itemDate
+                items[existingIdx].isTodo = true
+                items[existingIdx].todoCompletedAt = nil
+            } else {
+                let todoItem = ClipItem(
+                    type: isLink ? .link : .text,
+                    text: line,
+                    contentHash: hash,
+                    sourceAppName: item.sourceAppName ?? "清单拆解",
+                    createdAt: itemDate,
+                    isTodoItem: true,
+                    todoCompletedAt: nil
+                )
+                items.insert(todoItem, at: 0)
+            }
+            createdCount += 1
+        }
+
+        items = sortItems(items)
+        trimHistoryIfNeeded()
+        #if !ICLIP_EDITION_FLOW
+        semanticCache.removeAllObjects()
+        #else
+        financeCache.removeAllObjects()
+        #endif
+        saveHistory()
+        TactileFeedbackEngine.shared.perform(.magicTransform)
+        showToast("✓ 已拆解为 \(createdCount) 条待办（按 ⌥2 查看）")
+        return createdCount
+    }
+
     func pasteCustomString(
         _ text: String,
         htmlTable: String? = nil,
@@ -2254,14 +2527,14 @@ final class ClipboardStore: ObservableObject {
 
         var autoPinnedNow = false
         if hasAlias {
-            if !items[idx].isPinned {
+            if !items[idx].isPinned && !items[idx].isTodo {
                 items[idx].isPinned = true
                 autoPinnedNow = true
                 pendingOTPExpirationTasks[item.id]?.cancel()
                 pendingOTPExpirationTasks.removeValue(forKey: item.id)
                 TactileFeedbackEngine.shared.perform(.favoriteOn)
             }
-            if items[idx].pinCategory == nil {
+            if items[idx].isPinned && items[idx].pinCategory == nil {
                 items[idx].pinCategory = PinCategory.infer(alias: trimmed, text: items[idx].text)
             }
         }
@@ -2269,11 +2542,11 @@ final class ClipboardStore: ObservableObject {
         if autoPinnedNow {
             showToast("已保存备注并自动收藏保护")
         } else {
-            showToast(hasAlias ? "已更新备注标题" : "已清除备注标题")
+            showToast(hasAlias ? (items[idx].isTodo ? "已更新待办说明" : "已更新备注标题") : "已清除备注标题")
         }
     }
 
-    /// 纯函数：生成原位微调后的新 ClipItem（保留原 UUID、收藏、分组与备注名，自动重算类型与哈希）
+    /// 纯函数：生成原位微调后的新 ClipItem（保留原 UUID、收藏、分组、待办状态与备注名，自动重算类型与哈希）
     nonisolated static func updatedItem(from existing: ClipItem, withNewText newText: String) -> ClipItem? {
         let trimmed = newText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
@@ -2292,7 +2565,9 @@ final class ClipboardStore: ObservableObject {
                 createdAt: existing.createdAt,
                 isPinned: existing.isPinned,
                 pinCategory: existing.pinCategory,
-                customAlias: existing.customAlias
+                customAlias: existing.customAlias,
+                isTodoItem: existing.isTodoItem,
+                todoCompletedAt: existing.todoCompletedAt
             )
 
         case .image:
@@ -2470,6 +2745,21 @@ final class ClipboardStore: ObservableObject {
         if analyzed.isEmpty {
             analyzed = DocumentTypographyEngine.analyze(raw)
         }
+        if !item.isTodo {
+            let checklist = TodoChecklistExtractor.extractChecklistItems(from: raw)
+            if checklist.count >= 2 {
+                analyzed.insert(
+                    FinanceQuickAction(
+                        id: "todo-split-checklist",
+                        title: "拆为 \(checklist.count) 条待办",
+                        symbolName: "checklist",
+                        resultText: raw,
+                        toastText: "已拆解为 \(checklist.count) 条待办"
+                    ),
+                    at: 0
+                )
+            }
+        }
         let ranked = AdaptiveIntelligenceEngine.shared.rankActions(
             analyzed,
             idOf: \.id,
@@ -2489,6 +2779,10 @@ final class ClipboardStore: ObservableObject {
             actionID: action.id,
             sourceApp: item.sourceAppName
         )
+        if action.id == "todo-split-checklist" {
+            _ = splitChecklistIntoTodos(from: item)
+            return
+        }
         pasteboard.clearContents()
         pasteboard.setString(action.resultText, forType: .string)
         if action.id == "tbl-md-to-excel", let html = TableBridgeEngine.toHTMLTable(fromTSV: action.resultText) {
