@@ -42,7 +42,7 @@ use windows_sys::Win32::Graphics::Gdi::{
     ReleaseDC, SelectObject, SetBkMode, SetTextColor, ANTIALIASED_QUALITY, BITMAPINFO,
     BITMAPINFOHEADER, BI_RGB, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DIB_RGB_COLORS, DT_CENTER,
     DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK,
-    FW_BOLD, FW_MEDIUM, FW_NORMAL, FW_SEMIBOLD, HDC, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    FW_MEDIUM, FW_NORMAL, FW_SEMIBOLD, HDC, MONITORINFO, MONITOR_DEFAULTTONEAREST,
     OUT_DEFAULT_PRECIS, PAINTSTRUCT, SRCCOPY, TRANSPARENT,
 };
 use windows_sys::Win32::System::DataExchange::{
@@ -2699,7 +2699,16 @@ unsafe fn render_panel_frame_dib(
 
     {
         let mut canvas = PixelCanvas::new(dib_pixels, w, h);
-        canvas.clear(wallpaper_sim_bg.unwrap_or(Color4::rgba(0, 0, 0, 0)));
+        if let Some(bg) = wallpaper_sim_bg {
+            let bot = Color4::rgb(
+                bg.r.saturating_sub(14),
+                bg.g.saturating_sub(10),
+                bg.b.saturating_add(8),
+            );
+            canvas.fill_vgrad_round_rect(0, 0, w, h, 0.0, bg, bot);
+        } else {
+            canvas.clear(Color4::rgba(0, 0, 0, 0));
+        }
 
         // 面板根液态玻璃表面（Win11 DWM 自动圆角合成，辅以连续曲率半透底与 0.8px 光学细边）
         canvas.fill_round_rect(0, 0, w, h, sf(18.0), palette.window_bg);
