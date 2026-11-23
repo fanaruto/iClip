@@ -1,8 +1,8 @@
 #![cfg(target_os = "windows")]
 
 use iclip_core::canvas_ui::{
-    build_display_rows_ext, grid_move_selection, image_grid_row_height, standard_card_height,
-    Color4, DisplayRow, GlassPalette, GridMoveDir, PixelCanvas,
+    build_display_rows_ext, estimate_text_px, grid_move_selection, image_grid_row_height,
+    standard_card_height, Color4, DisplayRow, GlassPalette, GridMoveDir, PixelCanvas,
 };
 use iclip_core::engines::{
     analyze_text_actions, clean_tracking_url, compress_png_to_white_bg_jpeg,
@@ -2646,6 +2646,10 @@ unsafe fn composite_texts_premultiplied_alpha(
         SelectObject(mask_dc, font_handle);
         let mut wide = to_wide(&cmd.text);
         let mut r = cmd.rect;
+        // 补偿 Microsoft YaHei UI 在单行垂直居中时的 tmInternalLeading 下沉偏差 (-1pt)
+        if (cmd.flags & DT_VCENTER) != 0 && (cmd.flags & DT_SINGLELINE) != 0 {
+            r.top -= (1.1 * scale).round() as i32;
+        }
         let _ = DrawTextW(
             mask_dc,
             wide.as_mut_ptr(),
@@ -2853,7 +2857,7 @@ fn layout_and_draw_main_view(
         let ccx = (clear_rc.left + clear_rc.right) as f32 * 0.5;
         let ccy = (clear_rc.top + clear_rc.bottom) as f32 * 0.5;
         canvas.fill_circle(ccx, ccy, sf(7.5), palette.text_muted.with_alpha(95));
-        canvas.draw_icon_close(ccx, ccy, sf(7.5), sf(1.45), Color4::rgb(255, 255, 255));
+        canvas.draw_icon_close(ccx, ccy, sf(8.2), sf(1.18), Color4::rgb(255, 255, 255));
         st.hit_regions.push(HitRegion {
             rect: clear_rc,
             interactive_cursor: true,
@@ -3123,8 +3127,12 @@ fn layout_and_draw_main_view(
         pill_w,
         pill_h,
         (pill_h as f32) * 0.5,
-        sf(0.65),
-        palette.track_border,
+        sf(0.75),
+        if st.is_dark_mode {
+            Color4::rgba(255, 255, 255, 68)
+        } else {
+            palette.track_border
+        },
     );
 
     let pending_todos = st.store.pending_todo_count();
@@ -4341,10 +4349,12 @@ fn layout_and_draw_main_view(
                     // 右上角悬停圆形微按钮组或极淡快捷键胶囊 `^1`
                     let right_reserved = if is_hovered {
                         if can_jump {
-                            s(108)
+                            s(118)
                         } else {
-                            s(82)
+                            s(90)
                         }
+                    } else if is_selected {
+                        s(68)
                     } else {
                         s(44)
                     };
@@ -4530,8 +4540,26 @@ fn layout_and_draw_main_view(
                     } else if vis_pos < 9 {
                         let bw = s(28);
                         let bh = s(18);
-                        let bx = w - pad - bw - s(10);
+                        let mut bx = w - pad - bw - s(10);
                         let by = cur_y + s(9);
+                        if is_selected {
+                            let r_sz = s(20);
+                            let rx = bx + bw - r_sz;
+                            canvas.fill_circle(
+                                (rx + r_sz / 2) as f32,
+                                (by + bh / 2) as f32,
+                                (r_sz as f32) * 0.5,
+                                Color4::rgba(255, 255, 255, 62),
+                            );
+                            canvas.draw_icon_return_arrow(
+                                (rx + r_sz / 2) as f32,
+                                (by + bh / 2) as f32,
+                                sf(10.5),
+                                sf(1.45),
+                                Color4::rgb(255, 255, 255),
+                            );
+                            bx = rx - bw - s(5);
+                        }
                         canvas.fill_round_rect(
                             bx,
                             by,
@@ -4539,7 +4567,7 @@ fn layout_and_draw_main_view(
                             bh,
                             sf(9.0),
                             if is_selected {
-                                Color4::rgba(255, 255, 255, 52)
+                                Color4::rgba(255, 255, 255, 48)
                             } else {
                                 palette.chip_bg
                             },
@@ -4583,33 +4611,37 @@ fn layout_and_draw_main_view(
                         flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                     });
 
-                    // 副标题行（星标 + 分类圆点 + 摘要元信息 + 右侧等宽相对时间）
+                    // 副标题行（收藏星标 + 摘要元信息 + 右侧等宽相对时间）
                     let mut meta_x = left_cursor;
-                    let meta_cy = (cur_y + s(42)) as f32;
+                    let meta_cy = (cur_y + s(41)) as f32;
                     if item.is_pinned {
+                        let star_c = if is_selected {
+                            Color4::rgb(255, 255, 255)
+                        } else if !minimal {
+                            item.pin_category
+                                .map(GlassPalette::pin_category_color)
+                                .unwrap_or(palette.amber)
+                        } else {
+                            palette.amber
+                        };
                         canvas.draw_icon_star(
                             meta_x as f32 + sf(5.0),
                             meta_cy,
                             sf(10.5),
                             sf(1.3),
-                            if is_selected {
-                                Color4::rgb(255, 255, 255)
-                            } else {
-                                palette.amber
-                            },
+                            star_c,
                             true,
                         );
                         meta_x += s(14);
-                    }
-                    if !minimal {
+                    } else if !minimal {
                         if let Some(cat) = item.pin_category {
                             let dot_c = if is_selected {
                                 Color4::rgb(255, 255, 255)
                             } else {
                                 GlassPalette::pin_category_color(cat)
                             };
-                            canvas.fill_circle(meta_x as f32 + sf(3.2), meta_cy, sf(3.0), dot_c);
-                            meta_x += s(9);
+                            canvas.fill_circle(meta_x as f32 + sf(3.0), meta_cy, sf(2.6), dot_c);
+                            meta_x += s(8);
                         }
                     }
 
@@ -4681,7 +4713,7 @@ fn layout_and_draw_main_view(
                         flags: DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
                     });
 
-                    // 常驻轻雾快捷胶囊条（复刻 ClipCardView.swift:212 — 极淡 5.5% 雾面底，绝不画杂乱边框！）
+                    // 常驻轻雾快捷胶囊条（复刻 ClipCardView.swift:212 — 精确字宽包裹 + 极淡 5.5% 雾面底）
                     if has_chips {
                         let mut chip_x = left_cursor;
                         let chip_top = cur_y + s(56);
@@ -4692,8 +4724,8 @@ fn layout_and_draw_main_view(
                             } else {
                                 act.title.clone()
                             };
-                            let char_len = label.chars().count().min(20) as i32;
-                            let cw = (char_len * s(9) + s(26)).min(w - pad - chip_x - s(10));
+                            let txt_w = estimate_text_px(&label, sf(11.0));
+                            let cw = (s(20) + txt_w + s(9)).min(w - pad - chip_x - s(10));
                             if cw < s(52) {
                                 break;
                             }
@@ -4713,7 +4745,7 @@ fn layout_and_draw_main_view(
                                 palette.cobalt
                             };
                             canvas.draw_icon_bolt(
-                                (chip_x + s(10)) as f32,
+                                (chip_x + s(11)) as f32,
                                 (chip_top + chip_h / 2) as f32,
                                 sf(9.5),
                                 sf(1.35),
@@ -4722,15 +4754,15 @@ fn layout_and_draw_main_view(
                             texts.push(TextDrawCmd {
                                 text: label,
                                 rect: RECT {
-                                    left: chip_x + s(17),
+                                    left: chip_x + s(19),
                                     top: chip_top,
-                                    right: chip_x + cw - s(6),
+                                    right: chip_x + cw - s(7),
                                     bottom: chip_top + chip_h,
                                 },
                                 color: if is_selected {
                                     Color4::rgb(255, 255, 255)
                                 } else {
-                                    palette.text_primary.with_alpha(200)
+                                    palette.text_primary.with_alpha(206)
                                 },
                                 font_kind: FontKind::Meta,
                                 flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
@@ -4861,7 +4893,11 @@ fn layout_and_draw_main_view(
     let mut cur_rx = hint_right_edge;
     for (k, lbl) in hints {
         let lbl_w = s(24);
-        let cap_w = (k.chars().count() as i32) * s(7) + s(9);
+        let cap_w = match k {
+            "↵" | "⇥" => s(18),
+            "⇧↵" => s(26),
+            _ => (k.chars().count() as i32) * s(7) + s(9),
+        };
         let total_w = cap_w + s(3) + lbl_w;
         let start_x = cur_rx - total_w;
         if start_x < fb_x + s(78) {
@@ -4869,19 +4905,27 @@ fn layout_and_draw_main_view(
         }
         let cap_h = s(15);
         let cap_y = fb_y + (fb_h - cap_h) / 2;
-        canvas.fill_round_rect(start_x, cap_y, cap_w, cap_h, sf(4.0), palette.chip_bg);
-        texts.push(TextDrawCmd {
-            text: k.to_string(),
-            rect: RECT {
-                left: start_x,
-                top: cap_y,
-                right: start_x + cap_w,
-                bottom: cap_y + cap_h,
-            },
-            color: palette.text_secondary,
-            font_kind: FontKind::KeyCap,
-            flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-        });
+        canvas.fill_round_rect(start_x, cap_y, cap_w, cap_h, sf(4.5), palette.chip_bg);
+        let cap_cx = (start_x + cap_w / 2) as f32;
+        let cap_cy = (cap_y + cap_h / 2) as f32;
+        if k == "↵" {
+            canvas.draw_icon_return_arrow(cap_cx, cap_cy, sf(9.5), sf(1.3), palette.text_secondary);
+        } else if k == "⇥" {
+            canvas.draw_icon_tab_arrow(cap_cx, cap_cy, sf(9.5), sf(1.25), palette.text_secondary);
+        } else {
+            texts.push(TextDrawCmd {
+                text: k.to_string(),
+                rect: RECT {
+                    left: start_x,
+                    top: cap_y,
+                    right: start_x + cap_w,
+                    bottom: cap_y + cap_h,
+                },
+                color: palette.text_secondary,
+                font_kind: FontKind::KeyCap,
+                flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            });
+        }
         texts.push(TextDrawCmd {
             text: lbl.to_string(),
             rect: RECT {
@@ -5078,7 +5122,7 @@ fn layout_and_draw_settings_view(
         texts.push(TextDrawCmd {
             text: "搜索".to_string(),
             rect: RECT {
-                left: pv_x + s(142),
+                left: pv_x + s(153),
                 top: pv_y + s(11),
                 right: pv_x + pv_w - s(16),
                 bottom: pv_y + s(43),
@@ -5963,15 +6007,15 @@ fn layout_and_draw_toast_pill(
 
     let can_undo = st.store.has_active_undo(now_unix_secs())
         && (msg.contains("删除") || msg.contains("清空") || msg.contains("Ctrl+Z"));
-    let text_w = ((msg.chars().count().min(28) as i32) * s(11) + s(28)).min(w - s(48));
+    let text_w = (estimate_text_px(msg, sf(11.5)) + s(32)).clamp(s(140), w - s(36));
     let pill_w = if can_undo {
-        (text_w + s(52)).min(w - s(32))
+        (text_w + s(52)).min(w - s(28))
     } else {
         text_w
     };
     let pill_h = s(30);
     let px = (w - pill_w) / 2;
-    let py = h - s(46) - pill_h;
+    let py = h - s(58) - pill_h;
 
     canvas.draw_soft_shadow_round_rect(
         px,
@@ -5979,9 +6023,9 @@ fn layout_and_draw_toast_pill(
         pill_w,
         pill_h,
         sf(15.0),
-        sf(3.0),
-        sf(7.0),
-        Color4::rgba(0, 0, 0, 62),
+        sf(2.5),
+        sf(6.0),
+        Color4::rgba(0, 0, 0, 58),
     );
     canvas.fill_round_rect(
         px,
@@ -5989,7 +6033,20 @@ fn layout_and_draw_toast_pill(
         pill_w,
         pill_h,
         sf(15.0),
-        Color4::rgba(20, 22, 28, 224),
+        if st.is_dark_mode {
+            Color4::rgba(28, 33, 46, 242)
+        } else {
+            Color4::rgba(22, 25, 34, 234)
+        },
+    );
+    canvas.stroke_round_rect(
+        px,
+        py,
+        pill_w,
+        pill_h,
+        sf(15.0),
+        sf(0.8),
+        Color4::rgba(255, 255, 255, 48),
     );
 
     if can_undo {

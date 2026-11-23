@@ -123,11 +123,11 @@ impl GlassPalette {
             Self {
                 is_dark: true,
                 window_bg: Color4::rgba(22, 24, 30, win_a),
-                window_border: Color4::rgba(255, 255, 255, 36),
-                track_bg: Color4::rgba(28, 31, 38, ctrl_a),
-                track_border: Color4::rgba(255, 255, 255, 34),
-                active_segment_fill: Color4::rgba(255, 255, 255, 58),
-                active_segment_shadow: Color4::rgba(0, 0, 0, 62),
+                window_border: Color4::rgba(255, 255, 255, 38),
+                track_bg: Color4::rgba(26, 29, 37, ctrl_a),
+                track_border: Color4::rgba(255, 255, 255, 36),
+                active_segment_fill: Color4::rgba(255, 255, 255, 80),
+                active_segment_shadow: Color4::rgba(0, 0, 0, 72),
                 search_bg: Color4::rgba(28, 31, 38, ctrl_a),
                 search_border: Color4::rgba(255, 255, 255, 38),
                 group_fill: Color4::rgba(30, 33, 41, group_a),
@@ -146,20 +146,20 @@ impl GlassPalette {
                 card_border: Color4::rgba(255, 255, 255, 28),
                 card_hover_border: Color4::rgba(255, 255, 255, 66),
                 card_pinned_border: Color4::rgba(255, 159, 10, 118),
-                chip_bg: Color4::rgba(255, 255, 255, 16),
-                chip_hover_bg: Color4::rgba(255, 255, 255, 26),
-                select_top: Color4::rgb(10, 132, 255),
-                select_bottom: Color4::rgb(0, 110, 236),
-                select_border: Color4::rgba(255, 255, 255, 84),
-                select_shadow: Color4::rgba(10, 132, 255, 72),
-                cobalt: Color4::rgb(10, 132, 255),
-                cobalt_deep: Color4::rgb(0, 106, 228),
+                chip_bg: Color4::rgba(255, 255, 255, 17),
+                chip_hover_bg: Color4::rgba(255, 255, 255, 28),
+                select_top: Color4::rgb(44, 110, 255),
+                select_bottom: Color4::rgb(26, 88, 236),
+                select_border: Color4::rgba(255, 255, 255, 88),
+                select_shadow: Color4::rgba(30, 94, 255, 78),
+                cobalt: Color4::rgb(52, 118, 255),
+                cobalt_deep: Color4::rgb(26, 88, 232),
                 emerald: Color4::rgb(48, 209, 88),
                 amber: Color4::rgb(255, 159, 10),
                 danger: Color4::rgb(255, 69, 58),
                 text_primary: Color4::rgb(245, 246, 250),
-                text_secondary: Color4::rgba(235, 238, 245, 162),
-                text_muted: Color4::rgba(235, 238, 245, 112),
+                text_secondary: Color4::rgba(235, 238, 245, 166),
+                text_muted: Color4::rgba(235, 238, 245, 116),
             }
         } else {
             // macOS 浅色冰晶瓷白液态玻璃（对标 CleanShot X / macOS Tahoe Light Liquid Glass）
@@ -198,16 +198,16 @@ impl GlassPalette {
                 card_pinned_bg: pin_top,
                 card_pinned_hover_bg: pin_h_top,
                 card_border: Color4::rgba(15, 23, 42, 18),
-                card_hover_border: Color4::rgba(0, 122, 255, 58),
+                card_hover_border: Color4::rgba(30, 94, 255, 58),
                 card_pinned_border: Color4::rgba(245, 158, 11, 118),
                 chip_bg: Color4::rgba(15, 23, 42, 14),
                 chip_hover_bg: Color4::rgba(15, 23, 42, 23),
-                select_top: Color4::rgb(0, 122, 255),
-                select_bottom: Color4::rgb(8, 106, 236),
+                select_top: Color4::rgb(34, 102, 255),
+                select_bottom: Color4::rgb(22, 82, 238),
                 select_border: Color4::rgba(255, 255, 255, 92),
-                select_shadow: Color4::rgba(0, 122, 255, 62),
-                cobalt: Color4::rgb(0, 122, 255),
-                cobalt_deep: Color4::rgb(0, 98, 214),
+                select_shadow: Color4::rgba(30, 94, 255, 62),
+                cobalt: Color4::rgb(30, 94, 255),
+                cobalt_deep: Color4::rgb(18, 74, 214),
                 emerald: Color4::rgb(52, 199, 89),
                 amber: Color4::rgb(245, 158, 11),
                 danger: Color4::rgb(255, 59, 48),
@@ -360,6 +360,44 @@ pub fn standard_card_height(has_chips: bool, scale: f32) -> i32 {
 
 pub fn image_grid_row_height(scale: f32) -> i32 {
     (98.0 * scale).round() as i32
+}
+
+/// 跨平台 UI 单行文本像素宽度精确估算（区分 CJK 全角、大写、小写/数字、窄标点与键符，误差 <= 1pt）
+pub fn estimate_text_px(text: &str, font_px: f32) -> i32 {
+    let mut w = 0.0f32;
+    for ch in text.chars() {
+        let adv = if ch == ' ' {
+            0.30
+        } else if matches!(
+            ch,
+            '.' | ','
+                | ':'
+                | ';'
+                | '!'
+                | '|'
+                | '\''
+                | '`'
+                | '/'
+                | '\\'
+                | '-'
+                | '('
+                | ')'
+                | '['
+                | ']'
+        ) {
+            0.34
+        } else if ch.is_ascii_uppercase() || matches!(ch, '%' | '@' | '&' | 'M' | 'W') {
+            0.66
+        } else if ch.is_ascii_alphanumeric() || ch.is_ascii_punctuation() {
+            0.55
+        } else if matches!(ch, '⇧' | '↵' | '⇥' | '⌘' | '⌥' | '⌃' | '·') {
+            0.78
+        } else {
+            1.02
+        };
+        w += adv * font_px;
+    }
+    w.ceil() as i32
 }
 
 // ============================================================================
@@ -858,10 +896,15 @@ impl<'a> PixelCanvas<'a> {
             )
         };
 
-        let doc_x0 = (w as f32 * 0.39) as i32;
-        let doc_x1 = (w as f32 * 0.91) as i32;
-        let doc_y0 = (stage_h as f32 * 0.24) as i32;
-        let doc_y1 = (stage_h as f32 * 0.86) as i32;
+        let doc_x0 = (w as f32 * 0.42) as i32;
+        let doc_x1 = (w as f32 * 0.93) as i32;
+        let doc_y0 = s(7);
+        let doc_y1 = (stage_h - s(6)).max(doc_y0 + s(24));
+        let doc_r = sf(9.5);
+        let doc_cx = (doc_x0 + doc_x1) as f32 * 0.5;
+        let doc_cy = (doc_y0 + doc_y1) as f32 * 0.5;
+        let doc_hx = (doc_x1 - doc_x0) as f32 * 0.5 - doc_r;
+        let doc_hy = (doc_y1 - doc_y0) as f32 * 0.5 - doc_r;
 
         for py in 0..stage_h {
             let vf = py as f32 / (stage_h.max(1) as f32);
@@ -898,33 +941,49 @@ impl<'a> PixelCanvas<'a> {
                     col = col.lerp(rc2, edge);
                 }
 
-                // 右侧局部桌面 Notes.md 卡片（上沿穿过搜索胶囊背后以直观检验柔焦消融）
-                if px >= doc_x0 && px < doc_x1 && py >= doc_y0 && py < doc_y1 {
-                    let card_c = if is_dark {
-                        Color4::rgb(33, 38, 51)
+                // 右侧圆角超椭圆 Notes.md 文稿卡片（带 1px 细边框与抗锯齿圆角，零死直角穿帮）
+                let ddx = ((px as f32 + 0.5) - doc_cx).abs() - doc_hx;
+                let ddy = ((py as f32 + 0.5) - doc_cy).abs() - doc_hy;
+                let d_dist = squircle_corner_dist(ddx, ddy, doc_r);
+                let doc_cov = (0.5 - d_dist).clamp(0.0, 1.0);
+                if doc_cov > 0.0 {
+                    let mut card_c = if is_dark {
+                        Color4::rgb(34, 40, 54)
                     } else {
                         Color4::rgb(252, 253, 255)
                     };
-                    col = col.lerp(card_c, 0.94);
-                    // 模拟窗口三圆点与锐利正文条纹（低模糊时清晰可见，高模糊时完全融化）
                     let lx = px - doc_x0;
                     let ly = py - doc_y0;
-                    if (s(6)..s(12)).contains(&ly) {
-                        if (s(8)..s(14)).contains(&lx) {
-                            col = Color4::rgb(255, 95, 87);
-                        } else if (s(17)..s(23)).contains(&lx) {
-                            col = Color4::rgb(254, 188, 46);
-                        } else if (s(26)..s(32)).contains(&lx) {
-                            col = Color4::rgb(40, 200, 64);
-                        }
-                    } else if (s(19)..s(24)).contains(&ly) && (s(9)..s(126)).contains(&lx) {
-                        col = if is_dark {
-                            Color4::rgb(228, 232, 242)
+                    // 模拟文稿内部骨骼条纹（位于胶囊下方与内部，检验不同模糊半径下的消融效果）
+                    if (s(40)..s(44)).contains(&ly) && (s(12)..s(118)).contains(&lx) {
+                        card_c = if is_dark {
+                            Color4::rgb(198, 206, 224)
                         } else {
-                            Color4::rgb(38, 44, 56)
+                            Color4::rgb(68, 78, 96)
                         };
-                    } else if (s(30)..s(34)).contains(&ly) && (s(9)..s(98)).contains(&lx) {
-                        col = Color4::rgb(10, 132, 255);
+                    } else if (s(50)..s(54)).contains(&ly) && (s(12)..s(92)).contains(&lx) {
+                        card_c = if is_dark {
+                            Color4::rgb(82, 140, 255)
+                        } else {
+                            Color4::rgb(48, 112, 245)
+                        };
+                    } else if (s(60)..s(63)).contains(&ly) && (s(12)..s(134)).contains(&lx) {
+                        card_c = if is_dark {
+                            Color4::rgb(112, 122, 144)
+                        } else {
+                            Color4::rgb(168, 178, 194)
+                        };
+                    }
+                    // 卡片微细描边
+                    let border_cov = (1.1 - d_dist.abs()).clamp(0.0, 1.0);
+                    col = col.lerp(card_c, 0.92 * doc_cov);
+                    if border_cov > 0.0 {
+                        let bc = if is_dark {
+                            Color4::rgb(96, 108, 134)
+                        } else {
+                            Color4::rgb(206, 216, 232)
+                        };
+                        col = col.lerp(bc, 0.45 * border_cov);
                     }
                 }
 
@@ -1093,7 +1152,7 @@ impl<'a> PixelCanvas<'a> {
     }
 
     pub fn draw_icon_close(&mut self, cx: f32, cy: f32, size: f32, stroke: f32, c: Color4) {
-        let d = size * 0.30;
+        let d = size * 0.35;
         self.draw_line(cx - d, cy - d, cx + d, cy + d, stroke, c);
         self.draw_line(cx + d, cy - d, cx - d, cy + d, stroke, c);
     }
@@ -1182,31 +1241,31 @@ impl<'a> PixelCanvas<'a> {
             (cx + dx * cos_a - dy * sin_a, cy + dx * sin_a + dy * cos_a)
         };
 
-        let u = size * 0.42;
-        let (tl_x, tl_y) = rot(-u * 0.52, -u * 0.80);
-        let (tr_x, tr_y) = rot(u * 0.52, -u * 0.80);
-        let (bl_x, bl_y) = rot(-u * 0.72, u * 0.08);
-        let (br_x, br_y) = rot(u * 0.72, u * 0.08);
-        let (ml_x, ml_y) = rot(-u * 0.38, -u * 0.80);
-        let (mr_x, mr_y) = rot(u * 0.38, -u * 0.80);
-        let (nb_x, nb_y) = rot(0.0, u * 0.08);
-        let (nt_x, nt_y) = rot(0.0, u * 0.92);
+        let u = size * 0.40;
+        let (tl_x, tl_y) = rot(-u * 0.46, -u * 0.88);
+        let (tr_x, tr_y) = rot(u * 0.46, -u * 0.88);
+        let (bl_x, bl_y) = rot(-u * 0.66, -u * 0.04);
+        let (br_x, br_y) = rot(u * 0.66, -u * 0.04);
+        let (ml_x, ml_y) = rot(-u * 0.32, -u * 0.88);
+        let (mr_x, mr_y) = rot(u * 0.32, -u * 0.88);
+        let (nb_x, nb_y) = rot(0.0, -u * 0.04);
+        let (nt_x, nt_y) = rot(0.0, u * 1.12);
 
         self.draw_line(tl_x, tl_y, tr_x, tr_y, stroke, c);
         self.draw_line(ml_x, ml_y, bl_x, bl_y, stroke, c);
         self.draw_line(mr_x, mr_y, br_x, br_y, stroke, c);
         self.draw_line(bl_x, bl_y, br_x, br_y, stroke, c);
         if tilted_and_filled {
-            let (fc_x, fc_y) = rot(0.0, -u * 0.34);
-            self.fill_circle(fc_x, fc_y, u * 0.36, c);
+            let (fc_x, fc_y) = rot(0.0, -u * 0.44);
+            self.fill_circle(fc_x, fc_y, u * 0.32, c);
         }
-        self.draw_line(nb_x, nb_y, nt_x, nt_y, stroke, c);
+        self.draw_line(nb_x, nb_y, nt_x, nt_y, stroke * 1.05, c);
     }
 
     /// SF `gearshape` 8 齿正弦连续轮廓齿轮图标
     pub fn draw_icon_gear(&mut self, cx: f32, cy: f32, size: f32, stroke: f32, c: Color4) {
-        let r_base = size * 0.35;
-        let amp = size * 0.075;
+        let r_base = size * 0.355;
+        let amp = size * 0.068;
         let steps = 48;
         let mut prev = (0.0f32, 0.0f32);
         for i in 0..=steps {
@@ -1215,11 +1274,11 @@ impl<'a> PixelCanvas<'a> {
             let rad = r_base + amp * wave;
             let pt = (cx + theta.cos() * rad, cy + theta.sin() * rad);
             if i > 0 {
-                self.draw_line(prev.0, prev.1, pt.0, pt.1, stroke * 0.92, c);
+                self.draw_line(prev.0, prev.1, pt.0, pt.1, stroke * 0.78, c);
             }
             prev = pt;
         }
-        self.stroke_circle(cx, cy, size * 0.14, stroke * 0.92, c);
+        self.stroke_circle(cx, cy, size * 0.155, stroke * 0.78, c);
     }
 
     pub fn draw_icon_back(&mut self, cx: f32, cy: f32, size: f32, stroke: f32, c: Color4) {
@@ -1357,6 +1416,22 @@ impl<'a> PixelCanvas<'a> {
             cy + u * 0.22,
             cx - u * 0.22,
             cy + u * 0.72,
+            stroke,
+            c,
+        );
+    }
+
+    /// Tab 右跳符号 `⇥`（用于底栏键帽矢量绘制，对齐 `[ESC]` 视觉字重）
+    pub fn draw_icon_tab_arrow(&mut self, cx: f32, cy: f32, size: f32, stroke: f32, c: Color4) {
+        let u = size * 0.36;
+        self.draw_line(cx - u * 0.85, cy, cx + u * 0.45, cy, stroke, c);
+        self.draw_line(cx + u * 0.45, cy, cx - u * 0.05, cy - u * 0.52, stroke, c);
+        self.draw_line(cx + u * 0.45, cy, cx - u * 0.05, cy + u * 0.52, stroke, c);
+        self.draw_line(
+            cx + u * 0.78,
+            cy - u * 0.58,
+            cx + u * 0.78,
+            cy + u * 0.58,
             stroke,
             c,
         );
@@ -1671,7 +1746,7 @@ impl<'a> PixelCanvas<'a> {
             Color4::rgba(0, 0, 0, 46),
         );
         self.fill_circle(knob_cx, knob_cy, knob_r, Color4::rgb(255, 255, 255));
-        self.stroke_circle(knob_cx, knob_cy, knob_r, 0.9, Color4::rgba(0, 0, 0, 26));
+        self.stroke_circle(knob_cx, knob_cy, knob_r, 1.05, Color4::rgba(15, 23, 42, 54));
     }
 }
 
