@@ -435,6 +435,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         if event.keyCode == 53 {
             nav.isRecordingHotKey = false
             nav.isRecordingQueueHotKey = false
+            nav.hotKeyConflictWarning = nil
             HotKeyManager.shared.resumeAfterRecording()
             return nil
         }
@@ -446,12 +447,21 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         }
 
         let carbonMods = HotKeyShortcut.carbonModifiers(from: event.modifierFlags)
-        guard carbonMods != 0 else {
-            store.showToast("请至少搭配一个修饰键（⌥ / ⌘ / ⌃ / ⇧）")
+        let newShortcut = HotKeyShortcut(keyCode: UInt32(event.keyCode), carbonModifiers: carbonMods)
+        let role: HotKeySlotRole = nav.isRecordingQueueHotKey ? .queuePop : .mainToggle
+
+        if let conflictReason = HotKeyManager.shared.validateAndProbeShortcut(
+            newShortcut,
+            for: role,
+            copyAppendEnabled: AdaptiveIntelligenceEngine.shared.copyAppendEnabled && !store.minimalModeEnabled
+        ) {
+            NSSound.beep()
+            nav.hotKeyConflictWarning = conflictReason
+            store.showToast(conflictReason, duration: 3.0)
             return nil
         }
 
-        let newShortcut = HotKeyShortcut(keyCode: UInt32(event.keyCode), carbonModifiers: carbonMods)
+        nav.hotKeyConflictWarning = nil
         if nav.isRecordingQueueHotKey {
             nav.isRecordingQueueHotKey = false
             store.queuePopShortcut = newShortcut
@@ -1183,6 +1193,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         // ESC 取消录制并恢复原快捷键
         if event.keyCode == 53 {
             nav.isRecordingHotKey = false
+            nav.hotKeyConflictWarning = nil
             HotKeyManager.shared.resumeAfterRecording()
             return nil
         }
@@ -1194,14 +1205,23 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         }
 
         let carbonMods = HotKeyShortcut.carbonModifiers(from: event.modifierFlags)
-        guard carbonMods != 0 else {
-            store.showToast("请至少搭配一个修饰键（⌥ / ⌘ / ⌃ / ⇧）")
+        let newShortcut = HotKeyShortcut(keyCode: UInt32(event.keyCode), carbonModifiers: carbonMods)
+
+        if let conflictReason = HotKeyManager.shared.validateAndProbeShortcut(
+            newShortcut,
+            for: .mainToggle,
+            copyAppendEnabled: AdaptiveIntelligenceEngine.shared.copyAppendEnabled && !store.minimalModeEnabled
+        ) {
+            NSSound.beep()
+            nav.hotKeyConflictWarning = conflictReason
+            store.showToast(conflictReason, duration: 3.0)
             return nil
         }
 
-        let newShortcut = HotKeyShortcut(keyCode: UInt32(event.keyCode), carbonModifiers: carbonMods)
+        nav.hotKeyConflictWarning = nil
         nav.isRecordingHotKey = false
         store.hotKeyShortcut = newShortcut
+        HotKeyManager.shared.resumeAfterRecording()
         store.showToast("全局快捷键已更新为 \(newShortcut.displayString)")
         return nil
     }

@@ -69,11 +69,214 @@ struct HotKeyShortcut: Codable, Equatable {
             kVK_ANSI_Comma: ",", kVK_ANSI_Period: ".", kVK_ANSI_Slash: "/",
             kVK_ANSI_Backslash: "\\", kVK_ANSI_Grave: "`",
             kVK_Space: "Space", kVK_Return: "↵", kVK_Tab: "⇥",
+            kVK_Delete: "⌫", kVK_ForwardDelete: "⌦", kVK_Escape: "⎋",
+            kVK_LeftArrow: "←", kVK_RightArrow: "→", kVK_UpArrow: "↑", kVK_DownArrow: "↓",
             kVK_F1: "F1", kVK_F2: "F2", kVK_F3: "F3", kVK_F4: "F4",
             kVK_F5: "F5", kVK_F6: "F6", kVK_F7: "F7", kVK_F8: "F8",
             kVK_F9: "F9", kVK_F10: "F10", kVK_F11: "F11", kVK_F12: "F12"
         ]
         return map[Int(keyCode)] ?? "Key\(keyCode)"
+    }
+
+    var isFunctionKey: Bool {
+        let functionKeyCodes: Set<Int> = [
+            kVK_F1, kVK_F2, kVK_F3, kVK_F4, kVK_F5, kVK_F6,
+            kVK_F7, kVK_F8, kVK_F9, kVK_F10, kVK_F11, kVK_F12
+        ]
+        return functionKeyCodes.contains(Int(keyCode))
+    }
+}
+
+/// 全局热键槽位类型
+enum HotKeySlotRole: Equatable {
+    case mainToggle
+    case queuePop
+    case copyAppend
+}
+
+/// 快捷键全链路冲突检测器（一旦命中冲突即返回明确拦截原因，禁止设定保存）
+enum HotKeyConflictValidator {
+    private static let modifierMask = UInt32(cmdKey | optionKey | controlKey | shiftKey)
+
+    /// 纯静态/应用内冲突规则校验（无修饰键、单 Shift 干扰输入、系统核心快捷键、iClip 内部多通道及面板热键）
+    static func staticConflictReason(
+        for candidate: HotKeyShortcut,
+        role: HotKeySlotRole,
+        existingOwnShortcut: HotKeyShortcut,
+        otherBindings: [(shortcut: HotKeyShortcut, label: String)]
+    ) -> String? {
+        let mods = candidate.carbonModifiers & modifierMask
+
+        // 1. 修饰键完备性校验：禁止无修饰键或仅 Shift 搭配普通字符（避免废掉日常大写与标点输入）
+        if mods == 0 && !candidate.isFunctionKey {
+            return "请至少搭配一个修饰键（⌘ / ⌥ / ⌃）"
+        }
+        if mods == UInt32(shiftKey) && !candidate.isFunctionKey {
+            return "「\(candidate.displayString)」会干扰日常大写与符号输入，请搭配 ⌘ / ⌥ / ⌃"
+        }
+
+        // 若用户重新按下当前槽位原本正在使用的同一快捷键，允许直接确认保留
+        if candidate == existingOwnShortcut {
+            return nil
+        }
+
+        // 2. 与 iClip 自身其他已启用全局热键槽位互锁查重
+        for binding in otherBindings where binding.shortcut == candidate {
+            return "「\(candidate.displayString)」已绑定为「\(binding.label)」，禁止冲突设定"
+        }
+
+        // 3. macOS 系统核心编辑、窗口与全局截屏锁屏保留键硬拦截
+        if let sysName = systemCoreReservedName(for: candidate) {
+            return "「\(candidate.displayString)」与系统「\(sysName)」冲突，禁止设定"
+        }
+
+        // 4. iClip 面板内建固定核心快捷键冲突保护（仅针对呼出主面板与顺序出队）
+        if let internalName = internalPanelReservedName(for: candidate) {
+            return "「\(candidate.displayString)」与 iClip 内置「\(internalName)」冲突，禁止设定"
+        }
+
+        return nil
+    }
+
+    /// 实时查询 macOS「系统设置 → 键盘快捷键」中当前处于启用状态的全局符号热键（CopySymbolicHotKeys）
+    static func activeSystemSymbolicHotKeyConflict(
+        for candidate: HotKeyShortcut,
+        existingOwnShortcut: HotKeyShortcut
+    ) -> String? {
+        if candidate == existingOwnShortcut { return nil }
+        let mods = candidate.carbonModifiers & modifierMask
+
+        var unmanagedArray: Unmanaged<CFArray>?
+        let status = CopySymbolicHotKeys(&unmanagedArray)
+        guard status == noErr,
+              let list = unmanagedArray?.takeRetainedValue() as? [[String: Any]] else {
+            return nil
+        }
+
+        for entry in list {
+            let enabled = (entry[kHISymbolicHotKeyEnabled as String] as? Bool)
+                ?? ((entry[kHISymbolicHotKeyEnabled as String] as? Int ?? 0) != 0)
+            guard enabled else { continue }
+            guard let rawCode = entry[kHISymbolicHotKeyCode as String] as? Int,
+                  rawCode >= 0 && rawCode != 65535,
+                  let rawMods = entry[kHISymbolicHotKeyModifiers as String] as? Int else {
+                continue
+            }
+            let sysCode = UInt32(rawCode)
+            let sysMods = UInt32(rawMods) & modifierMask
+            if sysCode == candidate.keyCode && sysMods == mods {
+                return "「\(candidate.displayString)」已在 macOS 系统键盘快捷键中启用，禁止设定"
+            }
+        }
+        return nil
+    }
+
+    private static func systemCoreReservedName(for s: HotKeyShortcut) -> String? {
+        let code = Int(s.keyCode)
+        let mods = s.carbonModifiers & modifierMask
+        let cmd = UInt32(cmdKey)
+        let opt = UInt32(optionKey)
+        let ctrl = UInt32(controlKey)
+        let shift = UInt32(shiftKey)
+
+        if mods == cmd {
+            switch code {
+            case kVK_ANSI_C: return "复制"
+            case kVK_ANSI_V: return "粘贴"
+            case kVK_ANSI_X: return "剪切"
+            case kVK_ANSI_Z: return "撤销"
+            case kVK_ANSI_A: return "全选"
+            case kVK_ANSI_S: return "保存"
+            case kVK_ANSI_F: return "查找"
+            case kVK_ANSI_Q: return "退出应用"
+            case kVK_ANSI_W: return "关闭窗口"
+            case kVK_ANSI_H: return "隐藏应用"
+            case kVK_ANSI_M: return "最小化窗口"
+            case kVK_ANSI_N: return "新建窗口"
+            case kVK_ANSI_T: return "新建标签页"
+            case kVK_ANSI_Comma: return "应用偏好设置"
+            case kVK_Tab: return "应用切换器"
+            case kVK_ANSI_Grave: return "同应用切换窗口"
+            case kVK_Space: return "聚焦搜索 (Spotlight)"
+            default: break
+            }
+        } else if mods == (cmd | shift) {
+            switch code {
+            case kVK_ANSI_Z: return "重做"
+            case kVK_Tab: return "应用反向切换"
+            case kVK_ANSI_3, kVK_ANSI_4, kVK_ANSI_5: return "系统截屏/录屏"
+            default: break
+            }
+        } else if mods == (cmd | opt) {
+            switch code {
+            case kVK_Escape: return "强制退出应用"
+            case kVK_ANSI_H: return "隐藏其他应用"
+            case kVK_ANSI_D: return "显示/隐藏程序坞"
+            default: break
+            }
+        } else if mods == (cmd | ctrl) {
+            switch code {
+            case kVK_ANSI_Q: return "锁定屏幕"
+            case kVK_Space: return "表情与符号"
+            case kVK_ANSI_F: return "切换全屏"
+            default: break
+            }
+        } else if mods == ctrl && code == kVK_Space {
+            return "切换输入法"
+        } else if mods == (ctrl | opt) && code == kVK_Space {
+            return "切换下一个输入法"
+        } else if mods == (cmd | ctrl | shift) && (code == kVK_ANSI_3 || code == kVK_ANSI_4) {
+            return "截屏到剪贴板"
+        }
+        return nil
+    }
+
+    private static func internalPanelReservedName(for s: HotKeyShortcut) -> String? {
+        let code = Int(s.keyCode)
+        let mods = s.carbonModifiers & modifierMask
+        let cmd = UInt32(cmdKey)
+        let opt = UInt32(optionKey)
+        let ctrl = UInt32(controlKey)
+        let shift = UInt32(shiftKey)
+
+        let digitCodes: Set<Int> = [
+            kVK_ANSI_1, kVK_ANSI_2, kVK_ANSI_3, kVK_ANSI_4, kVK_ANSI_5,
+            kVK_ANSI_6, kVK_ANSI_7, kVK_ANSI_8, kVK_ANSI_9
+        ]
+        if (mods == cmd || mods == (cmd | opt) || mods == (cmd | shift)) && digitCodes.contains(code) {
+            return "顺位快速粘贴 (⌘1~9)"
+        }
+        let tabOptionCodes: Set<Int> = [
+            kVK_ANSI_1, kVK_ANSI_2, kVK_ANSI_3, kVK_ANSI_4, kVK_ANSI_5, kVK_ANSI_6
+        ]
+        if mods == opt && tabOptionCodes.contains(code) {
+            return "分类快速切换 (⌥1~6)"
+        }
+        if mods == ctrl && (code == kVK_ANSI_1 || code == kVK_ANSI_2 || code == kVK_ANSI_3) {
+            return "直达语义变换 (⌃1~3)"
+        }
+        if mods == opt && code == kVK_Space {
+            return "原位差异比对 (⌥Space)"
+        }
+        if mods == cmd {
+            switch code {
+            case kVK_ANSI_P: return "窗口始终在前 (⌘P)"
+            case kVK_ANSI_E: return "极简模式/编辑 (⌘E)"
+            case kVK_ANSI_R: return "修改备注 (⌘R)"
+            case kVK_ANSI_O: return "打开链接/路径 (⌘O)"
+            case kVK_ANSI_D: return "收藏切换 (⌘D)"
+            case kVK_ANSI_Y: return "速览预览 (⌘Y)"
+            case kVK_Delete: return "删除记录 (⌘⌫)"
+            default: break
+            }
+        }
+        if mods == (cmd | shift) && code == kVK_ANSI_C {
+            return "连环追加复制 (⇧⌘C)"
+        }
+        if mods == (cmd | opt) && code == kVK_ANSI_C {
+            return "纯文本/路径拷贝 (⌥⌘C)"
+        }
+        return nil
     }
 }
 
@@ -153,14 +356,24 @@ final class HotKeyManager {
         }
 
         let hotKeyID = EventHotKeyID(signature: OSType(0x514A434C), id: 1)
-        let regStatus = RegisterEventHotKey(
+        var regStatus = RegisterEventHotKey(
             shortcut.keyCode,
             shortcut.carbonModifiers,
             hotKeyID,
             GetApplicationEventTarget(),
-            0,
+            OptionBits(kEventHotKeyExclusive),
             &toggleHotKeyRef
         )
+        if regStatus == eventHotKeyExistsErr {
+            regStatus = RegisterEventHotKey(
+                shortcut.keyCode,
+                shortcut.carbonModifiers,
+                hotKeyID,
+                GetApplicationEventTarget(),
+                0,
+                &toggleHotKeyRef
+            )
+        }
         return regStatus == noErr
     }
 
@@ -176,14 +389,24 @@ final class HotKeyManager {
         }
 
         let hotKeyID = EventHotKeyID(signature: OSType(0x514A434C), id: 2)
-        let regStatus = RegisterEventHotKey(
+        var regStatus = RegisterEventHotKey(
             shortcut.keyCode,
             shortcut.carbonModifiers,
             hotKeyID,
             GetApplicationEventTarget(),
-            0,
+            OptionBits(kEventHotKeyExclusive),
             &queueHotKeyRef
         )
+        if regStatus == eventHotKeyExistsErr {
+            regStatus = RegisterEventHotKey(
+                shortcut.keyCode,
+                shortcut.carbonModifiers,
+                hotKeyID,
+                GetApplicationEventTarget(),
+                0,
+                &queueHotKeyRef
+            )
+        }
         return regStatus == noErr
     }
 
@@ -199,15 +422,95 @@ final class HotKeyManager {
         }
 
         let hotKeyID = EventHotKeyID(signature: OSType(0x514A434C), id: 3)
-        let regStatus = RegisterEventHotKey(
+        var regStatus = RegisterEventHotKey(
             shortcut.keyCode,
             shortcut.carbonModifiers,
             hotKeyID,
             GetApplicationEventTarget(),
-            0,
+            OptionBits(kEventHotKeyExclusive),
             &copyAppendHotKeyRef
         )
+        if regStatus == eventHotKeyExistsErr {
+            regStatus = RegisterEventHotKey(
+                shortcut.keyCode,
+                shortcut.carbonModifiers,
+                hotKeyID,
+                GetApplicationEventTarget(),
+                0,
+                &copyAppendHotKeyRef
+            )
+        }
         return regStatus == noErr
+    }
+
+    /// 录制设定新快捷键时的硬性冲突检测：一旦与系统核心键、系统启用热键、本应用其他热键或其他运行中应用冲突，返回原因并拒绝保存
+    func validateAndProbeShortcut(
+        _ candidate: HotKeyShortcut,
+        for role: HotKeySlotRole,
+        copyAppendEnabled: Bool = true
+    ) -> String? {
+        let existingOwn: HotKeyShortcut
+        var others: [(shortcut: HotKeyShortcut, label: String)] = []
+
+        switch role {
+        case .mainToggle:
+            existingOwn = currentShortcut
+            if onQueueTrigger != nil {
+                others.append((currentQueueShortcut, "顺序出队热键"))
+            }
+            if copyAppendEnabled && onCopyAppendTrigger != nil {
+                others.append((currentCopyAppendShortcut, "跨处续接复制"))
+            }
+        case .queuePop:
+            existingOwn = currentQueueShortcut
+            others.append((currentShortcut, "全局呼出快捷键"))
+            if copyAppendEnabled && onCopyAppendTrigger != nil {
+                others.append((currentCopyAppendShortcut, "跨处续接复制"))
+            }
+        case .copyAppend:
+            existingOwn = currentCopyAppendShortcut
+            others.append((currentShortcut, "全局呼出快捷键"))
+            if onQueueTrigger != nil {
+                others.append((currentQueueShortcut, "顺序出队热键"))
+            }
+        }
+
+        if let staticReason = HotKeyConflictValidator.staticConflictReason(
+            for: candidate,
+            role: role,
+            existingOwnShortcut: existingOwn,
+            otherBindings: others
+        ) {
+            return staticReason
+        }
+
+        if let sysSymbolicReason = HotKeyConflictValidator.activeSystemSymbolicHotKeyConflict(
+            for: candidate,
+            existingOwnShortcut: existingOwn
+        ) {
+            return sysSymbolicReason
+        }
+
+        if candidate != existingOwn {
+            var probeRef: EventHotKeyRef?
+            let probeID = EventHotKeyID(signature: OSType(0x514A5052), id: 99)
+            let status = RegisterEventHotKey(
+                candidate.keyCode,
+                candidate.carbonModifiers,
+                probeID,
+                GetApplicationEventTarget(),
+                OptionBits(kEventHotKeyExclusive),
+                &probeRef
+            )
+            if let ref = probeRef {
+                UnregisterEventHotKey(ref)
+            }
+            if status != noErr {
+                return "「\(candidate.displayString)」已被其他运行中应用占用，禁止设定"
+            }
+        }
+
+        return nil
     }
 
     @discardableResult

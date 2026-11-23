@@ -1,5 +1,6 @@
 import XCTest
 import CoreImage
+import Carbon
 @testable import QingJian
 
 final class CoreFeatureTests: XCTestCase {
@@ -1558,5 +1559,57 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertEqual(ClipFilterTab.digitFromKeyCode(23), 5)
         XCTAssertEqual(ClipFilterTab.digitFromKeyCode(25), 9)
         XCTAssertNil(ClipFilterTab.digitFromKeyCode(29))
+    }
+
+    // MARK: - 37. 全局快捷键多层级冲突检测与硬性拒绝设定保护
+
+    func testHotKeyConflictDetectionAndHardBlocking() {
+        let own = HotKeyShortcut.defaultShortcut // ⌥ V
+        let others: [(shortcut: HotKeyShortcut, label: String)] = [
+            (.defaultQueueShortcut, "顺序出队热键"),
+            (.defaultCopyAppendShortcut, "跨处续接复制")
+        ]
+
+        // 1. 无修饰键或仅 Shift 搭配普通字符必须硬拦截（F1~F12 功能键除外）
+        let bareV = HotKeyShortcut(keyCode: UInt32(kVK_ANSI_V), carbonModifiers: 0)
+        XCTAssertNotNil(HotKeyConflictValidator.staticConflictReason(for: bareV, role: .mainToggle, existingOwnShortcut: own, otherBindings: others))
+
+        let shiftOnlyA = HotKeyShortcut(keyCode: UInt32(kVK_ANSI_A), carbonModifiers: UInt32(shiftKey))
+        XCTAssertNotNil(HotKeyConflictValidator.staticConflictReason(for: shiftOnlyA, role: .mainToggle, existingOwnShortcut: own, otherBindings: others))
+
+        let shiftF6 = HotKeyShortcut(keyCode: UInt32(kVK_F6), carbonModifiers: UInt32(shiftKey))
+        XCTAssertNil(HotKeyConflictValidator.staticConflictReason(for: shiftF6, role: .mainToggle, existingOwnShortcut: own, otherBindings: others))
+
+        // 2. macOS 系统核心基础快捷键硬拦截（⌘C / ⌘V / ⌘Space / ⌃Space / ⇧⌘4 / ⌘Q）
+        let cmdC = HotKeyShortcut(keyCode: UInt32(kVK_ANSI_C), carbonModifiers: UInt32(cmdKey))
+        XCTAssertTrue(HotKeyConflictValidator.staticConflictReason(for: cmdC, role: .mainToggle, existingOwnShortcut: own, otherBindings: others)?.contains("复制") == true)
+
+        let cmdSpace = HotKeyShortcut(keyCode: UInt32(kVK_Space), carbonModifiers: UInt32(cmdKey))
+        XCTAssertTrue(HotKeyConflictValidator.staticConflictReason(for: cmdSpace, role: .mainToggle, existingOwnShortcut: own, otherBindings: others)?.contains("Spotlight") == true)
+
+        let ctrlSpace = HotKeyShortcut(keyCode: UInt32(kVK_Space), carbonModifiers: UInt32(controlKey))
+        XCTAssertNotNil(HotKeyConflictValidator.staticConflictReason(for: ctrlSpace, role: .mainToggle, existingOwnShortcut: own, otherBindings: others))
+
+        let shiftCmd4 = HotKeyShortcut(keyCode: UInt32(kVK_ANSI_4), carbonModifiers: UInt32(cmdKey | shiftKey))
+        XCTAssertNotNil(HotKeyConflictValidator.staticConflictReason(for: shiftCmd4, role: .mainToggle, existingOwnShortcut: own, otherBindings: others))
+
+        // 3. 应用内部其他全局槽位与面板内置快捷键冲突硬拦截（⌃⌥C / ⌃⌥V / ⌘P / ⌥1 / ⌥Space）
+        XCTAssertTrue(HotKeyConflictValidator.staticConflictReason(for: .defaultCopyAppendShortcut, role: .mainToggle, existingOwnShortcut: own, otherBindings: others)?.contains("跨处续接复制") == true)
+        XCTAssertTrue(HotKeyConflictValidator.staticConflictReason(for: .defaultQueueShortcut, role: .mainToggle, existingOwnShortcut: own, otherBindings: others)?.contains("顺序出队") == true)
+
+        let cmdP = HotKeyShortcut(keyCode: UInt32(kVK_ANSI_P), carbonModifiers: UInt32(cmdKey))
+        XCTAssertNotNil(HotKeyConflictValidator.staticConflictReason(for: cmdP, role: .mainToggle, existingOwnShortcut: own, otherBindings: others))
+
+        let opt1 = HotKeyShortcut(keyCode: UInt32(kVK_ANSI_1), carbonModifiers: UInt32(optionKey))
+        XCTAssertNotNil(HotKeyConflictValidator.staticConflictReason(for: opt1, role: .mainToggle, existingOwnShortcut: own, otherBindings: others))
+
+        // 4. 当前自身原快捷键（⌥V）与无冲突自定义组合键（⇧⌘V / ⌃⌥X / ⌥Z）正常放行
+        XCTAssertNil(HotKeyConflictValidator.staticConflictReason(for: own, role: .mainToggle, existingOwnShortcut: own, otherBindings: others))
+
+        let shiftCmdV = HotKeyShortcut(keyCode: UInt32(kVK_ANSI_V), carbonModifiers: UInt32(cmdKey | shiftKey))
+        XCTAssertNil(HotKeyConflictValidator.staticConflictReason(for: shiftCmdV, role: .mainToggle, existingOwnShortcut: own, otherBindings: others))
+
+        let optZ = HotKeyShortcut(keyCode: UInt32(kVK_ANSI_Z), carbonModifiers: UInt32(optionKey))
+        XCTAssertNil(HotKeyConflictValidator.staticConflictReason(for: optZ, role: .mainToggle, existingOwnShortcut: own, otherBindings: others))
     }
 }

@@ -33,6 +33,7 @@ final class PanelNavigationModel: ObservableObject {
     @Published var scrollRequestEpoch: Int = 0
     @Published var isRecordingHotKey: Bool = false
     @Published var isRecordingQueueHotKey: Bool = false
+    @Published var hotKeyConflictWarning: String? = nil
     @Published var isEditingAlias: Bool = false
     @Published var showQuickLook: Bool = false
     @Published var quickLookTabIndex: Int = 0
@@ -156,6 +157,7 @@ final class PanelNavigationModel: ObservableObject {
         isEditingAlias = false
         isRecordingHotKey = false
         isRecordingQueueHotKey = false
+        hotKeyConflictWarning = nil
         suppressAutoHide = false
         isDragTargeted = false
         lockPointerAtCurrentMouse()
@@ -495,7 +497,10 @@ struct ClipboardPopoverView: View {
             } else if nav.isRecordingHotKey || nav.isRecordingQueueHotKey {
                 nav.isRecordingHotKey = false
                 nav.isRecordingQueueHotKey = false
+                nav.hotKeyConflictWarning = nil
                 HotKeyManager.shared.resumeAfterRecording()
+            } else {
+                nav.hotKeyConflictWarning = nil
             }
         }
     }
@@ -1402,36 +1407,46 @@ struct ClipboardPopoverView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("全局呼出快捷键")
                                 .font(.system(size: 13.5, weight: .medium))
-                            Text(nav.isRecordingHotKey ? "请直接按下新组合键，按 ESC 取消" : "点击右侧按键录制自定义组合键")
-                                .font(.system(size: 11.5))
-                                .foregroundStyle(nav.isRecordingHotKey ? Color.accentColor : .secondary)
+                            if nav.isRecordingHotKey, let conflict = nav.hotKeyConflictWarning {
+                                Text(conflict)
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundStyle(.red)
+                            } else {
+                                Text(nav.isRecordingHotKey ? "请直接按下新组合键，按 ESC 取消" : "点击右侧按键录制自定义组合键（冲突自动拦截）")
+                                    .font(.system(size: 11.5))
+                                    .foregroundStyle(nav.isRecordingHotKey ? Color.accentColor : .secondary)
+                            }
                         }
                         Spacer()
 
                         Button {
                             if nav.isRecordingHotKey {
                                 nav.isRecordingHotKey = false
+                                nav.hotKeyConflictWarning = nil
                                 HotKeyManager.shared.resumeAfterRecording()
                             } else {
                                 nav.isRecordingQueueHotKey = false
+                                nav.hotKeyConflictWarning = nil
                                 HotKeyManager.shared.suspendForRecording()
                                 nav.isRecordingHotKey = true
                             }
                         } label: {
-                            Text(nav.isRecordingHotKey ? "等待按键..." : store.hotKeyShortcut.displayString)
+                            let hasConflict = nav.isRecordingHotKey && nav.hotKeyConflictWarning != nil
+                            Text(hasConflict ? "冲突 · 请重按" : (nav.isRecordingHotKey ? "等待按键..." : store.hotKeyShortcut.displayString))
                                 .font(.system(size: 12, weight: .semibold))
                                 .foregroundStyle(nav.isRecordingHotKey ? .white : .primary)
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 5)
                                 .background(
                                     Capsule()
-                                        .fill(nav.isRecordingHotKey ? Color.accentColor : Color.primary.opacity(0.08))
+                                        .fill(hasConflict ? Color.red : (nav.isRecordingHotKey ? Color.accentColor : Color.primary.opacity(0.08)))
                                 )
                         }
                         .buttonStyle(.plain)
 
                         if store.hotKeyShortcut != .defaultShortcut && !nav.isRecordingHotKey {
                             Button {
+                                nav.hotKeyConflictWarning = nil
                                 store.hotKeyShortcut = .defaultShortcut
                                 store.showToast("已恢复默认快捷键 ⌥ V")
                             } label: {
@@ -1452,36 +1467,46 @@ struct ClipboardPopoverView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("免开面板顺序出队热键")
                                 .font(.system(size: 13.5, weight: .medium))
-                            Text(nav.isRecordingQueueHotKey ? "请直接按下新组合键，按 ESC 取消" : "在表格/表单中连按即可逐项填入队列内容")
-                                .font(.system(size: 11.5))
-                                .foregroundStyle(nav.isRecordingQueueHotKey ? Color.accentColor : .secondary)
+                            if nav.isRecordingQueueHotKey, let conflict = nav.hotKeyConflictWarning {
+                                Text(conflict)
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundStyle(.red)
+                            } else {
+                                Text(nav.isRecordingQueueHotKey ? "请直接按下新组合键，按 ESC 取消" : "在表格/表单中连按即可逐项填入队列内容")
+                                    .font(.system(size: 11.5))
+                                    .foregroundStyle(nav.isRecordingQueueHotKey ? Color.accentColor : .secondary)
+                            }
                         }
                         Spacer()
 
                         Button {
                             if nav.isRecordingQueueHotKey {
                                 nav.isRecordingQueueHotKey = false
+                                nav.hotKeyConflictWarning = nil
                                 HotKeyManager.shared.resumeAfterRecording()
                             } else {
                                 nav.isRecordingHotKey = false
+                                nav.hotKeyConflictWarning = nil
                                 HotKeyManager.shared.suspendForRecording()
                                 nav.isRecordingQueueHotKey = true
                             }
                         } label: {
-                            Text(nav.isRecordingQueueHotKey ? "等待按键..." : store.queuePopShortcut.displayString)
+                            let hasConflict = nav.isRecordingQueueHotKey && nav.hotKeyConflictWarning != nil
+                            Text(hasConflict ? "冲突 · 请重按" : (nav.isRecordingQueueHotKey ? "等待按键..." : store.queuePopShortcut.displayString))
                                 .font(.system(size: 12, weight: .semibold))
                                 .foregroundStyle(nav.isRecordingQueueHotKey ? .white : .primary)
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 5)
                                 .background(
                                     Capsule()
-                                        .fill(nav.isRecordingQueueHotKey ? Color.accentColor : Color.primary.opacity(0.08))
+                                        .fill(hasConflict ? Color.red : (nav.isRecordingQueueHotKey ? Color.accentColor : Color.primary.opacity(0.08)))
                                 )
                         }
                         .buttonStyle(.plain)
 
                         if store.queuePopShortcut != .defaultQueueShortcut && !nav.isRecordingQueueHotKey {
                             Button {
+                                nav.hotKeyConflictWarning = nil
                                 store.queuePopShortcut = .defaultQueueShortcut
                                 store.showToast("已恢复默认出队快捷键 ⌃ ⌥ V")
                             } label: {
@@ -2453,6 +2478,7 @@ final class PanelNavigationModel: ObservableObject {
     @Published var presentationEpoch: Int = 0
     @Published var scrollRequestEpoch: Int = 0
     @Published var isRecordingHotKey: Bool = false
+    @Published var hotKeyConflictWarning: String? = nil
     @Published var isEditingAlias: Bool = false
     @Published var showQuickLook: Bool = false
     @Published var quickLookTabIndex: Int = 0
@@ -2590,6 +2616,7 @@ final class PanelNavigationModel: ObservableObject {
         isEditingAlias = false
         isCreatingTemplate = false
         isRecordingHotKey = false
+        hotKeyConflictWarning = nil
         suppressAutoHide = false
         isDragTargeted = false
         lockPointerAtCurrentMouse()
@@ -2919,7 +2946,10 @@ struct ClipboardPopoverView: View {
                 store.pruneUnavailableIgnoredApps()
             } else if nav.isRecordingHotKey {
                 nav.isRecordingHotKey = false
+                nav.hotKeyConflictWarning = nil
                 HotKeyManager.shared.resumeAfterRecording()
+            } else {
+                nav.hotKeyConflictWarning = nil
             }
         }
     }
@@ -3722,35 +3752,45 @@ struct ClipboardPopoverView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("全局呼出快捷键")
                                 .font(.system(size: 13.5, weight: .medium))
-                            Text(nav.isRecordingHotKey ? "请直接按下新组合键，按 ESC 取消" : "点击右侧按键录制自定义组合键")
-                                .font(.system(size: 11.5))
-                                .foregroundStyle(nav.isRecordingHotKey ? Color.accentColor : .secondary)
+                            if nav.isRecordingHotKey, let conflict = nav.hotKeyConflictWarning {
+                                Text(conflict)
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundStyle(.red)
+                            } else {
+                                Text(nav.isRecordingHotKey ? "请直接按下新组合键，按 ESC 取消" : "点击右侧按键录制自定义组合键（冲突自动拦截）")
+                                    .font(.system(size: 11.5))
+                                    .foregroundStyle(nav.isRecordingHotKey ? Color.accentColor : .secondary)
+                            }
                         }
                         Spacer()
 
                         Button {
                             if nav.isRecordingHotKey {
                                 nav.isRecordingHotKey = false
+                                nav.hotKeyConflictWarning = nil
                                 HotKeyManager.shared.resumeAfterRecording()
                             } else {
+                                nav.hotKeyConflictWarning = nil
                                 HotKeyManager.shared.suspendForRecording()
                                 nav.isRecordingHotKey = true
                             }
                         } label: {
-                            Text(nav.isRecordingHotKey ? "等待按键..." : store.hotKeyShortcut.displayString)
+                            let hasConflict = nav.isRecordingHotKey && nav.hotKeyConflictWarning != nil
+                            Text(hasConflict ? "冲突 · 请重按" : (nav.isRecordingHotKey ? "等待按键..." : store.hotKeyShortcut.displayString))
                                 .font(.system(size: 12, weight: .semibold))
                                 .foregroundStyle(nav.isRecordingHotKey ? .white : .primary)
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 5)
                                 .background(
                                     Capsule()
-                                        .fill(nav.isRecordingHotKey ? Color.accentColor : Color.primary.opacity(0.08))
+                                        .fill(hasConflict ? Color.red : (nav.isRecordingHotKey ? Color.accentColor : Color.primary.opacity(0.08)))
                                 )
                         }
                         .buttonStyle(.plain)
 
                         if store.hotKeyShortcut != .defaultShortcut && !nav.isRecordingHotKey {
                             Button {
+                                nav.hotKeyConflictWarning = nil
                                 store.hotKeyShortcut = .defaultShortcut
                                 store.showToast("已恢复默认快捷键 ⌥ V")
                             } label: {
