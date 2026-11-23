@@ -1038,14 +1038,17 @@ final class ClipboardStore: ObservableObject {
         case .image:
             if let fileName = item.imageFileName {
                 let url = imagesDirectoryURL.appendingPathComponent(fileName)
-                if FileManager.default.fileExists(atPath: url.path),
-                   let provider = NSItemProvider(contentsOf: url) {
-                    provider.suggestedName = fileName
-                    return provider
+                if FileManager.default.fileExists(atPath: url.path) {
+                    let exportURL = DragFileExportHelper.materializeExportFile(for: item, sourceImageURL: url)?.url ?? url
+                    if let provider = NSItemProvider(contentsOf: exportURL) {
+                        provider.suggestedName = exportURL.lastPathComponent
+                        return provider
+                    }
                 }
             }
             if let nsImage = cachedThumbnail(for: item), let tiff = nsImage.tiffRepresentation {
                 let provider = NSItemProvider()
+                provider.suggestedName = DragFileExportHelper.suggestedFileName(for: item, ext: "png")
                 provider.registerDataRepresentation(forTypeIdentifier: "public.tiff", visibility: .all) { completion in
                     completion(tiff, nil)
                     return nil
@@ -1074,7 +1077,39 @@ final class ClipboardStore: ObservableObject {
             return NSItemProvider(object: raw as NSString)
 
         case .text:
-            return NSItemProvider(object: (item.text ?? item.primaryTitle) as NSString)
+            let raw = item.text ?? item.primaryTitle
+            // 按住 ⌥ 拖拽任意文本卡片时，强制物化为带语义扩展名的真实文件（直投微信/飞书/网页上传框/桌面）
+            if NSEvent.modifierFlags.contains(.option),
+               let exported = DragFileExportHelper.materializeExportFile(for: item),
+               let fileProvider = NSItemProvider(contentsOf: exported.url) {
+                fileProvider.suggestedName = exported.url.lastPathComponent
+                return fileProvider
+            }
+
+            let provider = NSItemProvider(object: raw as NSString)
+            let spec = DragFileExportHelper.inferTextArtifactSpec(for: raw)
+            provider.suggestedName = DragFileExportHelper.suggestedFileName(
+                for: item,
+                ext: spec.ext,
+                fallbackStem: spec.fallbackStem
+            )
+            // 对 SVG / JSON / HTML / CSV / 脚本 / Markdown 同时附带标准文件表示，保持输入框粘贴纯文本的同时支持访达/设计工具直接接收真实文件
+            if spec.utType != .utf8PlainText && spec.utType != .plainText {
+                let itemSnapshot = item
+                provider.registerFileRepresentation(
+                    forTypeIdentifier: spec.utType.identifier,
+                    fileOptions: [],
+                    visibility: .all
+                ) { completion in
+                    if let exported = DragFileExportHelper.materializeExportFile(for: itemSnapshot) {
+                        completion(exported.url, false, nil)
+                    } else {
+                        completion(nil, false, nil)
+                    }
+                    return nil
+                }
+            }
+            return provider
         }
     }
 

@@ -1413,4 +1413,59 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertNil(InstantMathEvaluator.evaluate("/Users/fanaruto/Desktop", latestClipboardText: "12800"))
         XCTAssertNil(InstantMathEvaluator.evaluate("+8613800138000", latestClipboardText: "500"))
     }
+
+    // MARK: - 34. 百分号编码中文 URL 可读展示/拼音检索与拖拽即成文件（SVG/JSON/MD/可读截图名）测试
+
+    func testPercentEncodedChineseURLSearchAndDragFileMaterialization() throws {
+        // 1. 浏览器复制的百分号编码中文 URL：卡片直显可读中文、支持中文与拼音首字母盲搜，且不篡改底层原始 URL
+        let encodedWiki = "https://zh.wikipedia.org/wiki/%E7%AC%AC%E4%B8%80%E6%80%A7%E5%8E%9F%E7%90%86"
+        let linkItem = ClipItem(type: .link, text: encodedWiki, contentHash: "link:wiki")
+        XCTAssertEqual(linkItem.primaryTitle, "https://zh.wikipedia.org/wiki/第一性原理")
+        XCTAssertEqual(linkItem.text, encodedWiki)
+        XCTAssertTrue(linkItem.matches(query: "第一性原理"))
+        XCTAssertTrue(linkItem.matches(query: "dyxyl"))
+
+        // 2. 文本与代码拖拽类型智能推断（SVG / JSON / Markdown / CSV / Shell）与可读命名
+        let svgText = #"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="10"/></svg>"#
+        let svgSpec = DragFileExportHelper.inferTextArtifactSpec(for: svgText)
+        XCTAssertEqual(svgSpec.ext, "svg")
+
+        let jsonItem = ClipItem(
+            type: .text,
+            text: #"{"status":"ok","items":[1,2,3]}"#,
+            contentHash: "text:json",
+            customAlias: "订单接口示例"
+        )
+        let tempExportDir = FileManager.default.temporaryDirectory.appendingPathComponent("iclip-dragexport-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempExportDir) }
+
+        let jsonExported = try XCTUnwrap(DragFileExportHelper.materializeExportFile(for: jsonItem, exportDirectory: tempExportDir))
+        XCTAssertEqual(jsonExported.url.lastPathComponent, "订单接口示例.json")
+        XCTAssertEqual(try String(contentsOf: jsonExported.url, encoding: .utf8), jsonItem.text)
+
+        let mdItem = ClipItem(
+            type: .text,
+            text: "# 产品周会纪要\n\n- 完成性能优化\n- 发布新版本",
+            contentHash: "text:md"
+        )
+        let mdExported = try XCTUnwrap(DragFileExportHelper.materializeExportFile(for: mdItem, exportDirectory: tempExportDir))
+        XCTAssertEqual(mdExported.url.lastPathComponent, "产品周会纪要.md")
+
+        // 3. 截图拖出告别乱码 UUID，优先采用用户备注名建立零拷贝导出文件
+        let rawImgURL = tempExportDir.appendingPathComponent("97c87fcd-4a7e-4150-ba16-5d9852cf7b3.png")
+        try Data([0x89, 0x50, 0x4E, 0x47]).write(to: rawImgURL)
+        let imgItem = ClipItem(
+            type: .image,
+            imageFileName: rawImgURL.lastPathComponent,
+            contentHash: "img:lic",
+            customAlias: "深圳公司营业执照"
+        )
+        let imgExported = try XCTUnwrap(DragFileExportHelper.materializeExportFile(
+            for: imgItem,
+            sourceImageURL: rawImgURL,
+            exportDirectory: tempExportDir
+        ))
+        XCTAssertEqual(imgExported.url.lastPathComponent, "深圳公司营业执照.png")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: imgExported.url.path))
+    }
 }

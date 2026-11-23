@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// 收藏置顶的商务与办公场景分组标签（跨角色持久化保留，切换版本不丢失）
 enum PinCategory: String, Codable, CaseIterable, Identifiable {
@@ -190,9 +191,14 @@ struct ClipItem: Identifiable, Codable, Equatable {
         switch type {
         case .text, .link:
             guard let raw = text, !raw.isEmpty else { return "空白文本" }
-            let slice: Substring = raw.utf8.count > 540 ? raw.prefix(180) : raw[...]
+            let slice: Substring = raw.utf8.count > 1_080 ? raw.prefix(360) : raw[...]
             let trimmed = slice.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? "空白文本" : trimmed
+            if trimmed.isEmpty { return "空白文本" }
+            if type == .link || trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") {
+                let readable = URLReadableHelper.decodedReadablePreview(trimmed)
+                return readable.count > 180 ? String(readable.prefix(180)) : readable
+            }
+            return trimmed.count > 180 ? String(trimmed.prefix(180)) : trimmed
         case .image:
             if let w = imageWidth, let h = imageHeight {
                 return "图片 · \(w) × \(h)"
@@ -312,6 +318,10 @@ struct ClipItem: Identifiable, Codable, Equatable {
         if let text = text {
             if text.utf8.count <= 65_536 {
                 if text.range(of: token, options: opts) != nil { return true }
+                if text.utf8.count <= 4_096, text.contains("%"),
+                   URLReadableHelper.decodedReadablePreview(text).range(of: token, options: opts) != nil {
+                    return true
+                }
             } else {
                 // 超大负载仅检索头部约 32K 字符窗口，将单条最坏耗时锁死在 0.1ms 内
                 let head = text.prefix(32_768)
@@ -503,7 +513,9 @@ enum PinyinSearchCache {
         }
         if let t = item.text, !t.isEmpty {
             source.append(" ")
-            source.append(String(t.prefix(64)))
+            let rawHead = String(t.prefix(360))
+            let readableHead = URLReadableHelper.decodedReadablePreview(rawHead)
+            source.append(String(readableHead.prefix(64)))
         } else if let firstPath = item.filePaths?.first {
             source.append(" ")
             source.append(URL(fileURLWithPath: firstPath).lastPathComponent)
@@ -734,5 +746,189 @@ enum SmartSearchRanker {
         }
 
         return score
+    }
+}
+
+/// 百分号编码 URL 人类可读解码辅助（O(1) 前置 `%` 门控，不篡改底层原始 RFC 链接）
+enum URLReadableHelper {
+    static func decodedReadablePreview(_ raw: String) -> String {
+        guard raw.utf8.count <= 4_096, raw.contains("%") else { return raw }
+        guard raw.hasPrefix("http://") || raw.hasPrefix("https://") || raw.contains("://") else {
+            return raw
+        }
+        guard let decoded = raw.removingPercentEncoding, !decoded.isEmpty else {
+            return raw
+        }
+        return decoded
+            .replacingOccurrences(of: "\r", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\0", with: "")
+    }
+}
+
+/// 剪贴板拖拽即成文件（Drag-Out File Materialization）智能类型推断与可读命名引擎
+enum DragFileExportHelper {
+    private static let illegalFilenameChars = CharacterSet(charactersIn: "/:\\\"*?<>|\r\n\t\0")
+    private static let timestampFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyyMMdd-HHmmss"
+        return f
+    }()
+
+    /// 根据文本内容微秒级推断最契合的标准文件扩展名与 UTType
+    static func inferTextArtifactSpec(for text: String) -> (ext: String, utType: UTType, fallbackStem: String) {
+        let head = String(text.prefix(1_024)).trimmingCharacters(in: .whitespacesAndNewlines)
+        let lowerHead = head.lowercased()
+
+        if (lowerHead.hasPrefix("<svg") || (lowerHead.hasPrefix("<?xml") && lowerHead.contains("<svg"))),
+           (lowerHead.contains("</svg>") || text.lowercased().contains("</svg>") || lowerHead.contains("/>")) {
+            return ("svg", .svg, "iClip-矢量图")
+        }
+
+        if lowerHead.hasPrefix("<!doctype html") || lowerHead.hasPrefix("<html") {
+            return ("html", .html, "iClip-网页")
+        }
+
+        if text.utf8.count <= 262_144,
+           ((head.hasPrefix("{") && text.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("}")) ||
+            (head.hasPrefix("[") && text.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("]"))),
+           let data = text.data(using: .utf8),
+           (try? JSONSerialization.jsonObject(with: data)) != nil {
+            return ("json", .json, "iClip-数据")
+        }
+
+        if head.hasPrefix("#!/") {
+            if lowerHead.contains("python") {
+                return ("py", .pythonScript, "iClip-脚本")
+            }
+            return ("sh", .shellScript, "iClip-脚本")
+        }
+
+        if head.hasPrefix("# ") || head.hasPrefix("## ") || head.hasPrefix("### ") ||
+           text.contains("\n## ") || (head.hasPrefix("|") && text.contains("\n|---")) {
+            let mdType = UTType(filenameExtension: "md") ?? .plainText
+            return ("md", mdType, "iClip-文档")
+        }
+
+        let sampleLines = head.split(separator: "\n", omittingEmptySubsequences: true)
+        if sampleLines.count >= 2 {
+            let firstTabs = sampleLines[0].filter { $0 == "\t" }.count
+            if firstTabs >= 1 && sampleLines[1].filter({ $0 == "\t" }).count == firstTabs {
+                return ("tsv", .tabSeparatedText, "iClip-表格")
+            }
+            let firstCommas = sampleLines[0].filter { $0 == "," }.count
+            if firstCommas >= 2 && sampleLines[1].filter({ $0 == "," }).count == firstCommas {
+                return ("csv", .commaSeparatedText, "iClip-表格")
+            }
+        }
+
+        return ("txt", .utf8PlainText, "iClip-文本")
+    }
+
+    /// 生成人类可读、安全合法的拖出文件名（优先采用 ⌘R 备注名或 Markdown 一级标题，告别乱码 UUID）
+    static func suggestedFileName(for item: ClipItem, ext: String, fallbackStem: String = "iClip") -> String {
+        let cleanExt = ext.trimmingCharacters(in: CharacterSet(charactersIn: ". ")).lowercased()
+        let suffix = cleanExt.isEmpty ? "" : ".\(cleanExt)"
+
+        if let rawAlias = item.customAlias,
+           let cleanAlias = sanitizeFileStem(rawAlias) {
+            if !suffix.isEmpty && cleanAlias.lowercased().hasSuffix(suffix) {
+                return cleanAlias
+            }
+            return cleanAlias + suffix
+        }
+
+        if item.type == .text, let rawText = item.text {
+            let firstLine = rawText
+                .split(whereSeparator: \.isNewline)
+                .first
+                .map { String($0).trimmingCharacters(in: .whitespaces) } ?? ""
+            if firstLine.hasPrefix("#") {
+                let heading = firstLine.drop(while: { $0 == "#" || $0 == " " })
+                if let cleanHeading = sanitizeFileStem(String(heading), maxLength: 28) {
+                    return cleanHeading + suffix
+                }
+            }
+        }
+
+        let ts = timestampFormatter.string(from: item.createdAt)
+        let stem = (item.type == .image) ? "iClip-截图" : fallbackStem
+        return "\(stem)-\(ts)\(suffix)"
+    }
+
+    /// 在临时导出目录物化可直拖发送的真实文件（图片采用 APFS 零拷贝硬链接优先，自动回收超 1 小时旧临时件）
+    static func materializeExportFile(
+        for item: ClipItem,
+        sourceImageURL: URL? = nil,
+        exportDirectory: URL? = nil
+    ) -> (url: URL, utType: UTType)? {
+        let fm = FileManager.default
+        let dir = exportDirectory ?? fm.temporaryDirectory.appendingPathComponent("iClipDragExports", isDirectory: true)
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        pruneStaleExports(in: dir)
+
+        switch item.type {
+        case .image:
+            guard let src = sourceImageURL, fm.fileExists(atPath: src.path) else { return nil }
+            let name = suggestedFileName(for: item, ext: "png")
+            let dst = dir.appendingPathComponent(name)
+            if dst.standardizedFileURL == src.standardizedFileURL {
+                return (src, .png)
+            }
+            try? fm.removeItem(at: dst)
+            do {
+                try fm.linkItem(at: src, to: dst)
+            } catch {
+                try? fm.copyItem(at: src, to: dst)
+            }
+            return fm.fileExists(atPath: dst.path) ? (dst, .png) : (src, .png)
+
+        case .text:
+            guard let raw = item.text, !raw.isEmpty else { return nil }
+            let spec = inferTextArtifactSpec(for: raw)
+            let name = suggestedFileName(for: item, ext: spec.ext, fallbackStem: spec.fallbackStem)
+            let dst = dir.appendingPathComponent(name)
+            do {
+                try Data(raw.utf8).write(to: dst, options: .atomic)
+                return (dst, spec.utType)
+            } catch {
+                return nil
+            }
+
+        case .link, .file:
+            return nil
+        }
+    }
+
+    static func sanitizeFileStem(_ raw: String, maxLength: Int = 44) -> String? {
+        let components = raw
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .components(separatedBy: illegalFilenameChars)
+        var joined = components.joined(separator: "-")
+        while joined.contains("--") {
+            joined = joined.replacingOccurrences(of: "--", with: "-")
+        }
+        joined = joined.trimmingCharacters(in: CharacterSet(charactersIn: ".- "))
+        guard !joined.isEmpty else { return nil }
+        if joined.count > maxLength {
+            joined = String(joined.prefix(maxLength)).trimmingCharacters(in: CharacterSet(charactersIn: ".- "))
+        }
+        return joined.isEmpty ? nil : joined
+    }
+
+    private static func pruneStaleExports(in directory: URL) {
+        let fm = FileManager.default
+        guard let files = try? fm.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else { return }
+        let now = Date()
+        for f in files {
+            if let mod = (try? f.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate,
+               now.timeIntervalSince(mod) > 3_600 {
+                try? fm.removeItem(at: f)
+            }
+        }
     }
 }
