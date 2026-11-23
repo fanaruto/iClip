@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 /// 单条可跨机迁移的收藏知识资产快照（自包含文本、链接、动态模板、分组槽、备注名及内嵌图片数据）
 struct ArchivedClipEntry: Codable, Equatable {
@@ -60,11 +61,24 @@ struct PinnedArchiveBundle: Codable, Equatable {
     let entries: [ArchivedClipEntry]
 }
 
-/// 归档导入结果统计
+/// 归档导入结果统计（兼容原生 `.iclip` 与 Raycast / Maccy / Paste / CSV 跨软件搬家）
 struct ArchiveImportSummary: Equatable {
     let importedNewCount: Int
     let updatedExistingCount: Int
     let totalInBundle: Int
+    let sourceFormatLabel: String
+
+    init(
+        importedNewCount: Int,
+        updatedExistingCount: Int,
+        totalInBundle: Int,
+        sourceFormatLabel: String = "iClip 归档"
+    ) {
+        self.importedNewCount = importedNewCount
+        self.updatedExistingCount = updatedExistingCount
+        self.totalInBundle = totalInBundle
+        self.sourceFormatLabel = sourceFormatLabel
+    }
 }
 
 /// 归档导入导出错误类型
@@ -72,15 +86,18 @@ enum ArchiveBackupError: LocalizedError, Equatable {
     case noPinnedItems
     case invalidArchiveFormat
     case unsupportedSchemaVersion(Int)
+    case passphraseRequiredOrIncorrect
 
     var errorDescription: String? {
         switch self {
         case .noPinnedItems:
             return "当前暂无已收藏的记录，请先点击卡片收藏常用话术或模板"
         case .invalidArchiveFormat:
-            return "无法解析该归档文件，请确认选择的是有效的 .iclip 备份包"
+            return "无法解析该文件，请选择有效的 .iclip 归档或 Raycast / Maccy / CSV 常用语文件"
         case .unsupportedSchemaVersion(let ver):
             return "该归档包版本 (v\(ver)) 高于当前客户端，请先检查更新升级 iClip"
+        case .passphraseRequiredOrIncorrect:
+            return "加密归档口令不正确或已取消解锁"
         }
     }
 }
@@ -143,25 +160,68 @@ enum ArchiveBackupService {
         return try encoder.encode(bundle)
     }
 
-    /// 解码 `.iclip` Data 并与现有历史列表执行非破坏性去重合并（保留既有记录，绝不冲掉本地数据）
+    /// 导出带可选口令加密（AES-256-GCM）的 `.iclip` 收藏包
+    static func exportPinnedArchiveData(
+        from items: [ClipItem],
+        imagesDirectoryURL: URL,
+        passphrase: String?,
+        appVersion: String = AppRoleEdition.currentVersionString,
+        editionKey: String = AppRoleEdition.installed.rawValue
+    ) throws -> Data {
+        let plain = try exportPinnedArchiveData(
+            from: items,
+            imagesDirectoryURL: imagesDirectoryURL,
+            appVersion: appVersion,
+            editionKey: editionKey
+        )
+        guard let pw = passphrase?.trimmingCharacters(in: .whitespacesAndNewlines), !pw.isEmpty else {
+            return plain
+        }
+        guard let encrypted = LocalVaultCrypto.sealArchiveWithPassphrase(plain, passphrase: pw) else {
+            throw ArchiveBackupError.invalidArchiveFormat
+        }
+        return encrypted
+    }
+
+    /// 解码 `.iclip`（含口令加密版）或外部竞品常用语文件（Raycast / Maccy / Paste / CSV），执行非破坏性去重合并
     static func mergeArchiveData(
         _ data: Data,
         into existingItems: [ClipItem],
-        imagesDirectoryURL: URL
+        imagesDirectoryURL: URL,
+        passphrase: String? = nil,
+        fileExtensionHint: String? = nil
     ) throws -> (mergedItems: [ClipItem], summary: ArchiveImportSummary) {
+        let effectiveData: Data
+        if LocalVaultCrypto.isEncryptedArchive(data) {
+            guard let pw = passphrase, !pw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  let opened = LocalVaultCrypto.openEncryptedArchive(data, passphrase: pw) else {
+                throw ArchiveBackupError.passphraseRequiredOrIncorrect
+            }
+            effectiveData = opened
+        } else {
+            effectiveData = data
+        }
+
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
 
         let bundle: PinnedArchiveBundle
-        do {
-            bundle = try decoder.decode(PinnedArchiveBundle.self, from: data)
-        } catch {
+        if let decodedBundle = try? decoder.decode(PinnedArchiveBundle.self, from: effectiveData),
+           decodedBundle.format == PinnedArchiveBundle.formatIdentifier {
+            bundle = decodedBundle
+        } else if let external = UniversalCompetitorImporter.parseExternalData(effectiveData, fileExtensionHint: fileExtensionHint) {
+            return mergeExternalCompetitorCandidates(
+                external.entries,
+                formatLabel: external.formatName,
+                into: existingItems
+            )
+        } else if let probe = try? decoder.decode(PinnedArchiveBundle.self, from: effectiveData),
+                  probe.format != PinnedArchiveBundle.formatIdentifier {
+            throw ArchiveBackupError.invalidArchiveFormat
+        } else {
             throw ArchiveBackupError.invalidArchiveFormat
         }
 
-        guard bundle.format == PinnedArchiveBundle.formatIdentifier else {
-            throw ArchiveBackupError.invalidArchiveFormat
-        }
         guard bundle.schemaVersion <= PinnedArchiveBundle.currentSchemaVersion else {
             throw ArchiveBackupError.unsupportedSchemaVersion(bundle.schemaVersion)
         }
@@ -264,7 +324,70 @@ enum ArchiveBackupService {
         let summary = ArchiveImportSummary(
             importedNewCount: importedNew,
             updatedExistingCount: updatedExisting,
-            totalInBundle: bundle.entries.count
+            totalInBundle: bundle.entries.count,
+            sourceFormatLabel: "iClip 归档"
+        )
+        return (working, summary)
+    }
+
+    private static func mergeExternalCompetitorCandidates(
+        _ candidates: [UniversalCompetitorImporter.ExternalCandidate],
+        formatLabel: String,
+        into existingItems: [ClipItem]
+    ) -> (mergedItems: [ClipItem], summary: ArchiveImportSummary) {
+        var working = existingItems
+        var importedNew = 0
+        var updatedExisting = 0
+
+        for cand in candidates {
+            let trimmed = cand.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let isLink = trimmed.lowercased().hasPrefix("http://") || trimmed.lowercased().hasPrefix("https://")
+            let hash = SHA256.hash(data: Data(cand.text.utf8)).map { String(format: "%02x", $0) }.joined()
+            let contentHash = "\(isLink ? "link" : "text"):\(hash)"
+            let inferredCat = PinCategory.infer(alias: cand.alias, text: cand.text)
+
+            if let idx = working.firstIndex(where: { $0.contentHash == contentHash }) {
+                var cur = working[idx]
+                var changed = false
+                if !cur.isPinned {
+                    cur.isPinned = true
+                    changed = true
+                }
+                if (cur.customAlias?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true),
+                   let alias = cand.alias, !alias.isEmpty {
+                    cur.customAlias = alias
+                    changed = true
+                }
+                if cur.pinCategory == nil, let cat = inferredCat {
+                    cur.pinCategory = cat
+                    changed = true
+                }
+                if changed {
+                    working[idx] = cur
+                    updatedExisting += 1
+                }
+            } else {
+                let newItem = ClipItem(
+                    type: isLink ? .link : .text,
+                    text: cand.text,
+                    contentHash: contentHash,
+                    sourceAppName: cand.sourceLabel,
+                    createdAt: cand.createdAt ?? Date(),
+                    isPinned: true,
+                    pinCategory: inferredCat,
+                    customAlias: cand.alias
+                )
+                working.append(newItem)
+                importedNew += 1
+            }
+        }
+
+        let summary = ArchiveImportSummary(
+            importedNewCount: importedNew,
+            updatedExistingCount: updatedExisting,
+            totalInBundle: candidates.count,
+            sourceFormatLabel: formatLabel
         )
         return (working, summary)
     }

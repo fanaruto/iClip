@@ -165,18 +165,21 @@ enum HistoryPersistenceHelper {
         backupURL: URL,
         allowEmptyBackup: Bool = false
     ) {
-        guard let data = try? JSONEncoder().encode(items) else { return }
+        guard let plainData = try? JSONEncoder().encode(items),
+              let sealedData = LocalVaultCrypto.sealSnapshotData(plainData) else {
+            return
+        }
         do {
-            try data.write(to: primaryURL, options: .atomic)
+            try LocalVaultCrypto.writeProtectedFile(sealedData, to: primaryURL)
             if !items.isEmpty || allowEmptyBackup {
-                try? data.write(to: backupURL, options: .atomic)
+                try? LocalVaultCrypto.writeProtectedFile(sealedData, to: backupURL)
             }
         } catch {
             // 磁盘异常时不触碰既有 backupURL，保护最近一份完好快照
         }
     }
 
-    /// 加载剪贴板历史：若主文件因断电/截断损坏则自动从 backupURL 无损自愈，并隔离损坏原件
+    /// 加载剪贴板历史：原生支持 `ICLPENC1` 钥匙串 AES-256-GCM 密文，兼容旧明文无缝静默升级，损坏时从备份无损自愈
     static func loadSnapshot(
         primaryURL: URL,
         backupURL: URL,
@@ -187,10 +190,11 @@ enum HistoryPersistenceHelper {
         let backupExists = fm.fileExists(atPath: backupURL.path)
 
         if primaryExists {
-            if let data = try? Data(contentsOf: primaryURL),
-               let decoded = try? JSONDecoder().decode([ClipItem].self, from: data) {
-                if !decoded.isEmpty && !backupExists {
-                    try? data.write(to: backupURL, options: .atomic)
+            if let raw = try? Data(contentsOf: primaryURL),
+               let opened = LocalVaultCrypto.openSnapshotData(raw),
+               let decoded = try? JSONDecoder().decode([ClipItem].self, from: opened.plainData) {
+                if opened.wasLegacyPlaintext || (!decoded.isEmpty && !backupExists) {
+                    writeSnapshot(decoded, primaryURL: primaryURL, backupURL: backupURL, allowEmptyBackup: true)
                 }
                 return .loadedPrimary(decoded)
             }
@@ -199,9 +203,10 @@ enum HistoryPersistenceHelper {
         }
 
         if backupExists,
-           let backupData = try? Data(contentsOf: backupURL),
-           let recovered = try? JSONDecoder().decode([ClipItem].self, from: backupData) {
-            try? backupData.write(to: primaryURL, options: .atomic)
+           let backupRaw = try? Data(contentsOf: backupURL),
+           let openedBackup = LocalVaultCrypto.openSnapshotData(backupRaw),
+           let recovered = try? JSONDecoder().decode([ClipItem].self, from: openedBackup.plainData) {
+            writeSnapshot(recovered, primaryURL: primaryURL, backupURL: backupURL, allowEmptyBackup: true)
             return .recoveredFromBackup(recovered)
         }
 
@@ -340,6 +345,18 @@ final class ClipboardStore: ObservableObject {
     @Published var autoExpireOTP: Bool {
         didSet { UserDefaults.standard.set(autoExpireOTP, forKey: "autoExpireOTP") }
     }
+    /// 投屏与录屏隐身护盾（开启后 Zoom/腾讯会议/飞书共享屏幕及录屏画面中自动隐藏 iClip 面板，本机屏幕正常可见）
+    @Published var screenSharePrivacyEnabled: Bool {
+        didSet { UserDefaults.standard.set(screenSharePrivacyEnabled, forKey: "screenSharePrivacyEnabled") }
+    }
+    /// 列表敏感凭据防肩窥遮罩（开启后未选中/未悬停的 API Key、私钥、Token 默认圆点雾化，选中即刻原位显影）
+    @Published var maskSensitivePreviews: Bool {
+        didSet { UserDefaults.standard.set(maskSensitivePreviews, forKey: "maskSensitivePreviews") }
+    }
+    /// 密码剪贴板残留自动擦除（检测到 1Password / 系统密码等复制密码后，60 秒未变动自动清空系统剪贴板残留明文）
+    @Published var autoClearConcealedPasteboard: Bool {
+        didSet { UserDefaults.standard.set(autoClearConcealedPasteboard, forKey: "autoClearConcealedPasteboard") }
+    }
     @Published private(set) var launchAtLoginEnabled: Bool = false
     @Published var hotKeyShortcut: HotKeyShortcut {
         didSet {
@@ -422,6 +439,8 @@ final class ClipboardStore: ObservableObject {
     private var appearanceSaveWorkItem: DispatchWorkItem?
     private var cacheTrimWorkItem: DispatchWorkItem?
     private var pendingOTPExpirationTasks: [UUID: DispatchWorkItem] = [:]
+    private var concealedScrubWorkItem: DispatchWorkItem? = nil
+    private var sourceAppDeleteStreaks: [String: (name: String, count: Int, lastAt: TimeInterval)] = [:]
     private var undoRemovedItems: [ClipItem] = []
     private var undoPurgeWorkItem: DispatchWorkItem?
     private var copyAppendTargetID: UUID? = nil
@@ -467,7 +486,10 @@ final class ClipboardStore: ObservableObject {
 
         self.autoPasteEnabled = true
         self.soundEffectsEnabled = UserDefaults.standard.object(forKey: TactileFeedbackEngine.soundEnabledDefaultsKey) as? Bool ?? true
-        self.autoExpireOTP = true
+        self.autoExpireOTP = UserDefaults.standard.object(forKey: "autoExpireOTP") as? Bool ?? true
+        self.screenSharePrivacyEnabled = UserDefaults.standard.object(forKey: "screenSharePrivacyEnabled") as? Bool ?? true
+        self.maskSensitivePreviews = UserDefaults.standard.object(forKey: "maskSensitivePreviews") as? Bool ?? true
+        self.autoClearConcealedPasteboard = UserDefaults.standard.object(forKey: "autoClearConcealedPasteboard") as? Bool ?? true
         // 统一既定视觉风格：默认固定原生液态玻璃与纯净无分割线布局，仅暴露单一「背景模糊浓度」调节
         self.surfaceStyle = .liquidGlass
         let savedMask = UserDefaults.standard.object(forKey: "liquidGlassMaskOpacity") as? Double
@@ -848,15 +870,32 @@ final class ClipboardStore: ObservableObject {
         }
 
         let types = pasteboard.types ?? []
-        if types.contains(Self.concealedType) || types.contains(Self.transientType) {
+        let frontApp = NSWorkspace.shared.frontmostApplication
+        let frontBundleID = frontApp?.bundleIdentifier
+        let sourcePB = PasteboardPrivacyStandards.extractSourceBundleID(from: pasteboard)
+
+        switch PasteboardPrivacyStandards.inspect(
+            types: types,
+            sourceBundleIDFromPasteboard: sourcePB,
+            frontmostBundleID: frontBundleID
+        ) {
+        case .rejectConcealedSecret:
+            scheduleConcealedPasteboardScrubIfNeeded(capturedChangeCount: currentCount)
             return
+        case .rejectTransientAutomation:
+            return
+        case .allowCapture:
+            break
         }
 
-        let frontApp = NSWorkspace.shared.frontmostApplication
-        if let bundleID = frontApp?.bundleIdentifier, ignoredBundleIDSet.contains(bundleID) {
+        if let bundleID = frontBundleID, ignoredBundleIDSet.contains(bundleID) {
+            return
+        }
+        if let pbBid = sourcePB, ignoredBundleIDSet.contains(pbBid) {
             return
         }
         let sourceApp = frontApp?.localizedName
+        let effectiveBundleID = sourcePB ?? frontBundleID
 
         // 1. 文件 URL
         if types.contains(.fileURL),
@@ -870,7 +909,8 @@ final class ClipboardStore: ObservableObject {
                 type: .file,
                 filePaths: paths,
                 contentHash: contentHash,
-                sourceAppName: sourceApp
+                sourceAppName: sourceApp,
+                sourceAppBundleID: effectiveBundleID
             )
             let copyOutcome = ActionSparkController.shared.handleIncomingCopy(contentHash: contentHash, in: self)
             if copyOutcome == .triggerCandidate { return }
@@ -957,7 +997,8 @@ final class ClipboardStore: ObservableObject {
                             imageHeight: dims.height,
                             qrCodePayload: detectedQR,
                             contentHash: contentHash,
-                            sourceAppName: sourceApp
+                            sourceAppName: sourceApp,
+                            sourceAppBundleID: effectiveBundleID
                         )
                         self.insertOrPromote(item)
                         let reuseCount = AdaptiveIntelligenceEngine.shared.recordContentActivity(contentHash: contentHash)
@@ -1058,7 +1099,8 @@ final class ClipboardStore: ObservableObject {
                         type: finalIsLink ? .link : .text,
                         text: text,
                         contentHash: contentHash,
-                        sourceAppName: sourceApp
+                        sourceAppName: sourceApp,
+                        sourceAppBundleID: effectiveBundleID
                     )
                     insertOrPromote(restoredItem)
                     return
@@ -1068,7 +1110,8 @@ final class ClipboardStore: ObservableObject {
                 type: finalIsLink ? .link : .text,
                 text: text,
                 contentHash: contentHash,
-                sourceAppName: sourceApp
+                sourceAppName: sourceApp,
+                sourceAppBundleID: effectiveBundleID
             )
             insertOrPromote(item)
             copyAppendTargetID = items.first(where: { $0.contentHash == contentHash })?.id
@@ -1717,6 +1760,7 @@ final class ClipboardStore: ObservableObject {
         onBeforePaste?()
         if shouldAutoPaste {
             scheduleOTPAutoExpireIfNeeded(for: item)
+            scheduleBurnAfterPasteIfNeeded(for: item)
         }
 
         refreshAccessibilityStatus()
@@ -1873,6 +1917,80 @@ final class ClipboardStore: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + delaySeconds, execute: work)
     }
 
+    /// 检测到密码管理器写入 `Concealed` 机密后，60 秒若剪贴板未更新则静默擦除系统剪贴板残留明文
+    private func scheduleConcealedPasteboardScrubIfNeeded(capturedChangeCount: Int, delaySeconds: TimeInterval = 60.0) {
+        concealedScrubWorkItem?.cancel()
+        guard autoClearConcealedPasteboard else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.autoClearConcealedPasteboard else { return }
+            if self.pasteboard.changeCount == capturedChangeCount {
+                self.pasteboard.clearContents()
+                self.ignoreNextChangeCount = self.pasteboard.changeCount
+                self.lastChangeCount = self.pasteboard.changeCount
+            }
+        }
+        concealedScrubWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delaySeconds, execute: work)
+    }
+
+    /// 切换单条记录的「粘贴即焚」（⌘B）：开启后下次粘贴进目标窗口 5 秒即连同系统剪贴板一起无痕销毁
+    func toggleBurnAfterPaste(_ item: ClipItem) {
+        guard let idx = items.firstIndex(where: { $0.id == item.id }) else { return }
+        let nextState = !items[idx].isBurnAfterPaste
+        items[idx].isBurnAfterPaste = nextState
+        if nextState && items[idx].isPinned {
+            items[idx].isPinned = false
+        }
+        saveHistory()
+        TactileFeedbackEngine.shared.perform(nextState ? .favoriteOn : .favoriteOff)
+        showToast(nextState ? "已设为「粘贴即焚」· 粘贴 5 秒后无痕自毁" : "已取消粘贴即焚")
+    }
+
+    private func scheduleBurnAfterPasteIfNeeded(for item: ClipItem, delaySeconds: TimeInterval = 5.0) {
+        guard item.isBurnAfterPaste else { return }
+        let targetID = item.id
+        let expectedChangeCount = pasteboard.changeCount
+        pendingOTPExpirationTasks[targetID]?.cancel()
+
+        let work = DispatchWorkItem { [weak self] in
+            guard let self,
+                  let current = self.items.first(where: { $0.id == targetID }),
+                  current.isBurnAfterPaste else {
+                return
+            }
+            self.pendingOTPExpirationTasks.removeValue(forKey: targetID)
+            if self.pasteboard.changeCount == expectedChangeCount {
+                self.pasteboard.clearContents()
+                self.ignoreNextChangeCount = self.pasteboard.changeCount
+                self.lastChangeCount = self.pasteboard.changeCount
+            }
+            self.delete(current, userInitiated: false)
+        }
+        pendingOTPExpirationTasks[targetID] = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delaySeconds, execute: work)
+    }
+
+    /// 一键将指定记录的来源应用加入隐私忽略黑名单（支持 Bundle ID 精确匹配或运行中应用反查）
+    @discardableResult
+    func ignoreSourceApp(of item: ClipItem) -> Bool {
+        if let bid = item.sourceAppBundleID, !bid.isEmpty {
+            let name = item.sourceAppName ?? bid
+            addIgnoredApp(bundleIdentifier: bid, displayName: name)
+            showToast("已忽略来自「\(name)」的后续复制记录")
+            return true
+        }
+        if let appName = item.sourceAppName,
+           let matched = NSWorkspace.shared.runningApplications.first(where: {
+               $0.localizedName == appName && $0.bundleIdentifier != nil && $0.bundleIdentifier != Bundle.main.bundleIdentifier
+           }),
+           let bid = matched.bundleIdentifier {
+            addIgnoredApp(bundleIdentifier: bid, displayName: appName)
+            showToast("已忽略来自「\(appName)」的后续复制记录")
+            return true
+        }
+        return false
+    }
+
     private func recordTargetAppPasteIfAppropriate(for item: ClipItem) {
         guard !minimalModeEnabled else { return }
         AdaptiveIntelligenceEngine.shared.recordPasteToTargetApp(
@@ -1950,6 +2068,18 @@ final class ClipboardStore: ObservableObject {
         if userInitiated {
             TactileFeedbackEngine.shared.perform(.deleteItem)
             stageDeletionUndoBuffer([removed])
+            if let bid = removed.sourceAppBundleID,
+               let appName = removed.sourceAppName,
+               !ignoredBundleIDSet.contains(bid) {
+                let now = ProcessInfo.processInfo.systemUptime
+                let prev = sourceAppDeleteStreaks[bid]
+                let newCount = (prev != nil && (now - prev!.lastAt) < 180.0) ? (prev!.count + 1) : 1
+                sourceAppDeleteStreaks[bid] = (appName, newCount, now)
+                if newCount == 3 {
+                    showToast("已连续清理「\(appName)」记录，右键卡片可一键永久忽略该应用", duration: 4.0)
+                    return
+                }
+            }
             showToast("已删除 · 按 ⌘Z 撤销", duration: 3.4)
         } else {
             deleteImageFileIfNeeded(for: removed)
@@ -2057,21 +2187,24 @@ final class ClipboardStore: ObservableObject {
         items.filter(\.isPinned).count
     }
 
-    func exportPinnedArchive(to destinationURL: URL) throws -> Int {
+    func exportPinnedArchive(to destinationURL: URL, passphrase: String? = nil) throws -> Int {
         let data = try ArchiveBackupService.exportPinnedArchiveData(
             from: items,
-            imagesDirectoryURL: imagesDirectoryURL
+            imagesDirectoryURL: imagesDirectoryURL,
+            passphrase: passphrase
         )
         try data.write(to: destinationURL, options: .atomic)
         return pinnedItemCount
     }
 
-    func importPinnedArchive(from sourceURL: URL) throws -> ArchiveImportSummary {
+    func importPinnedArchive(from sourceURL: URL, passphrase: String? = nil) throws -> ArchiveImportSummary {
         let data = try Data(contentsOf: sourceURL)
         let (merged, summary) = try ArchiveBackupService.mergeArchiveData(
             data,
             into: items,
-            imagesDirectoryURL: imagesDirectoryURL
+            imagesDirectoryURL: imagesDirectoryURL,
+            passphrase: passphrase,
+            fileExtensionHint: sourceURL.pathExtension
         )
         self.items = sortItems(merged)
         saveHistory(immediate: true)

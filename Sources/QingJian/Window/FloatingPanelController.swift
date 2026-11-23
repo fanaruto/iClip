@@ -106,6 +106,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         p.hidesOnDeactivate = false
         p.minSize = windowSize
         p.maxSize = windowSize
+        p.sharingType = (store.screenSharePrivacyEnabled && !ProcessInfo.processInfo.arguments.contains("--demo")) ? .none : .readOnly
         p.delegate = self
 
         let view = ClipboardPopoverView(
@@ -228,6 +229,15 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             .receive(on: RunLoop.main)
             .sink { [weak self] pinned in
                 self?.panel?.level = pinned ? .statusBar : .floating
+            }
+            .store(in: &cancellables)
+
+        store.$screenSharePrivacyEnabled
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] shielded in
+                guard let self, !ProcessInfo.processInfo.arguments.contains("--demo") else { return }
+                self.panel?.sharingType = shielded ? .none : .readOnly
             }
             .store(in: &cancellables)
     }
@@ -714,6 +724,12 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             return nil
         }
 
+        // ⌘B (keyCode 11)：一键开启 / 取消「粘贴即焚」（粘贴 5 秒后连同系统剪贴板无痕自毁）
+        if flags == .command, event.keyCode == 11 {
+            rootView.toggleBurnAfterPasteForSelected()
+            return nil
+        }
+
         // ⌘S (keyCode 1) / ⌘D (keyCode 2)：全键盘一键收藏 / 取消收藏当前选中条目
         if flags == .command, (event.keyCode == 1 || event.keyCode == 2) {
             rootView.togglePinForSelected()
@@ -915,6 +931,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         p.hidesOnDeactivate = false
         p.minSize = windowSize
         p.maxSize = windowSize
+        p.sharingType = (store.screenSharePrivacyEnabled && !ProcessInfo.processInfo.arguments.contains("--demo")) ? .none : .readOnly
         p.delegate = self
 
         let view = ClipboardPopoverView(
@@ -1037,6 +1054,15 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             .receive(on: RunLoop.main)
             .sink { [weak self] pinned in
                 self?.panel?.level = pinned ? .statusBar : .floating
+            }
+            .store(in: &cancellables)
+
+        store.$screenSharePrivacyEnabled
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] shielded in
+                guard let self, !ProcessInfo.processInfo.arguments.contains("--demo") else { return }
+                self.panel?.sharingType = shielded ? .none : .readOnly
             }
             .store(in: &cancellables)
     }
@@ -1509,6 +1535,12 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         // ⌘T (keyCode 17)：一键加入待办 / 标记完成 / 恢复未完成
         if !store.minimalModeEnabled, flags == .command, event.keyCode == 17 {
             rootView.toggleTodoForSelected()
+            return nil
+        }
+
+        // ⌘B (keyCode 11)：一键开启 / 取消「粘贴即焚」（粘贴 5 秒后连同系统剪贴板无痕自毁）
+        if flags == .command, event.keyCode == 11 {
+            rootView.toggleBurnAfterPasteForSelected()
             return nil
         }
 

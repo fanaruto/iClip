@@ -99,6 +99,10 @@ const TIMER_ID_TOAST_CLEAR: usize = 2002;
 const TIMER_ID_COPY_FLASH_CLEAR: usize = 2003;
 const TIMER_ID_DEFERRED_APPEND: usize = 2004;
 const TIMER_ID_SPRING_ANIM: usize = 2005;
+const TIMER_ID_CONCEALED_SCRUB: usize = 2006;
+
+const WDA_NONE_AFFINITY: u32 = 0x0000_0000;
+const WDA_EXCLUDEFROMCAPTURE_AFFINITY: u32 = 0x0000_0011;
 
 const CMD_OPEN_PANEL: usize = 3001;
 const CMD_OPEN_SETTINGS: usize = 3002;
@@ -195,6 +199,9 @@ enum HitAction {
     ToggleStripRichFormat,
     ToggleAutoCleanUrl,
     ToggleAutoExpireOtp,
+    ToggleScreenSharePrivacy,
+    ToggleSensitiveVeil,
+    ToggleAutoClearConcealed,
     ToggleQueueMode,
     ToggleQueueAutoTab,
     ToggleAutostart,
@@ -254,6 +261,7 @@ struct WinAppState {
     cf_html_format: u32,
     cf_exclude_monitor: u32,
     cf_viewer_ignore: u32,
+    cf_can_include_history: u32,
     suppress_deactivate_hide: bool,
     autostart_cached: bool,
     kbd_hook: HHOOK,
@@ -387,12 +395,15 @@ pub fn run_windows_app() -> i32 {
         let store = ClipboardStore::new(ClipboardStore::default_app_data_dir());
         let sys_dark = query_windows_system_dark_mode();
         apply_dwm_glass_style(hwnd, sys_dark, store.config.blur_concentration_pct);
+        apply_screen_capture_shield(hwnd, store.config.screen_share_privacy);
 
         let cf_html = RegisterClipboardFormatW(to_wide("HTML Format").as_ptr());
         let cf_excl = RegisterClipboardFormatW(
             to_wide("ExcludeClipboardContentFromMonitorProcessing").as_ptr(),
         );
         let cf_ignore = RegisterClipboardFormatW(to_wide("Clipboard Viewer Ignore").as_ptr());
+        let cf_can_hist =
+            RegisterClipboardFormatW(to_wide("CanIncludeInClipboardHistory").as_ptr());
         let autostart = is_autostart_enabled();
 
         APP_STATE.with(|cell| {
@@ -436,6 +447,7 @@ pub fn run_windows_app() -> i32 {
                 cf_html_format: cf_html,
                 cf_exclude_monitor: cf_excl,
                 cf_viewer_ignore: cf_ignore,
+                cf_can_include_history: cf_can_hist,
                 suppress_deactivate_hide: false,
                 autostart_cached: autostart,
                 kbd_hook: null_mut(),
@@ -586,6 +598,7 @@ pub fn run_windows_self_test() -> Result<(), String> {
             cf_html_format: cf_html,
             cf_exclude_monitor: 0,
             cf_viewer_ignore: 0,
+            cf_can_include_history: 0,
             suppress_deactivate_hide: true,
             autostart_cached: true,
             kbd_hook: null_mut(),
@@ -865,6 +878,37 @@ unsafe fn apply_dwm_glass_style(hwnd: HWND, is_dark: bool, blur_pct: u8) {
         cyBottomHeight: -1,
     };
     let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
+}
+
+unsafe fn apply_screen_capture_shield(hwnd: HWND, enabled: bool) {
+    let affinity = if enabled {
+        WDA_EXCLUDEFROMCAPTURE_AFFINITY
+    } else {
+        WDA_NONE_AFFINITY
+    };
+    let _ = SetWindowDisplayAffinity(hwnd, affinity);
+}
+
+unsafe fn is_disallowed_by_clipboard_history_flag(hwnd: HWND, cf_can_include: u32) -> bool {
+    if cf_can_include == 0 || IsClipboardFormatAvailable(cf_can_include) == FALSE {
+        return false;
+    }
+    if OpenClipboard(hwnd) == FALSE {
+        return false;
+    }
+    let mut disallowed = false;
+    let hdata = GetClipboardData(cf_can_include);
+    if !hdata.is_null() {
+        let ptr = GlobalLock(hdata) as *const u32;
+        if !ptr.is_null() {
+            if GlobalSize(hdata) >= 4 && *ptr == 0 {
+                disallowed = true;
+            }
+            let _ = GlobalUnlock(hdata);
+        }
+    }
+    let _ = CloseClipboard();
+    disallowed
 }
 
 unsafe fn get_dpi_scale(hwnd: HWND) -> f32 {
@@ -1516,6 +1560,22 @@ unsafe extern "system" fn wnd_proc(
             } else if wparam == TIMER_ID_DEFERRED_APPEND {
                 KillTimer(hwnd, TIMER_ID_DEFERRED_APPEND);
                 simulate_ctrl_c();
+            } else if wparam == TIMER_ID_CONCEALED_SCRUB {
+                KillTimer(hwnd, TIMER_ID_CONCEALED_SCRUB);
+                let do_scrub = APP_STATE.with(|c| {
+                    let mut b = c.borrow_mut();
+                    let Some(st) = b.as_mut() else { return false };
+                    if st.store.config.auto_clear_concealed_clipboard {
+                        st.ignore_next_clipboard_seq = true;
+                        true
+                    } else {
+                        false
+                    }
+                });
+                if do_scrub && OpenClipboard(hwnd) != FALSE {
+                    let _ = EmptyClipboard();
+                    let _ = CloseClipboard();
+                }
             }
             0
         }
@@ -1805,7 +1865,11 @@ unsafe fn handle_clipboard_update(hwnd: HWND) {
             && IsClipboardFormatAvailable(st.cf_exclude_monitor) != FALSE)
             || (st.cf_viewer_ignore != 0
                 && IsClipboardFormatAvailable(st.cf_viewer_ignore) != FALSE)
+            || is_disallowed_by_clipboard_history_flag(hwnd, st.cf_can_include_history)
         {
+            if st.store.config.auto_clear_concealed_clipboard {
+                SetTimer(hwnd, TIMER_ID_CONCEALED_SCRUB, 60_000, None);
+            }
             return true;
         }
         false
@@ -1815,6 +1879,24 @@ unsafe fn handle_clipboard_update(hwnd: HWND) {
     }
 
     let source_app = detect_clipboard_source_app(hwnd);
+    let source_ignored = APP_STATE.with(|c| {
+        c.borrow()
+            .as_ref()
+            .map(|st| st.store.is_app_ignored(source_app.as_deref()))
+            .unwrap_or(false)
+    });
+    if source_ignored {
+        let auto_scrub = APP_STATE.with(|c| {
+            c.borrow()
+                .as_ref()
+                .map(|st| st.store.config.auto_clear_concealed_clipboard)
+                .unwrap_or(false)
+        });
+        if auto_scrub {
+            SetTimer(hwnd, TIMER_ID_CONCEALED_SCRUB, 60_000, None);
+        }
+        return;
+    }
 
     if IsClipboardFormatAvailable(CF_HDROP_ID) != FALSE {
         if let Some(paths) = read_files_from_clipboard(hwnd) {
@@ -2383,6 +2465,7 @@ unsafe fn commit_paste_item_by_index(hwnd: HWND, item_idx: usize, force_plain: b
         APP_STATE.with(|c| {
             if let Some(st) = c.borrow_mut().as_mut() {
                 st.store.schedule_otp_expire_if_needed(&id, 30);
+                st.store.schedule_burn_after_paste_if_needed(&id, 5);
             }
         });
     }
@@ -3503,7 +3586,14 @@ fn layout_and_draw_main_view(
             let trimmed_q = st.search_query.trim();
             if !trimmed_q.is_empty() && !trimmed_q.starts_with('@') {
                 let bh = s(40);
-                canvas.fill_round_rect(pad, cur_y, track_w, bh, sf(11.0), palette.cobalt.with_alpha(26));
+                canvas.fill_round_rect(
+                    pad,
+                    cur_y,
+                    track_w,
+                    bh,
+                    sf(11.0),
+                    palette.cobalt.with_alpha(26),
+                );
                 canvas.stroke_round_rect(
                     pad,
                     cur_y,
@@ -4723,8 +4813,10 @@ fn layout_and_draw_main_view(
                         });
                     }
 
-                    // 卡片主标题
-                    let title_str = item.primary_title(minimal);
+                    // 卡片主标题（未选中且未悬停时自动对高敏密钥应用防肩窥圆点遮罩，零高度抖动）
+                    let veil_on =
+                        st.store.config.mask_sensitive_previews && !is_selected && !is_hovered;
+                    let title_str = item.display_title(minimal, veil_on);
                     texts.push(TextDrawCmd {
                         text: title_str,
                         rect: RECT {
@@ -4779,6 +4871,11 @@ fn layout_and_draw_main_view(
                     }
 
                     let mut sub_parts: Vec<String> = Vec::new();
+                    if item.is_burn_after_paste() {
+                        sub_parts.push("粘贴即焚".to_string());
+                    } else if let Some(sec_kind) = item.detected_sensitive_kind() {
+                        sub_parts.push(sec_kind.badge_title().to_string());
+                    }
                     if !minimal {
                         if let Some(cat) = item.pin_category {
                             sub_parts.push(cat.title().to_string());
@@ -5646,13 +5743,15 @@ fn layout_and_draw_settings_view(
         y += g3_h + s(14);
     }
 
-    // ── 分组 4：隐私与存储（Segmented Picker 容量选择 + 跨设备 .iclip 归档迁移）──
+    // ── 分组 4：隐私护盾与跨软件迁移（DPAPI 加密 + 投屏隐身 + 防肩窥遮罩 + 多格式无损迁入）──
     if visible_block(y, s(18)) {
-        draw_group_header(texts, pad, y, content_w, s(18), "隐私与存储", palette);
+        draw_group_header(texts, pad, y, content_w, s(18), "隐私护盾与迁移", palette);
     }
     y += s(22);
 
-    let g4_h = s(122);
+    let g4_toggle_rows = 3;
+    let g4_top_h = s(32) + row_h * g4_toggle_rows;
+    let g4_h = g4_top_h + s(122);
     if visible_block(y, g4_h) {
         canvas.fill_round_rect(pad, y, content_w, g4_h, sf(14.0), palette.group_fill);
         canvas.stroke_round_rect(
@@ -5665,13 +5764,95 @@ fn layout_and_draw_settings_view(
             palette.group_stroke,
         );
 
+        // 顶部本机 DPAPI 静态加密激活徽标条
+        let badge_x = pad + s(10);
+        let badge_y = y + s(7);
+        let badge_w = content_w - s(20);
+        let badge_h = s(22);
+        canvas.fill_round_rect(
+            badge_x,
+            badge_y,
+            badge_w,
+            badge_h,
+            sf(7.0),
+            palette.emerald.with_alpha(26),
+        );
+        canvas.fill_circle(
+            (badge_x + s(11)) as f32,
+            (badge_y + badge_h / 2) as f32,
+            sf(3.2),
+            palette.emerald,
+        );
+        texts.push(TextDrawCmd {
+            text: "本机 DPAPI 硬件凭据加密保护已启用 · 零联网上传".to_string(),
+            rect: RECT {
+                left: badge_x + s(19),
+                top: badge_y,
+                right: badge_x + badge_w - s(8),
+                bottom: badge_y + badge_h,
+            },
+            color: palette.text_secondary,
+            font_kind: FontKind::Meta,
+            flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        });
+
+        let shield_toggles = [
+            (
+                "投屏与录屏光学隐身护盾",
+                "腾讯会议 / 飞书共享屏幕及录屏画面中自动隐藏面板",
+                st.store.config.screen_share_privacy,
+                palette.emerald,
+                HitAction::ToggleScreenSharePrivacy,
+            ),
+            (
+                "敏感凭据防肩窥圆点遮罩",
+                "API 密钥与私钥默认圆点雾化，选中或悬停即刻显影",
+                st.store.config.mask_sensitive_previews,
+                palette.cobalt,
+                HitAction::ToggleSensitiveVeil,
+            ),
+            (
+                "密码剪贴板 60 秒残留擦除",
+                "检测到密码管理器复制密码后超时自动清空系统剪贴板",
+                st.store.config.auto_clear_concealed_clipboard,
+                palette.cobalt,
+                HitAction::ToggleAutoClearConcealed,
+            ),
+        ];
+
+        let mut sry = y + s(32);
+        for (t, sub, on, acc, act) in shield_toggles {
+            canvas.draw_line(
+                (pad + s(12)) as f32,
+                sry as f32,
+                (w - pad - s(12)) as f32,
+                sry as f32,
+                sf(0.7),
+                palette.divider,
+            );
+            draw_grouped_toggle_row(
+                canvas, texts, st, pad, sry, content_w, row_h, scale, palette, t, sub, on, acc, act,
+            );
+            sry += row_h;
+        }
+
+        let sec_base_y = y + g4_top_h;
+        canvas.draw_line(
+            (pad + s(12)) as f32,
+            sec_base_y as f32,
+            (w - pad - s(12)) as f32,
+            sec_base_y as f32,
+            sf(0.7),
+            palette.divider,
+        );
+
         texts.push(TextDrawCmd {
             text: "历史保留上限".to_string(),
             rect: RECT {
                 left: pad + s(12),
-                top: y + s(8),
+                top: sec_base_y + s(8),
                 right: pad + s(160),
-                bottom: y + s(28),
+                bottom: sec_base_y + s(28),
             },
             color: palette.text_primary,
             font_kind: FontKind::CardTitle,
@@ -5681,9 +5862,9 @@ fn layout_and_draw_settings_view(
             text: "收藏记录永不清理".to_string(),
             rect: RECT {
                 left: w - pad - s(140),
-                top: y + s(8),
+                top: sec_base_y + s(8),
                 right: w - pad - s(12),
-                bottom: y + s(28),
+                bottom: sec_base_y + s(28),
             },
             color: palette.text_secondary,
             font_kind: FontKind::Meta,
@@ -5692,7 +5873,7 @@ fn layout_and_draw_settings_view(
 
         // iOS 原生风 Segmented Picker：[50 条 | 100 条 | 200 条 | 500 条]
         let pk_x = pad + s(12);
-        let pk_y = y + s(33);
+        let pk_y = sec_base_y + s(33);
         let pk_w = content_w - s(24);
         let pk_h = s(28);
         canvas.fill_round_rect(pk_x, pk_y, pk_w, pk_h, sf(8.5), palette.track_bg);
@@ -5746,9 +5927,9 @@ fn layout_and_draw_settings_view(
 
         canvas.draw_line(
             (pad + s(12)) as f32,
-            (y + s(70)) as f32,
+            (sec_base_y + s(70)) as f32,
             (w - pad - s(12)) as f32,
-            (y + s(70)) as f32,
+            (sec_base_y + s(70)) as f32,
             sf(0.7),
             palette.divider,
         );
@@ -5757,7 +5938,7 @@ fn layout_and_draw_settings_view(
         let imp_w = s(64);
         let exp_x = w - pad - s(12) - exp_w;
         let imp_x = exp_x - s(6) - imp_w;
-        let btn_y = y + s(82);
+        let btn_y = sec_base_y + s(82);
         let btn_h = s(26);
 
         canvas.fill_round_rect(imp_x, btn_y, imp_w, btn_h, sf(8.0), palette.chip_bg);
@@ -5818,24 +5999,27 @@ fn layout_and_draw_settings_view(
         });
 
         texts.push(TextDrawCmd {
-            text: "收藏资产归档迁移".to_string(),
+            text: "收藏归档与跨软件搬家".to_string(),
             rect: RECT {
                 left: pad + s(12),
-                top: y + s(75),
+                top: sec_base_y + s(75),
                 right: imp_x - s(8),
-                bottom: y + s(95),
+                bottom: sec_base_y + s(95),
             },
             color: palette.text_primary,
             font_kind: FontKind::CardTitle,
             flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE,
         });
         texts.push(TextDrawCmd {
-            text: format!("已收藏 {} 条，与 macOS 100% 互通", st.store.pinned_count()),
+            text: format!(
+                "已收藏 {} 条 · 支持 .iclip / Raycast / CSV",
+                st.store.pinned_count()
+            ),
             rect: RECT {
                 left: pad + s(12),
-                top: y + s(94),
+                top: sec_base_y + s(94),
                 right: imp_x - s(8),
-                bottom: y + s(114),
+                bottom: sec_base_y + s(114),
             },
             color: palette.text_secondary,
             font_kind: FontKind::Meta,
@@ -5858,6 +6042,7 @@ fn layout_and_draw_settings_view(
         ("直接键入光标处", "双击 / ↵".to_string()),
         ("左 / 右切换类目", "⇧⇥ / ⇥".to_string()),
         ("标记 / 完成待办事项", "Ctrl + T".to_string()),
+        ("设为粘贴一次后无痕自毁", "Ctrl + B".to_string()),
         ("设置备注标题（自动收藏）", "Ctrl + R".to_string()),
         ("原位速览 / 行级差异比对", "Space / Alt+Space".to_string()),
         ("快速键入前 9 条", "Ctrl + 1 ~ 9".to_string()),
@@ -6932,6 +7117,23 @@ unsafe fn handle_left_click(hwnd: HWND, x: i32, y: i32, is_double: bool) {
         HitAction::ToggleAutoExpireOtp => {
             toggle_config_bool(hwnd, |cfg| &mut cfg.auto_expire_otp);
         }
+        HitAction::ToggleScreenSharePrivacy => {
+            let next = APP_STATE.with(|c| {
+                let mut b = c.borrow_mut();
+                let st = b.as_mut().unwrap();
+                st.store.config.screen_share_privacy = !st.store.config.screen_share_privacy;
+                st.store.save_config();
+                st.store.config.screen_share_privacy
+            });
+            apply_screen_capture_shield(hwnd, next);
+            let _ = InvalidateRect(hwnd, null(), FALSE);
+        }
+        HitAction::ToggleSensitiveVeil => {
+            toggle_config_bool(hwnd, |cfg| &mut cfg.mask_sensitive_previews);
+        }
+        HitAction::ToggleAutoClearConcealed => {
+            toggle_config_bool(hwnd, |cfg| &mut cfg.auto_clear_concealed_clipboard);
+        }
         HitAction::ToggleQueueMode => {
             let active = APP_STATE.with(|c| {
                 let mut b = c.borrow_mut();
@@ -7290,6 +7492,34 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32) {
             },
         );
         return;
+    }
+
+    if ctrl_down && !alt_down && !shift_down && vk == 0x42 {
+        let msg = APP_STATE.with(|c| {
+            let mut b = c.borrow_mut();
+            let st = b.as_mut()?;
+            if st.view_mode == ActiveViewMode::Settings {
+                return None;
+            }
+            let filtered = st.store.filtered_indices_ext(
+                st.selected_tab,
+                st.selected_pin_category,
+                &st.search_query,
+                st.active_target_app_name.as_deref(),
+            );
+            let &store_idx = filtered.get(st.selected_visible_pos)?;
+            let id = st.store.items[store_idx].id.clone();
+            let on = st.store.toggle_burn_after_paste(&id)?;
+            Some(if on {
+                "已设为「粘贴即焚」· 粘贴 5 秒后无痕自毁".to_string()
+            } else {
+                "已取消粘贴即焚".to_string()
+            })
+        });
+        if let Some(m) = msg {
+            set_toast(hwnd, m);
+            return;
+        }
     }
 
     if ctrl_down && !alt_down && !shift_down && vk == 0x5A {
@@ -8108,9 +8338,10 @@ unsafe fn import_archive_via_dialog(hwnd: HWND) {
     });
 
     let mut file_buf = vec![0u16; 260];
-    let filter: Vec<u16> = "iClip 归档包 (*.iclip)\0*.iclip\0JSON 文件 (*.json)\0*.json\0\0"
-        .encode_utf16()
-        .collect();
+    let filter: Vec<u16> =
+        "支持导入的收藏与常用语 (*.iclip;*.json;*.csv;*.tsv)\0*.iclip;*.json;*.csv;*.tsv\0所有文件 (*.*)\0*.*\0\0"
+            .encode_utf16()
+            .collect();
 
     let mut ofn: OPENFILENAMEW = zeroed();
     ofn.lStructSize = size_of::<OPENFILENAMEW>() as u32;
@@ -8141,8 +8372,8 @@ unsafe fn import_archive_via_dialog(hwnd: HWND) {
             Ok(s) => set_toast(
                 hwnd,
                 format!(
-                    "导入新增 {} 条，合并更新 {} 条",
-                    s.imported_new_count, s.updated_existing_count
+                    "已从{}迁入 {} 条，合并更新 {} 条",
+                    s.source_format_label, s.imported_new_count, s.updated_existing_count
                 ),
             ),
             Err(e) => set_toast(hwnd, e.message()),
@@ -8233,7 +8464,14 @@ unsafe fn install_self_to_system_and_shortcuts(hwnd: HWND) {
         let subkey = to_wide("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
         let val_name = to_wide("iClip");
         let mut hkey = null_mut();
-        if RegOpenKeyExW(HKEY_CURRENT_USER, subkey.as_ptr(), 0, KEY_SET_VALUE, &mut hkey) == 0 {
+        if RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            subkey.as_ptr(),
+            0,
+            KEY_SET_VALUE,
+            &mut hkey,
+        ) == 0
+        {
             let quoted = format!("\"{}\"", target_exe.display());
             let wide = to_wide(&quoted);
             let _ = RegSetValueExW(
@@ -8258,7 +8496,14 @@ unsafe fn install_self_to_system_and_shortcuts(hwnd: HWND) {
         "$s=(New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path ([Environment]::GetFolderPath('Programs')) 'iClip.lnk'));$s.TargetPath='{target_escaped}';$s.WorkingDirectory='{work_dir}';$s.IconLocation='{target_escaped},0';$s.Save()"
     );
     let _ = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &ps_cmd])
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-WindowStyle",
+            "Hidden",
+            "-Command",
+            &ps_cmd,
+        ])
         .spawn();
 
     set_toast(hwnd, "已安装至本机并创建开始菜单图标".to_string());

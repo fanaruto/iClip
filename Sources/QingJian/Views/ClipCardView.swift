@@ -80,7 +80,8 @@ struct ClipCardView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 5.5) {
-                    Text(minimalMode ? item.rawContentPreview : item.primaryTitle)
+                    let veilOn = ClipboardStore.shared.maskSensitivePreviews && !isSelected && !isHovered
+                    Text(item.displayTitle(minimalMode: minimalMode, veilActive: veilOn))
                         .font(.system(size: 13.5, weight: .medium))
                         .lineSpacing(2.5)
                         .foregroundStyle(isSelected ? Color.white : Color.primary)
@@ -96,6 +97,18 @@ struct ClipCardView: View {
                             Image(systemName: "star.fill")
                                 .font(.system(size: 9.5, weight: .semibold))
                                 .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.orange)
+                        }
+
+                        if item.isBurnAfterPaste {
+                            Text("粘贴即焚")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.red)
+                            Text("·")
+                        } else if let secKind = item.detectedSensitiveKind {
+                            Text(secKind.shieldBadgeTitle)
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.orange)
+                            Text("·")
                         }
 
                         if showsTodoCheckbox {
@@ -734,6 +747,16 @@ struct ClipCardView: View {
             }
         }
 
+        Button(item.isBurnAfterPaste ? "取消「粘贴即焚」（⌘B）" : "设为「粘贴即焚」（⌘B）") {
+            ClipboardStore.shared.toggleBurnAfterPaste(item)
+        }
+
+        if let appName = item.sourceAppName, !appName.isEmpty, item.sourceAppBundleID != nil {
+            Button("忽略来自「\(appName)」的复制") {
+                _ = ClipboardStore.shared.ignoreSourceApp(of: item)
+            }
+        }
+
         Button("删除", role: .destructive) {
             onDelete()
         }
@@ -817,7 +840,8 @@ struct ClipCardView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 5.5) {
-                    Text(item.primaryTitle)
+                    let veilOn = ClipboardStore.shared.maskSensitivePreviews && !isSelected && !isHovered
+                    Text(item.displayTitle(minimalMode: ClipboardStore.shared.minimalModeEnabled, veilActive: veilOn))
                         .font(.system(size: 13.5, weight: .medium))
                         .lineSpacing(2.5)
                         .foregroundStyle(isSelected ? Color.white : Color.primary)
@@ -833,6 +857,13 @@ struct ClipCardView: View {
                             Image(systemName: "star.fill")
                                 .font(.system(size: 9.5, weight: .semibold))
                                 .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.orange)
+                        }
+
+                        if item.isBurnAfterPaste {
+                            Text("粘贴即焚")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.red)
+                            Text("·")
                         }
 
                         if showsTodoCheckbox {
@@ -1394,6 +1425,16 @@ struct ClipCardView: View {
                 Button(item.customAlias != nil ? "修改备注标题（⌘R）..." : "设置备注标题（⌘R）...") {
                     onEditAlias()
                 }
+            }
+        }
+
+        Button(item.isBurnAfterPaste ? "取消「粘贴即焚」（⌘B）" : "设为「粘贴即焚」（⌘B）") {
+            ClipboardStore.shared.toggleBurnAfterPaste(item)
+        }
+
+        if let appName = item.sourceAppName, !appName.isEmpty, item.sourceAppBundleID != nil {
+            Button("忽略来自「\(appName)」的复制") {
+                _ = ClipboardStore.shared.ignoreSourceApp(of: item)
             }
         }
 

@@ -296,7 +296,10 @@ final class ActionSparkController {
     }
 
     private func ensurePanel(size: NSSize, store: ClipboardStore) {
-        guard panel == nil else { return }
+        if let existing = panel {
+            existing.sharingType = store.screenSharePrivacyEnabled ? .none : .readOnly
+            return
+        }
         let rect = NSRect(origin: .zero, size: size)
         let p = NSPanel(
             contentRect: rect,
@@ -312,6 +315,7 @@ final class ActionSparkController {
         p.hasShadow = true
         p.hidesOnDeactivate = false
         p.isMovable = false
+        p.sharingType = store.screenSharePrivacyEnabled ? .none : .readOnly
 
         let root = ActionSparkPillView(
             viewModel: viewModel,

@@ -194,9 +194,45 @@ pub struct ClipItem {
     pub is_todo_item: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub todo_completed_unix_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub burn_after_paste: Option<bool>,
 }
 
 impl ClipItem {
+    pub fn is_burn_after_paste(&self) -> bool {
+        self.burn_after_paste == Some(true)
+    }
+
+    pub fn set_burn_after_paste(&mut self, enabled: bool) {
+        self.burn_after_paste = if enabled { Some(true) } else { None };
+    }
+
+    pub fn detected_sensitive_kind(&self) -> Option<crate::security::SensitiveSecretKind> {
+        if self.kind != ClipContentType::Text {
+            return None;
+        }
+        self.text
+            .as_deref()
+            .and_then(crate::security::classify_sensitive_text)
+    }
+
+    pub fn display_title(&self, minimal_mode: bool, veil_active: bool) -> String {
+        if !minimal_mode {
+            if let Some(alias) = &self.custom_alias {
+                let t = alias.trim();
+                if !t.is_empty() {
+                    return t.to_string();
+                }
+            }
+        }
+        if veil_active && self.detected_sensitive_kind().is_some() {
+            if let Some(raw) = &self.text {
+                return crate::security::veiled_sensitive_preview(raw);
+            }
+        }
+        self.primary_title(minimal_mode)
+    }
+
     pub fn is_todo(&self) -> bool {
         self.is_todo_item == Some(true)
     }
@@ -244,6 +280,7 @@ impl ClipItem {
             custom_alias: None,
             is_todo_item: None,
             todo_completed_unix_secs: None,
+            burn_after_paste: None,
         }
     }
 
@@ -273,6 +310,7 @@ impl ClipItem {
             custom_alias: None,
             is_todo_item: None,
             todo_completed_unix_secs: None,
+            burn_after_paste: None,
         }
     }
 
@@ -297,6 +335,7 @@ impl ClipItem {
             custom_alias: None,
             is_todo_item: None,
             todo_completed_unix_secs: None,
+            burn_after_paste: None,
         }
     }
 

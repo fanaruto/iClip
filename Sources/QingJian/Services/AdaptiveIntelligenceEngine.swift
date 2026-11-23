@@ -1024,6 +1024,20 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
             adoptedEffects.append(!neg ? "已切换至极简纯净模式" : "已恢复完整进阶功能模式")
         }
 
+        let shareShieldKeys = ["投屏", "录屏", "共享屏幕", "防录屏", "会议隐身"]
+        if Self.containsAny(lower, shareShieldKeys) {
+            let neg = Self.isClauseNegated(matching: shareShieldKeys, in: clauses)
+            store.screenSharePrivacyEnabled = !neg
+            adoptedEffects.append(!neg ? "已开启投屏与录屏光学隐身护盾" : "已关闭投屏隐身保护")
+        }
+
+        let veilKeys = ["防窥", "肩窥", "遮罩", "雾化", "隐藏敏感"]
+        if Self.containsAny(lower, veilKeys) {
+            let neg = Self.isClauseNegated(matching: veilKeys, in: clauses)
+            store.maskSensitivePreviews = !neg
+            adoptedEffects.append(!neg ? "已开启敏感凭据防肩窥圆点遮罩" : "已关闭列表敏感凭据遮罩")
+        }
+
         let status: UserSuggestionRecord.Status
         let summary: String
         if !adoptedEffects.isEmpty {

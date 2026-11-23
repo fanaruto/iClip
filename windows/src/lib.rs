@@ -4,6 +4,7 @@ pub mod engines;
 pub mod hotkey;
 pub mod intelligence;
 pub mod model;
+pub mod security;
 pub mod store;
 
 #[cfg(test)]
@@ -623,10 +624,92 @@ mod tests {
         store.set_custom_alias(&id_a, "优先复盘");
         let item_a = store.items.iter().find(|it| it.id == id_a).unwrap();
         assert!(!item_a.is_pinned);
-        let (md_out, md_cnt) = store.format_todos_as_markdown().expect("应导出 Markdown 清单");
+        let (md_out, md_cnt) = store
+            .format_todos_as_markdown()
+            .expect("应导出 Markdown 清单");
         assert_eq!(md_cnt, 1);
         assert_eq!(md_out, "- [ ] 优先复盘 — 第一项待办");
 
         let _ = std::fs::remove_dir_all(tmp_dir);
+    }
+
+    #[test]
+    fn test_vault_encryption_tamper_heal_sensitive_veil_and_competitor_import() {
+        use crate::archive::merge_archive_data_with_hint;
+        use crate::security::{SensitiveSecretKind, VAULT_MAGIC};
+
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "iclip_win_vault_test_{}",
+            crate::model::now_unix_secs()
+        ));
+        let _ = fs::create_dir_all(&tmp_dir);
+
+        // 1. 模拟历史遗留明文 history.json -> Store 启动后必须自动无损读取并升级为 ICLPWIN1 认证密文
+        let secret_key = "sk-proj-AbCdEfGhIjKlMnOpQrStUvWxYz9876543210ZxY9";
+        let plain_item = ClipItem::new_text(secret_key.to_string(), Some("Cursor".to_string()));
+        let legacy_json = serde_json::to_vec(&vec![plain_item]).unwrap();
+        let hist_path = tmp_dir.join("history.json");
+        let bak_path = tmp_dir.join("history.backup.json");
+        fs::write(&hist_path, &legacy_json).unwrap();
+
+        let mut store = ClipboardStore::new(tmp_dir.clone());
+        assert_eq!(store.items.len(), 1);
+        assert_eq!(store.items[0].text.as_deref(), Some(secret_key));
+
+        let on_disk = fs::read(&hist_path).unwrap();
+        assert!(on_disk.starts_with(VAULT_MAGIC));
+        assert!(!String::from_utf8_lossy(&on_disk).contains(secret_key));
+        assert!(bak_path.exists());
+
+        // 2. 恶意篡改主密文任意字节 -> HMAC-SHA256 鉴权拦截并自动从加密备份无损自愈
+        let mut tampered = on_disk.clone();
+        let last_idx = tampered.len() - 5;
+        tampered[last_idx] ^= 0xAA;
+        fs::write(&hist_path, &tampered).unwrap();
+
+        let healed_store = ClipboardStore::new(tmp_dir.clone());
+        assert_eq!(healed_store.items.len(), 1);
+        assert_eq!(healed_store.items[0].text.as_deref(), Some(secret_key));
+
+        // 3. 敏感凭据防肩窥圆点遮罩与粘贴即焚生命周期
+        let item = &store.items[0];
+        assert_eq!(
+            item.detected_sensitive_kind(),
+            Some(SensitiveSecretKind::ApiKey)
+        );
+        let veiled = item.display_title(false, true);
+        assert!(veiled.contains("••••••••••••"));
+        assert!(veiled.ends_with("ZxY9"));
+        assert!(!veiled.contains("AbCdEfGhIjKl"));
+        assert_eq!(item.display_title(false, false), secret_key);
+
+        let item_id = store.items[0].id.clone();
+        assert_eq!(store.toggle_burn_after_paste(&item_id), Some(true));
+        assert!(store.schedule_burn_after_paste_if_needed(&item_id, 5));
+        let now = crate::model::now_unix_secs();
+        assert_eq!(store.sweep_expired_otps(now + 6), 1);
+        assert!(store.items.is_empty());
+
+        // 4. 跨软件一键无损搬家（Raycast JSON + Excel CSV 常用语表）
+        let raycast = r#"[
+            {"name": "总公司税号", "text": "上海怀道科技有限公司 91310115MA1K99882X", "keyword": "!sh"},
+            {"name": "下载中心", "text": "https://app.webfooo.com/iClip", "keyword": "!dl"}
+        ]"#
+        .as_bytes();
+        let (merged_ray, sum_ray) =
+            merge_archive_data_with_hint(raycast, &[], &tmp_dir, Some("json")).unwrap();
+        assert_eq!(sum_ray.source_format_label, "Raycast 常用语");
+        assert_eq!(sum_ray.imported_new_count, 2);
+        assert_eq!(merged_ray[0].pin_category, Some(PinCategory::Invoice));
+
+        let csv = "标题,正文\n寄件地址,\"上海市浦东新区张江路, 100号\"\n欢迎语,您好！\n";
+        let (merged_csv, sum_csv) =
+            merge_archive_data_with_hint(csv.as_bytes(), &merged_ray, &tmp_dir, Some("csv"))
+                .unwrap();
+        assert_eq!(sum_csv.source_format_label, "CSV 常用语表");
+        assert_eq!(sum_csv.imported_new_count, 2);
+        assert_eq!(merged_csv.len(), 4);
+
+        let _ = fs::remove_dir_all(tmp_dir);
     }
 }

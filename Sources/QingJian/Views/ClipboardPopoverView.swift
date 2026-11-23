@@ -1790,8 +1790,62 @@ struct ClipboardPopoverView: View {
                     }
                 }
 
-                // 隐私与存储整合分组
-                settingsGroup(title: "隐私与存储") {
+                // 隐私护盾与迁移整合分组
+                settingsGroup(title: "隐私护盾与迁移") {
+                    HStack(spacing: 7) {
+                        Image(systemName: "lock.shield.fill")
+                            .font(.system(size: 12.5, weight: .semibold))
+                            .foregroundStyle(.green)
+                        Text("本机钥匙串 AES-256-GCM 透明加密已启用 · 零联网上传")
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 6)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color.green.opacity(0.09))
+                    )
+
+                    Toggle(isOn: $store.screenSharePrivacyEnabled) {
+                        VStack(alignment: .leading, spacing: 1.5) {
+                            Text("投屏与录屏光学隐身护盾")
+                                .font(.system(size: 13.5, weight: .medium))
+                            Text("腾讯会议 / 飞书共享屏幕及录屏中自动隐去 iClip，本机可见")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+
+                    Toggle(isOn: $store.maskSensitivePreviews) {
+                        VStack(alignment: .leading, spacing: 1.5) {
+                            Text("敏感凭据防肩窥圆点遮罩")
+                                .font(.system(size: 13.5, weight: .medium))
+                            Text("API 密钥与私钥默认圆点雾化，选中或悬停即刻原位显影")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+
+                    Toggle(isOn: $store.autoClearConcealedPasteboard) {
+                        VStack(alignment: .leading, spacing: 1.5) {
+                            Text("密码剪贴板 60 秒残留擦除")
+                                .font(.system(size: 13.5, weight: .medium))
+                            Text("从 1Password / 系统密码复制密码后超时自动清空系统剪贴板")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+
+                    Divider().opacity(0.35)
+
                     VStack(alignment: .leading, spacing: 7) {
                         HStack {
                             Text("历史保留上限")
@@ -1893,9 +1947,9 @@ struct ClipboardPopoverView: View {
 
                     HStack(spacing: 8) {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("收藏资产归档迁移")
+                            Text("收藏归档与跨软件一键搬家")
                                 .font(.system(size: 13.5, weight: .medium))
-                            Text("已收藏 \(store.pinnedItemCount) 条，支持跨设备导入导出")
+                            Text("已收藏 \(store.pinnedItemCount) 条 · 支持 .iclip / Raycast / Maccy / CSV")
                                 .font(.system(size: 11.5))
                                 .foregroundStyle(.secondary)
                         }
@@ -2512,6 +2566,11 @@ struct ClipboardPopoverView: View {
         }
     }
 
+    func toggleBurnAfterPasteForSelected() {
+        guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return }
+        store.toggleBurnAfterPaste(filteredItems[nav.selectedIndex])
+    }
+
     @discardableResult
     func pasteAndCompleteTodoIfApplicable() -> Bool {
         guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return false }
@@ -2594,12 +2653,12 @@ struct ClipboardPopoverView: View {
     private func importPinnedArchiveAction() {
         nav.suppressAutoHide = true
         let panel = NSOpenPanel()
-        panel.title = "选择要导入合并的 .iclip 收藏归档包"
+        panel.title = "导入 .iclip 归档或 Raycast / Maccy / Paste / CSV 常用语"
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
         panel.allowsOtherFileTypes = true
-        var allowed: [UTType] = [.json, .data]
+        var allowed: [UTType] = [.json, .commaSeparatedText, .tabSeparatedText, .plainText, .data]
         if let iclipType = UTType(filenameExtension: "iclip") {
             allowed.insert(iclipType, at: 0)
         }
@@ -2612,13 +2671,13 @@ struct ClipboardPopoverView: View {
         do {
             let summary = try store.importPinnedArchive(from: sourceURL)
             if summary.importedNewCount > 0 && summary.updatedExistingCount > 0 {
-                store.showToast("已导入 \(summary.importedNewCount) 条新收藏，补齐 \(summary.updatedExistingCount) 条既有记录")
+                store.showToast("已从\(summary.sourceFormatLabel)迁入 \(summary.importedNewCount) 条，更新 \(summary.updatedExistingCount) 条")
             } else if summary.importedNewCount > 0 {
-                store.showToast("已成功导入 \(summary.importedNewCount) 条收藏资产")
+                store.showToast("已从\(summary.sourceFormatLabel)无损迁入 \(summary.importedNewCount) 条收藏")
             } else if summary.updatedExistingCount > 0 {
                 store.showToast("已合并更新 \(summary.updatedExistingCount) 条既有收藏")
             } else {
-                store.showToast("归档内 \(summary.totalInBundle) 条收藏均已在本地存在")
+                store.showToast("\(summary.sourceFormatLabel)内 \(summary.totalInBundle) 条记录均已在本地存在")
             }
         } catch {
             store.showToast(error.localizedDescription)
@@ -4285,8 +4344,62 @@ struct ClipboardPopoverView: View {
                     }
                 }
 
-                // 隐私与存储整合分组
-                settingsGroup(title: "隐私与存储") {
+                // 隐私护盾与迁移整合分组
+                settingsGroup(title: "隐私护盾与迁移") {
+                    HStack(spacing: 7) {
+                        Image(systemName: "lock.shield.fill")
+                            .font(.system(size: 12.5, weight: .semibold))
+                            .foregroundStyle(.green)
+                        Text("本机钥匙串 AES-256-GCM 透明加密已启用 · 零联网上传")
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 6)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color.green.opacity(0.09))
+                    )
+
+                    Toggle(isOn: $store.screenSharePrivacyEnabled) {
+                        VStack(alignment: .leading, spacing: 1.5) {
+                            Text("投屏与录屏光学隐身护盾")
+                                .font(.system(size: 13.5, weight: .medium))
+                            Text("腾讯会议 / 飞书共享屏幕及录屏中自动隐去 iClip，本机可见")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+
+                    Toggle(isOn: $store.maskSensitivePreviews) {
+                        VStack(alignment: .leading, spacing: 1.5) {
+                            Text("敏感凭据防肩窥圆点遮罩")
+                                .font(.system(size: 13.5, weight: .medium))
+                            Text("API 密钥与私钥默认圆点雾化，选中或悬停即刻原位显影")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+
+                    Toggle(isOn: $store.autoClearConcealedPasteboard) {
+                        VStack(alignment: .leading, spacing: 1.5) {
+                            Text("密码剪贴板 60 秒残留擦除")
+                                .font(.system(size: 13.5, weight: .medium))
+                            Text("从 1Password / 系统密码复制密码后超时自动清空系统剪贴板")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+
+                    Divider().opacity(0.35)
+
                     VStack(alignment: .leading, spacing: 7) {
                         HStack {
                             Text("历史保留上限")
@@ -4388,9 +4501,9 @@ struct ClipboardPopoverView: View {
 
                     HStack(spacing: 8) {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("收藏资产归档迁移")
+                            Text("收藏归档与跨软件一键搬家")
                                 .font(.system(size: 13.5, weight: .medium))
-                            Text("已收藏 \(store.pinnedItemCount) 条，支持跨设备导入导出")
+                            Text("已收藏 \(store.pinnedItemCount) 条 · 支持 .iclip / Raycast / Maccy / CSV")
                                 .font(.system(size: 11.5))
                                 .foregroundStyle(.secondary)
                         }
@@ -4997,6 +5110,11 @@ struct ClipboardPopoverView: View {
         }
     }
 
+    func toggleBurnAfterPasteForSelected() {
+        guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return }
+        store.toggleBurnAfterPaste(filteredItems[nav.selectedIndex])
+    }
+
     @discardableResult
     func pasteAndCompleteTodoIfApplicable() -> Bool {
         guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return false }
@@ -5079,12 +5197,12 @@ struct ClipboardPopoverView: View {
     private func importPinnedArchiveAction() {
         nav.suppressAutoHide = true
         let panel = NSOpenPanel()
-        panel.title = "选择要导入合并的 .iclip 收藏归档包"
+        panel.title = "导入 .iclip 归档或 Raycast / Maccy / Paste / CSV 常用语"
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
         panel.allowsOtherFileTypes = true
-        var allowed: [UTType] = [.json, .data]
+        var allowed: [UTType] = [.json, .commaSeparatedText, .tabSeparatedText, .plainText, .data]
         if let iclipType = UTType(filenameExtension: "iclip") {
             allowed.insert(iclipType, at: 0)
         }
@@ -5097,13 +5215,13 @@ struct ClipboardPopoverView: View {
         do {
             let summary = try store.importPinnedArchive(from: sourceURL)
             if summary.importedNewCount > 0 && summary.updatedExistingCount > 0 {
-                store.showToast("已导入 \(summary.importedNewCount) 条新收藏，补齐 \(summary.updatedExistingCount) 条既有记录")
+                store.showToast("已从\(summary.sourceFormatLabel)迁入 \(summary.importedNewCount) 条，更新 \(summary.updatedExistingCount) 条")
             } else if summary.importedNewCount > 0 {
-                store.showToast("已成功导入 \(summary.importedNewCount) 条收藏资产")
+                store.showToast("已从\(summary.sourceFormatLabel)无损迁入 \(summary.importedNewCount) 条收藏")
             } else if summary.updatedExistingCount > 0 {
                 store.showToast("已合并更新 \(summary.updatedExistingCount) 条既有收藏")
             } else {
-                store.showToast("归档内 \(summary.totalInBundle) 条收藏均已在本地存在")
+                store.showToast("\(summary.sourceFormatLabel)内 \(summary.totalInBundle) 条记录均已在本地存在")
             }
         } catch {
             store.showToast(error.localizedDescription)

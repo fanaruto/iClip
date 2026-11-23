@@ -58,6 +58,7 @@ pub struct ArchiveImportSummary {
     pub imported_new_count: usize,
     pub updated_existing_count: usize,
     pub total_in_bundle: usize,
+    pub source_format_label: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,7 +73,8 @@ impl ArchiveBackupError {
         match self {
             Self::NoPinnedItems => "当前暂无已固定的收藏记录，请先固定常用话术或模板".to_string(),
             Self::InvalidArchiveFormat => {
-                "无法解析该归档文件，请确认选择的是有效的 .iclip 备份包".to_string()
+                "无法解析该文件，请选择有效的 .iclip 归档或 Raycast / Maccy / CSV 常用语文件"
+                    .to_string()
             }
             Self::UnsupportedSchemaVersion(v) => {
                 format!("该归档包版本 (v{v}) 高于当前客户端，请先升级 iClip")
@@ -143,12 +145,32 @@ pub fn merge_archive_data(
     existing_items: &[ClipItem],
     images_dir: &Path,
 ) -> Result<(Vec<ClipItem>, ArchiveImportSummary), ArchiveBackupError> {
-    let bundle: PinnedArchiveBundle =
-        serde_json::from_slice(data).map_err(|_| ArchiveBackupError::InvalidArchiveFormat)?;
+    merge_archive_data_with_hint(data, existing_items, images_dir, None)
+}
 
-    if bundle.format != ARCHIVE_FORMAT_ID {
-        return Err(ArchiveBackupError::InvalidArchiveFormat);
-    }
+pub fn merge_archive_data_with_hint(
+    data: &[u8],
+    existing_items: &[ClipItem],
+    images_dir: &Path,
+    ext_hint: Option<&str>,
+) -> Result<(Vec<ClipItem>, ArchiveImportSummary), ArchiveBackupError> {
+    let bundle: PinnedArchiveBundle = match serde_json::from_slice::<PinnedArchiveBundle>(data) {
+        Ok(b) if b.format == ARCHIVE_FORMAT_ID => b,
+        Ok(_) => return Err(ArchiveBackupError::InvalidArchiveFormat),
+        Err(_) => {
+            if let Some((cands, fmt_label)) =
+                crate::security::parse_external_competitor_data(data, ext_hint)
+            {
+                return Ok(merge_external_candidates(
+                    &cands,
+                    &fmt_label,
+                    existing_items,
+                ));
+            }
+            return Err(ArchiveBackupError::InvalidArchiveFormat);
+        }
+    };
+
     if bundle.schema_version > CURRENT_SCHEMA_VERSION {
         return Err(ArchiveBackupError::UnsupportedSchemaVersion(
             bundle.schema_version,
@@ -257,6 +279,7 @@ pub fn merge_archive_data(
                 custom_alias: entry.custom_alias.clone(),
                 is_todo_item: entry.is_todo_item,
                 todo_completed_unix_secs: None,
+                burn_after_paste: None,
             };
             working.push(restored);
             imported_new += 1;
@@ -267,6 +290,71 @@ pub fn merge_archive_data(
         imported_new_count: imported_new,
         updated_existing_count: updated_existing,
         total_in_bundle: bundle.entries.len(),
+        source_format_label: "iClip 归档".to_string(),
     };
     Ok((working, summary))
+}
+
+fn merge_external_candidates(
+    candidates: &[crate::security::ExternalImportCandidate],
+    format_label: &str,
+    existing_items: &[ClipItem],
+) -> (Vec<ClipItem>, ArchiveImportSummary) {
+    let mut working = existing_items.to_vec();
+    let mut imported_new = 0usize;
+    let mut updated_existing = 0usize;
+
+    for cand in candidates {
+        let trimmed = cand.text.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let mut temp_item = ClipItem::new_text(cand.text.clone(), Some(cand.source_label.clone()));
+        let inferred_cat = PinCategory::infer(cand.alias.as_deref(), Some(&cand.text));
+
+        if let Some(existing) = working
+            .iter_mut()
+            .find(|it| it.content_hash == temp_item.content_hash)
+        {
+            let mut changed = false;
+            if !existing.is_pinned {
+                existing.is_pinned = true;
+                changed = true;
+            }
+            let alias_empty = existing
+                .custom_alias
+                .as_deref()
+                .map(|s| s.trim().is_empty())
+                .unwrap_or(true);
+            if alias_empty {
+                if let Some(al) = &cand.alias {
+                    existing.custom_alias = Some(al.clone());
+                    changed = true;
+                }
+            }
+            if existing.pin_category.is_none() && inferred_cat.is_some() {
+                existing.pin_category = inferred_cat;
+                changed = true;
+            }
+            if changed {
+                updated_existing += 1;
+            }
+        } else {
+            temp_item.is_pinned = true;
+            temp_item.custom_alias = cand.alias.clone();
+            temp_item.pin_category = inferred_cat;
+            working.push(temp_item);
+            imported_new += 1;
+        }
+    }
+
+    (
+        working,
+        ArchiveImportSummary {
+            imported_new_count: imported_new,
+            updated_existing_count: updated_existing,
+            total_in_bundle: candidates.len(),
+            source_format_label: format_label.to_string(),
+        },
+    )
 }

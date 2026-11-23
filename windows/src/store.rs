@@ -1,5 +1,6 @@
 use crate::archive::{
-    export_pinned_archive_data, merge_archive_data, ArchiveBackupError, ArchiveImportSummary,
+    export_pinned_archive_data, merge_archive_data_with_hint, ArchiveBackupError,
+    ArchiveImportSummary,
 };
 use crate::engines::is_otp_message;
 use crate::hotkey::{WinHotKeyShortcut, WinSingleModifier};
@@ -10,6 +11,7 @@ use crate::model::{
     contains_case_insensitive, now_unix_secs, sha256_hex, ClipContentType, ClipFilterTab, ClipItem,
     PinCategory, QuickAction,
 };
+use crate::security::{load_or_create_vault_key, open_vault_bytes, seal_vault_bytes};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::fs;
@@ -91,6 +93,14 @@ pub struct StoreConfig {
     pub auto_paste_enabled: bool,
     #[serde(default = "default_true")]
     pub auto_expire_otp: bool,
+    #[serde(default = "default_true")]
+    pub screen_share_privacy: bool,
+    #[serde(default = "default_true")]
+    pub mask_sensitive_previews: bool,
+    #[serde(default = "default_true")]
+    pub auto_clear_concealed_clipboard: bool,
+    #[serde(default)]
+    pub ignored_apps: Vec<String>,
     #[serde(default)]
     pub queue_auto_tab: bool,
     #[serde(default)]
@@ -115,6 +125,14 @@ impl Default for StoreConfig {
             auto_clean_tracking_url: false,
             auto_paste_enabled: true,
             auto_expire_otp: true,
+            screen_share_privacy: true,
+            mask_sensitive_previews: true,
+            auto_clear_concealed_clipboard: true,
+            ignored_apps: vec![
+                "1Password".to_string(),
+                "Bitwarden".to_string(),
+                "KeePassXC".to_string(),
+            ],
             queue_auto_tab: false,
             glass_appearance: GlassAppearance::Tinted,
             blur_concentration_pct: 38,
@@ -165,6 +183,7 @@ pub struct ClipboardStore {
     config_file: PathBuf,
     memory_file: PathBuf,
     suggestions_file: PathBuf,
+    vault_key: [u8; 32],
     undo_stack: Vec<UndoSnapshot>,
 }
 
@@ -188,17 +207,26 @@ impl ClipboardStore {
             .and_then(|b| serde_json::from_slice::<AdaptiveMemory>(&b).ok())
             .unwrap_or_default();
 
-        // 双模自愈读取：主文件缺失或异常截断损坏时，自动从 backup 镜像无损恢复
-        let primary_items = fs::read(&history_file)
-            .ok()
-            .and_then(|b| serde_json::from_slice::<Vec<ClipItem>>(&b).ok());
+        let vault_key = load_or_create_vault_key(&data_dir);
+        let mut legacy_migrated = false;
+
+        // 零信任双模自愈读取：支持 DPAPI 认证密文与历史明文自动升级，主文件篡改/截断时自动从加密备份恢复
+        let primary_items = fs::read(&history_file).ok().and_then(|raw| {
+            let (plain, was_legacy) = open_vault_bytes(&raw, &vault_key)?;
+            let parsed = serde_json::from_slice::<Vec<ClipItem>>(&plain).ok()?;
+            if was_legacy {
+                legacy_migrated = true;
+            }
+            Some(parsed)
+        });
 
         let (mut items, healed_from_backup) = match primary_items {
             Some(list) if !list.is_empty() || !history_backup_file.exists() => (list, false),
             _ => {
-                let backup = fs::read(&history_backup_file)
-                    .ok()
-                    .and_then(|b| serde_json::from_slice::<Vec<ClipItem>>(&b).ok());
+                let backup = fs::read(&history_backup_file).ok().and_then(|raw| {
+                    let (plain, _) = open_vault_bytes(&raw, &vault_key)?;
+                    serde_json::from_slice::<Vec<ClipItem>>(&plain).ok()
+                });
                 match backup {
                     Some(b_list) if !b_list.is_empty() => (b_list, true),
                     _ => (primary_items.unwrap_or_default(), false),
@@ -222,11 +250,12 @@ impl ClipboardStore {
             config_file,
             memory_file,
             suggestions_file,
+            vault_key,
             undo_stack: Vec::new(),
         };
 
         let archived = store.archive_expired_completed_todos(now_unix_secs());
-        if healed_from_backup && archived == 0 {
+        if (healed_from_backup || legacy_migrated) && archived == 0 {
             store.save_history();
         }
         store
@@ -271,9 +300,10 @@ impl ClipboardStore {
     }
 
     pub fn save_history(&self) {
-        if let Ok(bytes) = serde_json::to_vec(&self.items) {
-            Self::atomic_write(&self.history_file, &bytes);
-            Self::atomic_write(&self.history_backup_file, &bytes);
+        if let Ok(plain_bytes) = serde_json::to_vec(&self.items) {
+            let sealed = seal_vault_bytes(&plain_bytes, &self.vault_key, &self.data_dir);
+            Self::atomic_write(&self.history_file, &sealed);
+            Self::atomic_write(&self.history_backup_file, &sealed);
         }
     }
 
@@ -432,15 +462,17 @@ impl ClipboardStore {
         if todos.is_empty() {
             return None;
         }
-        todos.sort_by(|a, b| match (a.is_todo_completed(), b.is_todo_completed()) {
-            (false, true) => std::cmp::Ordering::Less,
-            (true, false) => std::cmp::Ordering::Greater,
-            (false, false) => b.created_unix_secs.cmp(&a.created_unix_secs),
-            (true, true) => b
-                .todo_completed_unix_secs
-                .unwrap_or(b.created_unix_secs)
-                .cmp(&a.todo_completed_unix_secs.unwrap_or(a.created_unix_secs)),
-        });
+        todos.sort_by(
+            |a, b| match (a.is_todo_completed(), b.is_todo_completed()) {
+                (false, true) => std::cmp::Ordering::Less,
+                (true, false) => std::cmp::Ordering::Greater,
+                (false, false) => b.created_unix_secs.cmp(&a.created_unix_secs),
+                (true, true) => b
+                    .todo_completed_unix_secs
+                    .unwrap_or(b.created_unix_secs)
+                    .cmp(&a.todo_completed_unix_secs.unwrap_or(a.created_unix_secs)),
+            },
+        );
         let count = todos.len();
         let lines: Vec<String> = todos
             .into_iter()
@@ -888,6 +920,30 @@ impl ClipboardStore {
                 "已关闭验证码自动销毁".to_string()
             });
         }
+        if lower.contains("投屏")
+            || lower.contains("录屏")
+            || lower.contains("共享屏幕")
+            || lower.contains("会议隐身")
+        {
+            self.config.screen_share_privacy = !is_off;
+            effects.push(if !is_off {
+                "已开启投屏与录屏光学隐身护盾".to_string()
+            } else {
+                "已关闭投屏隐身保护".to_string()
+            });
+        }
+        if lower.contains("防窥")
+            || lower.contains("肩窥")
+            || lower.contains("遮罩")
+            || lower.contains("雾化")
+        {
+            self.config.mask_sensitive_previews = !is_off;
+            effects.push(if !is_off {
+                "已开启敏感凭据防肩窥圆点遮罩".to_string()
+            } else {
+                "已关闭敏感凭据遮罩".to_string()
+            });
+        }
         if lower.contains("自动粘贴") || lower.contains("直接粘贴") {
             self.config.auto_paste_enabled = !is_off;
             effects.push(if !is_off {
@@ -1116,7 +1172,11 @@ impl ClipboardStore {
         let mut count = 0;
         for id in expired_ids {
             if let Some(it) = self.items.iter().find(|i| i.id == id) {
-                if !it.is_pinned && !self.config.minimal_mode_enabled && self.config.auto_expire_otp
+                let is_burn = it.is_burn_after_paste();
+                if is_burn
+                    || (!it.is_pinned
+                        && !self.config.minimal_mode_enabled
+                        && self.config.auto_expire_otp)
                 {
                     self.delete_by_id_with_undo(&id, false);
                     count += 1;
@@ -1124,6 +1184,41 @@ impl ClipboardStore {
             }
         }
         count
+    }
+
+    pub fn toggle_burn_after_paste(&mut self, item_id: &str) -> Option<bool> {
+        let item = self.items.iter_mut().find(|it| it.id == item_id)?;
+        let next = !item.is_burn_after_paste();
+        item.set_burn_after_paste(next);
+        if next && item.is_pinned {
+            item.is_pinned = false;
+        }
+        self.save_history();
+        Some(next)
+    }
+
+    pub fn schedule_burn_after_paste_if_needed(&mut self, item_id: &str, delay_secs: u64) -> bool {
+        let Some(item) = self.items.iter().find(|it| it.id == item_id) else {
+            return false;
+        };
+        if !item.is_burn_after_paste() {
+            return false;
+        }
+        let expire_at = now_unix_secs() + delay_secs;
+        self.pending_otp_expirations.retain(|(id, _)| id != item_id);
+        self.pending_otp_expirations
+            .push((item_id.to_string(), expire_at));
+        true
+    }
+
+    pub fn is_app_ignored(&self, app_name: Option<&str>) -> bool {
+        let Some(name) = app_name.map(|s| s.trim()).filter(|s| !s.is_empty()) else {
+            return false;
+        };
+        self.config
+            .ignored_apps
+            .iter()
+            .any(|ig| ig.eq_ignore_ascii_case(name))
     }
 
     pub fn toggle_queue_item(&mut self, item_id: &str) -> Option<usize> {
@@ -1172,7 +1267,9 @@ impl ClipboardStore {
         src: &Path,
     ) -> Result<ArchiveImportSummary, ArchiveBackupError> {
         let data = fs::read(src).map_err(|_| ArchiveBackupError::InvalidArchiveFormat)?;
-        let (mut merged, summary) = merge_archive_data(&data, &self.items, &self.images_dir)?;
+        let ext = src.extension().and_then(|e| e.to_str());
+        let (mut merged, summary) =
+            merge_archive_data_with_hint(&data, &self.items, &self.images_dir, ext)?;
         Self::sort_items(&mut merged);
         self.items = merged;
         self.save_history();

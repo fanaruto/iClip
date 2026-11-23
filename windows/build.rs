@@ -21,7 +21,10 @@ fn main() {
     }
 
     let count = u16::from_le_bytes([ico[4], ico[5]]) as usize;
-    assert!(count > 0 && ico.len() >= 6 + count * 16, "corrupted ICO directory");
+    assert!(
+        count > 0 && ico.len() >= 6 + count * 16,
+        "corrupted ICO directory"
+    );
 
     let mut res = Vec::with_capacity(ico.len() + 512);
 

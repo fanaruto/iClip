@@ -181,6 +181,8 @@ struct ClipItem: Identifiable, Codable, Equatable {
     var filePaths: [String]?
     var contentHash: String
     var sourceAppName: String?
+    /// 来源应用的 Bundle Identifier（用于一键忽略来源应用及隐私习惯自学习，可选兼容旧数据）
+    var sourceAppBundleID: String?
     var createdAt: Date
     var isPinned: Bool
     /// 收藏分组场景（话术 / 开票 / 地址 / 模板）
@@ -191,6 +193,13 @@ struct ClipItem: Identifiable, Codable, Equatable {
     var isTodoItem: Bool?
     /// 待办完成时间戳（nil 表示未完成；非 nil 表示已完成，满 24 小时自动归档回普通历史）
     var todoCompletedAt: Date?
+    /// 是否开启「粘贴即焚」（⌘B：下次粘贴进目标应用后 5 秒连同系统剪贴板一起无痕销毁）
+    var burnAfterPaste: Bool?
+
+    var isBurnAfterPaste: Bool {
+        get { burnAfterPaste == true }
+        set { burnAfterPaste = newValue ? true : nil }
+    }
 
     var isTodo: Bool {
         get { isTodoItem == true }
@@ -223,12 +232,14 @@ struct ClipItem: Identifiable, Codable, Equatable {
         filePaths: [String]? = nil,
         contentHash: String,
         sourceAppName: String? = nil,
+        sourceAppBundleID: String? = nil,
         createdAt: Date = Date(),
         isPinned: Bool = false,
         pinCategory: PinCategory? = nil,
         customAlias: String? = nil,
         isTodoItem: Bool? = nil,
-        todoCompletedAt: Date? = nil
+        todoCompletedAt: Date? = nil,
+        burnAfterPaste: Bool? = nil
     ) {
         self.id = id
         self.type = type
@@ -242,12 +253,37 @@ struct ClipItem: Identifiable, Codable, Equatable {
         self.filePaths = filePaths
         self.contentHash = contentHash
         self.sourceAppName = sourceAppName
+        self.sourceAppBundleID = sourceAppBundleID
         self.createdAt = createdAt
         self.isPinned = isPinned
         self.pinCategory = pinCategory
         self.customAlias = customAlias
         self.isTodoItem = isTodoItem
         self.todoCompletedAt = todoCompletedAt
+        self.burnAfterPaste = burnAfterPaste
+    }
+
+    /// 离线敏感凭据识别（仅对普通文本生效，微秒级）
+    var detectedSensitiveKind: SensitiveSecretKind? {
+        guard type == .text, let raw = text else { return nil }
+        return SensitiveCredentialVeil.classify(raw)
+    }
+
+    /// 根据隐私遮罩状态返回卡片标题（未选中且未悬停时对无备注的高敏密钥做圆点防肩窥遮罩，零高度抖动）
+    func displayTitle(minimalMode: Bool, veilActive: Bool) -> String {
+        if minimalMode {
+            if veilActive, let raw = text, detectedSensitiveKind != nil {
+                return SensitiveCredentialVeil.veiledPreview(for: raw)
+            }
+            return rawContentPreview
+        }
+        if let alias = customAlias?.trimmingCharacters(in: .whitespacesAndNewlines), !alias.isEmpty {
+            return alias
+        }
+        if veilActive, let raw = text, detectedSensitiveKind != nil {
+            return SensitiveCredentialVeil.veiledPreview(for: raw)
+        }
+        return rawContentPreview
     }
 
     /// 标题/主要预览文案（若有备注标题则优先展示备注名）
