@@ -2,10 +2,200 @@ import Foundation
 import Carbon
 import AppKit
 
-/// 可持久化的全局快捷键模型（支持任意修饰键 + 主键组合）
+/// 支持「双击单键呼出」的纯净修饰键类型（按下松开不向输入框产生任何字符，零打字污染）
+enum SingleModifierKind: String, Codable, Equatable {
+    case command
+    case option
+    case control
+    case shift
+    case fn
+
+    var symbol: String {
+        switch self {
+        case .command: return "⌘"
+        case .option: return "⌥"
+        case .control: return "⌃"
+        case .shift: return "⇧"
+        case .fn: return "Fn"
+        }
+    }
+
+    var canonicalKeyCode: UInt32 {
+        switch self {
+        case .command: return 55
+        case .option: return 58
+        case .control: return 59
+        case .shift: return 56
+        case .fn: return 63
+        }
+    }
+
+    static func from(keyCode: UInt16) -> SingleModifierKind? {
+        switch keyCode {
+        case 55, 54: return .command
+        case 58, 61: return .option
+        case 59, 62: return .control
+        case 56, 60: return .shift
+        case 63: return .fn
+        default: return nil
+        }
+    }
+
+    func isFlagPressed(in flags: NSEvent.ModifierFlags) -> Bool {
+        switch self {
+        case .command: return flags.contains(.command)
+        case .option: return flags.contains(.option)
+        case .control: return flags.contains(.control)
+        case .shift: return flags.contains(.shift)
+        case .fn: return flags.contains(.function)
+        }
+    }
+
+    func isExclusivelyPressed(in flags: NSEvent.ModifierFlags) -> Bool {
+        let relevant = flags.intersection([.command, .option, .control, .shift, .function])
+        switch self {
+        case .command: return relevant == .command
+        case .option: return relevant == .option
+        case .control: return relevant == .control
+        case .shift: return relevant == .shift
+        case .fn: return relevant == .function
+        }
+    }
+}
+
+/// 零误触双击修饰单键状态机（第二次干净松开瞬间触发；期间只要夹杂任何字母键如 ⌘C×2 或鼠标点击即自动静默作废）
+struct ModifierDoubleTapStateMachine {
+    var maxHoldDuration: TimeInterval = 0.30
+    var maxTapGap: TimeInterval = 0.34
+
+    private var activePressKind: SingleModifierKind? = nil
+    private var activePressKeyCode: UInt16? = nil
+    private var activePressStartTime: TimeInterval = 0
+    private var pollutedDuringHold: Bool = false
+
+    private var firstCleanTapKind: SingleModifierKind? = nil
+    private var firstCleanTapKeyCode: UInt16? = nil
+    private var firstCleanReleaseTime: TimeInterval = 0
+
+    enum StepOutcome: Equatable {
+        case none
+        case firstTapCompleted(SingleModifierKind)
+        case doubleTapTriggered(SingleModifierKind)
+    }
+
+    init(maxHoldDuration: TimeInterval = 0.30, maxTapGap: TimeInterval = 0.34) {
+        self.maxHoldDuration = maxHoldDuration
+        self.maxTapGap = maxTapGap
+    }
+
+    mutating func reset() {
+        activePressKind = nil
+        activePressKeyCode = nil
+        activePressStartTime = 0
+        pollutedDuringHold = false
+        firstCleanTapKind = nil
+        firstCleanTapKeyCode = nil
+        firstCleanReleaseTime = 0
+    }
+
+    /// 当普通按键按下或鼠标点击发生时调用，彻底阻断 ⌘C->⌘V 或 ⌘C×2 误触发双击修饰键
+    mutating func markInterferingEvent() {
+        pollutedDuringHold = true
+        firstCleanTapKind = nil
+        firstCleanTapKeyCode = nil
+        firstCleanReleaseTime = 0
+    }
+
+    mutating func handleFlagsChanged(
+        keyCode: UInt16,
+        flags: NSEvent.ModifierFlags,
+        uptime: TimeInterval
+    ) -> StepOutcome {
+        guard let kind = SingleModifierKind.from(keyCode: keyCode) else {
+            markInterferingEvent()
+            return .none
+        }
+
+        let cleanFlags = flags.intersection([.command, .option, .control, .shift, .function])
+
+        if kind.isFlagPressed(in: cleanFlags) {
+            guard kind.isExclusivelyPressed(in: cleanFlags) else {
+                // 同时按下了第二个修饰键（如 ⌃+⌥），作废单键双击序列
+                markInterferingEvent()
+                return .none
+            }
+            if firstCleanTapKind != nil && (uptime - firstCleanReleaseTime) > maxTapGap {
+                firstCleanTapKind = nil
+                firstCleanTapKeyCode = nil
+            }
+            activePressKind = kind
+            activePressKeyCode = keyCode
+            activePressStartTime = uptime
+            pollutedDuringHold = false
+            return .none
+        } else {
+            // 松开修饰键：必须无残留其他修饰键、期间未按过字母键、且按住时长不超过阈值
+            guard cleanFlags.isEmpty,
+                  !pollutedDuringHold,
+                  activePressKind == kind,
+                  activePressKeyCode == keyCode,
+                  (uptime - activePressStartTime) <= maxHoldDuration else {
+                reset()
+                return .none
+            }
+
+            activePressKind = nil
+            activePressKeyCode = nil
+
+            if firstCleanTapKind == kind,
+               firstCleanTapKeyCode == keyCode,
+               (uptime - firstCleanReleaseTime) <= maxTapGap {
+                firstCleanTapKind = nil
+                firstCleanTapKeyCode = nil
+                firstCleanReleaseTime = 0
+                return .doubleTapTriggered(kind)
+            } else {
+                firstCleanTapKind = kind
+                firstCleanTapKeyCode = keyCode
+                firstCleanReleaseTime = uptime
+                return .firstTapCompleted(kind)
+            }
+        }
+    }
+}
+
+/// 可持久化的全局快捷键模型（支持「修饰键+主键」组合键与「双击单键 ⌘/⌥/⌃/⇧/Fn」两种模式，向后兼容旧版 JSON）
 struct HotKeyShortcut: Codable, Equatable {
     let keyCode: UInt32
     let carbonModifiers: UInt32
+    let doubleTapModifier: SingleModifierKind?
+
+    init(keyCode: UInt32, carbonModifiers: UInt32, doubleTapModifier: SingleModifierKind? = nil) {
+        self.keyCode = keyCode
+        self.carbonModifiers = carbonModifiers
+        self.doubleTapModifier = doubleTapModifier
+    }
+
+    static func doubleTap(_ kind: SingleModifierKind) -> HotKeyShortcut {
+        HotKeyShortcut(keyCode: kind.canonicalKeyCode, carbonModifiers: 0, doubleTapModifier: kind)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case keyCode
+        case carbonModifiers
+        case doubleTapModifier
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.keyCode = try container.decode(UInt32.self, forKey: .keyCode)
+        self.carbonModifiers = try container.decode(UInt32.self, forKey: .carbonModifiers)
+        self.doubleTapModifier = try container.decodeIfPresent(SingleModifierKind.self, forKey: .doubleTapModifier)
+    }
+
+    var isDoubleTap: Bool {
+        doubleTapModifier != nil
+    }
 
     /// 默认主面板呼出快捷键：Option + V
     static let defaultShortcut = HotKeyShortcut(
@@ -25,8 +215,11 @@ struct HotKeyShortcut: Codable, Equatable {
         carbonModifiers: UInt32(controlKey | optionKey)
     )
 
-    /// 供界面显示的苹果标准符号串（例如 "⌥ V"、"⌃ ⌥ V"）
+    /// 供界面显示的苹果标准符号串（例如 "⌥ V"、"⌃ ⌥ V"、"双击 ⌘"）
     var displayString: String {
+        if let kind = doubleTapModifier {
+            return "双击 \(kind.symbol)"
+        }
         var parts: [String] = []
         if (carbonModifiers & UInt32(controlKey)) != 0 { parts.append("⌃") }
         if (carbonModifiers & UInt32(optionKey)) != 0 { parts.append("⌥") }
@@ -36,9 +229,12 @@ struct HotKeyShortcut: Codable, Equatable {
         return parts.joined(separator: " ")
     }
 
-    /// 紧凑符号串（用于菜单栏提示，例如 "⌥V"）
+    /// 紧凑符号串（用于菜单栏提示，例如 "⌥V"、"⌘⌘"）
     var compactDisplayString: String {
-        displayString.replacingOccurrences(of: " ", with: "")
+        if let kind = doubleTapModifier {
+            return kind == .fn ? "Fn×2" : "\(kind.symbol)\(kind.symbol)"
+        }
+        return displayString.replacingOccurrences(of: " ", with: "")
     }
 
     static func carbonModifiers(from flags: NSEvent.ModifierFlags) -> UInt32 {
@@ -105,19 +301,29 @@ enum HotKeyConflictValidator {
         existingOwnShortcut: HotKeyShortcut,
         otherBindings: [(shortcut: HotKeyShortcut, label: String)]
     ) -> String? {
-        let mods = candidate.carbonModifiers & modifierMask
-
-        // 1. 修饰键完备性校验：禁止无修饰键或仅 Shift 搭配普通字符（避免废掉日常大写与标点输入）
-        if mods == 0 && !candidate.isFunctionKey {
-            return "请至少搭配一个修饰键（⌘ / ⌥ / ⌃）"
-        }
-        if mods == UInt32(shiftKey) && !candidate.isFunctionKey {
-            return "「\(candidate.displayString)」会干扰日常大写与符号输入，请搭配 ⌘ / ⌥ / ⌃"
-        }
-
-        // 若用户重新按下当前槽位原本正在使用的同一快捷键，允许直接确认保留
         if candidate == existingOwnShortcut {
             return nil
+        }
+
+        // 若为「双击修饰单键（⌘ / ⌥ / ⌃ / ⇧ / Fn）」模式，检查应用内其他槽位查重与系统听写双击冲突
+        if let kind = candidate.doubleTapModifier {
+            for binding in otherBindings where binding.shortcut == candidate {
+                return "「\(candidate.displayString)」已绑定为「\(binding.label)」，禁止冲突设定"
+            }
+            if let dictationReason = activeSystemDictationDoubleTapConflict(for: kind) {
+                return dictationReason
+            }
+            return nil
+        }
+
+        let mods = candidate.carbonModifiers & modifierMask
+
+        // 1. 修饰键完备性校验：禁止普通字符无修饰键或仅 Shift 搭配普通字符（引导用户双击修饰键实现单键呼出）
+        if mods == 0 && !candidate.isFunctionKey {
+            return "普通字符键会干扰日常打字；请搭配修饰键，或连按两次 ⌘ / ⌥ / ⌃ / ⇧ 设为双击单键"
+        }
+        if mods == UInt32(shiftKey) && !candidate.isFunctionKey {
+            return "「\(candidate.displayString)」会干扰日常大写与符号输入，请搭配 ⌘ / ⌥ / ⌃ 或双击单键"
         }
 
         // 2. 与 iClip 自身其他已启用全局热键槽位互锁查重
@@ -143,7 +349,7 @@ enum HotKeyConflictValidator {
         for candidate: HotKeyShortcut,
         existingOwnShortcut: HotKeyShortcut
     ) -> String? {
-        if candidate == existingOwnShortcut { return nil }
+        if candidate == existingOwnShortcut || candidate.isDoubleTap { return nil }
         let mods = candidate.carbonModifiers & modifierMask
 
         var unmanagedArray: Unmanaged<CFArray>?
@@ -278,6 +484,28 @@ enum HotKeyConflictValidator {
         }
         return nil
     }
+
+    private static func activeSystemDictationDoubleTapConflict(for kind: SingleModifierKind) -> String? {
+        guard let speechDomain = UserDefaults.standard.persistentDomain(forName: "com.apple.speech.recognition.AppleSpeechRecognition.prefs"),
+              let masterEnabled = speechDomain["DictationIMMasterDictationEnabled"] as? Bool,
+              masterEnabled else {
+            return nil
+        }
+        // macOS 语音听写开启时默认常绑定双击 Fn 或双击 Control / Command（DictationIMShortcutValue）
+        if let shortcutVal = speechDomain["DictationIMShortcutValue"] as? Int {
+            let conflicted: Bool
+            switch shortcutVal {
+            case 1: conflicted = (kind == .fn)
+            case 2, 3, 4: conflicted = (kind == .command)
+            case 5: conflicted = (kind == .control)
+            default: conflicted = false
+            }
+            if conflicted {
+                return "「双击 \(kind.symbol)」与 macOS 已启用的「听写」快捷键冲突，禁止设定"
+            }
+        }
+        return nil
+    }
 }
 
 /// 基于 Carbon 的多通道可热更新全局快捷键管理（ID 1: 呼出主面板；ID 2: 免开面板顺序出队）
@@ -296,6 +524,14 @@ final class HotKeyManager {
     private var currentShortcut: HotKeyShortcut = .defaultShortcut
     private var currentQueueShortcut: HotKeyShortcut = .defaultQueueShortcut
     private var currentCopyAppendShortcut: HotKeyShortcut = .defaultCopyAppendShortcut
+
+    private var globalFlagsMonitor: Any?
+    private var localFlagsMonitor: Any?
+    private var globalInterferenceMonitor: Any?
+    private var localInterferenceMonitor: Any?
+    private var runtimeDoubleTapMachine = ModifierDoubleTapStateMachine()
+    private var isSuspendedForRecording: Bool = false
+    private var lastDoubleTapFireUptime: TimeInterval = 0
 
     private init() {}
 
@@ -348,12 +584,19 @@ final class HotKeyManager {
     func registerToggleHotKey(shortcut: HotKeyShortcut = .defaultShortcut, action: @escaping () -> Void) -> Bool {
         self.onToggleTrigger = action
         self.currentShortcut = shortcut
-        guard ensureEventHandlerInstalled() else { return false }
 
         if let ref = toggleHotKeyRef {
             UnregisterEventHotKey(ref)
             toggleHotKeyRef = nil
         }
+
+        if shortcut.isDoubleTap {
+            refreshDoubleTapMonitors()
+            return true
+        }
+
+        refreshDoubleTapMonitors()
+        guard ensureEventHandlerInstalled() else { return false }
 
         let hotKeyID = EventHotKeyID(signature: OSType(0x514A434C), id: 1)
         var regStatus = RegisterEventHotKey(
@@ -381,12 +624,19 @@ final class HotKeyManager {
     func registerQueuePopHotKey(shortcut: HotKeyShortcut = .defaultQueueShortcut, action: @escaping () -> Void) -> Bool {
         self.onQueueTrigger = action
         self.currentQueueShortcut = shortcut
-        guard ensureEventHandlerInstalled() else { return false }
 
         if let ref = queueHotKeyRef {
             UnregisterEventHotKey(ref)
             queueHotKeyRef = nil
         }
+
+        if shortcut.isDoubleTap {
+            refreshDoubleTapMonitors()
+            return true
+        }
+
+        refreshDoubleTapMonitors()
+        guard ensureEventHandlerInstalled() else { return false }
 
         let hotKeyID = EventHotKeyID(signature: OSType(0x514A434C), id: 2)
         var regStatus = RegisterEventHotKey(
@@ -491,7 +741,7 @@ final class HotKeyManager {
             return sysSymbolicReason
         }
 
-        if candidate != existingOwn {
+        if candidate != existingOwn && !candidate.isDoubleTap {
             var probeRef: EventHotKeyRef?
             let probeID = EventHotKeyID(signature: OSType(0x514A5052), id: 99)
             let status = RegisterEventHotKey(
@@ -549,6 +799,7 @@ final class HotKeyManager {
 
     /// 录制新快捷键前临时挂起全局拦截
     func suspendForRecording() {
+        isSuspendedForRecording = true
         if let ref = toggleHotKeyRef {
             UnregisterEventHotKey(ref)
             toggleHotKeyRef = nil
@@ -561,18 +812,81 @@ final class HotKeyManager {
             UnregisterEventHotKey(ref)
             copyAppendHotKeyRef = nil
         }
+        removeDoubleTapMonitors()
     }
 
     /// 取消或结束录制后恢复当前多通道快捷键
     func resumeAfterRecording() {
+        isSuspendedForRecording = false
         _ = updateShortcut(currentShortcut)
         _ = updateQueueShortcut(currentQueueShortcut)
         if onCopyAppendTrigger != nil {
             _ = updateCopyAppendShortcut(currentCopyAppendShortcut)
         }
+        refreshDoubleTapMonitors()
+    }
+
+    private func refreshDoubleTapMonitors() {
+        guard !isSuspendedForRecording else {
+            removeDoubleTapMonitors()
+            return
+        }
+        let needsToggle = (onToggleTrigger != nil && currentShortcut.isDoubleTap)
+        let needsQueue = (onQueueTrigger != nil && currentQueueShortcut.isDoubleTap)
+        guard needsToggle || needsQueue else {
+            removeDoubleTapMonitors()
+            return
+        }
+        guard globalFlagsMonitor == nil else { return }
+
+        runtimeDoubleTapMachine.reset()
+
+        globalFlagsMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+            self?.processRuntimeFlagsEvent(event)
+        }
+        localFlagsMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+            self?.processRuntimeFlagsEvent(event)
+            return event
+        }
+        globalInterferenceMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown]) { [weak self] _ in
+            self?.runtimeDoubleTapMachine.markInterferingEvent()
+        }
+        localInterferenceMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown]) { [weak self] event in
+            self?.runtimeDoubleTapMachine.markInterferingEvent()
+            return event
+        }
+    }
+
+    private func removeDoubleTapMonitors() {
+        if let m = globalFlagsMonitor { NSEvent.removeMonitor(m); globalFlagsMonitor = nil }
+        if let m = localFlagsMonitor { NSEvent.removeMonitor(m); localFlagsMonitor = nil }
+        if let m = globalInterferenceMonitor { NSEvent.removeMonitor(m); globalInterferenceMonitor = nil }
+        if let m = localInterferenceMonitor { NSEvent.removeMonitor(m); localInterferenceMonitor = nil }
+        runtimeDoubleTapMachine.reset()
+    }
+
+    private func processRuntimeFlagsEvent(_ event: NSEvent) {
+        guard !isSuspendedForRecording else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        let outcome = runtimeDoubleTapMachine.handleFlagsChanged(
+            keyCode: event.keyCode,
+            flags: event.modifierFlags,
+            uptime: now
+        )
+        guard case .doubleTapTriggered(let kind) = outcome else { return }
+        guard (now - lastDoubleTapFireUptime) > 0.12 else { return }
+
+        if currentShortcut.doubleTapModifier == kind, let toggle = onToggleTrigger {
+            lastDoubleTapFireUptime = now
+            DispatchQueue.main.async { toggle() }
+        } else if currentQueueShortcut.doubleTapModifier == kind, let queue = onQueueTrigger {
+            lastDoubleTapFireUptime = now
+            DispatchQueue.main.async { queue() }
+        }
     }
 
     func unregister() {
+        removeDoubleTapMonitors()
         if let ref = toggleHotKeyRef {
             UnregisterEventHotKey(ref)
             toggleHotKeyRef = nil

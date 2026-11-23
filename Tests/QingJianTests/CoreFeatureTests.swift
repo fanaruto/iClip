@@ -1612,4 +1612,50 @@ final class CoreFeatureTests: XCTestCase {
         let optZ = HotKeyShortcut(keyCode: UInt32(kVK_ANSI_Z), carbonModifiers: UInt32(optionKey))
         XCTAssertNil(HotKeyConflictValidator.staticConflictReason(for: optZ, role: .mainToggle, existingOwnShortcut: own, otherBindings: others))
     }
+
+    // MARK: - 38. 单键双击（⌘ / ⌥ / ⌃ / ⇧ / Fn）零误触状态机、JSON 兼容与冲突拦截测试
+
+    func testSingleModifierDoubleTapStateMachineAndConflictGuard() throws {
+        var machine = ModifierDoubleTapStateMachine(maxHoldDuration: 0.30, maxTapGap: 0.34)
+
+        // 1. 干净双击左 Command (keyCode 55) -> 第一次松开返回 firstTapCompleted，第二次松开返回 doubleTapTriggered
+        XCTAssertEqual(machine.handleFlagsChanged(keyCode: 55, flags: .command, uptime: 10.00), .none)
+        XCTAssertEqual(machine.handleFlagsChanged(keyCode: 55, flags: [], uptime: 10.08), .firstTapCompleted(.command))
+        XCTAssertEqual(machine.handleFlagsChanged(keyCode: 55, flags: .command, uptime: 10.20), .none)
+        XCTAssertEqual(machine.handleFlagsChanged(keyCode: 55, flags: [], uptime: 10.28), .doubleTapTriggered(.command))
+
+        // 2. 期间夹杂普通按键（如连按 ⌘C -> ⌘V 或 ⌘C×2 微星标）必须 100% 静默作废，绝不误弹面板
+        XCTAssertEqual(machine.handleFlagsChanged(keyCode: 55, flags: .command, uptime: 20.00), .none)
+        machine.markInterferingEvent() // 按下了 C
+        XCTAssertEqual(machine.handleFlagsChanged(keyCode: 55, flags: [], uptime: 20.09), .none)
+        XCTAssertEqual(machine.handleFlagsChanged(keyCode: 55, flags: .command, uptime: 20.18), .none)
+        machine.markInterferingEvent() // 按下了 V
+        XCTAssertEqual(machine.handleFlagsChanged(keyCode: 55, flags: [], uptime: 20.26), .none)
+
+        // 3. 长按超过 maxHoldDuration (0.30s) 或左右不同物理键混按不误触发
+        XCTAssertEqual(machine.handleFlagsChanged(keyCode: 58, flags: .option, uptime: 30.00), .none)
+        XCTAssertEqual(machine.handleFlagsChanged(keyCode: 58, flags: [], uptime: 30.45), .none) // 长按作废
+
+        XCTAssertEqual(machine.handleFlagsChanged(keyCode: 55, flags: .command, uptime: 40.00), .none)
+        XCTAssertEqual(machine.handleFlagsChanged(keyCode: 55, flags: [], uptime: 40.08), .firstTapCompleted(.command))
+        XCTAssertEqual(machine.handleFlagsChanged(keyCode: 54, flags: .command, uptime: 40.18), .none) // 右 Command (54) != 左 Command (55)
+        XCTAssertEqual(machine.handleFlagsChanged(keyCode: 54, flags: [], uptime: 40.25), .firstTapCompleted(.command))
+
+        // 4. 旧版无 doubleTapModifier 字段的持久化 JSON 无损解码兼容 + 双击单键槽位查重硬拦截
+        let legacyJSON = Data(#"{"keyCode":9,"carbonModifiers":2048}"#.utf8)
+        let decodedLegacy = try JSONDecoder().decode(HotKeyShortcut.self, from: legacyJSON)
+        XCTAssertEqual(decodedLegacy, .defaultShortcut)
+        XCTAssertFalse(decodedLegacy.isDoubleTap)
+
+        let doubleCtrl = HotKeyShortcut.doubleTap(.control)
+        XCTAssertEqual(doubleCtrl.displayString, "双击 ⌃")
+        XCTAssertEqual(doubleCtrl.compactDisplayString, "⌃⌃")
+        let conflictWithQueue = HotKeyConflictValidator.staticConflictReason(
+            for: doubleCtrl,
+            role: .mainToggle,
+            existingOwnShortcut: .defaultShortcut,
+            otherBindings: [(doubleCtrl, "顺序出队热键")]
+        )
+        XCTAssertTrue(conflictWithQueue?.contains("顺序出队热键") == true)
+    }
 }

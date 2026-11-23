@@ -26,6 +26,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     private var rootView: ClipboardPopoverView!
     private var demoRunner: DemoShowcaseRunner?
     private var keyMonitor: Any?
+    private var recordingTapMachine = ModifierDoubleTapStateMachine(maxHoldDuration: 0.35, maxTapGap: 0.48)
     private var previousApp: NSRunningApplication?
     private var hideWorkItem: DispatchWorkItem?
     private var cancellables = Set<AnyCancellable>()
@@ -416,23 +417,48 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
 
     private func installKeyMonitor() {
         removeKeyMonitor()
-        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
             guard let self = self, self.isVisible else { return event }
             if self.nav.isRecordingHotKey || self.nav.isRecordingQueueHotKey {
                 return self.handleHotKeyRecording(event)
             }
+            guard event.type == .keyDown else { return event }
             return self.handleKeyDown(event)
         }
     }
 
-    /// 录制自定义全局快捷键（要求至少含一个修饰键 + 主键；按 ESC 取消）
+    /// 录制自定义全局快捷键（支持「修饰键+主键」组合键，或连按两次 ⌘/⌥/⌃/⇧/Fn 单键双击；按 ESC 取消）
     private func handleHotKeyRecording(_ event: NSEvent) -> NSEvent? {
-        // ESC 取消录制并恢复原快捷键
         if nav.isEditingAlias {
             return event
         }
 
+        let role: HotKeySlotRole = nav.isRecordingQueueHotKey ? .queuePop : .mainToggle
+
+        if event.type == .flagsChanged {
+            let outcome = recordingTapMachine.handleFlagsChanged(
+                keyCode: event.keyCode,
+                flags: event.modifierFlags,
+                uptime: ProcessInfo.processInfo.systemUptime
+            )
+            switch outcome {
+            case .none:
+                return nil
+            case .firstTapCompleted(let kind):
+                nav.hotKeyConflictWarning = nil
+                nav.hotKeyRecordingHint = "再按一次 \(kind.symbol) 设为「双击 \(kind.symbol)」，或按下组合键"
+                return nil
+            case .doubleTapTriggered(let kind):
+                nav.hotKeyRecordingHint = nil
+                return commitRecordedShortcut(.doubleTap(kind), role: role)
+            }
+        }
+
+        recordingTapMachine.markInterferingEvent()
+        nav.hotKeyRecordingHint = nil
+
         if event.keyCode == 53 {
+            recordingTapMachine.reset()
             nav.isRecordingHotKey = false
             nav.isRecordingQueueHotKey = false
             nav.hotKeyConflictWarning = nil
@@ -440,7 +466,6 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             return nil
         }
 
-        // 忽略单独按下的修饰键
         let modifierKeyCodes: Set<UInt16> = [54, 55, 56, 57, 58, 59, 60, 61, 62, 63]
         if modifierKeyCodes.contains(event.keyCode) {
             return nil
@@ -448,8 +473,10 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
 
         let carbonMods = HotKeyShortcut.carbonModifiers(from: event.modifierFlags)
         let newShortcut = HotKeyShortcut(keyCode: UInt32(event.keyCode), carbonModifiers: carbonMods)
-        let role: HotKeySlotRole = nav.isRecordingQueueHotKey ? .queuePop : .mainToggle
+        return commitRecordedShortcut(newShortcut, role: role)
+    }
 
+    private func commitRecordedShortcut(_ newShortcut: HotKeyShortcut, role: HotKeySlotRole) -> NSEvent? {
         if let conflictReason = HotKeyManager.shared.validateAndProbeShortcut(
             newShortcut,
             for: role,
@@ -461,7 +488,9 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             return nil
         }
 
+        recordingTapMachine.reset()
         nav.hotKeyConflictWarning = nil
+        nav.hotKeyRecordingHint = nil
         if nav.isRecordingQueueHotKey {
             nav.isRecordingQueueHotKey = false
             store.queuePopShortcut = newShortcut
@@ -789,6 +818,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     private var rootView: ClipboardPopoverView!
     private var demoRunner: DemoShowcaseRunner?
     private var keyMonitor: Any?
+    private var recordingTapMachine = ModifierDoubleTapStateMachine(maxHoldDuration: 0.35, maxTapGap: 0.48)
     private var previousApp: NSRunningApplication?
     private var hideWorkItem: DispatchWorkItem?
     private var cancellables = Set<AnyCancellable>()
@@ -1179,26 +1209,48 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
 
     private func installKeyMonitor() {
         removeKeyMonitor()
-        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
             guard let self = self, self.isVisible else { return event }
             if self.nav.isRecordingHotKey {
                 return self.handleHotKeyRecording(event)
             }
+            guard event.type == .keyDown else { return event }
             return self.handleKeyDown(event)
         }
     }
 
-    /// 录制自定义全局快捷键（要求至少含一个修饰键 + 主键；按 ESC 取消）
+    /// 录制自定义全局快捷键（支持「修饰键+主键」组合键，或连按两次 ⌘/⌥/⌃/⇧/Fn 单键双击；按 ESC 取消）
     private func handleHotKeyRecording(_ event: NSEvent) -> NSEvent? {
-        // ESC 取消录制并恢复原快捷键
+        if event.type == .flagsChanged {
+            let outcome = recordingTapMachine.handleFlagsChanged(
+                keyCode: event.keyCode,
+                flags: event.modifierFlags,
+                uptime: ProcessInfo.processInfo.systemUptime
+            )
+            switch outcome {
+            case .none:
+                return nil
+            case .firstTapCompleted(let kind):
+                nav.hotKeyConflictWarning = nil
+                nav.hotKeyRecordingHint = "再按一次 \(kind.symbol) 设为「双击 \(kind.symbol)」，或按下组合键"
+                return nil
+            case .doubleTapTriggered(let kind):
+                nav.hotKeyRecordingHint = nil
+                return commitRecordedShortcut(.doubleTap(kind))
+            }
+        }
+
+        recordingTapMachine.markInterferingEvent()
+        nav.hotKeyRecordingHint = nil
+
         if event.keyCode == 53 {
+            recordingTapMachine.reset()
             nav.isRecordingHotKey = false
             nav.hotKeyConflictWarning = nil
             HotKeyManager.shared.resumeAfterRecording()
             return nil
         }
 
-        // 忽略单独按下的修饰键
         let modifierKeyCodes: Set<UInt16> = [54, 55, 56, 57, 58, 59, 60, 61, 62, 63]
         if modifierKeyCodes.contains(event.keyCode) {
             return nil
@@ -1206,7 +1258,10 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
 
         let carbonMods = HotKeyShortcut.carbonModifiers(from: event.modifierFlags)
         let newShortcut = HotKeyShortcut(keyCode: UInt32(event.keyCode), carbonModifiers: carbonMods)
+        return commitRecordedShortcut(newShortcut)
+    }
 
+    private func commitRecordedShortcut(_ newShortcut: HotKeyShortcut) -> NSEvent? {
         if let conflictReason = HotKeyManager.shared.validateAndProbeShortcut(
             newShortcut,
             for: .mainToggle,
@@ -1218,7 +1273,9 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             return nil
         }
 
+        recordingTapMachine.reset()
         nav.hotKeyConflictWarning = nil
+        nav.hotKeyRecordingHint = nil
         nav.isRecordingHotKey = false
         store.hotKeyShortcut = newShortcut
         HotKeyManager.shared.resumeAfterRecording()

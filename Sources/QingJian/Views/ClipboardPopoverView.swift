@@ -34,6 +34,7 @@ final class PanelNavigationModel: ObservableObject {
     @Published var isRecordingHotKey: Bool = false
     @Published var isRecordingQueueHotKey: Bool = false
     @Published var hotKeyConflictWarning: String? = nil
+    @Published var hotKeyRecordingHint: String? = nil
     @Published var isEditingAlias: Bool = false
     @Published var showQuickLook: Bool = false
     @Published var quickLookTabIndex: Int = 0
@@ -158,6 +159,7 @@ final class PanelNavigationModel: ObservableObject {
         isRecordingHotKey = false
         isRecordingQueueHotKey = false
         hotKeyConflictWarning = nil
+        hotKeyRecordingHint = nil
         suppressAutoHide = false
         isDragTargeted = false
         lockPointerAtCurrentMouse()
@@ -1411,8 +1413,12 @@ struct ClipboardPopoverView: View {
                                 Text(conflict)
                                     .font(.system(size: 11, weight: .medium))
                                     .foregroundStyle(.red)
+                            } else if nav.isRecordingHotKey, let hint = nav.hotKeyRecordingHint {
+                                Text(hint)
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundStyle(Color.accentColor)
                             } else {
-                                Text(nav.isRecordingHotKey ? "请直接按下新组合键，按 ESC 取消" : "点击右侧按键录制自定义组合键（冲突自动拦截）")
+                                Text(nav.isRecordingHotKey ? "按下组合键，或双击 ⌘/⌥/⌃/⇧ 单键（ESC 取消）" : "点击录制组合键或双击 ⌘/⌥/⌃/⇧ 单键")
                                     .font(.system(size: 11.5))
                                     .foregroundStyle(nav.isRecordingHotKey ? Color.accentColor : .secondary)
                             }
@@ -1471,8 +1477,12 @@ struct ClipboardPopoverView: View {
                                 Text(conflict)
                                     .font(.system(size: 11, weight: .medium))
                                     .foregroundStyle(.red)
+                            } else if nav.isRecordingQueueHotKey, let hint = nav.hotKeyRecordingHint {
+                                Text(hint)
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundStyle(Color.accentColor)
                             } else {
-                                Text(nav.isRecordingQueueHotKey ? "请直接按下新组合键，按 ESC 取消" : "在表格/表单中连按即可逐项填入队列内容")
+                                Text(nav.isRecordingQueueHotKey ? "按下组合键，或双击 ⌘/⌥/⌃/⇧ 单键（ESC 取消）" : "在表格/表单中连按即可逐项填入队列内容")
                                     .font(.system(size: 11.5))
                                     .foregroundStyle(nav.isRecordingQueueHotKey ? Color.accentColor : .secondary)
                             }
@@ -2479,6 +2489,7 @@ final class PanelNavigationModel: ObservableObject {
     @Published var scrollRequestEpoch: Int = 0
     @Published var isRecordingHotKey: Bool = false
     @Published var hotKeyConflictWarning: String? = nil
+    @Published var hotKeyRecordingHint: String? = nil
     @Published var isEditingAlias: Bool = false
     @Published var showQuickLook: Bool = false
     @Published var quickLookTabIndex: Int = 0
@@ -2617,6 +2628,7 @@ final class PanelNavigationModel: ObservableObject {
         isCreatingTemplate = false
         isRecordingHotKey = false
         hotKeyConflictWarning = nil
+        hotKeyRecordingHint = nil
         suppressAutoHide = false
         isDragTargeted = false
         lockPointerAtCurrentMouse()
@@ -3756,8 +3768,12 @@ struct ClipboardPopoverView: View {
                                 Text(conflict)
                                     .font(.system(size: 11, weight: .medium))
                                     .foregroundStyle(.red)
+                            } else if nav.isRecordingHotKey, let hint = nav.hotKeyRecordingHint {
+                                Text(hint)
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundStyle(Color.accentColor)
                             } else {
-                                Text(nav.isRecordingHotKey ? "请直接按下新组合键，按 ESC 取消" : "点击右侧按键录制自定义组合键（冲突自动拦截）")
+                                Text(nav.isRecordingHotKey ? "按下组合键，或双击 ⌘/⌥/⌃/⇧ 单键（ESC 取消）" : "点击录制组合键或双击 ⌘/⌥/⌃/⇧ 单键")
                                     .font(.system(size: 11.5))
                                     .foregroundStyle(nav.isRecordingHotKey ? Color.accentColor : .secondary)
                             }
