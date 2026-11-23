@@ -822,6 +822,7 @@ enum SemanticEngine {
                 withTemplate: item.replacement
             )
         }
+        result = SensitiveCredentialVeil.redactForExternalSharing(result)
         return result
     }
 

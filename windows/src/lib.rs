@@ -1379,4 +1379,77 @@ mod tests {
         assert!(!example.contains("ProdDb99"));
         assert!(!example.contains("RealPass99"));
     }
+
+    #[test]
+    fn test_dynamic_template_8_placeholders_cloud_keys_wireguard_and_security_audit() {
+        use crate::engines::{redact_secrets, render_dynamic_template};
+        use crate::model::ClipItem;
+        use crate::security::{
+            classify_sensitive_text, is_security_audit_query, SensitiveSecretKind,
+        };
+        use crate::store::ClipboardStore;
+
+        // 1. 验证阿里云 LTAI、腾讯云 AKID、Stripe sk_live_、Telegram Bot、npm 与 WireGuard 私钥识别脱敏
+        let ali_ak = concat!("LTAI", "5t9x8K2mPq7NvWzR4BcD");
+        let tencent_ak = concat!("AKID", "z8krbsJ5yKBZQpn74WFkmLPx3gnPhESA");
+        let stripe_key = concat!("sk_live_", "51NxyzTestMockSecretKey998877");
+        let tg_bot = concat!("123456789", ":AA", "HdqTcvCH1vGWJxfSeofSAs0K5PALDsawX");
+        let npm_tok = concat!("npm_", "1234567890abcdefABCDEF1234567890abcd");
+        let wg_conf = concat!(
+            "[Interface]\nPrivateKey = ",
+            "cGxhY2Vob2xkZXJ3aXJlZ3VhcmRwcml2YXRla2V5MTI=",
+            "\nAddress = 10.8.0.2/24"
+        );
+
+        for k in [ali_ak, tencent_ak, stripe_key, tg_bot, npm_tok] {
+            assert_eq!(
+                classify_sensitive_text(k),
+                Some(SensitiveSecretKind::ApiKey)
+            );
+            assert_ne!(redact_secrets(k), k);
+        }
+        assert_eq!(
+            classify_sensitive_text(wg_conf),
+            Some(SensitiveSecretKind::PrivateKey)
+        );
+        assert!(redact_secrets(wg_conf).contains("***WG_KEY_REDACTED***"));
+
+        // 2. 验证 Windows 动态模板支持全部 8 大占位符（含空格与大小写容忍）及 `{{clip_redacted}}`
+        let ctx = format!("日志 key={ali_ak} 手机 13812345678");
+        let tpl = "单号:{{ uuid }}|日:{{date}}|时:{{time}}|周:{{weekday}}|戳:{{ts}}|敏:{{ clip_redacted }}";
+        let out = render_dynamic_template(tpl, Some(&ctx));
+        assert!(!out.contains("{{"));
+        assert!(!out.contains(ali_ak));
+        assert!(out.contains("138****5678"));
+        assert!(out.contains("星期"));
+
+        // 3. 验证 `@体检` / `@安全` 识别及未收藏投毒/钓鱼/敏感风险全量清零（收藏项豁免）
+        assert!(is_security_audit_query("@体检"));
+        assert!(is_security_audit_query("@shield"));
+        assert!(!is_security_audit_query("@pin"));
+
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "iclip-iter10-test-{}-{}",
+            std::process::id(),
+            crate::model::now_unix_secs()
+        ));
+        let _ = fs::create_dir_all(&tmp_dir);
+        let mut store = ClipboardStore::new(tmp_dir.clone());
+
+        let mut pinned_sec = ClipItem::new_text(ali_ak.to_string(), None);
+        pinned_sec.is_pinned = true;
+        let unpinned_wg = ClipItem::new_text(wg_conf.to_string(), None);
+        let poison_cmd = ClipItem::new_text("echo safe\u{202E}evil".to_string(), None);
+        assert!(unpinned_wg.matches_query("@体检"));
+        assert!(poison_cmd.matches_query("@体检"));
+
+        store.items = vec![pinned_sec, unpinned_wg, poison_cmd];
+        assert_eq!(store.unpinned_sensitive_count(), 2);
+        let swept = store.sweep_all_unpinned_sensitive();
+        assert_eq!(swept, 2);
+        assert_eq!(store.items.len(), 1);
+        assert!(store.items[0].is_pinned);
+
+        let _ = fs::remove_dir_all(tmp_dir);
+    }
 }

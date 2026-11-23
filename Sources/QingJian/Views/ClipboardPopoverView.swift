@@ -614,6 +614,19 @@ struct ClipboardPopoverView: View {
             .padding(.horizontal, 14)
             .padding(.bottom, 8)
             .transition(.opacity.combined(with: .move(edge: .top)))
+        } else if SecurityPostureAudit.isAuditQuery(nav.searchText) {
+            SecurityAuditCardView(
+                report: store.securityPostureReport,
+                onSweepRisks: {
+                    withAnimation(.spring(response: 0.24, dampingFraction: 0.85)) {
+                        _ = store.sweepAllUnpinnedSensitiveItems()
+                        clampSelection()
+                    }
+                }
+            )
+            .padding(.horizontal, 14)
+            .padding(.bottom, 8)
+            .transition(.opacity.combined(with: .move(edge: .top)))
         } else if let math = InstantMathEvaluator.evaluate(nav.searchText, latestClipboardText: store.items.first?.text) {
             InstantMathCardView(
                 math: math,
@@ -3480,6 +3493,19 @@ struct ClipboardPopoverView: View {
                     nav.searchText = ""
                     store.captureQuickNote(body: pwGen.secretValue, alias: pwGen.defaultVaultAlias, pin: true)
                     onDismiss()
+                }
+            )
+            .padding(.horizontal, 14)
+            .padding(.bottom, 8)
+            .transition(.opacity.combined(with: .move(edge: .top)))
+        } else if SecurityPostureAudit.isAuditQuery(nav.searchText) {
+            SecurityAuditCardView(
+                report: store.securityPostureReport,
+                onSweepRisks: {
+                    withAnimation(.spring(response: 0.24, dampingFraction: 0.85)) {
+                        _ = store.sweepAllUnpinnedSensitiveItems()
+                        clampSelection()
+                    }
                 }
             )
             .padding(.horizontal, 14)

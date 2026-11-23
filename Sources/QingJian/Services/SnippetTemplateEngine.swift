@@ -345,10 +345,12 @@ enum SnippetTemplateEngine {
         let contextRedacted: String = {
             guard !contextRaw.isEmpty else { return "" }
             #if !ICLIP_EDITION_FLOW
-            return SemanticEngine.redactSecrets(in: contextRaw)
+            let step1 = SemanticEngine.redactSecrets(in: contextRaw)
+            return SemanticEngine.redactPIIAndPrivateIP(in: SensitiveCredentialVeil.redactForExternalSharing(step1))
             #else
-            let full = NSRange(contextRaw.startIndex..<contextRaw.endIndex, in: contextRaw)
-            return fallbackPhoneRegex.stringByReplacingMatches(in: contextRaw, range: full, withTemplate: "$1****$2")
+            let veiled = SensitiveCredentialVeil.redactForExternalSharing(contextRaw)
+            let full = NSRange(veiled.startIndex..<veiled.endIndex, in: veiled)
+            return fallbackPhoneRegex.stringByReplacingMatches(in: veiled, range: full, withTemplate: "$1****$2")
             #endif
         }()
 

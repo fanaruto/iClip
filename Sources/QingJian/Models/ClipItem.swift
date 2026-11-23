@@ -622,6 +622,10 @@ enum EpisodicQueryMatcher {
             if let t = item.text, SensitiveCredentialVeil.isOTPAuthURI(t) { return true }
             if let qr = item.qrCodePayload, SensitiveCredentialVeil.isOTPAuthURI(qr) { return true }
             return false
+        case "@安全", "@体检", "@隐私体检", "@shield", "@audit":
+            if case .pastejackingOrBidi = item.detectedPoisonThreat { return true }
+            if item.detectedLinkRisk != nil { return true }
+            return item.detectedSensitiveKind != nil || item.isBurnAfterPaste
         case "风险", "@风险", "@毒", "@poison", "poison":
             return item.detectedPoisonThreat != nil || item.detectedLinkRisk != nil
         case "即焚", "@即焚", "@burn", "burn":
@@ -659,6 +663,7 @@ enum EpisodicQueryMatcher {
              "身份证", "@身份证", "银行卡", "@银行卡", "@idcard",
              "webhook", "@webhook",
              "2fa", "@2fa", "totp", "@totp", "@动态码",
+             "@安全", "@体检", "@隐私体检", "@shield", "@audit",
              "风险", "@风险", "@毒", "@poison", "poison",
              "即焚", "@即焚", "@burn", "burn":
             return true

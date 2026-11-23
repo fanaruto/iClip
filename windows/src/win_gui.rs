@@ -2702,15 +2702,28 @@ unsafe fn commit_paste_item_by_index(hwnd: HWND, item_idx: usize, force_plain: b
                         if let Some(raw) = &item.text {
                             if !force_plain
                                 && !st.store.config.minimal_mode_enabled
-                                && (raw.contains("{{clip") || raw.contains("{{date"))
+                                && iclip_core::engines::contains_dynamic_template_placeholders(raw)
                             {
                                 let ctx = st
                                     .store
                                     .items
                                     .iter()
-                                    .find(|c| c.id != item.id && c.text.is_some())
+                                    .find(|c| {
+                                        c.id != item.id
+                                            && c.text
+                                                .as_deref()
+                                                .map(|t| {
+                                                    !iclip_core::engines::contains_dynamic_template_placeholders(t)
+                                                })
+                                                .unwrap_or(false)
+                                    })
                                     .and_then(|c| c.text.as_deref());
-                                text_to_write = Some(render_dynamic_template(raw, ctx));
+                                let rendered = render_dynamic_template(raw, ctx);
+                                if iclip_core::security::classify_sensitive_text(&rendered).is_some()
+                                {
+                                    privacy_guard.block_cloud_and_history = true;
+                                }
+                                text_to_write = Some(rendered);
                             } else if !force_plain
                                 && !st.store.config.minimal_mode_enabled
                                 && matches!(
@@ -4100,6 +4113,130 @@ fn layout_and_draw_main_view(
                     secret: pw_cand.secret_value,
                     toast: pw_cand.ephemeral_toast,
                 },
+            });
+            cur_y += bh + s(8);
+        } else if iclip_core::security::is_security_audit_query(&st.search_query) {
+            let risk_cnt = st.store.unpinned_sensitive_count();
+            let pinned_sec = st.store.pinned_sensitive_count();
+            let total_cnt = st.store.items.len();
+            let is_clean = risk_cnt == 0;
+            let accent = if is_clean {
+                Color4::rgb(32, 178, 92)
+            } else {
+                Color4::rgb(245, 146, 28)
+            };
+            let bh = s(48);
+            canvas.fill_round_rect(pad, cur_y, track_w, bh, sf(13.0), accent.with_alpha(24));
+            canvas.stroke_round_rect(
+                pad,
+                cur_y,
+                track_w,
+                bh,
+                sf(13.0),
+                sf(0.75),
+                accent.with_alpha(68),
+            );
+            let ic_cx = (pad + s(24)) as f32;
+            let ic_cy = (cur_y + bh / 2) as f32;
+            canvas.fill_circle(ic_cx, ic_cy, sf(13.0), accent.with_alpha(38));
+            texts.push(TextDrawCmd {
+                text: "SH".to_string(),
+                rect: RECT {
+                    left: pad + s(11),
+                    top: cur_y,
+                    right: pad + s(37),
+                    bottom: cur_y + bh,
+                },
+                color: accent,
+                font_kind: FontKind::BadgeBold,
+                flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            });
+
+            let btn_w = if is_clean { s(68) } else { s(88) };
+            let btn_h = s(24);
+            let btn_x = w - pad - btn_w - s(10);
+            let btn_y = cur_y + (bh - btn_h) / 2;
+            if is_clean {
+                canvas.fill_round_rect(btn_x, btn_y, btn_w, btn_h, sf(12.0), accent.with_alpha(36));
+                texts.push(TextDrawCmd {
+                    text: "护盾全开".to_string(),
+                    rect: RECT {
+                        left: btn_x,
+                        top: btn_y,
+                        right: btn_x + btn_w,
+                        bottom: btn_y + btn_h,
+                    },
+                    color: accent,
+                    font_kind: FontKind::BadgeBold,
+                    flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                });
+            } else {
+                canvas.fill_round_rect(btn_x, btn_y, btn_w, btn_h, sf(12.0), accent);
+                texts.push(TextDrawCmd {
+                    text: format!("一键清零 ({risk_cnt})"),
+                    rect: RECT {
+                        left: btn_x,
+                        top: btn_y,
+                        right: btn_x + btn_w,
+                        bottom: btn_y + btn_h,
+                    },
+                    color: Color4::rgb(255, 255, 255),
+                    font_kind: FontKind::BadgeBold,
+                    flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                });
+                st.hit_regions.push(HitRegion {
+                    rect: RECT {
+                        left: btn_x,
+                        top: btn_y,
+                        right: btn_x + btn_w,
+                        bottom: btn_y + btn_h,
+                    },
+                    interactive_cursor: true,
+                    action: HitAction::SweepUnpinnedSensitive,
+                });
+            }
+
+            let text_right = btn_x - s(8);
+            let headline = if is_clean {
+                format!("✓ 零临时风险残留 · {pinned_sec} 项收藏密钥受保护")
+            } else {
+                format!("检出 {risk_cnt} 项未收藏敏感/投毒风险 · 收藏豁免")
+            };
+            let stealth_lbl = if st.store.config.screen_share_privacy {
+                "开启"
+            } else {
+                "关闭"
+            };
+            let veil_lbl = if st.store.config.mask_sensitive_previews {
+                "开启"
+            } else {
+                "关闭"
+            };
+            let subline =
+                format!("DPAPI已加密 {total_cnt} 条 · 投屏隐身{stealth_lbl} · 防肩窥{veil_lbl}");
+            texts.push(TextDrawCmd {
+                text: headline,
+                rect: RECT {
+                    left: pad + s(44),
+                    top: cur_y + s(5),
+                    right: text_right,
+                    bottom: cur_y + s(26),
+                },
+                color: palette.text_primary,
+                font_kind: FontKind::Headline,
+                flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+            });
+            texts.push(TextDrawCmd {
+                text: subline,
+                rect: RECT {
+                    left: pad + s(44),
+                    top: cur_y + s(25),
+                    right: text_right,
+                    bottom: cur_y + bh - s(4),
+                },
+                color: palette.text_secondary,
+                font_kind: FontKind::Meta,
+                flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
             });
             cur_y += bh + s(8);
         } else if let Some(math) = evaluate_instant_math(&st.search_query, latest_txt) {

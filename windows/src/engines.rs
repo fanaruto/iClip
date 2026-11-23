@@ -1775,12 +1775,45 @@ pub fn redact_secrets(text: &str) -> String {
     let rules: &[(&str, &str, &str)] = &[
         ("sk-", r"sk-[A-Za-z0-9_\-]{18,}", "sk-***REDACTED***"),
         (
+            "_live_",
+            r"\b(?:sk|rk)_live_[A-Za-z0-9]{16,}\b",
+            "stripe_***REDACTED***",
+        ),
+        (
+            "_test_",
+            r"\b(?:sk|rk)_test_[A-Za-z0-9]{16,}\b",
+            "stripe_***REDACTED***",
+        ),
+        (
+            "whsec_",
+            r"\bwhsec_[A-Za-z0-9]{16,}\b",
+            "whsec_***REDACTED***",
+        ),
+        (
             "gh",
             r"(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{24,}|github_pat_[A-Za-z0-9_]{30,}",
             "gh_***REDACTED***",
         ),
         ("AKIA", r"AKIA[0-9A-Z]{16}", "AKIA***REDACTED***"),
+        ("LTAI", r"\bLTAI[A-Za-z0-9]{12,24}\b", "LTAI***REDACTED***"),
+        ("AKID", r"\bAKID[A-Za-z0-9]{13,32}\b", "AKID***REDACTED***"),
         ("AIza", r"AIza[0-9A-Za-z\-_]{35}", "AIza***REDACTED***"),
+        (
+            ":AA",
+            r"\b\d{8,10}:AA[A-Za-z0-9_-]{33}\b",
+            "tg_bot:***REDACTED***",
+        ),
+        ("npm_", r"\bnpm_[A-Za-z0-9]{36}\b", "npm_***REDACTED***"),
+        (
+            "pypi-",
+            r"\bpypi-[A-Za-z0-9_-]{40,}\b",
+            "pypi-***REDACTED***",
+        ),
+        (
+            "SG.",
+            r"\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\b",
+            "SG.***REDACTED***",
+        ),
         (
             "eyJ",
             r"eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}",
@@ -1810,6 +1843,14 @@ pub fn redact_secrets(text: &str) -> String {
     }
 
     if out.contains('=') || out.contains(':') {
+        let wg_re = Regex::new(
+            r"(?im)^(\s*(?:PrivateKey|PresharedKey)\s*=\s*)([A-Za-z0-9+/]{42,44}=)(\s*)$",
+        )
+        .unwrap();
+        out = wg_re
+            .replace_all(&out, "${1}***WG_KEY_REDACTED***${3}")
+            .into_owned();
+
         let env_re = Regex::new(
             r##"(?im)^(\s*(?:export\s+)?[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY|AUTH_TOKEN|CLIENT_SECRET)[A-Z0-9_]*\s*[:=]\s*['"]?)([^\s'"#]{6,})(['"]?)"##,
         )
@@ -1993,16 +2034,77 @@ pub fn clean_tracking_url(raw: &str) -> Option<String> {
     Some(out)
 }
 
+pub fn contains_dynamic_template_placeholders(text: &str) -> bool {
+    if !text.contains("{{") || !text.contains("}}") {
+        return false;
+    }
+    static TPL_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    let re = TPL_RE.get_or_init(|| {
+        Regex::new(r"(?i)\{\{\s*(clip|clip_redacted|date|time|datetime|weekday|ts|uuid)\s*\}\}")
+            .unwrap()
+    });
+    re.is_match(text)
+}
+
 pub fn render_dynamic_template(template: &str, latest_context: Option<&str>) -> String {
+    if !contains_dynamic_template_placeholders(template) {
+        return template.to_string();
+    }
     let ctx = latest_context.unwrap_or("");
     let redacted_ctx = redact_pii_and_private_ip(&redact_secrets(ctx));
-    let iso = crate::model::unix_secs_to_iso8601(crate::model::now_unix_secs());
-    let date_only = &iso[0..10];
-    template
-        .replace("{{clip_redacted}}", &redacted_ctx)
-        .replace("{{clip}}", ctx)
-        .replace("{{date}}", date_only)
-        .replace("{{datetime}}", &iso)
+    let now_secs = crate::model::now_unix_secs();
+    // 默认东八区展示本地自然日期/时间/星期（与中文用户直觉一致）
+    let local_secs = now_secs.saturating_add(8 * 3600);
+    let iso_local = crate::model::unix_secs_to_iso8601(local_secs);
+    let date_only = &iso_local[0..10];
+    let time_only = &iso_local[11..19];
+    let datetime_pretty = format!("{date_only} {time_only}");
+    let weekday_idx = (((local_secs / 86_400) + 4) % 7) as usize;
+    const WEEKDAYS: [&str; 7] = [
+        "星期日",
+        "星期一",
+        "星期二",
+        "星期三",
+        "星期四",
+        "星期五",
+        "星期六",
+    ];
+    let weekday_str = WEEKDAYS[weekday_idx];
+    let ts_str = now_secs.to_string();
+
+    static TPL_REP_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    let re = TPL_REP_RE.get_or_init(|| {
+        Regex::new(r"(?i)\{\{\s*(clip|clip_redacted|date|time|datetime|weekday|ts|uuid)\s*\}\}")
+            .unwrap()
+    });
+
+    let mut out = String::with_capacity(template.len() + ctx.len());
+    let mut last = 0usize;
+    let mut uuid_seq = 0u32;
+    for caps in re.captures_iter(template) {
+        let Some(full_m) = caps.get(0) else { continue };
+        let Some(key_m) = caps.get(1) else { continue };
+        out.push_str(&template[last..full_m.start()]);
+        match key_m.as_str().to_ascii_lowercase().as_str() {
+            "clip" => out.push_str(ctx),
+            "clip_redacted" => out.push_str(&redacted_ctx),
+            "date" => out.push_str(date_only),
+            "time" => out.push_str(time_only),
+            "datetime" => out.push_str(&datetime_pretty),
+            "weekday" => out.push_str(weekday_str),
+            "ts" => out.push_str(&ts_str),
+            "uuid" => {
+                uuid_seq += 1;
+                out.push_str(&crate::model::generate_pseudo_uuid(&format!(
+                    "tpl-{now_secs}-{uuid_seq}"
+                )));
+            }
+            _ => out.push_str(full_m.as_str()),
+        }
+        last = full_m.end();
+    }
+    out.push_str(&template[last..]);
+    out
 }
 
 /// 零像素解码快速嗅探本地 JPEG / PNG 照片是否携带 EXIF / GPS / XMP / 文本隐私元数据块

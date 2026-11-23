@@ -870,7 +870,11 @@ pub fn classify_sensitive_text(raw: &str) -> Option<SensitiveSecretKind> {
     static AGE_KEY_RE: OnceLock<Regex> = OnceLock::new();
     let age_re =
         AGE_KEY_RE.get_or_init(|| Regex::new(r"\bAGE-SECRET-KEY-1[A-Z0-9]{50,}\b").unwrap());
-    if age_re.is_match(sample) || is_otpauth_uri(sample) {
+    static WG_PRIV_RE: OnceLock<Regex> = OnceLock::new();
+    let wg_re = WG_PRIV_RE.get_or_init(|| {
+        Regex::new(r"(?im)^\s*(?:PrivateKey|PresharedKey)\s*=\s*[A-Za-z0-9+/]{42,44}=\s*$").unwrap()
+    });
+    if age_re.is_match(sample) || is_otpauth_uri(sample) || wg_re.is_match(sample) {
         return Some(SensitiveSecretKind::PrivateKey);
     }
 
@@ -880,7 +884,7 @@ pub fn classify_sensitive_text(raw: &str) -> Option<SensitiveSecretKind> {
     static BEARER_RE: OnceLock<Regex> = OnceLock::new();
 
     let api_re = API_RE.get_or_init(|| {
-        Regex::new(r"\b(?:sk-(?:proj-|ant-|live_|test_)?[A-Za-z0-9_-]{18,}|gh[pousr]_[A-Za-z0-9]{24,}|github_pat_[A-Za-z0-9_]{28,}|glpat-[A-Za-z0-9_-]{18,}|xox[baprs]-[A-Za-z0-9-]{18,}|AIzaSy[A-Za-z0-9_-]{31,}|hf_[A-Za-z0-9]{24,}|AKIA[0-9A-Z]{16})\b").unwrap()
+        Regex::new(r"\b(?:sk-(?:proj-|ant-)?[A-Za-z0-9_-]{18,}|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}|whsec_[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{24,}|github_pat_[A-Za-z0-9_]{28,}|glpat-[A-Za-z0-9_-]{18,}|xox[baprs]-[A-Za-z0-9-]{18,}|AIzaSy[A-Za-z0-9_-]{31,}|hf_[A-Za-z0-9]{24,}|AKIA[0-9A-Z]{16}|LTAI[A-Za-z0-9]{12,24}|AKID[A-Za-z0-9]{13,32}|\d{8,10}:AA[A-Za-z0-9_-]{33}|npm_[A-Za-z0-9]{36}|pypi-[A-Za-z0-9_-]{40,}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,})\b").unwrap()
     });
     if api_re.is_match(sample) {
         return Some(SensitiveSecretKind::ApiKey);
@@ -2319,4 +2323,12 @@ pub fn generate_env_example_template(raw: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+pub fn is_security_audit_query(raw: &str) -> bool {
+    let q = raw.trim().to_lowercase();
+    matches!(
+        q.as_str(),
+        "@安全" | "@体检" | "@隐私体检" | "@shield" | "@audit"
+    )
 }

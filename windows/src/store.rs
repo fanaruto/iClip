@@ -1416,28 +1416,33 @@ impl ClipboardStore {
         count
     }
 
-    /// 统计当前库中未收藏、非待办的高敏凭据与粘贴即焚项总数（支撑 `@敏感` 体检汇总栏）
+    fn is_unpinned_security_or_poison_risk(it: &ClipItem) -> bool {
+        if it.is_pinned || it.is_pending_todo() {
+            return false;
+        }
+        it.detected_sensitive_kind().is_some()
+            || it.is_burn_after_paste()
+            || it.detected_link_risk().is_some()
+            || matches!(
+                it.detected_poison_threat(),
+                Some(crate::security::PoisonThreatKind::PastejackingOrBidi(_))
+            )
+    }
+
+    /// 统计当前库中未收藏、非待办的高敏凭据、投毒风险与粘贴即焚项总数（支撑 `@敏感` 与 `@体检`）
     pub fn unpinned_sensitive_count(&self) -> usize {
         self.items
             .iter()
-            .filter(|it| {
-                !it.is_pinned
-                    && !it.is_pending_todo()
-                    && (it.detected_sensitive_kind().is_some() || it.is_burn_after_paste())
-            })
+            .filter(|it| Self::is_unpinned_security_or_poison_risk(it))
             .count()
     }
 
-    /// 一键无痕清扫所有未收藏、非待办的敏感凭据与粘贴即焚残留（收藏项永久豁免）
+    /// 一键无痕清扫所有未收藏、非待办的敏感凭据、隐藏控制符投毒、钓鱼风险与粘贴即焚残留（收藏项永久豁免）
     pub fn sweep_all_unpinned_sensitive(&mut self) -> usize {
         let target_ids: Vec<String> = self
             .items
             .iter()
-            .filter(|it| {
-                !it.is_pinned
-                    && !it.is_pending_todo()
-                    && (it.detected_sensitive_kind().is_some() || it.is_burn_after_paste())
-            })
+            .filter(|it| Self::is_unpinned_security_or_poison_risk(it))
             .map(|it| it.id.clone())
             .collect();
         let count = target_ids.len();

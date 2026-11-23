@@ -844,18 +844,35 @@ final class ClipboardStore: ObservableObject {
         return purged.count
     }
 
-    /// 当前历史库中未收藏、非待办的高敏凭据与粘贴即焚项总数（支撑 `@敏感` 体检栏）
+    private static func isUnpinnedSecurityOrPoisonRisk(_ item: ClipItem) -> Bool {
+        if item.isPinned || item.isPendingTodo { return false }
+        if item.detectedSensitiveKind != nil || item.isBurnAfterPaste || item.detectedLinkRisk != nil {
+            return true
+        }
+        if case .pastejackingOrBidi = item.detectedPoisonThreat {
+            return true
+        }
+        return false
+    }
+
+    /// 当前历史库中未收藏、非待办的高敏凭据、投毒风险与粘贴即焚项总数（支撑 `@敏感` 与 `@体检`）
     var unpinnedSensitiveCount: Int {
         items.reduce(0) { acc, item in
-            let isProtected = item.isPinned || item.isPendingTodo
-            if !isProtected && (item.detectedSensitiveKind != nil || item.isBurnAfterPaste) {
-                return acc + 1
-            }
-            return acc
+            Self.isUnpinnedSecurityOrPoisonRisk(item) ? (acc + 1) : acc
         }
     }
 
-    /// 一键无痕清扫所有未收藏、非待办的敏感凭据与粘贴即焚残留（收藏项永久豁免）
+    var securityPostureReport: SecurityPostureAudit.Report {
+        SecurityPostureAudit.Report(
+            totalEncryptedItems: items.count,
+            pinnedProtectedSecrets: pinnedSensitiveItemCount,
+            unpinnedRiskCount: unpinnedSensitiveCount,
+            screenStealthEnabled: screenSharePrivacyEnabled,
+            shoulderSurfVeilEnabled: maskSensitivePreviews
+        )
+    }
+
+    /// 一键无痕清扫所有未收藏、非待办的敏感凭据、隐藏控制符投毒、钓鱼风险与粘贴即焚残留（收藏项永久豁免）
     @discardableResult
     func sweepAllUnpinnedSensitiveItems() -> Int {
         var kept: [ClipItem] = []
@@ -863,8 +880,7 @@ final class ClipboardStore: ObservableObject {
         let currentPBString = pasteboard.string(forType: .string)
 
         for item in items {
-            let isProtected = item.isPinned || item.isPendingTodo
-            if !isProtected && (item.detectedSensitiveKind != nil || item.isBurnAfterPaste) {
+            if Self.isUnpinnedSecurityOrPoisonRisk(item) {
                 removed.append(item)
             } else {
                 kept.append(item)
@@ -1334,6 +1350,9 @@ final class ClipboardStore: ObservableObject {
     /// 将 iClip 面板内的条目（文本 / 链接 / 图片 / 文件）包装为原生 NSItemProvider，支持直接拖出至任意外部应用
     func makeDragItemProvider(for item: ClipItem) -> NSItemProvider {
         lastInternalDragUptime = ProcessInfo.processInfo.systemUptime
+        if item.isBurnAfterPaste {
+            scheduleBurnAfterPasteIfNeeded(for: item, delaySeconds: 5.0)
+        }
 
         switch item.type {
         case .image:
@@ -1394,8 +1413,8 @@ final class ClipboardStore: ObservableObject {
                 ext: spec.ext,
                 fallbackStem: spec.fallbackStem
             )
-            // 对 SVG / JSON / HTML / CSV / 脚本 / Markdown 同时附带标准文件表示，保持输入框粘贴纯文本的同时支持访达/设计工具直接接收真实文件
-            if spec.utType != .utf8PlainText && spec.utType != .plainText {
+            // 对 SVG / JSON / HTML / CSV / 脚本 / Markdown 同时附带标准文件表示（粘贴即焚高机密卡片禁止静默落盘临时文件）
+            if !item.isBurnAfterPaste && spec.utType != .utf8PlainText && spec.utType != .plainText {
                 let itemSnapshot = item
                 provider.registerFileRepresentation(
                     forTypeIdentifier: spec.utType.identifier,

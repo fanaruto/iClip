@@ -603,6 +603,16 @@ impl ClipItem {
                     .map(crate::security::is_otpauth_uri)
                     .unwrap_or(false)
             }
+            "@安全" | "@体检" | "@隐私体检" | "@shield" | "@audit" => {
+                if matches!(
+                    self.detected_poison_threat(),
+                    Some(crate::security::PoisonThreatKind::PastejackingOrBidi(_))
+                ) || self.detected_link_risk().is_some()
+                {
+                    return true;
+                }
+                return self.detected_sensitive_kind().is_some() || self.is_burn_after_paste();
+            }
             "风险" | "@风险" | "@毒" | "@poison" | "poison" => {
                 return self.detected_poison_threat().is_some()
                     || self.detected_link_risk().is_some()

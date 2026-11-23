@@ -138,6 +138,69 @@ struct SecurePasswordCardView: View {
     }
 }
 
+/// 搜索框 `@安全` / `@体检` / `@shield` 零信任安全盾牌实时体检卡片（可视化呈现全库加密与活跃防线，一键清零未收藏风险）
+struct SecurityAuditCardView: View {
+    let report: SecurityPostureAudit.Report
+    let onSweepRisks: () -> Void
+
+    var body: some View {
+        let isClean = (report.unpinnedRiskCount == 0)
+        let tint: Color = isClean ? .green : .orange
+
+        HStack(spacing: 10) {
+            Image(systemName: isClean ? "checkmark.shield.fill" : "exclamationmark.shield.fill")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(tint)
+                .frame(width: 28, height: 28)
+                .background(Circle().fill(tint.opacity(0.15)))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(report.headlineText)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+
+                Text(report.postureSubtitle)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 4)
+
+            if isClean {
+                Text("护盾全开")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(Color.green)
+                    .padding(.horizontal, 8.5)
+                    .padding(.vertical, 4)
+                    .background(Capsule().fill(Color.green.opacity(0.14)))
+            } else {
+                Button(action: onSweepRisks) {
+                    Text("一键清零 (\(report.unpinnedRiskCount))")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 4.5)
+                        .background(Capsule().fill(Color.orange))
+                }
+                .buttonStyle(.plain)
+                .help("连根清除未收藏的敏感凭据、即焚残留、隐藏控制符投毒与钓鱼风险链接（收藏项永久豁免）")
+            }
+        }
+        .padding(.horizontal, 11)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .fill(tint.opacity(0.09))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .strokeBorder(tint.opacity(0.26), lineWidth: 0.65)
+        )
+    }
+}
+
 /// 顶栏「始终在前（Always on Top · ⌘P）」32×32 原生玻璃图钉圆钮（锁死外框尺寸，零布局抖动）
 struct AlwaysOnTopPinButton: View {
     @ObservedObject var store: ClipboardStore

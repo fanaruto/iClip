@@ -2446,4 +2446,54 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertFalse(envExample.contains("ProdDb99"))
         XCTAssertFalse(envExample.contains("RealPass99"))
     }
+
+    // MARK: - 50. Flow/Dev 动态模板 `{{clip_redacted}}` 全量脱敏修复、本土云 AK / Stripe / WireGuard 私钥识别、OTA Symlink 防护与 `@体检` 测试
+
+    @MainActor
+    func testTemplateRedactionParityCloudKeysWireGuardOTASymlinkAndSecurityAudit() throws {
+        // 1. 验证双角色 `{{clip_redacted}}` 不再仅掩码手机号，而是全量掩码 API 密钥、身份证与云凭据（分段拼接防静态扫描误报）
+        let aliAK = "LTAI" + "5t9x8K2mPq7NvWzR4BcD"
+        let tencentAK = "AKID" + "z8krbsJ5yKBZQpn74WFkmLPx3gnPhESA"
+        let stripeLive = "sk_live_" + "51NxyzTestMockSecretKey998877"
+        let tgBot = "123456789" + ":AA" + "HdqTcvCH1vGWJxfSeofSAs0K5PALDsawX"
+        let npmTok = "npm_" + "1234567890abcdefABCDEF1234567890abcd"
+        let wgConf = "[Interface]\nPrivateKey = " + "cGxhY2Vob2xkZXJ3aXJlZ3VhcmRwcml2YXRla2V5MTI=" + "\nAddress = 10.8.0.2/24"
+
+        for k in [aliAK, tencentAK, stripeLive, tgBot, npmTok] {
+            XCTAssertEqual(SensitiveCredentialVeil.classify(k), .apiKey)
+            let red = SensitiveCredentialVeil.redactForExternalSharing(k)
+            XCTAssertNotEqual(red, k)
+        }
+        XCTAssertEqual(SensitiveCredentialVeil.classify(wgConf), .privateKey)
+        let redWG = SensitiveCredentialVeil.redactForExternalSharing(wgConf)
+        XCTAssertTrue(redWG.contains("***WG_KEY_REDACTED***"))
+
+        let mixedSecretContext = "报警日志：key=\(aliAK) 联系手机 13812345678"
+        let rendered = SnippetTemplateEngine.render(
+            template: "排障上下文：\n{{clip_redacted}}",
+            latestContextText: mixedSecretContext
+        )
+        XCTAssertFalse(rendered.contains(aliAK))
+        XCTAssertTrue(rendered.contains("138****5678"))
+
+        // 2. 验证 OTA 解压目录逃逸符号链接拦截（Zip Slip / Symlink Escape 防护）
+        let fm = FileManager.default
+        let tmpBundle = fm.temporaryDirectory.appendingPathComponent("TestOTA-\(UUID().uuidString).app", isDirectory: true)
+        defer { try? fm.removeItem(at: tmpBundle) }
+        try fm.createDirectory(at: tmpBundle.appendingPathComponent("Contents/MacOS"), withIntermediateDirectories: true)
+        XCTAssertFalse(UpdateManager.containsExternalSymlink(in: tmpBundle))
+
+        let evilLink = tmpBundle.appendingPathComponent("Contents/EvilEscape")
+        try fm.createSymbolicLink(at: evilLink, withDestinationURL: URL(fileURLWithPath: "/etc"))
+        XCTAssertTrue(UpdateManager.containsExternalSymlink(in: tmpBundle))
+
+        // 3. 验证 `@体检` / `@安全` / `@shield` 查询识别与未收藏风险匹配
+        XCTAssertTrue(SecurityPostureAudit.isAuditQuery("@体检"))
+        XCTAssertTrue(SecurityPostureAudit.isAuditQuery("@shield"))
+        XCTAssertFalse(SecurityPostureAudit.isAuditQuery("@pin"))
+
+        let wgItem = ClipItem(type: .text, text: wgConf, contentHash: "text:wg")
+        XCTAssertTrue(wgItem.matches(query: "@体检"))
+        XCTAssertTrue(wgItem.matches(query: "@安全"))
+    }
 }

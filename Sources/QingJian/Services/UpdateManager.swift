@@ -293,6 +293,15 @@ final class UpdateManager: NSObject, ObservableObject {
                     throw OTAError.invalidAppBundle
                 }
 
+                // 强制阻断包内含恶意符号链接路径穿越（Zip Slip / Symlink 防护）与伪造 Bundle Identifier
+                guard !Self.containsExternalSymlink(in: newAppURL) else {
+                    throw OTAError.invalidAppBundle
+                }
+                guard let newPlist = NSDictionary(contentsOf: newAppURL.appendingPathComponent("Contents/Info.plist")),
+                      (newPlist["CFBundleIdentifier"] as? String) == "com.qingjian.clipboard" else {
+                    throw OTAError.invalidAppBundle
+                }
+
                 // 执行系统级代码签名与 Bundle 密封完整性核验，拒绝任何损坏或被篡改的二进制覆盖 /Applications
                 let verifyProc = Process()
                 verifyProc.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
@@ -307,7 +316,6 @@ final class UpdateManager: NSObject, ObservableObject {
 
                 // 校验证书包内的角色标记是否与用户请求的目标角色一致（二次防呆校验）
                 if info.isEditionSwitch,
-                   let newPlist = NSDictionary(contentsOf: newAppURL.appendingPathComponent("Contents/Info.plist")),
                    let bundledEdition = newPlist["IClipEdition"] as? String,
                    bundledEdition != info.edition.rawValue {
                     throw OTAError.editionMismatch
@@ -442,6 +450,33 @@ final class UpdateManager: NSObject, ObservableObject {
             "app.webfooo.com"
         ]
         return trustedHosts.contains(host)
+    }
+
+    /// 递归检查解压出的 `.app` 包是否包含逃逸至包目录外部的恶意符号链接（Zip Slip / Symlink 逃逸防护）
+    nonisolated static func containsExternalSymlink(in bundleURL: URL) -> Bool {
+        let fm = FileManager.default
+        let rootPrefix = bundleURL.resolvingSymlinksInPath().standardizedFileURL.path + "/"
+        if let rootVals = try? bundleURL.resourceValues(forKeys: [.isSymbolicLinkKey]),
+           rootVals.isSymbolicLink == true {
+            return true
+        }
+        guard let enumerator = fm.enumerator(
+            at: bundleURL,
+            includingPropertiesForKeys: [.isSymbolicLinkKey],
+            options: []
+        ) else {
+            return true
+        }
+        for case let fileURL as URL in enumerator {
+            if let vals = try? fileURL.resourceValues(forKeys: [.isSymbolicLinkKey]),
+               vals.isSymbolicLink == true {
+                let resolved = fileURL.resolvingSymlinksInPath().standardizedFileURL.path
+                if !resolved.hasPrefix(rootPrefix) {
+                    return true
+                }
+            }
+        }
+        return false
     }
 
     nonisolated private static func shellQuote(_ value: String) -> String {

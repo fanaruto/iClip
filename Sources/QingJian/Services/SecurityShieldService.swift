@@ -495,7 +495,10 @@ enum ClipboardPoisonGuard {
 /// 2. 离线微秒级高敏凭据嗅探与防肩窥圆点雾化遮罩（零布局抖动，选中/悬停即刻原位显影）
 enum SensitiveCredentialVeil {
     private static let apiKeyRegex = try! NSRegularExpression(
-        pattern: #"\b(?:sk-(?:proj-|ant-|live_|test_)?[A-Za-z0-9_-]{18,}|gh[pousr]_[A-Za-z0-9]{24,}|github_pat_[A-Za-z0-9_]{28,}|glpat-[A-Za-z0-9_-]{18,}|xox[baprs]-[A-Za-z0-9-]{18,}|AIzaSy[A-Za-z0-9_-]{31,}|hf_[A-Za-z0-9]{24,}|AKIA[0-9A-Z]{16})\b"#
+        pattern: #"\b(?:sk-(?:proj-|ant-)?[A-Za-z0-9_-]{18,}|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}|whsec_[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{24,}|github_pat_[A-Za-z0-9_]{28,}|glpat-[A-Za-z0-9_-]{18,}|xox[baprs]-[A-Za-z0-9-]{18,}|AIzaSy[A-Za-z0-9_-]{31,}|hf_[A-Za-z0-9]{24,}|AKIA[0-9A-Z]{16}|LTAI[A-Za-z0-9]{12,24}|AKID[A-Za-z0-9]{13,32}|\d{8,10}:AA[A-Za-z0-9_-]{33}|npm_[A-Za-z0-9]{36}|pypi-[A-Za-z0-9_-]{40,}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,})\b"#
+    )
+    private static let wireGuardPrivateKeyRegex = try! NSRegularExpression(
+        pattern: #"(?im)^(\s*(?:PrivateKey|PresharedKey)\s*=\s*)([A-Za-z0-9+/]{42,44}=)(\s*)$"#
     )
     private static let jwtRegex = try! NSRegularExpression(
         pattern: #"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"#
@@ -603,7 +606,8 @@ enum SensitiveCredentialVeil {
         }
         let nsRange = NSRange(sample.startIndex..<sample.endIndex, in: sample)
         if ageSecretKeyRegex.firstMatch(in: sample, range: nsRange) != nil
-            || otpAuthUriRegex.firstMatch(in: sample, range: nsRange) != nil {
+            || otpAuthUriRegex.firstMatch(in: sample, range: nsRange) != nil
+            || wireGuardPrivateKeyRegex.firstMatch(in: sample, range: nsRange) != nil {
             return .privateKey
         }
         if apiKeyRegex.firstMatch(in: sample, range: nsRange) != nil {
@@ -792,6 +796,11 @@ enum SensitiveCredentialVeil {
             withTemplate: "Bearer ***REDACTED***"
         )
         if out.contains("=") || out.contains(":") {
+            out = wireGuardPrivateKeyRegex.stringByReplacingMatches(
+                in: out,
+                range: NSRange(out.startIndex..<out.endIndex, in: out),
+                withTemplate: "$1***WG_KEY_REDACTED***$3"
+            )
             out = envSecretRegex.stringByReplacingMatches(
                 in: out,
                 range: NSRange(out.startIndex..<out.endIndex, in: out),
@@ -1802,5 +1811,39 @@ enum EnvTemplateSanitizer {
 
         guard validAssignments >= 2 && mutatedCount >= 1 else { return nil }
         return outLines.joined(separator: "\n")
+    }
+}
+
+/// 8. 零信任安全盾牌实时体检引擎（支持 `@安全` / `@体检` / `@shield` 一眼透视加密状态与未收藏风险）
+enum SecurityPostureAudit {
+    struct Report: Equatable {
+        let totalEncryptedItems: Int
+        let pinnedProtectedSecrets: Int
+        let unpinnedRiskCount: Int
+        let screenStealthEnabled: Bool
+        let shoulderSurfVeilEnabled: Bool
+
+        var headlineText: String {
+            if unpinnedRiskCount == 0 {
+                return "✓ 零临时风险残留 · \(pinnedProtectedSecrets) 项收藏密钥受保护"
+            }
+            return "检出 \(unpinnedRiskCount) 项未收藏敏感/投毒风险 · 收藏项豁免"
+        }
+
+        var postureSubtitle: String {
+            let stealth = screenStealthEnabled ? "开启" : "关闭"
+            let veil = shoulderSurfVeilEnabled ? "开启" : "关闭"
+            return "硬件主密钥已加密 \(totalEncryptedItems) 条 · 投屏隐身\(stealth) · 防肩窥\(veil)"
+        }
+    }
+
+    static func isAuditQuery(_ rawQuery: String) -> Bool {
+        let q = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        switch q {
+        case "@安全", "@体检", "@隐私体检", "@shield", "@audit":
+            return true
+        default:
+            return false
+        }
     }
 }
