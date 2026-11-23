@@ -239,6 +239,38 @@ enum HistoryPersistenceHelper {
         }
         return removedCount
     }
+
+    /// 清理应用数据根目录在异常断电/热重启时偶发残留的 Foundation 原子写入临时文件（如 history.json.sb-*）
+    @discardableResult
+    static func pruneStaleAtomicTempFiles(
+        in appSupportDirectoryURL: URL,
+        minimumAgeSeconds: TimeInterval = 300,
+        now: Date = Date()
+    ) -> Int {
+        let fm = FileManager.default
+        guard let urls = try? fm.contentsOfDirectory(
+            at: appSupportDirectoryURL,
+            includingPropertiesForKeys: [.isRegularFileKey, .contentModificationDateKey],
+            options: []
+        ) else {
+            return 0
+        }
+        var removed = 0
+        for url in urls {
+            let name = url.lastPathComponent
+            guard name.contains(".sb-") else { continue }
+            let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .contentModificationDateKey])
+            guard values?.isRegularFile == true else { continue }
+            if let modified = values?.contentModificationDate,
+               now.timeIntervalSince(modified) < minimumAgeSeconds {
+                continue
+            }
+            if (try? fm.removeItem(at: url)) != nil {
+                removed += 1
+            }
+        }
+        return removed
+    }
 }
 
 /// 剪贴板核心管理与持久化服务（支持极客开发版 / 心流办公版编译期隔离与跨版本无损存储）
@@ -651,11 +683,16 @@ final class ClipboardStore: ObservableObject {
             guard let self else { return }
             let referenced = Set((self.items + self.undoRemovedItems).compactMap(\.imageFileName))
             let imagesDir = self.imagesDirectoryURL
+            let rootDir = self.appSupportURL
             self.diskQueue.async {
                 _ = HistoryPersistenceHelper.pruneOrphanedImages(
                     in: imagesDir,
                     referencedFileNames: referenced,
                     minimumAgeSeconds: 60
+                )
+                _ = HistoryPersistenceHelper.pruneStaleAtomicTempFiles(
+                    in: rootDir,
+                    minimumAgeSeconds: 300
                 )
             }
         }
@@ -944,6 +981,11 @@ final class ClipboardStore: ObservableObject {
             copyAppendSegmentCount = 1
 
             let hasRichFormatting = RichTextPasteboardHelper.hasStrippableRichFormatting(types: types, plainText: rawText)
+            let hasSparkRichFormatting = RichTextPasteboardHelper.shouldOfferRichStripSpark(
+                types: types,
+                plainText: rawText,
+                sourceApp: sourceApp
+            )
             var text = rawText
             let isLink = isValidWebURL(trimmed)
             var didAutoApplyRule = false
@@ -1010,7 +1052,7 @@ final class ClipboardStore: ObservableObject {
                 ActionSparkController.shared.presentIfAppropriate(
                     for: latest,
                     reuseCount: reuseCount,
-                    hasRichFormatting: hasRichFormatting,
+                    hasRichFormatting: hasSparkRichFormatting,
                     in: self
                 )
             }
@@ -1666,6 +1708,10 @@ final class ClipboardStore: ObservableObject {
     func resolvedBrowserURL(for item: ClipItem) -> URL? {
         let raw = (item.text ?? item.primaryTitle).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !raw.isEmpty else { return nil }
+        if let cleaned = URLTrackingCleaner.extractFirstCleanedWebURL(from: raw),
+           let cleanedURL = URL(string: cleaned) ?? cleaned.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed).flatMap(URL.init(string:)) {
+            return cleanedURL
+        }
         if let direct = URL(string: raw), direct.scheme != nil {
             return direct
         }
@@ -1686,15 +1732,24 @@ final class ClipboardStore: ObservableObject {
         return nil
     }
 
-    /// 点击链接卡片左侧徽标：触发跃迁声触反馈并直接在默认浏览器中打开链接
+    /// 点击链接卡片左侧徽标或悬停打开按钮：触发跃迁声触反馈并强制激活默认浏览器前台打开链接
     func openLinkInBrowser(_ item: ClipItem) {
         guard let url = resolvedBrowserURL(for: item) else {
             showToast("无效的链接地址")
             return
         }
         TactileFeedbackEngine.shared.perform(.openLink)
-        NSWorkspace.shared.open(url)
         onAfterOpenExternalURL?()
+        let config = NSWorkspace.OpenConfiguration()
+        config.activates = true
+        NSWorkspace.shared.open(url, configuration: config) { [weak self] _, error in
+            if error != nil {
+                Task { @MainActor in
+                    _ = NSWorkspace.shared.open(url)
+                    self?.showToast("已在浏览器请求打开链接")
+                }
+            }
+        }
     }
 
     /// 全键盘 ⌘O 直达打开：链接在默认浏览器打开，文件与本地原图直接在访达中高亮定位
@@ -3043,11 +3098,14 @@ final class ClipboardStore: ObservableObject {
     }
 
     nonisolated static func isValidWebURL(_ string: String) -> Bool {
-        guard !string.contains("\n"), !string.contains(" ") else { return false }
-        guard let url = URL(string: string),
+        guard !string.contains("\n"), !string.contains("\r"), !string.contains(" ") else { return false }
+        let candidate = URL(string: string)
+            ?? string.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed).flatMap(URL.init(string:))
+        guard let url = candidate,
               let scheme = url.scheme?.lowercased(),
               (scheme == "http" || scheme == "https"),
-              let host = url.host, host.contains(".") else {
+              let host = url.host?.lowercased(),
+              (host.contains(".") || host == "localhost" || host == "127.0.0.1" || host == "0.0.0.0") else {
             return false
         }
         return true

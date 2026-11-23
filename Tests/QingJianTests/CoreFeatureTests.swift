@@ -1499,4 +1499,64 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertEqual(PinCategory.infer(alias: "日报通知", text: "今日日期 {{date}}"), .template)
         XCTAssertNil(PinCategory.infer(alias: "生产跳板机命令", text: "ssh jump-prod"))
     }
+
+    // MARK: - 36. IDE/终端语法高亮剪贴零误扰抑制、原子临时件自洁与数字顺位键码映射
+
+    @MainActor
+    func testIDECodeRichCopySparkSuppressionAndDigitKeyCodeMapping() throws {
+        // 1. IDE 与终端默认附带 HTML/RTF 时不误触发「去样式」微星标，而浏览器富文本照常提供微星标
+        let htmlTypes: [NSPasteboard.PasteboardType] = [.string, .html]
+        XCTAssertFalse(RichTextPasteboardHelper.shouldOfferRichStripSpark(
+            types: htmlTypes,
+            plainText: "let answer = 42",
+            sourceApp: "Antigravity"
+        ))
+        XCTAssertFalse(RichTextPasteboardHelper.shouldOfferRichStripSpark(
+            types: htmlTypes + [NSPasteboard.PasteboardType("vscode-editor-data")],
+            plainText: "function hello() {}",
+            sourceApp: "UnknownForkIDE"
+        ))
+        XCTAssertFalse(RichTextPasteboardHelper.shouldOfferRichStripSpark(
+            types: htmlTypes,
+            plainText: "git status -s",
+            sourceApp: "Ghostty"
+        ))
+        XCTAssertTrue(RichTextPasteboardHelper.shouldOfferRichStripSpark(
+            types: htmlTypes,
+            plainText: "这是一段来自网页博客带背景底色的文章段落",
+            sourceApp: "Google Chrome"
+        ))
+
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("iclip-ide-spark-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let engine = AdaptiveIntelligenceEngine(customDirectoryURL: tempDir)
+
+        let idePlainItem = ClipItem(type: .text, text: "普通对话或代码片段", contentHash: "text:ide1", sourceAppName: "Cursor")
+        XCTAssertNil(engine.evaluateSparkCandidate(for: idePlainItem, reuseCount: 1, minimalMode: false, hasRichFormatting: true))
+
+        let browserRichItem = ClipItem(type: .text, text: "网页花哨样式文本", contentHash: "text:web1", sourceAppName: "Safari")
+        let webSpark = engine.evaluateSparkCandidate(for: browserRichItem, reuseCount: 1, minimalMode: false, hasRichFormatting: true)
+        XCTAssertEqual(webSpark?.actionID, "strip-rich-style")
+
+        // 2. Foundation 原子写入残留 .sb-* 临时文件过期清理（保护新文件与正常 history.json）
+        let historyFile = tempDir.appendingPathComponent("history.json")
+        let staleTemp = tempDir.appendingPathComponent("history.json.sb-c149ea9b-Kw9zqw")
+        try Data("[]".utf8).write(to: historyFile)
+        try Data("stale".utf8).write(to: staleTemp)
+        let removed = HistoryPersistenceHelper.pruneStaleAtomicTempFiles(
+            in: tempDir,
+            minimumAgeSeconds: 300,
+            now: Date().addingTimeInterval(600)
+        )
+        XCTAssertEqual(removed, 1)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: historyFile.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: staleTemp.path))
+
+        // 3. 硬件数字键 1...9 精确映射（兼容 ⌘1~9 / ⌥⌘1~9 / ⇧⌘1~9）
+        XCTAssertEqual(ClipFilterTab.digitFromKeyCode(18), 1)
+        XCTAssertEqual(ClipFilterTab.digitFromKeyCode(23), 5)
+        XCTAssertEqual(ClipFilterTab.digitFromKeyCode(25), 9)
+        XCTAssertNil(ClipFilterTab.digitFromKeyCode(29))
+    }
 }

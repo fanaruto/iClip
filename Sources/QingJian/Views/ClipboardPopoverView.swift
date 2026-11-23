@@ -2263,10 +2263,15 @@ struct ClipboardPopoverView: View {
         return true
     }
 
-    func pasteItem(at index: Int) {
+    func pasteItem(at index: Int, plainTextOnly: Bool = false, smartTransform: Bool = false) {
         guard index >= 0, index < filteredItems.count else { return }
+        if smartTransform {
+            nav.selectedIndex = index
+            pasteSecondaryActionForSelected()
+            return
+        }
         let item = filteredItems[index]
-        store.copyAndOptionallyPaste(item, plainTextOnly: false, shouldAutoPaste: true, onBeforePaste: onDismiss)
+        store.copyAndOptionallyPaste(item, plainTextOnly: plainTextOnly, shouldAutoPaste: true, onBeforePaste: onDismiss)
     }
 
     func togglePinForSelected() {
@@ -4528,10 +4533,15 @@ struct ClipboardPopoverView: View {
         }
     }
 
-    func pasteItem(at index: Int) {
+    func pasteItem(at index: Int, plainTextOnly: Bool = false, smartTransform: Bool = false) {
         guard index >= 0, index < filteredItems.count else { return }
+        if smartTransform {
+            nav.selectedIndex = index
+            pasteSmartTransformedSelected()
+            return
+        }
         let item = filteredItems[index]
-        store.copyAndOptionallyPaste(item, plainTextOnly: false, shouldAutoPaste: true, onBeforePaste: onDismiss)
+        store.copyAndOptionallyPaste(item, plainTextOnly: plainTextOnly, shouldAutoPaste: true, onBeforePaste: onDismiss)
     }
 
     func togglePinForSelected() {

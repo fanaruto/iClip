@@ -9,6 +9,11 @@ final class KeyableFloatingPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+/// 允许悬浮面板在非激活态（如「始终在前」跨应用对照时）首次鼠标点击直接穿透触发内部链接跳转与操作按钮
+final class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
 /// 悬浮窗控制器：使用苹果官方 WindowServer 级原生材质根容器（NSGlassEffectView / NSVisualEffectView）
 /// 彻底消除透明大画布阴影截断方框，保留系统原生连续圆角与柔和投影
 @MainActor
@@ -108,7 +113,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         )
         self.rootView = view
 
-        let hosting = NSHostingView(rootView: view)
+        let hosting = FirstMouseHostingView(rootView: view)
         // 锁死 NSHostingView 尺寸反推：彻底禁止任何内部子视图状态切换反向拉宽或撑高 NSPanel 外框
         hosting.sizingOptions = []
         hosting.frame = contentRect
@@ -620,9 +625,19 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             return nil
         }
 
-        if flags == .command, let chars = event.charactersIgnoringModifiers, let digit = Int(chars), (1...9).contains(digit) {
-            rootView.pasteItem(at: digit - 1)
-            return nil
+        if let digit = ClipFilterTab.digitFromKeyCode(event.keyCode) {
+            if flags == .command {
+                rootView.pasteItem(at: digit - 1)
+                return nil
+            }
+            if flags == [.command, .option] {
+                rootView.pasteItem(at: digit - 1, plainTextOnly: true)
+                return nil
+            }
+            if flags == [.command, .shift] {
+                rootView.pasteItem(at: digit - 1, smartTransform: true)
+                return nil
+            }
         }
 
         // ⌥1 ~ ⌥6：全键盘一键直达顶部分类（全部 / 收藏 / 文本 / 链接 / 图片 / 文件）
@@ -744,6 +759,11 @@ final class KeyableFloatingPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+/// 允许悬浮面板在非激活态（如「始终在前」跨应用对照时）首次鼠标点击直接穿透触发内部链接跳转与操作按钮
+final class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
 /// 悬浮窗控制器：使用苹果官方 WindowServer 级原生材质根容器（NSGlassEffectView / NSVisualEffectView）
 /// 彻底消除透明大画布阴影截断方框，保留系统原生连续圆角与柔和投影
 @MainActor
@@ -843,7 +863,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         )
         self.rootView = view
 
-        let hosting = NSHostingView(rootView: view)
+        let hosting = FirstMouseHostingView(rootView: view)
         // 锁死 NSHostingView 尺寸反推：彻底禁止任何内部子视图状态切换反向拉宽或撑高 NSPanel 外框
         hosting.sizingOptions = []
         hosting.frame = contentRect
@@ -1340,9 +1360,19 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             return nil
         }
 
-        if flags == .command, let chars = event.charactersIgnoringModifiers, let digit = Int(chars), (1...9).contains(digit) {
-            rootView.pasteItem(at: digit - 1)
-            return nil
+        if let digit = ClipFilterTab.digitFromKeyCode(event.keyCode) {
+            if flags == .command {
+                rootView.pasteItem(at: digit - 1)
+                return nil
+            }
+            if flags == [.command, .option] {
+                rootView.pasteItem(at: digit - 1, plainTextOnly: true)
+                return nil
+            }
+            if flags == [.command, .shift] {
+                rootView.pasteItem(at: digit - 1, smartTransform: true)
+                return nil
+            }
         }
 
         // ⌥1 ~ ⌥6：全键盘一键直达顶部分类（全部 / 收藏 / 文本 / 链接 / 图片 / 文件）

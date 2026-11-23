@@ -601,22 +601,28 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
             if hasRichFormatting,
                let plain = item.text, !plain.isEmpty,
                !isCategoryCoolingDown("rich_text") {
-                let promo = promotableRuleIfEligible(forActionID: "strip-rich-style")
-                let preferred = isHabitPreferred(actionID: "strip-rich-style", sourceApp: item.sourceAppName)
-                return AdaptiveSparkCandidate(
-                    actionID: "strip-rich-style",
-                    categoryKey: "rich_text",
-                    sourceApp: item.sourceAppName,
-                    symbolName: "textformat",
-                    shortTitle: "净化为纯文本",
-                    badgeHint: preferred ? "习惯首选" : "去样式",
-                    promotableRule: promo,
-                    payload: .replaceClipboardText(
-                        text: plain,
-                        htmlTable: nil,
-                        toast: "已剥离富文本样式，直接 ⌘V 粘贴纯文本"
-                    )
+                let isCodeOrTerminal = RichTextPasteboardHelper.isCodeEditorOrTerminalCopy(
+                    types: [],
+                    sourceApp: item.sourceAppName
                 )
+                let preferred = isHabitPreferred(actionID: "strip-rich-style", sourceApp: item.sourceAppName)
+                if !isCodeOrTerminal || preferred {
+                    let promo = promotableRuleIfEligible(forActionID: "strip-rich-style")
+                    return AdaptiveSparkCandidate(
+                        actionID: "strip-rich-style",
+                        categoryKey: "rich_text",
+                        sourceApp: item.sourceAppName,
+                        symbolName: "textformat",
+                        shortTitle: "净化为纯文本",
+                        badgeHint: preferred ? "习惯首选" : "去样式",
+                        promotableRule: promo,
+                        payload: .replaceClipboardText(
+                            text: plain,
+                            htmlTable: nil,
+                            toast: "已剥离富文本样式，直接 ⌘V 粘贴纯文本"
+                        )
+                    )
+                }
             }
             // 若无格式转换命中，但该未收藏条目已被反复复制 ≥ 3 次，主动提示沉淀进收藏夹
             if !item.isPinned && reuseCount >= 3 {
@@ -1349,14 +1355,24 @@ enum URLTrackingCleaner {
     }
 }
 
-/// 富文本脏样式无损嗅探器：识别网页/IDE/文档夹带的 HTML/RTF 样式，同时严格保护电子表格分列结构
+/// 富文本脏样式无损嗅探器：识别网页/文档夹带的 HTML/RTF 脏样式，严格保护电子表格分列结构，并自动过滤 IDE/终端等宽语法着色噪音
 enum RichTextPasteboardHelper {
     private static let webArchiveType = NSPasteboard.PasteboardType("com.apple.webarchive")
+    private static let vscodeEditorDataType = NSPasteboard.PasteboardType("vscode-editor-data")
+    private static let sourceCodeType = NSPasteboard.PasteboardType("public.source-code")
     private static let richTextTypes: Set<NSPasteboard.PasteboardType> = [
         .html,
         .rtf,
         .rtfd,
         NSPasteboard.PasteboardType("com.apple.webarchive")
+    ]
+
+    private static let codeAndTerminalAppKeywords: [String] = [
+        "antigravity", "cursor", "visual studio code", "vscode", "windsurf", "trae",
+        "zed", "xcode", "intellij", "pycharm", "webstorm", "goland", "clion",
+        "rustrover", "phpstorm", "rubymine", "rider", "datagrip", "android studio",
+        "sublime text", "nova", "bbedit", "textmate", "coteditor",
+        "terminal", "终端", "iterm", "ghostty", "warp", "kitty", "alacritty", "wezterm", "tabby", "hyper"
     ]
 
     static func hasStrippableRichFormatting(
@@ -1372,5 +1388,35 @@ enum RichTextPasteboardHelper {
             return false
         }
         return types.contains { richTextTypes.contains($0) }
+    }
+
+    /// 识别是否来自代码编辑器 / IDE / 终端的常规语法高亮复制（此类应用默认附带 HTML/RTF，不应主动弹「去样式」微星标打扰编码）
+    static func isCodeEditorOrTerminalCopy(
+        types: [NSPasteboard.PasteboardType],
+        sourceApp: String?
+    ) -> Bool {
+        if types.contains(vscodeEditorDataType) || types.contains(sourceCodeType) {
+            return true
+        }
+        guard let rawApp = sourceApp?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !rawApp.isEmpty else {
+            return false
+        }
+        if rawApp == "code" || rawApp == "code - insiders" || rawApp == "vim" || rawApp == "nvim" || rawApp == "neovim" || rawApp == "emacs" {
+            return true
+        }
+        return codeAndTerminalAppKeywords.contains { rawApp.contains($0) }
+    }
+
+    /// 判断本次复制是否值得主动弹出「净化富文本」微星标
+    static func shouldOfferRichStripSpark(
+        types: [NSPasteboard.PasteboardType],
+        plainText: String,
+        sourceApp: String?
+    ) -> Bool {
+        guard hasStrippableRichFormatting(types: types, plainText: plainText) else {
+            return false
+        }
+        return !isCodeEditorOrTerminalCopy(types: types, sourceApp: sourceApp)
     }
 }

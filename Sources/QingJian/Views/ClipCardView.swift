@@ -41,8 +41,15 @@ struct ClipCardView: View {
         minimalMode ? [] : ClipboardStore.shared.financeActions(for: item)
     }
 
+    private var hasEmbeddedWebLink: Bool {
+        guard item.type == .text, let raw = item.text else { return false }
+        let head = raw.prefix(2048).lowercased()
+        guard head.contains("http://") || head.contains("https://") else { return false }
+        return URLTrackingCleaner.extractFirstCleanedWebURL(from: raw) != nil
+    }
+
     private var hasLeadingVisual: Bool {
-        item.type != .text
+        item.type != .text || hasEmbeddedWebLink
     }
 
     var body: some View {
@@ -236,6 +243,11 @@ struct ClipCardView: View {
             onPaste(false)
             return
         }
+        if (item.type == .link || hasEmbeddedWebLink) && NSEvent.modifierFlags.contains(.command) {
+            onSelect()
+            _ = ClipboardStore.shared.openItemExternally(item)
+            return
+        }
         if !minimalMode && NSEvent.modifierFlags.contains(.command) {
             onToggleMerge()
         } else {
@@ -310,7 +322,17 @@ struct ClipCardView: View {
             }
 
         case .text:
-            EmptyView()
+            if hasEmbeddedWebLink {
+                LinkLaunchLogoButton(
+                    defaultSymbol: "link",
+                    tint: .blue,
+                    isSelectedCard: isSelected
+                ) {
+                    _ = ClipboardStore.shared.openItemExternally(item)
+                }
+            } else {
+                EmptyView()
+            }
         }
     }
 
@@ -376,6 +398,18 @@ struct ClipCardView: View {
     private var hoverActions: some View {
         let surface: HoverActionSurface = isSelected ? .onSelectedCard : .onStandardCard
         return HStack(spacing: 5) {
+            if item.type == .link || hasEmbeddedWebLink {
+                HoverActionCircleButton(
+                    symbolName: "arrow.up.right",
+                    size: 24,
+                    iconSize: 11,
+                    surface: surface,
+                    kind: .openURL,
+                    helpText: "在浏览器中打开链接（⌘O / ⌘单击）",
+                    action: { _ = ClipboardStore.shared.openItemExternally(item) }
+                )
+            }
+
             if !minimalMode {
                 HoverActionCircleButton(
                     symbolName: mergeRank != nil ? "checkmark.square.fill" : "square.stack",
@@ -645,9 +679,16 @@ struct ClipCardView: View {
         ClipboardStore.shared.semanticSnapshot(for: item)
     }
 
+    private var hasEmbeddedWebLink: Bool {
+        guard item.type == .text, let raw = item.text else { return false }
+        let head = raw.prefix(2048).lowercased()
+        guard head.contains("http://") || head.contains("https://") else { return false }
+        return URLTrackingCleaner.extractFirstCleanedWebURL(from: raw) != nil
+    }
+
     private var hasLeadingVisual: Bool {
         if item.type == .text {
-            return semantic.parsedColorRGBA != nil
+            return semantic.parsedColorRGBA != nil || hasEmbeddedWebLink
         }
         return true
     }
@@ -800,6 +841,11 @@ struct ClipCardView: View {
             onPaste(false)
             return
         }
+        if (item.type == .link || hasEmbeddedWebLink) && NSEvent.modifierFlags.contains(.command) {
+            onSelect()
+            _ = ClipboardStore.shared.openItemExternally(item)
+            return
+        }
         onSelect()
         onCopyOnly(false)
         triggerCopiedInlineFlash()
@@ -938,6 +984,14 @@ struct ClipCardView: View {
                             .strokeBorder(Color.white.opacity(0.45), lineWidth: 1)
                     )
                     .shadow(color: Color.black.opacity(0.12), radius: 3, y: 1)
+            } else if hasEmbeddedWebLink {
+                LinkLaunchLogoButton(
+                    defaultSymbol: "link",
+                    tint: .blue,
+                    isSelectedCard: isSelected
+                ) {
+                    _ = ClipboardStore.shared.openItemExternally(item)
+                }
             } else {
                 EmptyView()
             }
@@ -972,6 +1026,18 @@ struct ClipCardView: View {
     private var hoverActions: some View {
         let surface: HoverActionSurface = isSelected ? .onSelectedCard : .onStandardCard
         return HStack(spacing: 5) {
+            if item.type == .link || hasEmbeddedWebLink {
+                HoverActionCircleButton(
+                    symbolName: "arrow.up.right",
+                    size: 24,
+                    iconSize: 11,
+                    surface: surface,
+                    kind: .openURL,
+                    helpText: "在浏览器中打开链接（⌘O / ⌘单击）",
+                    action: { _ = ClipboardStore.shared.openItemExternally(item) }
+                )
+            }
+
             HoverActionCircleButton(
                 symbolName: item.isPinned ? "star.fill" : "star",
                 size: 24,
@@ -1160,6 +1226,7 @@ enum HoverActionKind: Equatable {
     case star(isPinned: Bool)
     case delete
     case ocr
+    case openURL
 }
 
 private struct IconMotionKeyframes {
@@ -1240,6 +1307,8 @@ struct HoverActionCircleButton: View {
                 return Color(red: 0.94, green: 0.24, blue: 0.28).opacity(0.94)
             case .ocr:
                 return Color(red: 0.12, green: 0.66, blue: 0.90).opacity(0.94)
+            case .openURL:
+                return Color(red: 0.14, green: 0.52, blue: 0.98).opacity(0.95)
             }
         }
 
@@ -1276,6 +1345,7 @@ struct HoverActionCircleButton: View {
         case .star:   return Color.orange.opacity(0.42)
         case .delete: return Color.red.opacity(0.42)
         case .ocr:    return Color.cyan.opacity(0.38)
+        case .openURL: return Color.blue.opacity(0.42)
         }
     }
 
@@ -1442,18 +1512,6 @@ private struct LinkLaunchKeyframes {
     var scale: CGFloat = 1.0
 }
 
-private struct LinkLaunchSpringButtonStyle: ButtonStyle {
-    let isHovered: Bool
-    let reduceMotion: Bool
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .scaleEffect(configuration.isPressed ? 0.90 : (isHovered && !reduceMotion ? 1.08 : 1.0))
-            .animation(.spring(response: 0.22, dampingFraction: 0.66), value: isHovered)
-            .animation(.spring(response: 0.14, dampingFraction: 0.72), value: configuration.isPressed)
-    }
-}
-
 private final class PassivePointingHandNSView: NSView {
     override func hitTest(_ point: NSPoint) -> NSView? {
         nil
@@ -1497,56 +1555,61 @@ struct LinkLaunchLogoButton: View {
         return isSelectedCard ? .white : tint
     }
 
-    var body: some View {
-        let baseButton = Button {
-            if !reduceMotion {
-                haloScale = 0.96
-                haloOpacity = 0.92
-                withAnimation(.easeOut(duration: 0.30)) {
-                    haloScale = 1.38
-                    haloOpacity = 0.0
-                }
+    private func triggerOpen() {
+        if !reduceMotion {
+            haloScale = 0.96
+            haloOpacity = 0.92
+            withAnimation(.easeOut(duration: 0.30)) {
+                haloScale = 1.38
+                haloOpacity = 0.0
             }
-            action()
-        } label: {
-            ZStack {
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .fill(badgeBackground)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 11, style: .continuous)
-                            .strokeBorder(
-                                isHovered
-                                    ? Color.white.opacity(isSelectedCard ? 0.90 : 0.45)
-                                    : Color.clear,
-                                lineWidth: 0.85
-                            )
-                    )
-
-                animatedSymbol
-            }
-            .frame(width: 42, height: 42)
-            .overlay {
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .strokeBorder(Color.white.opacity(0.85), lineWidth: 1.2)
-                    .scaleEffect(haloScale)
-                    .opacity(haloOpacity)
-                    .allowsHitTesting(false)
-            }
-            .overlay {
-                PointingHandCursorOverlay()
-                    .allowsHitTesting(false)
-            }
-            .shadow(
-                color: isHovered
-                    ? (isSelectedCard ? Color.black.opacity(0.20) : tint.opacity(0.42))
-                    : .clear,
-                radius: isHovered ? 6 : 0,
-                y: isHovered ? 2 : 0
-            )
         }
-        .buttonStyle(LinkLaunchSpringButtonStyle(isHovered: isHovered, reduceMotion: reduceMotion))
+        action()
+    }
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .fill(badgeBackground)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        .strokeBorder(
+                            isHovered
+                                ? Color.white.opacity(isSelectedCard ? 0.90 : 0.45)
+                                : Color.clear,
+                            lineWidth: 0.85
+                        )
+                )
+
+            animatedSymbol
+        }
+        .frame(width: 42, height: 42)
+        .scaleEffect(isHovered && !reduceMotion ? 1.08 : 1.0)
+        .overlay {
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.85), lineWidth: 1.2)
+                .scaleEffect(haloScale)
+                .opacity(haloOpacity)
+                .allowsHitTesting(false)
+        }
+        .overlay {
+            PointingHandCursorOverlay()
+                .allowsHitTesting(false)
+        }
+        .shadow(
+            color: isHovered
+                ? (isSelectedCard ? Color.black.opacity(0.20) : tint.opacity(0.42))
+                : .clear,
+            radius: isHovered ? 6 : 0,
+            y: isHovered ? 2 : 0
+        )
         .contentShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
-        .help("点击直接在浏览器中访问链接")
+        .highPriorityGesture(
+            TapGesture().onEnded {
+                triggerOpen()
+            }
+        )
+        .help("点击直接在浏览器中访问链接（或按 ⌘O / ⌘单击卡片）")
         .animation(.spring(response: 0.22, dampingFraction: 0.74), value: isHovered)
         .onHover { hovering in
             if hovering && !isHovered {
@@ -1554,12 +1617,6 @@ struct LinkLaunchLogoButton: View {
                 TactileFeedbackEngine.shared.perform(.hoverTick)
             }
             isHovered = hovering
-        }
-
-        if #available(macOS 15.0, *) {
-            baseButton.pointerStyle(.link)
-        } else {
-            baseButton
         }
     }
 

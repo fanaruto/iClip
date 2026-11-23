@@ -72,6 +72,25 @@ final class UpdateManager: NSObject, ObservableObject {
         checkRequestEpoch &+= 1
         let requestID = checkRequestEpoch
 
+        // 优先检测同级目录或本地 LocalOTA 缓存中是否存在与当前版本一致的目标角色签名包（零流量秒切且严防被远端旧 Release 降级覆盖）
+        if isSwitchingEdition,
+           let localArchive = Self.findLocalSiblingArchive(assetName: desiredEdition.expectedAssetName, matchingVersion: currentVersion) {
+            let size = ((try? FileManager.default.attributesOfItem(atPath: localArchive.path))?[.size] as? Int64) ?? 0
+            let localInfo = ReleaseInfo(
+                version: currentVersion,
+                tagName: "v\(currentVersion)",
+                notes: "检测到本机已就绪同版本 v\(currentVersion)「\(desiredEdition.title)」签名包，支持离线秒速无损切换。",
+                edition: desiredEdition,
+                isEditionSwitch: true,
+                assetName: desiredEdition.expectedAssetName,
+                assetSize: size,
+                downloadURL: localArchive,
+                htmlURL: URL(string: "https://github.com/\(repoOwner)/\(repoName)")!
+            )
+            state = .available(localInfo)
+            return
+        }
+
         if !silent || isSwitchingEdition {
             state = .checking
         }
@@ -108,6 +127,11 @@ final class UpdateManager: NSObject, ObservableObject {
                 let expectedAsset = desiredEdition.expectedAssetName
 
                 if isSwitchingEdition {
+                    // 防降级护栏：若当前本机版本超前于 GitHub Latest Release，严禁拉取线上旧包覆盖本地新版功能
+                    if Self.isVersion(currentVersion, newerThan: latestVer) {
+                        state = .failed("当前本机版本 v\(currentVersion) 高于线上 Release v\(latestVer)，已拦截降级覆盖")
+                        return
+                    }
                     // 跨角色切换：严格匹配目标角色专属安装包，禁止回退到其他角色的压缩包
                     guard let roleAsset = decoded.assets.first(where: { $0.name == expectedAsset }),
                           let downloadURL = URL(string: roleAsset.browserDownloadURL),
@@ -177,6 +201,17 @@ final class UpdateManager: NSObject, ObservableObject {
         }
 
         downloadingInfo = info
+        if info.downloadURL.isFileURL {
+            let fm = FileManager.default
+            let tmpCopy = fm.temporaryDirectory.appendingPathComponent("local-ota-\(UUID().uuidString).zip")
+            do {
+                try fm.copyItem(at: info.downloadURL, to: tmpCopy)
+                installDownloadedArchive(at: tmpCopy, info: info)
+            } catch {
+                state = .failed("读取本地角色安装包失败：\(error.localizedDescription)")
+            }
+            return
+        }
         state = .downloading(progress: 0.0, info: info)
 
         let config = URLSessionConfiguration.ephemeral
@@ -311,6 +346,38 @@ final class UpdateManager: NSObject, ObservableObject {
     private static func normalizeVersion(_ raw: String) -> String {
         raw.trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "^[vV]", with: "", options: .regularExpression)
+    }
+
+    private static func findLocalSiblingArchive(assetName: String, matchingVersion: String) -> URL? {
+        let fm = FileManager.default
+
+        // 1. 若当前运行在构建产物目录（如 dist/），同级存在同名版本构建出的兄弟包
+        let bundleSiblingDir = Bundle.main.bundleURL.deletingLastPathComponent()
+        let siblingZip = bundleSiblingDir.appendingPathComponent(assetName)
+        let siblingAppName = assetName == AppRoleEdition.developer.expectedAssetName ? "iClip-Dev.app" : "iClip-Flow.app"
+        let siblingAppPlist = bundleSiblingDir.appendingPathComponent(siblingAppName).appendingPathComponent("Contents/Info.plist")
+        if fm.fileExists(atPath: siblingZip.path),
+           let plist = NSDictionary(contentsOf: siblingAppPlist),
+           let siblingVer = plist["CFBundleShortVersionString"] as? String,
+           normalizeVersion(siblingVer) == normalizeVersion(matchingVersion) {
+            return siblingZip
+        }
+
+        // 2. 检查 Application Support/QingJian/LocalOTA/ 缓存的同版本双角色专属签名包
+        if let appSupport = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
+            let localOTADir = appSupport
+                .appendingPathComponent("QingJian", isDirectory: true)
+                .appendingPathComponent("LocalOTA", isDirectory: true)
+            let versionMarker = localOTADir.appendingPathComponent("VERSION")
+            let cachedZip = localOTADir.appendingPathComponent(assetName)
+            if fm.fileExists(atPath: cachedZip.path),
+               let cachedVer = try? String(contentsOf: versionMarker, encoding: .utf8),
+               normalizeVersion(cachedVer) == normalizeVersion(matchingVersion) {
+                return cachedZip
+            }
+        }
+
+        return nil
     }
 
     private static func isVersion(_ lhs: String, newerThan rhs: String) -> Bool {

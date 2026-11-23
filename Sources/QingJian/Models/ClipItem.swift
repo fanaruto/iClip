@@ -140,6 +140,22 @@ enum ClipFilterTab: String, CaseIterable, Identifiable {
         default: return nil
         }
     }
+
+    /// 将 macOS 主键盘或小键盘数字 1...9 虚拟键码解析为序号 1...9（不受 Shift/Option 特殊字符影响）
+    static func digitFromKeyCode(_ keyCode: UInt16) -> Int? {
+        switch keyCode {
+        case 18, 83: return 1
+        case 19, 84: return 2
+        case 20, 85: return 3
+        case 21, 86: return 4
+        case 23, 87: return 5
+        case 22, 88: return 6
+        case 26, 89: return 7
+        case 28, 91: return 8
+        case 25, 92: return 9
+        default: return nil
+        }
+    }
 }
 
 /// 单条剪贴板记录（双角色共享超集持久化 Schema，确保通过 OTA 跨角色切换时历史与元数据 100% 无损）
