@@ -1,7 +1,4 @@
-use crate::archive::{
-    export_pinned_archive_data, merge_archive_data_with_hint, ArchiveBackupError,
-    ArchiveImportSummary,
-};
+use crate::archive::{export_pinned_archive_data, ArchiveBackupError, ArchiveImportSummary};
 use crate::engines::is_otp_message;
 use crate::hotkey::{WinHotKeyShortcut, WinSingleModifier};
 use crate::intelligence::{
@@ -102,6 +99,8 @@ pub struct StoreConfig {
     #[serde(default = "default_true")]
     pub auto_expire_unpinned_secrets: bool,
     #[serde(default)]
+    pub auto_strip_zero_width: bool,
+    #[serde(default)]
     pub ignored_apps: Vec<String>,
     #[serde(default)]
     pub queue_auto_tab: bool,
@@ -131,6 +130,7 @@ impl Default for StoreConfig {
             mask_sensitive_previews: true,
             auto_clear_concealed_clipboard: true,
             auto_expire_unpinned_secrets: true,
+            auto_strip_zero_width: false,
             ignored_apps: vec![
                 "1Password".to_string(),
                 "Bitwarden".to_string(),
@@ -1041,6 +1041,19 @@ impl ClipboardStore {
             }
         }
 
+        if lower.contains("零宽")
+            || lower.contains("隐藏字符")
+            || lower.contains("幽灵字符")
+            || lower.contains("控制符")
+        {
+            self.config.auto_strip_zero_width = !is_off;
+            effects.push(if !is_off {
+                "已开启复制自动清除零宽与隐藏控制符".to_string()
+            } else {
+                "已关闭自动清除隐藏字符".to_string()
+            });
+        }
+
         self.save_config();
 
         let summary = if effects.is_empty() {
@@ -1376,10 +1389,23 @@ impl ClipboardStore {
         &mut self,
         src: &Path,
     ) -> Result<ArchiveImportSummary, ArchiveBackupError> {
+        self.import_archive_from_file_with_passphrase(src, None)
+    }
+
+    pub fn import_archive_from_file_with_passphrase(
+        &mut self,
+        src: &Path,
+        passphrase: Option<&str>,
+    ) -> Result<ArchiveImportSummary, ArchiveBackupError> {
         let data = fs::read(src).map_err(|_| ArchiveBackupError::InvalidArchiveFormat)?;
         let ext = src.extension().and_then(|e| e.to_str());
-        let (mut merged, summary) =
-            merge_archive_data_with_hint(&data, &self.items, &self.images_dir, ext)?;
+        let (mut merged, summary) = crate::archive::merge_archive_data_full(
+            &data,
+            &self.items,
+            &self.images_dir,
+            passphrase,
+            ext,
+        )?;
         Self::sort_items(&mut merged);
         self.items = merged;
         self.save_history();

@@ -12,6 +12,7 @@ enum LearnedAutoRuleKind: String, CaseIterable, Codable, Identifiable {
     case cleanMeetingTranscript
     case compressLargeImage
     case extractQRCode
+    case sanitizeInvisibleChars
 
     var id: String { rawValue }
 
@@ -26,6 +27,7 @@ enum LearnedAutoRuleKind: String, CaseIterable, Codable, Identifiable {
         case .cleanMeetingTranscript: return "复制会议纪要自动剥离时间轴"
         case .compressLargeImage: return "复制超大截图（>1.5MB）自动轻量优化"
         case .extractQRCode: return "复制二维码截图自动提取链接/内容"
+        case .sanitizeInvisibleChars: return "复制文本自动清除零宽幽灵与隐藏控制符"
         }
     }
 
@@ -40,6 +42,7 @@ enum LearnedAutoRuleKind: String, CaseIterable, Codable, Identifiable {
         case .cleanMeetingTranscript: return "智能契约：已自动剥离会议时间轴"
         case .compressLargeImage: return "智能契约：已自动轻量优化大图"
         case .extractQRCode: return "智能契约：已自动提取图中二维码"
+        case .sanitizeInvisibleChars: return "智能契约：已自动清除隐形幽灵与控制符"
         }
     }
 
@@ -55,6 +58,7 @@ enum LearnedAutoRuleKind: String, CaseIterable, Codable, Identifiable {
         case "meet-plain-body", "meet-speaker-notes": return .cleanMeetingTranscript
         case "img-compress": return .compressLargeImage
         case "img-qrcode": return .extractQRCode
+        case "sanitize-invisible-poison": return .sanitizeInvisibleChars
         default: return nil
         }
     }
@@ -466,6 +470,14 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
         guard !state.enabledAutoRules.isEmpty else { return nil }
         let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, trimmed.utf8.count <= 32_768 else { return nil }
+
+        if state.enabledAutoRules.contains(.sanitizeInvisibleChars),
+           ClipboardPoisonGuard.inspect(rawText) != nil {
+            let cleaned = ClipboardPoisonGuard.sanitize(rawText)
+            if cleaned != rawText && !cleaned.isEmpty {
+                return (cleaned, .sanitizeInvisibleChars)
+            }
+        }
 
         if isLink, state.enabledAutoRules.contains(.cleanTrackingURL) {
             if let cleaned = URLTrackingCleaner.cleanTrackingURL(trimmed), cleaned != trimmed {
@@ -1050,6 +1062,13 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
             let neg = Self.isClauseNegated(matching: secretTTLKeys, in: clauses)
             store.autoExpireUnpinnedSecrets = !neg
             adoptedEffects.append(!neg ? "已开启未收藏敏感凭据 24h 自动销毁" : "已关闭未收藏敏感凭据自动销毁")
+        }
+
+        let ghostKeys = ["零宽", "隐藏字符", "幽灵字符", "控制符", "防投毒"]
+        if Self.containsAny(lower, ghostKeys) {
+            let neg = Self.isClauseNegated(matching: ghostKeys, in: clauses)
+            setAutoRule(.sanitizeInvisibleChars, enabled: !neg)
+            adoptedEffects.append(!neg ? "已开启自动清除零宽幽灵与隐藏控制符契约" : "已关闭自动清除隐藏字符契约")
         }
 
         let status: UserSuggestionRecord.Status

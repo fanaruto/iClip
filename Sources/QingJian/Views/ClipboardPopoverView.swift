@@ -39,7 +39,18 @@ final class PanelNavigationModel: ObservableObject {
     @Published var hotKeyConflictWarning: String? = nil
     @Published var hotKeyRecordingHint: String? = nil
     @Published var isEditingAlias: Bool = false
-    @Published var showQuickLook: Bool = false
+    @Published var showQuickLook: Bool = false {
+        didSet {
+            if showQuickLook {
+                if selectedIndex >= 0 && selectedIndex < cachedFilteredItems.count {
+                    quickLookAnchorID = cachedFilteredItems[selectedIndex].id
+                }
+            } else {
+                quickLookAnchorID = nil
+            }
+        }
+    }
+    private var quickLookAnchorID: UUID? = nil
     @Published var quickLookTabIndex: Int = 0
     @Published var quickLookPreferDiff: Bool = false
     @Published var isQuickLookEditing: Bool = false
@@ -201,6 +212,17 @@ final class PanelNavigationModel: ObservableObject {
         }
 
         self.cachedFilteredItems = filtered
+        if showQuickLook {
+            if let anchor = quickLookAnchorID, !filtered.contains(where: { $0.id == anchor }) {
+                showQuickLook = false
+                isQuickLookEditing = false
+                quickLookDraftText = ""
+            } else if filtered.isEmpty {
+                showQuickLook = false
+                isQuickLookEditing = false
+                quickLookDraftText = ""
+            }
+        }
         self.cachedDisplayRows = rows
         self.cachedVisualRows = GridNavigationHelper.buildVisualRows(count: filtered.count, imageColumns: 3) {
             tab != .todo && filtered[$0].type == .image
@@ -2818,7 +2840,18 @@ final class PanelNavigationModel: ObservableObject {
     @Published var hotKeyConflictWarning: String? = nil
     @Published var hotKeyRecordingHint: String? = nil
     @Published var isEditingAlias: Bool = false
-    @Published var showQuickLook: Bool = false
+    @Published var showQuickLook: Bool = false {
+        didSet {
+            if showQuickLook {
+                if selectedIndex >= 0 && selectedIndex < cachedFilteredItems.count {
+                    quickLookAnchorID = cachedFilteredItems[selectedIndex].id
+                }
+            } else {
+                quickLookAnchorID = nil
+            }
+        }
+    }
+    private var quickLookAnchorID: UUID? = nil
     @Published var quickLookTabIndex: Int = 0
     @Published var quickLookPreferDiff: Bool = false
     @Published var isQuickLookEditing: Bool = false
@@ -2993,6 +3026,17 @@ final class PanelNavigationModel: ObservableObject {
         }
 
         self.cachedFilteredItems = filtered
+        if showQuickLook {
+            if let anchor = quickLookAnchorID, !filtered.contains(where: { $0.id == anchor }) {
+                showQuickLook = false
+                isQuickLookEditing = false
+                quickLookDraftText = ""
+            } else if filtered.isEmpty {
+                showQuickLook = false
+                isQuickLookEditing = false
+                quickLookDraftText = ""
+            }
+        }
         self.cachedDisplayRows = rows
         self.cachedVisualRows = GridNavigationHelper.buildVisualRows(count: filtered.count, imageColumns: 3) {
             tab != .todo && filtered[$0].type == .image

@@ -282,6 +282,12 @@ struct ClipItem: Identifiable, Codable, Equatable {
         }
     }
 
+    /// 离线剪贴板投毒与零宽幽灵字符检测（微秒级）
+    var detectedPoisonThreat: ClipboardPoisonGuard.ThreatKind? {
+        guard type == .text || type == .link, let raw = text else { return nil }
+        return ClipboardPoisonGuard.inspect(raw)
+    }
+
     /// 根据隐私遮罩状态返回卡片标题（未选中且未悬停时对无备注的高敏文本/链接做圆点防肩窥遮罩，零高度抖动）
     func displayTitle(minimalMode: Bool, veilActive: Bool) -> String {
         if minimalMode {
@@ -593,7 +599,10 @@ enum EpisodicQueryMatcher {
         case "二维码", "qrcode", "@qr":
             return !(item.qrCodePayload?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
         case "敏感", "@敏感", "@密钥", "@隐私", "@secret", "secret":
+            if case .pastejackingOrBidi = item.detectedPoisonThreat { return true }
             return item.detectedSensitiveKind != nil || item.isBurnAfterPaste
+        case "风险", "@风险", "@毒", "@poison", "poison":
+            return item.detectedPoisonThreat != nil
         case "即焚", "@即焚", "@burn", "burn":
             return item.isBurnAfterPaste
         case "今天", "今日", "today", "@today":
@@ -624,6 +633,7 @@ enum EpisodicQueryMatcher {
              "本周", "一周", "7d", "week", "@7d", "@week",
              "二维码", "qrcode", "@qr",
              "敏感", "@敏感", "@密钥", "@隐私", "@secret", "secret",
+             "风险", "@风险", "@毒", "@poison", "poison",
              "即焚", "@即焚", "@burn", "burn":
             return true
         default:

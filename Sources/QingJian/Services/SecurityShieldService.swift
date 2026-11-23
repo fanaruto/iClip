@@ -252,11 +252,12 @@ enum LocalVaultCrypto {
         return upgraded
     }
 
-    // MARK: - 口令级跨设备归档加密（`.iclip` 可选密码保护，双端互通）
+    // MARK: - 口令级跨设备归档加密（`.iclip` 可选密码保护，macOS ↔ Windows 100% 字节级双向互通）
 
     static let archiveEncryptedMagic = Data("ICLPARCH1".utf8)
+    static let crossPlatformArchiveMagic = Data("ICLPAWIN1".utf8)
 
-    private static func derivePassphraseKey(passphrase: String, salt: Data) -> SymmetricKey {
+    private static func derivePassphraseKeyBytes(passphrase: String, salt: Data) -> Data {
         // 4,096 轮迭代 SHA-256 密钥拉伸（零外部 C 库依赖，macOS Swift 与 Windows Rust 100% 字节级一致）
         var block = Data()
         block.append(salt)
@@ -270,42 +271,224 @@ enum LocalVaultCrypto {
             withUnsafeBytes(of: &rLE) { mix.append(contentsOf: $0) }
             hash = Data(SHA256.hash(data: mix))
         }
-        return SymmetricKey(data: hash)
+        return hash
+    }
+
+    private static func deriveArchiveSubkeys(masterKeyBytes: Data, nonce: Data) -> (encKey: Data, macKey: SymmetricKey) {
+        let mKey = SymmetricKey(data: masterKeyBytes)
+        var encMsg = Data("enc|".utf8)
+        encMsg.append(nonce)
+        var macMsg = Data("mac|".utf8)
+        macMsg.append(nonce)
+        let encDigest = Data(HMAC<SHA256>.authenticationCode(for: encMsg, using: mKey))
+        let macDigest = Data(HMAC<SHA256>.authenticationCode(for: macMsg, using: mKey))
+        return (encDigest, SymmetricKey(data: macDigest))
+    }
+
+    private static func applySHA256CTRStream(encKey: Data, nonce: Data, data: Data) -> Data {
+        var bytes = [UInt8](data)
+        var counter: UInt64 = 0
+        var offset = 0
+        while offset < bytes.count {
+            var blockInput = Data(capacity: 32 + 16 + 8)
+            blockInput.append(encKey)
+            blockInput.append(nonce)
+            var cLE = counter.littleEndian
+            withUnsafeBytes(of: &cLE) { blockInput.append(contentsOf: $0) }
+            let stream = Array(SHA256.hash(data: blockInput))
+            let chunkLen = min(32, bytes.count - offset)
+            for i in 0..<chunkLen {
+                bytes[offset + i] ^= stream[i]
+            }
+            offset += chunkLen
+            counter &+= 1
+        }
+        return Data(bytes)
     }
 
     static func sealArchiveWithPassphrase(_ plainArchive: Data, passphrase: String) -> Data? {
         let trimmed = passphrase.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return plainArchive }
         var salt = Data(count: 16)
+        var nonce = Data(count: 16)
         _ = salt.withUnsafeMutableBytes { SecRandomCopyBytes(kSecRandomDefault, 16, $0.baseAddress!) }
-        let key = derivePassphraseKey(passphrase: trimmed, salt: salt)
-        guard let box = try? AES.GCM.seal(plainArchive, using: key),
-              let combined = box.combined else {
-            return nil
-        }
-        var out = Data(capacity: archiveEncryptedMagic.count + 16 + combined.count)
-        out.append(archiveEncryptedMagic)
+        _ = nonce.withUnsafeMutableBytes { SecRandomCopyBytes(kSecRandomDefault, 16, $0.baseAddress!) }
+
+        let master = derivePassphraseKeyBytes(passphrase: trimmed, salt: salt)
+        let (encKey, macKey) = deriveArchiveSubkeys(masterKeyBytes: master, nonce: nonce)
+        let ciphertext = applySHA256CTRStream(encKey: encKey, nonce: nonce, data: plainArchive)
+
+        var out = Data(capacity: 9 + 16 + 16 + ciphertext.count + 32)
+        out.append(crossPlatformArchiveMagic)
         out.append(salt)
-        out.append(combined)
+        out.append(nonce)
+        out.append(ciphertext)
+        let tag = Data(HMAC<SHA256>.authenticationCode(for: out, using: macKey))
+        out.append(tag)
         return out
     }
 
     static func isEncryptedArchive(_ data: Data) -> Bool {
-        data.starts(with: archiveEncryptedMagic)
+        data.starts(with: crossPlatformArchiveMagic) || data.starts(with: archiveEncryptedMagic)
     }
 
     static func openEncryptedArchive(_ data: Data, passphrase: String) -> Data? {
-        guard isEncryptedArchive(data) else { return data }
-        let headerLen = archiveEncryptedMagic.count + 16
-        guard data.count > headerLen + 28 else { return nil }
-        let salt = data.subdata(in: archiveEncryptedMagic.count..<headerLen)
-        let combined = data.subdata(in: headerLen..<data.count)
-        let key = derivePassphraseKey(passphrase: passphrase.trimmingCharacters(in: .whitespacesAndNewlines), salt: salt)
-        guard let box = try? AES.GCM.SealedBox(combined: combined),
-              let plain = try? AES.GCM.open(box, using: key) else {
-            return nil
+        let trimmed = passphrase.trimmingCharacters(in: .whitespacesAndNewlines)
+        if data.starts(with: crossPlatformArchiveMagic) {
+            guard !trimmed.isEmpty, data.count >= 9 + 16 + 16 + 32 else { return nil }
+            let bodyEnd = data.count - 32
+            let expectedTag = data.subdata(in: bodyEnd..<data.count)
+            let salt = data.subdata(in: 9..<25)
+            let nonce = data.subdata(in: 25..<41)
+            let master = derivePassphraseKeyBytes(passphrase: trimmed, salt: salt)
+            let (encKey, macKey) = deriveArchiveSubkeys(masterKeyBytes: master, nonce: nonce)
+            let valid = HMAC<SHA256>.isValidAuthenticationCode(
+                expectedTag,
+                authenticating: data.subdata(in: 0..<bodyEnd),
+                using: macKey
+            )
+            guard valid else { return nil }
+            let cipherSlice = data.subdata(in: 41..<bodyEnd)
+            return applySHA256CTRStream(encKey: encKey, nonce: nonce, data: cipherSlice)
         }
-        return plain
+        if data.starts(with: archiveEncryptedMagic) {
+            let headerLen = archiveEncryptedMagic.count + 16
+            guard !trimmed.isEmpty, data.count > headerLen + 28 else { return nil }
+            let salt = data.subdata(in: archiveEncryptedMagic.count..<headerLen)
+            let combined = data.subdata(in: headerLen..<data.count)
+            let key = SymmetricKey(data: derivePassphraseKeyBytes(passphrase: trimmed, salt: salt))
+            guard let box = try? AES.GCM.SealedBox(combined: combined),
+                  let plain = try? AES.GCM.open(box, using: key) else {
+                return nil
+            }
+            return plain
+        }
+        return data
+    }
+}
+
+/// 1.9 剪贴板投毒、终端粘贴劫持（Pastejacking / Trojan Source CVE-2021-42574）与网页零宽幽灵字符净化护盾
+enum ClipboardPoisonGuard {
+    enum ThreatKind: Equatable {
+        /// 高危：包含双向文本反转伪装（RLO/LRO/Bidi Isolates）或隐藏终端控制转义（ESC/CSI/Backspace/内联CR覆盖）
+        case pastejackingOrBidi(count: Int)
+        /// 常见污染：从富文本/网页复制出的零宽幽灵字符（U+200B/200C/非Emoji 200D/2060/FEFF）
+        case zeroWidthGhost(count: Int)
+    }
+
+    private static let ansiCSIRegex = try! NSRegularExpression(
+        pattern: "\u{001B}\\[[0-9;?]*[ -/]*[@-~]|\u{009B}[0-9;?]*[ -/]*[@-~]|\u{001B}\\][^\u{0007}\u{001B}]*(?:\u{0007}|\u{001B}\\\\)"
+    )
+
+    private static func isBidiOverrideScalar(_ v: UInt32) -> Bool {
+        (v >= 0x202A && v <= 0x202E) || (v >= 0x2066 && v <= 0x2069) || v == 0x061C
+    }
+
+    private static func isZeroWidthScalar(_ v: UInt32) -> Bool {
+        v == 0x200B || v == 0x200C || v == 0x2060 || v == 0xFEFF
+    }
+
+    static func inspect(_ rawText: String) -> ThreatKind? {
+        guard !rawText.isEmpty else { return nil }
+        let sample: Substring = rawText.utf8.count > 16_384 ? rawText.prefix(8_192) : rawText[...]
+        var highRiskCount = 0
+        var zeroWidthCount = 0
+        var prevScalar: UInt32 = 0
+
+        let scalars = Array(sample.unicodeScalars)
+        for idx in scalars.indices {
+            let v = scalars[idx].value
+            if isBidiOverrideScalar(v) || v == 0x001B || v == 0x009B || v == 0x0008 || v == 0x0007 {
+                highRiskCount += 1
+            } else if v == 0x000D {
+                // `\r` 后紧跟的若非 `\n` 且后面还有可见字符，属于终端同行覆盖回显欺骗（`evil \r safe`）
+                let nextV: UInt32? = (idx + 1 < scalars.count) ? scalars[idx + 1].value : nil
+                if let nv = nextV, nv != 0x000A && nv != 0x000D {
+                    highRiskCount += 1
+                }
+            } else if isZeroWidthScalar(v) {
+                zeroWidthCount += 1
+            } else if v == 0x200D {
+                // 智能豁免合法 Emoji ZWJ 复合序列（如 👨‍👩‍👧 / 🧑‍💻）
+                if prevScalar < 0x2600 {
+                    zeroWidthCount += 1
+                }
+            }
+            prevScalar = v
+        }
+
+        if highRiskCount > 0 {
+            return .pastejackingOrBidi(count: highRiskCount + zeroWidthCount)
+        }
+        if zeroWidthCount > 0 {
+            return .zeroWidthGhost(count: zeroWidthCount)
+        }
+        return nil
+    }
+
+    /// 彻底剥离 ANSI 转义序列、Bidi 反转木马符、欺骗性内联回车与非 Emoji 零宽幽灵字符
+    static func sanitize(_ rawText: String) -> String {
+        guard !rawText.isEmpty else { return rawText }
+        let hadHighRisk: Bool = {
+            if case .pastejackingOrBidi = inspect(rawText) { return true }
+            return false
+        }()
+
+        // 1. 剥离完整 ANSI CSI / OSC 控制序列，防止残留 `[31m` 等尾巴
+        var stage = rawText
+        if stage.contains("\u{001B}") || stage.contains("\u{009B}") {
+            stage = ansiCSIRegex.stringByReplacingMatches(
+                in: stage,
+                range: NSRange(stage.startIndex..<stage.endIndex, in: stage),
+                withTemplate: ""
+            )
+        }
+        // 2. 规范化 CRLF 后，将同行欺骗裸 `\r` 转为安全空格或剥离
+        stage = stage.replacingOccurrences(of: "\r\n", with: "\n")
+        if stage.contains("\r") {
+            stage = stage.replacingOccurrences(of: "\r", with: " ")
+        }
+
+        // 3. 逐标量过滤危险控制符、Bidi 伪装符与非 Emoji 零宽字符
+        var out = String.UnicodeScalarView()
+        out.reserveCapacity(stage.unicodeScalars.count)
+        var prevV: UInt32 = 0
+        for sc in stage.unicodeScalars {
+            let v = sc.value
+            if isBidiOverrideScalar(v) || isZeroWidthScalar(v) {
+                continue
+            }
+            if v == 0x200D && prevV < 0x2600 {
+                continue
+            }
+            if v < 0x0020 && v != 0x000A && v != 0x0009 {
+                continue
+            }
+            if v == 0x007F || (v >= 0x0080 && v <= 0x009F) {
+                continue
+            }
+            out.append(sc)
+            prevV = v
+        }
+
+        var cleaned = String(out)
+        if hadHighRisk {
+            // 剥离尾随自动回车执行陷阱，让用户在终端先看清命令再按回车
+            while cleaned.hasSuffix("\n") {
+                cleaned.removeLast()
+            }
+        }
+        return cleaned
+    }
+
+    static func isTerminalApp(_ appName: String?) -> Bool {
+        guard let raw = appName?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !raw.isEmpty else { return false }
+        let terms = [
+            "ghostty", "iterm", "terminal", "终端", "warp", "wezterm",
+            "kitty", "alacritty", "hyper", "tabby", "windterm", "termius", "royal tsx"
+        ]
+        return terms.contains { raw.contains($0) }
     }
 }
 

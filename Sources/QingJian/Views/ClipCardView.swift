@@ -104,6 +104,11 @@ struct ClipCardView: View {
                                 .font(.system(size: 10, weight: .semibold))
                                 .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.red)
                             Text("·")
+                        } else if case .pastejackingOrBidi = item.detectedPoisonThreat {
+                            Text("含隐藏控制符")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.red)
+                            Text("·")
                         } else if let secKind = item.detectedSensitiveKind {
                             let ttlHint = (!item.isPinned && !item.isPendingTodo && ClipboardStore.shared.autoExpireUnpinnedSecrets) ? " · 24h自毁" : ""
                             Text(secKind.shieldBadgeTitle + ttlHint)
@@ -868,6 +873,11 @@ struct ClipCardView: View {
 
                         if item.isBurnAfterPaste {
                             Text("粘贴即焚")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.red)
+                            Text("·")
+                        } else if case .pastejackingOrBidi = item.detectedPoisonThreat {
+                            Text("含隐藏控制符")
                                 .font(.system(size: 10, weight: .semibold))
                                 .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.red)
                             Text("·")

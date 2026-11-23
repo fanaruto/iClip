@@ -221,6 +221,16 @@ impl ClipItem {
         }
     }
 
+    pub fn detected_poison_threat(&self) -> Option<crate::security::PoisonThreatKind> {
+        match self.kind {
+            ClipContentType::Text | ClipContentType::Link => self
+                .text
+                .as_deref()
+                .and_then(crate::security::inspect_clipboard_poison),
+            ClipContentType::Image | ClipContentType::File => None,
+        }
+    }
+
     pub fn display_title(&self, minimal_mode: bool, veil_active: bool) -> String {
         if !minimal_mode {
             if let Some(alias) = &self.custom_alias {
@@ -526,7 +536,16 @@ impl ClipItem {
             "未完成" | "@pending" => return self.is_pending_todo(),
             "已完成" | "@done" => return self.is_todo_completed(),
             "敏感" | "@敏感" | "@密钥" | "@隐私" | "@secret" | "secret" => {
-                return self.detected_sensitive_kind().is_some() || self.is_burn_after_paste()
+                if matches!(
+                    self.detected_poison_threat(),
+                    Some(crate::security::PoisonThreatKind::PastejackingOrBidi(_))
+                ) {
+                    return true;
+                }
+                return self.detected_sensitive_kind().is_some() || self.is_burn_after_paste();
+            }
+            "风险" | "@风险" | "@毒" | "@poison" | "poison" => {
+                return self.detected_poison_threat().is_some()
             }
             "即焚" | "@即焚" | "@burn" | "burn" => return self.is_burn_after_paste(),
             _ => {}

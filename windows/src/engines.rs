@@ -23,6 +23,33 @@ pub fn analyze_text_actions(raw: &str, minimal_mode: bool) -> Vec<QuickAction> {
 
     let mut actions = Vec::new();
 
+    // 0.0 最高优安全护盾：剪贴板投毒（Bidi / ANSI 控制符劫持）与零宽幽灵字符净化
+    if let Some(threat) = crate::security::inspect_clipboard_poison(inspect) {
+        let cleaned = crate::security::sanitize_clipboard_poison(raw);
+        if cleaned != raw && !cleaned.is_empty() {
+            let (title, is_sec, toast) = match threat {
+                crate::security::PoisonThreatKind::PastejackingOrBidi(_) => (
+                    "净化隐藏控制符".to_string(),
+                    true,
+                    "已剥离隐藏终端控制符与双向伪装符".to_string(),
+                ),
+                crate::security::PoisonThreatKind::ZeroWidthGhost(n) => (
+                    format!("清除 {n} 个零宽字符"),
+                    false,
+                    "已清除隐藏零宽幽灵字符".to_string(),
+                ),
+            };
+            actions.push(QuickAction {
+                id: "sanitize-invisible-poison",
+                title,
+                is_security: is_sec,
+                result_text: cleaned,
+                html_table_payload: None,
+                toast_text: toast,
+            });
+        }
+    }
+
     // 0. 最高优：一次性短信/邮件验证码（OTP）抗干扰提取（双角色共享）
     if raw.len() <= 800 {
         if let Some(otp) = extract_verification_code(trimmed) {

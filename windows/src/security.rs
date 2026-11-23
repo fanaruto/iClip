@@ -579,6 +579,151 @@ pub fn open_encrypted_archive_bytes(data: &[u8], passphrase: &str) -> Option<Vec
 }
 
 // ============================================================================
+// 1.9 剪贴板投毒、终端粘贴劫持（Pastejacking / Trojan Source CVE-2021-42574）与零宽幽灵字符净化护盾
+// ============================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PoisonThreatKind {
+    PastejackingOrBidi(usize),
+    ZeroWidthGhost(usize),
+}
+
+fn is_bidi_override_char(c: char) -> bool {
+    let v = c as u32;
+    (0x202A..=0x202E).contains(&v) || (0x2066..=0x2069).contains(&v) || v == 0x061C
+}
+
+fn is_zero_width_char(c: char) -> bool {
+    matches!(c as u32, 0x200B | 0x200C | 0x2060 | 0xFEFF)
+}
+
+pub fn inspect_clipboard_poison(raw: &str) -> Option<PoisonThreatKind> {
+    if raw.is_empty() {
+        return None;
+    }
+    let sample = if raw.len() > 16_384 {
+        let mut end = 16_384;
+        while end > 0 && !raw.is_char_boundary(end) {
+            end -= 1;
+        }
+        &raw[..end]
+    } else {
+        raw
+    };
+
+    let chars: Vec<char> = sample.chars().collect();
+    let mut high_risk = 0usize;
+    let mut zero_width = 0usize;
+    let mut prev_u32 = 0u32;
+
+    for (idx, &ch) in chars.iter().enumerate() {
+        let v = ch as u32;
+        if is_bidi_override_char(ch) || v == 0x001B || v == 0x009B || v == 0x0008 || v == 0x0007 {
+            high_risk += 1;
+        } else if v == 0x000D {
+            if let Some(&next_ch) = chars.get(idx + 1) {
+                if next_ch != '\n' && next_ch != '\r' {
+                    high_risk += 1;
+                }
+            }
+        } else if is_zero_width_char(ch) {
+            zero_width += 1;
+        } else if v == 0x200D && prev_u32 < 0x2600 {
+            zero_width += 1;
+        }
+        prev_u32 = v;
+    }
+
+    if high_risk > 0 {
+        Some(PoisonThreatKind::PastejackingOrBidi(high_risk + zero_width))
+    } else if zero_width > 0 {
+        Some(PoisonThreatKind::ZeroWidthGhost(zero_width))
+    } else {
+        None
+    }
+}
+
+pub fn sanitize_clipboard_poison(raw: &str) -> String {
+    if raw.is_empty() {
+        return String::new();
+    }
+    let had_high_risk = matches!(
+        inspect_clipboard_poison(raw),
+        Some(PoisonThreatKind::PastejackingOrBidi(_))
+    );
+
+    static ANSI_RE: OnceLock<Regex> = OnceLock::new();
+    let mut stage = if raw.contains('\x1b') || raw.contains('\u{009b}') {
+        let re = ANSI_RE.get_or_init(|| {
+            Regex::new("\x1b\\[[0-9;?]*[ -/]*[@-~]|\u{009b}[0-9;?]*[ -/]*[@-~]|\x1b\\][^\x07\x1b]*(?:\x07|\x1b\\\\)")
+                .unwrap()
+        });
+        re.replace_all(raw, "").into_owned()
+    } else {
+        raw.to_string()
+    };
+
+    stage = stage.replace("\r\n", "\n");
+    if stage.contains('\r') {
+        stage = stage.replace('\r', " ");
+    }
+
+    let mut out = String::with_capacity(stage.len());
+    let mut prev_u32 = 0u32;
+    for ch in stage.chars() {
+        let v = ch as u32;
+        if is_bidi_override_char(ch) || is_zero_width_char(ch) {
+            continue;
+        }
+        if v == 0x200D && prev_u32 < 0x2600 {
+            continue;
+        }
+        if v < 0x0020 && ch != '\n' && ch != '\t' {
+            continue;
+        }
+        if v == 0x007F || (0x0080..=0x009F).contains(&v) {
+            continue;
+        }
+        out.push(ch);
+        prev_u32 = v;
+    }
+
+    if had_high_risk {
+        while out.ends_with('\n') {
+            out.pop();
+        }
+    }
+    out
+}
+
+pub fn is_terminal_app(app_name: Option<&str>) -> bool {
+    let Some(raw) = app_name.map(str::trim).filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    let lower = raw.to_lowercase();
+    const TERMS: &[&str] = &[
+        "windowsterminal",
+        "wt",
+        "powershell",
+        "pwsh",
+        "cmd",
+        "ghostty",
+        "iterm",
+        "terminal",
+        "终端",
+        "warp",
+        "wezterm",
+        "kitty",
+        "alacritty",
+        "tabby",
+        "windterm",
+        "xshell",
+        "mobaxterm",
+    ];
+    TERMS.iter().any(|t| lower == *t || lower.contains(t))
+}
+
+// ============================================================================
 // 2. 离线微秒级敏感凭据嗅探与防肩窥圆点雾化遮罩（零高度抖动）
 // ============================================================================
 

@@ -1538,8 +1538,12 @@ unsafe extern "system" fn wnd_proc(
                         .as_mut()
                         .map(|s| {
                             let n = now_unix_secs();
-                            s.store.sweep_expired_otps(n)
-                                + s.store.archive_expired_completed_todos(n)
+                            let cnt = s.store.sweep_expired_otps(n)
+                                + s.store.archive_expired_completed_todos(n);
+                            if cnt > 0 && s.show_quick_look {
+                                s.show_quick_look = false;
+                            }
+                            cnt
                         })
                         .unwrap_or(0)
                 });
@@ -1983,6 +1987,19 @@ unsafe fn handle_clipboard_update(hwnd: HWND) {
                                 feedback_toast = Some("双按复制：已剥离富文本脏样式".to_string());
                             }
                         } else if !minimal {
+                            if st.store.config.auto_strip_zero_width
+                                && iclip_core::security::inspect_clipboard_poison(&raw_text)
+                                    .is_some()
+                            {
+                                let clean =
+                                    iclip_core::security::sanitize_clipboard_poison(&raw_text);
+                                if clean != raw_text && !clean.is_empty() {
+                                    raw_text = clean;
+                                    rewrite_clipboard_text = Some(raw_text.clone());
+                                    feedback_toast =
+                                        Some("智能契约：已自动清除隐形幽灵与控制符".to_string());
+                                }
+                            }
                             if st.store.config.auto_clean_tracking_url {
                                 if let Some(clean) = clean_tracking_url(raw_text.trim()) {
                                     raw_text = clean.clone();
@@ -2472,6 +2489,26 @@ unsafe fn commit_paste_item_by_index(hwnd: HWND, item_idx: usize, force_plain: b
                                     .find(|c| c.id != item.id && c.text.is_some())
                                     .and_then(|c| c.text.as_deref());
                                 text_to_write = Some(render_dynamic_template(raw, ctx));
+                            } else if !force_plain
+                                && !st.store.config.minimal_mode_enabled
+                                && matches!(
+                                    item.detected_poison_threat(),
+                                    Some(
+                                        iclip_core::security::PoisonThreatKind::PastejackingOrBidi(
+                                            _
+                                        )
+                                    )
+                                )
+                                && iclip_core::security::is_terminal_app(target_app.as_deref())
+                            {
+                                let safe_cmd = iclip_core::security::sanitize_clipboard_poison(raw);
+                                if safe_cmd != *raw && !safe_cmd.is_empty() {
+                                    text_to_write = Some(safe_cmd);
+                                    st.toast_message =
+                                        Some("已拦截隐藏终端控制符劫持并安全键入".to_string());
+                                } else {
+                                    text_to_write = Some(raw.clone());
+                                }
                             } else {
                                 text_to_write = Some(raw.clone());
                             }
@@ -5048,6 +5085,13 @@ fn layout_and_draw_main_view(
                     let mut sub_parts: Vec<String> = Vec::new();
                     if item.is_burn_after_paste() {
                         sub_parts.push("粘贴即焚".to_string());
+                    } else if matches!(
+                        item.detected_poison_threat(),
+                        Some(iclip_core::security::PoisonThreatKind::PastejackingOrBidi(
+                            _
+                        ))
+                    ) {
+                        sub_parts.push("含隐藏控制符".to_string());
                     } else if let Some(sec_kind) = item.detected_sensitive_kind() {
                         if !item.is_pinned
                             && !item.is_pending_todo()
@@ -8569,12 +8613,24 @@ unsafe fn import_archive_via_dialog(hwnd: HWND) {
 
     if ok {
         let src = PathBuf::from(from_wide_slice(&file_buf));
+        let clip_pw = read_unicode_text_from_clipboard(hwnd);
         let res = APP_STATE.with(|c| {
-            c.borrow_mut()
-                .as_mut()
-                .unwrap()
+            let mut b = c.borrow_mut();
+            let st = b.as_mut().unwrap();
+            let q_pw = Some(st.search_query.trim().to_string()).filter(|s| !s.is_empty());
+            let first_try = st
                 .store
-                .import_archive_from_file(&src)
+                .import_archive_from_file_with_passphrase(&src, q_pw.as_deref());
+            if first_try
+                == Err(iclip_core::archive::ArchiveBackupError::PassphraseRequiredOrIncorrect)
+            {
+                if let Some(cp) = clip_pw.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                    return st
+                        .store
+                        .import_archive_from_file_with_passphrase(&src, Some(cp));
+                }
+            }
+            first_try
         });
         show_panel_near_cursor(hwnd);
         match res {
@@ -8585,6 +8641,12 @@ unsafe fn import_archive_via_dialog(hwnd: HWND) {
                     s.source_format_label, s.imported_new_count, s.updated_existing_count
                 ),
             ),
+            Err(iclip_core::archive::ArchiveBackupError::PassphraseRequiredOrIncorrect) => {
+                set_toast(
+                    hwnd,
+                    "加密归档：请先复制口令或在搜索框输入口令后再点导入".to_string(),
+                )
+            }
             Err(e) => set_toast(hwnd, e.message()),
         }
     }

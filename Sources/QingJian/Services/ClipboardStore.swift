@@ -760,6 +760,7 @@ final class ClipboardStore: ObservableObject {
         for dead in purged {
             pendingOTPExpirationTasks[dead.id]?.cancel()
             pendingOTPExpirationTasks.removeValue(forKey: dead.id)
+            evictItemMemoryCaches(for: dead)
             deleteImageFileIfNeeded(for: dead)
         }
         saveHistory()
@@ -799,6 +800,7 @@ final class ClipboardStore: ObservableObject {
         for dead in removed {
             pendingOTPExpirationTasks[dead.id]?.cancel()
             pendingOTPExpirationTasks.removeValue(forKey: dead.id)
+            evictItemMemoryCaches(for: dead)
             if let cur = currentPBString, let raw = dead.text, cur == raw {
                 shouldScrubPasteboard = true
             }
@@ -1836,6 +1838,24 @@ final class ClipboardStore: ObservableObject {
         }
         #endif
 
+        // 终端粘贴劫持（Pastejacking / Trojan Bidi）实时主动防御：目标窗口为终端且剪贴含高危隐藏控制符时自动剥离
+        if !minimalModeEnabled && !forceRawSecret,
+           let raw = item.text,
+           case .pastejackingOrBidi = item.detectedPoisonThreat,
+           ClipboardPoisonGuard.isTerminalApp(activeTargetAppName) {
+            let safeCmd = ClipboardPoisonGuard.sanitize(raw)
+            if safeCmd != raw && !safeCmd.isEmpty {
+                pasteCustomString(
+                    safeCmd,
+                    sourceItem: item,
+                    toast: "已拦截隐藏终端劫持控制符并安全键入",
+                    shouldAutoPaste: shouldAutoPaste,
+                    onBeforePaste: onBeforePaste
+                )
+                return
+            }
+        }
+
         writeToPasteboard(item, plainTextOnly: plainTextOnly)
         if shouldAutoPaste {
             AdaptiveIntelligenceEngine.shared.recordContentActivity(contentHash: item.contentHash)
@@ -2137,6 +2157,7 @@ final class ClipboardStore: ObservableObject {
         pendingOTPExpirationTasks.removeValue(forKey: item.id)
         guard let idx = items.firstIndex(where: { $0.id == item.id }) else { return }
         let removed = items.remove(at: idx)
+        evictItemMemoryCaches(for: removed)
         #if ICLIP_EDITION_FLOW
         pasteQueueIDs.removeAll { $0 == removed.id }
         selectedMergeIDs.removeAll { $0 == removed.id }
@@ -2167,6 +2188,9 @@ final class ClipboardStore: ObservableObject {
     func clearUnpinned() {
         let toRemove = items.filter { !$0.isPinned && !$0.isPendingTodo }
         guard !toRemove.isEmpty else { return }
+        for item in toRemove {
+            evictItemMemoryCaches(for: item)
+        }
         #if ICLIP_EDITION_FLOW
         let removedIDs = Set(toRemove.map(\.id))
         pasteQueueIDs.removeAll { removedIDs.contains($0) }
@@ -2312,6 +2336,32 @@ final class ClipboardStore: ObservableObject {
         let analyzed = SemanticEngine.analyze(item)
         var baseActions = analyzed.actions
         var resolvedKind = analyzed.primaryKind
+
+        // 剪贴板投毒（Bidi / ANSI 控制符）与网页零宽幽灵字符净化胶囊
+        if let raw = item.text, let threat = item.detectedPoisonThreat {
+            let cleanText = ClipboardPoisonGuard.sanitize(raw)
+            if cleanText != raw && !cleanText.isEmpty {
+                let (title, isHighRisk): (String, Bool) = {
+                    switch threat {
+                    case .pastejackingOrBidi:
+                        return ("净化隐藏控制符", true)
+                    case .zeroWidthGhost(let n):
+                        return ("清除 \(n) 个零宽字符", false)
+                    }
+                }()
+                baseActions.insert(
+                    TransformAction(
+                        id: "sanitize-invisible-poison",
+                        title: title,
+                        symbolName: isHighRisk ? "exclamationmark.shield.fill" : "sparkles",
+                        isSecurityAction: isHighRisk,
+                        resultText: cleanText,
+                        toastText: isHighRisk ? "已彻底剥离隐藏控制符与双向伪装符" : "已清除隐藏零宽幽灵字符"
+                    ),
+                    at: 0
+                )
+            }
+        }
 
         // 兜底身份证/银行卡等高敏凭据的通用脱敏胶囊
         if let raw = item.text, item.detectedSensitiveKind != nil,
@@ -3006,6 +3056,27 @@ final class ClipboardStore: ObservableObject {
                         symbolName: "lock.shield",
                         resultText: redacted,
                         toastText: "已自动掩码密钥与敏感隐私"
+                    ),
+                    at: 0
+                )
+            }
+        }
+        if let threat = item.detectedPoisonThreat {
+            let cleanText = ClipboardPoisonGuard.sanitize(raw)
+            if cleanText != raw && !cleanText.isEmpty {
+                let title: String = {
+                    switch threat {
+                    case .pastejackingOrBidi: return "净化隐藏控制符"
+                    case .zeroWidthGhost(let n): return "清除 \(n) 个零宽字符"
+                    }
+                }()
+                analyzed.insert(
+                    FinanceQuickAction(
+                        id: "sanitize-invisible-poison",
+                        title: title,
+                        symbolName: "exclamationmark.shield.fill",
+                        resultText: cleanText,
+                        toastText: "已清除隐藏控制符与零宽幽灵字符"
                     ),
                     at: 0
                 )
@@ -3710,6 +3781,19 @@ final class ClipboardStore: ObservableObject {
         let icon = NSWorkspace.shared.icon(forFile: first)
         fileIconCache.setObject(icon, forKey: cacheKey)
         return icon
+    }
+
+    private func evictItemMemoryCaches(for item: ClipItem) {
+        let appPart = item.sourceAppName ?? ""
+        let stdKey = "\(item.contentHash)|\(appPart)|std" as NSString
+        let extKey = "\(item.contentHash)|\(appPart)|ext" as NSString
+        #if !ICLIP_EDITION_FLOW
+        semanticCache.removeObject(forKey: stdKey)
+        semanticCache.removeObject(forKey: extKey)
+        #else
+        financeCache.removeObject(forKey: stdKey)
+        financeCache.removeObject(forKey: extKey)
+        #endif
     }
 
     private func deleteImageFileIfNeeded(for item: ClipItem) {

