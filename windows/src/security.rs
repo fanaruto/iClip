@@ -2,12 +2,14 @@ use regex_lite::Regex;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 pub const VAULT_MAGIC: &[u8; 8] = b"ICLPWIN1";
+pub const IMAGE_VAULT_MAGIC: &[u8; 8] = b"ICLPIMG1";
 static NONCE_SEQ: AtomicU64 = AtomicU64::new(1);
+static KEY_CACHE: OnceLock<Mutex<Vec<(PathBuf, [u8; 32])>>> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SensitiveSecretKind {
@@ -183,42 +185,58 @@ fn generate_entropy_32(seed_hint: &Path) -> [u8; 32] {
     out
 }
 
-/// 加载或静默初始化与数据目录绑定的 256-bit 主密钥（Windows 下经系统内核 DPAPI 封装）
+/// 加载或静默初始化与数据目录绑定的 256-bit 主密钥（Windows 下经系统内核 DPAPI 封装，进程内内存缓存零重复 I/O）
 pub fn load_or_create_vault_key(data_dir: &Path) -> [u8; 32] {
-    let key_path = data_dir.join("vault.dpapi");
-    if let Ok(raw) = fs::read(&key_path) {
-        #[cfg(target_os = "windows")]
-        if let Some(unprotected) = win_dpapi::unprotect_bytes(&raw) {
-            if unprotected.len() == 32 {
-                let mut k = [0u8; 32];
-                k.copy_from_slice(&unprotected);
-                return k;
-            }
-        }
-        #[cfg(not(target_os = "windows"))]
-        if raw.len() == 32 {
-            let mut k = [0u8; 32];
-            k.copy_from_slice(&raw);
-            return k;
+    let cache = KEY_CACHE.get_or_init(|| Mutex::new(Vec::new()));
+    if let Ok(guard) = cache.lock() {
+        if let Some((_, k)) = guard.iter().find(|(p, _)| p == data_dir) {
+            return *k;
         }
     }
 
-    let fresh = generate_entropy_32(data_dir);
-    let _ = fs::create_dir_all(data_dir);
-    #[cfg(target_os = "windows")]
-    if let Some(protected) = win_dpapi::protect_bytes(&fresh) {
-        let _ = fs::write(&key_path, protected);
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = fs::write(&key_path, fresh);
-        #[cfg(unix)]
+    let key_path = data_dir.join("vault.dpapi");
+    let resolved: [u8; 32] = 'load: {
+        if let Ok(raw) = fs::read(&key_path) {
+            #[cfg(target_os = "windows")]
+            if let Some(unprotected) = win_dpapi::unprotect_bytes(&raw) {
+                if unprotected.len() == 32 {
+                    let mut k = [0u8; 32];
+                    k.copy_from_slice(&unprotected);
+                    break 'load k;
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            if raw.len() == 32 {
+                let mut k = [0u8; 32];
+                k.copy_from_slice(&raw);
+                break 'load k;
+            }
+        }
+
+        let fresh = generate_entropy_32(data_dir);
+        let _ = fs::create_dir_all(data_dir);
+        #[cfg(target_os = "windows")]
+        if let Some(protected) = win_dpapi::protect_bytes(&fresh) {
+            let _ = fs::write(&key_path, protected);
+        }
+        #[cfg(not(target_os = "windows"))]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600));
+            let _ = fs::write(&key_path, fresh);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600));
+            }
+        }
+        fresh
+    };
+
+    if let Ok(mut guard) = cache.lock() {
+        if guard.len() < 16 && !guard.iter().any(|(p, _)| p == data_dir) {
+            guard.push((data_dir.to_path_buf(), resolved));
         }
     }
-    fresh
+    resolved
 }
 
 fn hmac_sha256(key: &[u8; 32], message: &[u8]) -> [u8; 32] {
@@ -326,6 +344,152 @@ pub fn open_vault_bytes(raw: &[u8], master_key: &[u8; 32]) -> Option<(Vec<u8>, b
 }
 
 // ============================================================================
+// 1.5 本地剪贴板截图全模态透明静态认证加密（`ICLPIMG1` + 旧明文 PNG 自动升级）
+// ============================================================================
+
+pub fn seal_image_bytes(plain: &[u8], master_key: &[u8; 32], seed_dir: &Path) -> Vec<u8> {
+    let entropy = generate_entropy_32(seed_dir);
+    let mut nonce = [0u8; 16];
+    nonce.copy_from_slice(&entropy[..16]);
+
+    let (enc_key, mac_key) = derive_subkeys(master_key, &nonce);
+    let mut ciphertext = plain.to_vec();
+    apply_sha256_ctr_stream(&enc_key, &nonce, &mut ciphertext);
+
+    let mut out = Vec::with_capacity(8 + 16 + ciphertext.len() + 32);
+    out.extend_from_slice(IMAGE_VAULT_MAGIC);
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(&ciphertext);
+
+    let tag = hmac_sha256(&mac_key, &out);
+    out.extend_from_slice(&tag);
+    out
+}
+
+pub fn open_image_bytes(raw: &[u8], master_key: &[u8; 32]) -> Option<(Vec<u8>, bool)> {
+    if raw.is_empty() {
+        return None;
+    }
+    if raw.starts_with(IMAGE_VAULT_MAGIC) {
+        if raw.len() < 8 + 16 + 32 {
+            return None;
+        }
+        let body_end = raw.len() - 32;
+        let expected_tag = &raw[body_end..];
+        let mut nonce = [0u8; 16];
+        nonce.copy_from_slice(&raw[8..24]);
+
+        let (enc_key, mac_key) = derive_subkeys(master_key, &nonce);
+        let computed_tag = hmac_sha256(&mac_key, &raw[..body_end]);
+
+        let mut diff = 0u8;
+        for (a, b) in expected_tag.iter().zip(computed_tag.iter()) {
+            diff |= a ^ b;
+        }
+        if diff != 0 {
+            return None;
+        }
+
+        let mut plain = raw[24..body_end].to_vec();
+        apply_sha256_ctr_stream(&enc_key, &nonce, &mut plain);
+        return Some((plain, false));
+    }
+    // 平滑兼容历史遗留明文 PNG / JPEG 图像
+    Some((raw.to_vec(), true))
+}
+
+fn data_dir_from_images_dir(images_dir: &Path) -> &Path {
+    images_dir.parent().unwrap_or(images_dir)
+}
+
+pub fn write_encrypted_image_to_dir(
+    images_dir: &Path,
+    file_name: &str,
+    plain_png: &[u8],
+) -> std::io::Result<()> {
+    let _ = fs::create_dir_all(images_dir);
+    let data_dir = data_dir_from_images_dir(images_dir);
+    let key = load_or_create_vault_key(data_dir);
+    let sealed = seal_image_bytes(plain_png, &key, data_dir);
+    let dest = images_dir.join(file_name);
+    fs::write(&dest, sealed)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&dest, fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
+pub fn read_decrypted_image_from_dir(images_dir: &Path, file_name: &str) -> Option<Vec<u8>> {
+    let clean_name = Path::new(file_name).file_name()?;
+    let raw = fs::read(images_dir.join(clean_name)).ok()?;
+    let data_dir = data_dir_from_images_dir(images_dir);
+    let key = load_or_create_vault_key(data_dir);
+    open_image_bytes(&raw, &key).map(|(plain, _)| plain)
+}
+
+pub fn upgrade_plain_images_in_dir(images_dir: &Path, master_key: &[u8; 32]) -> usize {
+    let Ok(entries) = fs::read_dir(images_dir) else {
+        return 0;
+    };
+    let data_dir = data_dir_from_images_dir(images_dir);
+    let mut upgraded = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Ok(raw) = fs::read(&path) else {
+            continue;
+        };
+        if raw.is_empty() || raw.starts_with(IMAGE_VAULT_MAGIC) {
+            continue;
+        }
+        let sealed = seal_image_bytes(&raw, master_key, data_dir);
+        if fs::write(&path, sealed).is_ok() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+            }
+            upgraded += 1;
+        }
+    }
+    upgraded
+}
+
+/// 按需将加密截图物化至受控临时预览目录（自动清扫超 10 分钟旧临时件，供资源管理器预览）
+pub fn materialize_temp_preview_image(images_dir: &Path, file_name: &str) -> Option<PathBuf> {
+    let clean_name = Path::new(file_name)
+        .file_name()?
+        .to_string_lossy()
+        .to_string();
+    let plain = read_decrypted_image_from_dir(images_dir, &clean_name)?;
+    let preview_dir = std::env::temp_dir().join("iClipPreviewExports");
+    let _ = fs::create_dir_all(&preview_dir);
+    if let Ok(entries) = fs::read_dir(&preview_dir) {
+        let now = std::time::SystemTime::now();
+        for ent in entries.flatten() {
+            if let Ok(meta) = ent.metadata() {
+                if let Ok(modified) = meta.modified() {
+                    if now
+                        .duration_since(modified)
+                        .map(|d| d.as_secs() > 600)
+                        .unwrap_or(false)
+                    {
+                        let _ = fs::remove_file(ent.path());
+                    }
+                }
+            }
+        }
+    }
+    let out_path = preview_dir.join(clean_name);
+    fs::write(&out_path, plain).ok()?;
+    Some(out_path)
+}
+
+// ============================================================================
 // 2. 离线微秒级敏感凭据嗅探与防肩窥圆点雾化遮罩（零高度抖动）
 // ============================================================================
 
@@ -373,7 +537,21 @@ pub fn classify_sensitive_text(raw: &str) -> Option<SensitiveSecretKind> {
         Regex::new(r"(?i)\b(?:bearer|authorization\s*:\s*bearer)\s+[A-Za-z0-9._~+/=-]{20,}")
             .unwrap()
     });
-    if conn_re.is_match(sample) || bearer_re.is_match(sample) {
+    static URL_QUERY_SEC_RE: OnceLock<Regex> = OnceLock::new();
+    let url_q_re = URL_QUERY_SEC_RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)[?&](?:api_key|apikey|access_token|auth_token|client_secret|secret|password|passwd)=[^&\s#]{8,}",
+        )
+        .unwrap()
+    });
+    static BASIC_AUTH_RE: OnceLock<Regex> = OnceLock::new();
+    let basic_re =
+        BASIC_AUTH_RE.get_or_init(|| Regex::new(r"(?i)\bhttps?://[^:\s/@]+:[^@\s/]{4,}@").unwrap());
+    if conn_re.is_match(sample)
+        || bearer_re.is_match(sample)
+        || url_q_re.is_match(sample)
+        || basic_re.is_match(sample)
+    {
         return Some(SensitiveSecretKind::ConnectionSecret);
     }
 

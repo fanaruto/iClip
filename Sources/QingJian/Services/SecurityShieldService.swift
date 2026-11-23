@@ -134,6 +134,88 @@ enum LocalVaultCrypto {
         try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
     }
 
+    // MARK: - 本地剪贴板截图全模态静态透明加密（`ICLPIMG1` + AES-256-GCM + 旧明文 PNG 自动升级）
+
+    static let imageEncryptedMagic = Data("ICLPIMG1".utf8)
+
+    static func sealImageData(_ plainImageData: Data, customKey: SymmetricKey? = nil) -> Data? {
+        guard !plainImageData.isEmpty else { return nil }
+        let key = customKey ?? loadOrCreateMasterKey()
+        guard let sealed = try? AES.GCM.seal(plainImageData, using: key),
+              let combined = sealed.combined else {
+            return nil
+        }
+        var output = Data(capacity: imageEncryptedMagic.count + combined.count)
+        output.append(imageEncryptedMagic)
+        output.append(combined)
+        return output
+    }
+
+    static func openImageData(
+        _ rawData: Data,
+        customKey: SymmetricKey? = nil
+    ) -> (plainData: Data, wasLegacyPlainImage: Bool)? {
+        guard !rawData.isEmpty else { return nil }
+        if rawData.starts(with: imageEncryptedMagic) {
+            let payload = rawData.dropFirst(imageEncryptedMagic.count)
+            let key = customKey ?? loadOrCreateMasterKey()
+            guard let box = try? AES.GCM.SealedBox(combined: payload),
+                  let opened = try? AES.GCM.open(box, using: key) else {
+                return nil
+            }
+            return (opened, false)
+        }
+        return (rawData, true)
+    }
+
+    static func writeEncryptedImage(
+        _ plainImageData: Data,
+        to fileURL: URL,
+        customKey: SymmetricKey? = nil
+    ) throws {
+        let payload = sealImageData(plainImageData, customKey: customKey) ?? plainImageData
+        try writeProtectedFile(payload, to: fileURL)
+    }
+
+    static func readDecryptedImageData(
+        at fileURL: URL,
+        customKey: SymmetricKey? = nil
+    ) -> Data? {
+        guard let raw = try? Data(contentsOf: fileURL, options: [.mappedIfSafe]) else {
+            return nil
+        }
+        return openImageData(raw, customKey: customKey)?.plainData
+    }
+
+    @discardableResult
+    static func upgradePlainImagesInDirectoryIfNeeded(
+        _ imagesDir: URL,
+        customKey: SymmetricKey? = nil
+    ) -> Int {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: imagesDir.path) else { return 0 }
+        try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: imagesDir.path)
+        guard let files = try? fm.contentsOfDirectory(
+            at: imagesDir,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else { return 0 }
+
+        var upgraded = 0
+        for fileURL in files where !fileURL.hasDirectoryPath {
+            guard let raw = try? Data(contentsOf: fileURL), !raw.isEmpty else { continue }
+            if raw.starts(with: imageEncryptedMagic) {
+                try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
+                continue
+            }
+            if let sealed = sealImageData(raw, customKey: customKey),
+               (try? writeProtectedFile(sealed, to: fileURL)) != nil {
+                upgraded += 1
+            }
+        }
+        return upgraded
+    }
+
     // MARK: - 口令级跨设备归档加密（`.iclip` 可选密码保护，双端互通）
 
     static let archiveEncryptedMagic = Data("ICLPARCH1".utf8)
@@ -217,6 +299,12 @@ enum SensitiveCredentialVeil {
     private static let envSecretRegex = try! NSRegularExpression(
         pattern: ##"(?im)^(\s*(?:export\s+)?[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY|AUTH_TOKEN|CLIENT_SECRET)[A-Z0-9_]*\s*[:=]\s*['"]?)([^\s'"#]{6,})(['"]?)"##
     )
+    private static let urlQuerySecretRegex = try! NSRegularExpression(
+        pattern: #"(?i)([?&](?:api_key|apikey|access_token|auth_token|client_secret|secret|password|passwd)=)([^&\s#]{8,})"#
+    )
+    private static let httpBasicAuthRegex = try! NSRegularExpression(
+        pattern: #"(?i)\b(https?://[^:\s/@]+:)([^@\s/]{4,})(@)"#
+    )
 
     /// 仅扫描首 2,048 UTF-8 字节，2MB 超大文本耗时 < 0.03ms
     static func classify(_ rawText: String) -> SensitiveSecretKind? {
@@ -232,7 +320,10 @@ enum SensitiveCredentialVeil {
         if jwtRegex.firstMatch(in: sample, range: nsRange) != nil {
             return .jwtToken
         }
-        if connUriRegex.firstMatch(in: sample, range: nsRange) != nil || bearerRegex.firstMatch(in: sample, range: nsRange) != nil {
+        if connUriRegex.firstMatch(in: sample, range: nsRange) != nil
+            || bearerRegex.firstMatch(in: sample, range: nsRange) != nil
+            || urlQuerySecretRegex.firstMatch(in: sample, range: nsRange) != nil
+            || httpBasicAuthRegex.firstMatch(in: sample, range: nsRange) != nil {
             return .connectionSecret
         }
         for match in idCardCandidateRegex.matches(in: sample, range: nsRange) {
@@ -349,6 +440,18 @@ enum SensitiveCredentialVeil {
                 in: out,
                 range: NSRange(out.startIndex..<out.endIndex, in: out),
                 withTemplate: "$1***REDACTED***$3"
+            )
+            out = httpBasicAuthRegex.stringByReplacingMatches(
+                in: out,
+                range: NSRange(out.startIndex..<out.endIndex, in: out),
+                withTemplate: "$1***REDACTED***$3"
+            )
+        }
+        if out.contains("?") || out.contains("&") {
+            out = urlQuerySecretRegex.stringByReplacingMatches(
+                in: out,
+                range: NSRange(out.startIndex..<out.endIndex, in: out),
+                withTemplate: "$1***REDACTED***"
             )
         }
         out = bearerRegex.stringByReplacingMatches(

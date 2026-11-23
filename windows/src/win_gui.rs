@@ -202,6 +202,7 @@ enum HitAction {
     ToggleScreenSharePrivacy,
     ToggleSensitiveVeil,
     ToggleAutoClearConcealed,
+    ToggleAutoExpireSecrets,
     ToggleQueueMode,
     ToggleQueueAutoTab,
     ToggleAutostart,
@@ -1898,6 +1899,9 @@ unsafe fn handle_clipboard_update(hwnd: HWND) {
         return;
     }
 
+    // 用户正常复制了非密码新内容，立即取消此前挂起的残留清擦定时器，防止误清正常剪贴板
+    KillTimer(hwnd, TIMER_ID_CONCEALED_SCRUB);
+
     if IsClipboardFormatAvailable(CF_HDROP_ID) != FALSE {
         if let Some(paths) = read_files_from_clipboard(hwnd) {
             if !paths.is_empty() {
@@ -2010,8 +2014,7 @@ unsafe fn handle_clipboard_update(hwnd: HWND) {
                     st.pending_append_capture = false;
                     let hash = iclip_core::model::sha256_hex(&png_bytes);
                     let file_name = format!("{}.png", &hash[0..24]);
-                    let full_path = st.store.images_dir.join(&file_name);
-                    if std::fs::write(&full_path, &png_bytes).is_ok() {
+                    if st.store.write_image_bytes(&file_name, &png_bytes).is_ok() {
                         st.store.insert_or_promote(ClipItem::new_image(
                             file_name,
                             w,
@@ -2099,9 +2102,10 @@ unsafe fn open_item_external_target(hwnd: HWND, store_idx: usize) {
             let img_path = APP_STATE.with(|c| {
                 c.borrow().as_ref().and_then(|st| {
                     item.image_file_name.as_ref().and_then(|f| {
-                        let clean_name = std::path::Path::new(f).file_name()?;
-                        let candidate = st.store.images_dir.join(clean_name);
-                        candidate.exists().then_some(candidate)
+                        iclip_core::security::materialize_temp_preview_image(
+                            &st.store.images_dir,
+                            f,
+                        )
                     })
                 })
             });
@@ -2406,8 +2410,13 @@ unsafe fn copy_only_item_in_place(hwnd: HWND, item_idx: usize) {
     if let Some(txt) = text_to_write {
         let _ = write_text_and_html_to_clipboard(hwnd, &txt, None);
     } else if let Some(img_path) = image_path_to_write {
-        if let Ok(bytes) = std::fs::read(img_path) {
-            let _ = write_image_bytes_to_clipboard(hwnd, &bytes);
+        if let (Some(dir), Some(fname)) = (
+            img_path.parent(),
+            img_path.file_name().and_then(|s| s.to_str()),
+        ) {
+            if let Some(bytes) = iclip_core::security::read_decrypted_image_from_dir(dir, fname) {
+                let _ = write_image_bytes_to_clipboard(hwnd, &bytes);
+            }
         }
     }
 
@@ -2472,18 +2481,37 @@ unsafe fn commit_paste_item_by_index(hwnd: HWND, item_idx: usize, force_plain: b
     if let Some(txt) = text_to_write {
         let _ = write_text_and_html_to_clipboard(hwnd, &txt, None);
     } else if let Some(img_path) = image_path_to_write {
-        if let Ok(bytes) = std::fs::read(img_path) {
-            let _ = write_image_bytes_to_clipboard(hwnd, &bytes);
+        if let (Some(dir), Some(fname)) = (
+            img_path.parent(),
+            img_path.file_name().and_then(|s| s.to_str()),
+        ) {
+            if let Some(bytes) = iclip_core::security::read_decrypted_image_from_dir(dir, fname) {
+                let _ = write_image_bytes_to_clipboard(hwnd, &bytes);
+            }
         }
     }
 
+    let mut scrub_unpinned_secret = false;
     if let Some(id) = item_id_for_otp {
         APP_STATE.with(|c| {
             if let Some(st) = c.borrow_mut().as_mut() {
                 st.store.schedule_otp_expire_if_needed(&id, 30);
                 st.store.schedule_burn_after_paste_if_needed(&id, 5);
+                if st.store.config.auto_clear_concealed_clipboard {
+                    if let Some(cur) = st.store.items.iter().find(|i| i.id == id) {
+                        if !cur.is_pinned
+                            && !cur.is_burn_after_paste()
+                            && cur.detected_sensitive_kind().is_some()
+                        {
+                            scrub_unpinned_secret = true;
+                        }
+                    }
+                }
             }
         });
+    }
+    if scrub_unpinned_secret {
+        SetTimer(hwnd, TIMER_ID_CONCEALED_SCRUB, 45_000, None);
     }
 
     if always_top {
@@ -2629,7 +2657,7 @@ unsafe fn handle_queue_pop_shortcut(hwnd: HWND) {
         let _ = write_text_and_html_to_clipboard(hwnd, txt, None);
     } else if item.kind == ClipContentType::Image {
         if let Some(f) = &item.image_file_name {
-            if let Ok(bytes) = std::fs::read(img_dir.join(f)) {
+            if let Some(bytes) = iclip_core::security::read_decrypted_image_from_dir(&img_dir, f) {
                 let _ = write_image_bytes_to_clipboard(hwnd, &bytes);
             }
         }
@@ -2690,8 +2718,7 @@ fn load_or_get_thumbnail<'a>(
         let item = &cache[pos];
         return Some((item.width, item.height, item.rgba.as_slice()));
     }
-    let full_path = images_dir.join(file_name);
-    let raw = std::fs::read(full_path).ok()?;
+    let raw = iclip_core::security::read_decrypted_image_from_dir(images_dir, file_name)?;
     let dyn_img = image::load_from_memory(&raw).ok()?;
     let (ow, oh) = (dyn_img.width(), dyn_img.height());
     let thumb = if ow > 260 || oh > 260 {
@@ -4893,7 +4920,14 @@ fn layout_and_draw_main_view(
                     if item.is_burn_after_paste() {
                         sub_parts.push("粘贴即焚".to_string());
                     } else if let Some(sec_kind) = item.detected_sensitive_kind() {
-                        sub_parts.push(sec_kind.badge_title().to_string());
+                        if !item.is_pinned
+                            && !item.is_pending_todo()
+                            && st.store.config.auto_expire_unpinned_secrets
+                        {
+                            sub_parts.push(format!("{} · 24h自毁", sec_kind.badge_title()));
+                        } else {
+                            sub_parts.push(sec_kind.badge_title().to_string());
+                        }
                     }
                     if !minimal {
                         if let Some(cat) = item.pin_category {
@@ -5768,7 +5802,7 @@ fn layout_and_draw_settings_view(
     }
     y += s(22);
 
-    let g4_toggle_rows = 3;
+    let g4_toggle_rows = 4;
     let g4_top_h = s(32) + row_h * g4_toggle_rows;
     let g4_h = g4_top_h + s(122);
     if visible_block(y, g4_h) {
@@ -5836,6 +5870,13 @@ fn layout_and_draw_settings_view(
                 st.store.config.auto_clear_concealed_clipboard,
                 palette.cobalt,
                 HitAction::ToggleAutoClearConcealed,
+            ),
+            (
+                "未收藏敏感凭据 24h 自动销毁",
+                "临时密钥与身份证卡号满 24 小时自动代谢，收藏项永久守护",
+                st.store.config.auto_expire_unpinned_secrets,
+                palette.cobalt,
+                HitAction::ToggleAutoExpireSecrets,
             ),
         ];
 
@@ -7153,6 +7194,9 @@ unsafe fn handle_left_click(hwnd: HWND, x: i32, y: i32, is_double: bool) {
         HitAction::ToggleAutoClearConcealed => {
             toggle_config_bool(hwnd, |cfg| &mut cfg.auto_clear_concealed_clipboard);
         }
+        HitAction::ToggleAutoExpireSecrets => {
+            toggle_config_bool(hwnd, |cfg| &mut cfg.auto_expire_unpinned_secrets);
+        }
         HitAction::ToggleQueueMode => {
             let active = APP_STATE.with(|c| {
                 let mut b = c.borrow_mut();
@@ -7360,7 +7404,10 @@ unsafe fn apply_image_studio_transform(hwnd: HWND, store_idx: usize, to_jpeg: bo
         }
     });
     let Some(path) = img_path else { return };
-    let Ok(raw_png) = std::fs::read(&path) else {
+    let Some((dir, fname)) = path.parent().zip(path.file_name().and_then(|s| s.to_str())) else {
+        return;
+    };
+    let Some(raw_png) = iclip_core::security::read_decrypted_image_from_dir(dir, fname) else {
         return;
     };
 

@@ -16,7 +16,8 @@ enum ImageStudioEngine {
     /// 将本地 PNG 截图转换为高画质轻量 JPEG（自动垫白底防止透明通道变黑底，体积通常缩减 80%~92%）
     static func compressToLightweightJPEG(at imageURL: URL, quality: CGFloat = 0.78, maxEdge: Int = 2560) -> ProcessedImageResult? {
         autoreleasepool {
-            guard let source = CGImageSourceCreateWithURL(imageURL as CFURL, nil) else {
+            guard let imgData = LocalVaultCrypto.readDecryptedImageData(at: imageURL),
+                  let source = CGImageSourceCreateWithData(imgData as CFData, nil) else {
                 return nil
             }
             let thumbOpts: [CFString: Any] = [
@@ -81,7 +82,8 @@ enum ImageStudioEngine {
     /// 为裸截图一键生成苹果风柔光渐变衬底 + 连续圆角 + 立体柔和投影样机图（CleanShot 级质感）
     static func renderAppleMockupFrame(at imageURL: URL, maxSourceEdge: Int = 2200) -> ProcessedImageResult? {
         autoreleasepool {
-            guard let source = CGImageSourceCreateWithURL(imageURL as CFURL, nil) else {
+            guard let imgData = LocalVaultCrypto.readDecryptedImageData(at: imageURL),
+                  let source = CGImageSourceCreateWithData(imgData as CFData, nil) else {
                 return nil
             }
             return renderAppleMockupFrame(fromSource: source, maxSourceEdge: maxSourceEdge)

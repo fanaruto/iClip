@@ -208,9 +208,16 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
             let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             baseDir = appSupport.appendingPathComponent("QingJian", isDirectory: true)
         }
-        try? FileManager.default.createDirectory(at: baseDir, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(
+            at: baseDir,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: baseDir.path)
         self.brainFileURL = baseDir.appendingPathComponent("adaptive_intelligence.json")
         self.suggestionsFileURL = baseDir.appendingPathComponent("user_suggestions.json")
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: brainFileURL.path)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: suggestionsFileURL.path)
 
         let loaded: AdaptiveBrainState
         if let data = try? Data(contentsOf: brainFileURL),
@@ -1038,6 +1045,13 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
             adoptedEffects.append(!neg ? "已开启敏感凭据防肩窥圆点遮罩" : "已关闭列表敏感凭据遮罩")
         }
 
+        let secretTTLKeys = ["敏感清理", "敏感自毁", "24小时清理", "24h自毁", "自动销毁敏感"]
+        if Self.containsAny(lower, secretTTLKeys) {
+            let neg = Self.isClauseNegated(matching: secretTTLKeys, in: clauses)
+            store.autoExpireUnpinnedSecrets = !neg
+            adoptedEffects.append(!neg ? "已开启未收藏敏感凭据 24h 自动销毁" : "已关闭未收藏敏感凭据自动销毁")
+        }
+
         let status: UserSuggestionRecord.Status
         let summary: String
         if !adoptedEffects.isEmpty {
@@ -1191,7 +1205,7 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
         let work = DispatchWorkItem { [ioQueue] in
             ioQueue.async {
                 if let data = try? JSONEncoder().encode(snapshot) {
-                    try? data.write(to: url, options: .atomic)
+                    try? LocalVaultCrypto.writeProtectedFile(data, to: url)
                 }
             }
         }
@@ -1207,7 +1221,7 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             encoder.dateEncodingStrategy = .iso8601
             if let data = try? encoder.encode(snapshot) {
-                try? data.write(to: url, options: .atomic)
+                try? LocalVaultCrypto.writeProtectedFile(data, to: url)
             }
         }
     }

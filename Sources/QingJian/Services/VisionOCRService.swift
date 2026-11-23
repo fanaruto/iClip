@@ -88,7 +88,8 @@ enum VisionOCRService {
 
     private static func performSyncRecognition(at url: URL) -> String? {
         autoreleasepool {
-            guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+            guard let imgData = LocalVaultCrypto.readDecryptedImageData(at: url),
+                  let source = CGImageSourceCreateWithData(imgData as CFData, nil) else {
                 return nil
             }
             // 使用 ImageIO 硬件降采样至最大 2048px 长边，5K 截图峰值内存直降 75%，文字识别精度不受损

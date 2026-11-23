@@ -1844,6 +1844,18 @@ struct ClipboardPopoverView: View {
                     .toggleStyle(.switch)
                     .controlSize(.small)
 
+                    Toggle(isOn: $store.autoExpireUnpinnedSecrets) {
+                        VStack(alignment: .leading, spacing: 1.5) {
+                            Text("未收藏敏感凭据 24h 自动销毁")
+                                .font(.system(size: 13.5, weight: .medium))
+                            Text("临时密钥与身份证卡号满 24 小时自动无痕代谢，收藏项永久守护")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+
                     Divider().opacity(0.35)
 
                     VStack(alignment: .leading, spacing: 7) {
@@ -4391,6 +4403,18 @@ struct ClipboardPopoverView: View {
                             Text("密码剪贴板 60 秒残留擦除")
                                 .font(.system(size: 13.5, weight: .medium))
                             Text("从 1Password / 系统密码复制密码后超时自动清空系统剪贴板")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+
+                    Toggle(isOn: $store.autoExpireUnpinnedSecrets) {
+                        VStack(alignment: .leading, spacing: 1.5) {
+                            Text("未收藏敏感凭据 24h 自动销毁")
+                                .font(.system(size: 13.5, weight: .medium))
+                            Text("临时密钥与身份证卡号满 24 小时自动无痕代谢，收藏项永久守护")
                                 .font(.system(size: 11))
                                 .foregroundStyle(.secondary)
                         }

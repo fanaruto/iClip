@@ -135,8 +135,9 @@ final class UpdateManager: NSObject, ObservableObject {
                     // 跨角色切换：严格匹配目标角色专属安装包，禁止回退到其他角色的压缩包
                     guard let roleAsset = decoded.assets.first(where: { $0.name == expectedAsset }),
                           let downloadURL = URL(string: roleAsset.browserDownloadURL),
+                          Self.isTrustedRemoteDownloadURL(downloadURL),
                           let htmlURL = URL(string: decoded.htmlURL) else {
-                        state = .failed("GitHub Release v\(latestVer) 尚未上传「\(desiredEdition.title)」专属包（\(expectedAsset)）")
+                        state = .failed("GitHub Release v\(latestVer) 尚未上传可信「\(desiredEdition.title)」专属包（\(expectedAsset)）")
                         return
                     }
 
@@ -165,8 +166,9 @@ final class UpdateManager: NSObject, ObservableObject {
                 guard let asset = decoded.assets.first(where: { $0.name == expectedAsset })
                         ?? decoded.assets.first(where: { $0.name == legacyAssetName }),
                       let downloadURL = URL(string: asset.browserDownloadURL),
+                      Self.isTrustedRemoteDownloadURL(downloadURL),
                       let htmlURL = URL(string: decoded.htmlURL) else {
-                    if !silent { state = .failed("新版本 v\(latestVer) 尚未上传 \(expectedAsset)") }
+                    if !silent { state = .failed("新版本 v\(latestVer) 尚未上传可信安装包 \(expectedAsset)") }
                     return
                 }
 
@@ -212,6 +214,10 @@ final class UpdateManager: NSObject, ObservableObject {
             }
             return
         }
+        if !Self.isTrustedRemoteDownloadURL(info.downloadURL) {
+            state = .failed("更新源未通过安全域名校验，已拦截下载")
+            return
+        }
         state = .downloading(progress: 0.0, info: info)
 
         let config = URLSessionConfiguration.ephemeral
@@ -254,9 +260,20 @@ final class UpdateManager: NSObject, ObservableObject {
             let extractDir = stageDir.appendingPathComponent("extracted", isDirectory: true)
 
             do {
-                try fm.createDirectory(at: extractDir, withIntermediateDirectories: true)
+                try fm.createDirectory(
+                    at: extractDir,
+                    withIntermediateDirectories: true,
+                    attributes: [.posixPermissions: 0o700]
+                )
+                try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: stageDir.path)
                 try fm.copyItem(at: tempZipURL, to: copiedZip)
                 try? fm.removeItem(at: tempZipURL)
+
+                if info.assetSize > 0,
+                   let actualSize = (try? fm.attributesOfItem(atPath: copiedZip.path)[.size] as? Int64),
+                   actualSize != info.assetSize {
+                    throw OTAError.corruptedDownloadSize
+                }
 
                 // 使用系统 ditto 解压，完整保留开发者证书代码签名与辅助功能 TCC 信任链
                 let unzip = Process()
@@ -274,6 +291,18 @@ final class UpdateManager: NSObject, ObservableObject {
                       (fm.isExecutableFile(atPath: newAppURL.appendingPathComponent("Contents/MacOS/QingJian").path)
                        || fm.isExecutableFile(atPath: newAppURL.appendingPathComponent("Contents/MacOS/iClip").path)) else {
                     throw OTAError.invalidAppBundle
+                }
+
+                // 执行系统级代码签名与 Bundle 密封完整性核验，拒绝任何损坏或被篡改的二进制覆盖 /Applications
+                let verifyProc = Process()
+                verifyProc.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+                verifyProc.arguments = ["--verify", "--deep", "--strict", newAppURL.path]
+                verifyProc.standardOutput = Pipe()
+                verifyProc.standardError = Pipe()
+                try verifyProc.run()
+                verifyProc.waitUntilExit()
+                guard verifyProc.terminationStatus == 0 else {
+                    throw OTAError.signatureVerificationFailed
                 }
 
                 // 校验证书包内的角色标记是否与用户请求的目标角色一致（二次防呆校验）
@@ -321,7 +350,7 @@ final class UpdateManager: NSObject, ObservableObject {
                 rm -rf "$STAGE_DIR"
                 """
                 try scriptContent.write(to: scriptURL, atomically: true, encoding: .utf8)
-                try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+                try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: scriptURL.path)
 
                 let launcher = Process()
                 launcher.executableURL = URL(fileURLWithPath: "/bin/zsh")
@@ -399,19 +428,39 @@ final class UpdateManager: NSObject, ObservableObject {
         return false
     }
 
+    nonisolated static func isTrustedRemoteDownloadURL(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased(), scheme == "https",
+              let host = url.host?.lowercased() else {
+            return false
+        }
+        let trustedHosts: Set<String> = [
+            "github.com",
+            "api.github.com",
+            "objects.githubusercontent.com",
+            "release-assets.githubusercontent.com",
+            "codeload.github.com",
+            "app.webfooo.com"
+        ]
+        return trustedHosts.contains(host)
+    }
+
     nonisolated private static func shellQuote(_ value: String) -> String {
         "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
     enum OTAError: LocalizedError {
+        case corruptedDownloadSize
         case extractFailed
         case invalidAppBundle
+        case signatureVerificationFailed
         case editionMismatch
 
         var errorDescription: String? {
             switch self {
+            case .corruptedDownloadSize: return "下载包体积与官方清单不一致，已拦截安装"
             case .extractFailed: return "解压更新包失败"
             case .invalidAppBundle: return "更新包中未找到有效的应用文件"
+            case .signatureVerificationFailed: return "更新包代码签名完整性校验未通过，已安全中止替换"
             case .editionMismatch: return "下载包的角色标识与所选角色不匹配，已安全中止替换"
             }
         }

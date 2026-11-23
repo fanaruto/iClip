@@ -438,8 +438,10 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertTrue(restoredQR.isPinned)
         XCTAssertEqual(restoredQR.ocrText, "企业对公收款码")
         let restoredFileName = try XCTUnwrap(restoredQR.imageFileName)
-        let restoredDiskBytes = try Data(contentsOf: dstImgDir.appendingPathComponent(restoredFileName))
-        XCTAssertEqual(restoredDiskBytes, fakePNGBytes)
+        let restoredURL = dstImgDir.appendingPathComponent(restoredFileName)
+        let restoredRawCipher = try Data(contentsOf: restoredURL)
+        XCTAssertTrue(restoredRawCipher.starts(with: LocalVaultCrypto.imageEncryptedMagic))
+        XCTAssertEqual(LocalVaultCrypto.readDecryptedImageData(at: restoredURL), fakePNGBytes)
 
         // 3. 幂等性验证：二次重复导入同一归档包零重复膨胀
         let (mergedTwice, summaryTwice) = try ArchiveBackupService.mergeArchiveData(
@@ -1972,5 +1974,74 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertTrue(SensitiveCredentialVeil.isExternalAIOrChatApp("ChatGPT"))
         XCTAssertTrue(SensitiveCredentialVeil.isExternalAIOrChatApp("微信"))
         XCTAssertFalse(SensitiveCredentialVeil.isExternalAIOrChatApp("Ghostty"))
+    }
+
+    // MARK: - 42. 本地截图全模态静态加密（`ICLPIMG1`）、含敏链接/图片 OCR 遮罩、OTA 源校验与 24h 自动老化测试
+
+    @MainActor
+    func testEncryptedImageVaultMultimodalVeilOTAGuardAndSecretAutoTTL() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("iclip-imgvault-\(UUID().uuidString)", isDirectory: true)
+        let imgDir = tempDir.appendingPathComponent("images", isDirectory: true)
+        let exportDir = tempDir.appendingPathComponent("exports", isDirectory: true)
+        try FileManager.default.createDirectory(at: imgDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        // 1. 存量明文 PNG 原地升级为 `ICLPIMG1` 认证密文，且按需导出时解密还原原始字节、篡改密文自动拦截
+        let fakePNG = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0xDE, 0xAD, 0xBE, 0xEF])
+        let legacyURL = imgDir.appendingPathComponent("legacy-idcard.png")
+        try fakePNG.write(to: legacyURL)
+        XCTAssertEqual(LocalVaultCrypto.readDecryptedImageData(at: legacyURL), fakePNG)
+
+        let upgradedCount = LocalVaultCrypto.upgradePlainImagesInDirectoryIfNeeded(imgDir)
+        XCTAssertEqual(upgradedCount, 1)
+        let encryptedOnDisk = try Data(contentsOf: legacyURL)
+        XCTAssertTrue(encryptedOnDisk.starts(with: LocalVaultCrypto.imageEncryptedMagic))
+        XCTAssertNotEqual(encryptedOnDisk, fakePNG)
+        XCTAssertEqual(LocalVaultCrypto.readDecryptedImageData(at: legacyURL), fakePNG)
+
+        let imgItem = ClipItem(
+            type: .image,
+            imageFileName: "legacy-idcard.png",
+            ocrText: "公民身份号码 110101199003077758",
+            contentHash: "img:idcard",
+            customAlias: "报销证件照"
+        )
+        let exported = try XCTUnwrap(
+            DragFileExportHelper.materializeExportFile(
+                for: imgItem,
+                sourceImageURL: legacyURL,
+                exportDirectory: exportDir
+            )
+        )
+        XCTAssertEqual(try Data(contentsOf: exported.url), fakePNG)
+
+        // 篡改密文末字节 -> GCM 认证拦截返回 nil
+        var tampered = encryptedOnDisk
+        tampered[tampered.count - 1] ^= 0xFF
+        try tampered.write(to: legacyURL)
+        XCTAssertNil(LocalVaultCrypto.readDecryptedImageData(at: legacyURL))
+
+        // 2. 含敏链接（?api_key=）与含敏图片 OCR 副标题防肩窥遮罩
+        let secretLink = ClipItem(
+            type: .link,
+            text: "https://api.service.io/v1/chat?api_key=VendorCustomSecretToken9876543210",
+            contentHash: "link:sec"
+        )
+        XCTAssertEqual(secretLink.detectedSensitiveKind, .connectionSecret)
+        XCTAssertTrue(secretLink.displayTitle(minimalMode: false, veilActive: true).contains("••••••••••••"))
+        XCTAssertTrue(
+            SensitiveCredentialVeil.redactForExternalSharing(secretLink.text ?? "").contains("api_key=***REDACTED***")
+        )
+
+        XCTAssertEqual(imgItem.detectedSensitiveKind, .personalIdentity)
+        let veiledImgSub = imgItem.subtitleInfo(veilActive: true)
+        XCTAssertTrue(veiledImgSub.contains("••••••••••••"))
+        XCTAssertFalse(veiledImgSub.contains("110101199003077758"))
+
+        // 3. OTA 远端更新源严格 HTTPS 域名白名单校验
+        XCTAssertTrue(UpdateManager.isTrustedRemoteDownloadURL(URL(string: "https://github.com/fanaruto/iClip/releases/download/v2.6.0/iClip-Dev-macOS.zip")!))
+        XCTAssertTrue(UpdateManager.isTrustedRemoteDownloadURL(URL(string: "https://app.webfooo.com/downloads/iClip/iClip-Dev-macOS.zip")!))
+        XCTAssertFalse(UpdateManager.isTrustedRemoteDownloadURL(URL(string: "http://github.com/fanaruto/iClip/iClip.zip")!))
+        XCTAssertFalse(UpdateManager.isTrustedRemoteDownloadURL(URL(string: "https://evil-mirror.example.com/iClip.zip")!))
     }
 }

@@ -101,8 +101,9 @@ pub fn export_pinned_archive_data(
             let mut embedded_png_base64 = None;
             if item.kind == ClipContentType::Image {
                 if let Some(name) = &item.image_file_name {
-                    let path = images_dir.join(name);
-                    if let Ok(bytes) = fs::read(&path) {
+                    if let Some(bytes) =
+                        crate::security::read_decrypted_image_from_dir(images_dir, name)
+                    {
                         if bytes.len() <= MAX_EMBEDDED_IMAGE_BYTES {
                             embedded_png_base64 = Some(BASE64.encode(&bytes));
                         }
@@ -234,7 +235,11 @@ pub fn merge_archive_data_with_hint(
                         if missing {
                             let file_name =
                                 format!("{}.png", generate_pseudo_uuid(&entry.content_hash));
-                            if fs::write(images_dir.join(&file_name), &png_bytes).is_ok() {
+                            if crate::security::write_encrypted_image_to_dir(
+                                images_dir, &file_name, &png_bytes,
+                            )
+                            .is_ok()
+                            {
                                 existing.image_file_name = Some(file_name);
                                 changed = true;
                             }
@@ -255,7 +260,9 @@ pub fn merge_archive_data_with_hint(
                     continue;
                 };
                 let file_name = format!("{}.png", generate_pseudo_uuid(&entry.content_hash));
-                if fs::write(images_dir.join(&file_name), &png_bytes).is_err() {
+                if crate::security::write_encrypted_image_to_dir(images_dir, &file_name, &png_bytes)
+                    .is_err()
+                {
                     continue;
                 }
                 saved_image_name = Some(file_name);

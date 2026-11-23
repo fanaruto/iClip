@@ -11,7 +11,7 @@ pub mod store;
 mod tests {
     use crate::archive::{export_pinned_archive_data, merge_archive_data, ArchiveBackupError};
     use crate::engines::*;
-    use crate::model::{ClipItem, PinCategory};
+    use crate::model::{ClipContentType, ClipItem, PinCategory};
     use crate::store::ClipboardStore;
     use image::{codecs::png::PngEncoder, ColorType, ImageEncoder, Rgba, RgbaImage};
     use std::fs;
@@ -798,5 +798,84 @@ mod tests {
         assert_eq!(ai_ranked[0].id, "redact-secrets");
         assert_eq!(ai_ranked[0].title, "防泄密脱敏");
         let _ = fs::remove_dir_all(tmp_store_dir);
+    }
+
+    #[test]
+    fn test_encrypted_image_vault_multimodal_veil_and_24h_secret_ttl() {
+        use crate::security::{materialize_temp_preview_image, IMAGE_VAULT_MAGIC};
+
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "iclip_img_vault_ttl_{}",
+            crate::model::now_unix_secs()
+        ));
+        let img_dir = tmp_dir.join("images");
+        let _ = fs::create_dir_all(&img_dir);
+
+        // 1. 存量明文 PNG 启动时自动原地加密升级为 ICLPIMG1，且解密读取与临时预览导出字节 100% 无损
+        let fake_png = b"\x89PNG\r\n\x1a\nSENSITIVE_ID_IMAGE_PAYLOAD".to_vec();
+        let legacy_path = img_dir.join("legacy_shot.png");
+        fs::write(&legacy_path, &fake_png).unwrap();
+
+        let mut store = ClipboardStore::new(tmp_dir.clone());
+        let disk_bytes = fs::read(&legacy_path).unwrap();
+        assert!(disk_bytes.starts_with(IMAGE_VAULT_MAGIC));
+        assert_ne!(disk_bytes, fake_png);
+        assert_eq!(
+            store.read_image_bytes("legacy_shot.png").as_deref(),
+            Some(fake_png.as_slice())
+        );
+
+        let preview_file = materialize_temp_preview_image(&img_dir, "legacy_shot.png").unwrap();
+        assert_eq!(fs::read(&preview_file).unwrap(), fake_png);
+        let _ = fs::remove_file(preview_file);
+
+        // 篡改密文 -> HMAC 拦截拒绝解密
+        let mut tampered = disk_bytes.clone();
+        let last = tampered.len() - 3;
+        tampered[last] ^= 0x5A;
+        fs::write(&legacy_path, &tampered).unwrap();
+        assert_eq!(store.read_image_bytes("legacy_shot.png"), None);
+
+        // 2. 含敏链接 (?api_key=) 与含敏图片 OCR 识别遮罩
+        let sec_link = ClipItem::new_text(
+            "https://api.example.com/v1/models?api_key=VendorCustomSecretToken987654321"
+                .to_string(),
+            None,
+        );
+        assert_eq!(sec_link.kind, ClipContentType::Link);
+        assert_eq!(
+            sec_link.detected_sensitive_kind(),
+            Some(crate::security::SensitiveSecretKind::ConnectionSecret)
+        );
+        assert!(sec_link.display_title(false, true).contains("••••••••••••"));
+        assert!(
+            redact_secrets(sec_link.text.as_deref().unwrap()).contains("api_key=***REDACTED***")
+        );
+
+        // 3. 未收藏敏感凭据 24h 自动销毁（收藏项与未完成待办永久豁免）
+        let now = crate::model::now_unix_secs();
+        let mut old_unpinned =
+            ClipItem::new_text("sk-proj-OldEphemeralKey9876543210AbCdEf".to_string(), None);
+        old_unpinned.created_unix_secs = now - 90_000;
+
+        let mut old_pinned =
+            ClipItem::new_text("sk-proj-PinnedPermanentKey9876543210XyZ1".to_string(), None);
+        old_pinned.created_unix_secs = now - 90_000;
+        old_pinned.is_pinned = true;
+
+        let mut old_normal = ClipItem::new_text("普通历史会议笔记永久保留".to_string(), None);
+        old_normal.created_unix_secs = now - 90_000;
+
+        store.items = vec![old_pinned, old_unpinned, old_normal];
+        let purged = store.purge_expired_unpinned_secrets(now, 86_400);
+        assert_eq!(purged, 1);
+        assert_eq!(store.items.len(), 2);
+        assert!(store.items.iter().any(|i| i.is_pinned));
+        assert!(store
+            .items
+            .iter()
+            .any(|i| i.text.as_deref() == Some("普通历史会议笔记永久保留")));
+
+        let _ = fs::remove_dir_all(tmp_dir);
     }
 }

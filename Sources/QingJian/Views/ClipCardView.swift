@@ -105,7 +105,8 @@ struct ClipCardView: View {
                                 .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.red)
                             Text("·")
                         } else if let secKind = item.detectedSensitiveKind {
-                            Text(secKind.shieldBadgeTitle)
+                            let ttlHint = (!item.isPinned && !item.isPendingTodo && ClipboardStore.shared.autoExpireUnpinnedSecrets) ? " · 24h自毁" : ""
+                            Text(secKind.shieldBadgeTitle + ttlHint)
                                 .font(.system(size: 10, weight: .semibold))
                                 .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.orange)
                             Text("·")
@@ -887,7 +888,8 @@ struct ClipCardView: View {
                                 )
                             Text("·")
                         } else if !item.isBurnAfterPaste, let secKind = item.detectedSensitiveKind {
-                            Text(secKind.shieldBadgeTitle)
+                            let ttlHint = (!item.isPinned && !item.isPendingTodo && ClipboardStore.shared.autoExpireUnpinnedSecrets) ? " · 24h自毁" : ""
+                            Text(secKind.shieldBadgeTitle + ttlHint)
                                 .font(.system(size: 10, weight: .semibold))
                                 .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.orange)
                             Text("·")

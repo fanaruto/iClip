@@ -99,6 +99,8 @@ pub struct StoreConfig {
     pub mask_sensitive_previews: bool,
     #[serde(default = "default_true")]
     pub auto_clear_concealed_clipboard: bool,
+    #[serde(default = "default_true")]
+    pub auto_expire_unpinned_secrets: bool,
     #[serde(default)]
     pub ignored_apps: Vec<String>,
     #[serde(default)]
@@ -128,6 +130,7 @@ impl Default for StoreConfig {
             screen_share_privacy: true,
             mask_sensitive_previews: true,
             auto_clear_concealed_clipboard: true,
+            auto_expire_unpinned_secrets: true,
             ignored_apps: vec![
                 "1Password".to_string(),
                 "Bitwarden".to_string(),
@@ -254,11 +257,22 @@ impl ClipboardStore {
             undo_stack: Vec::new(),
         };
 
-        let archived = store.archive_expired_completed_todos(now_unix_secs());
-        if (healed_from_backup || legacy_migrated) && archived == 0 {
+        let _ = crate::security::upgrade_plain_images_in_dir(&store.images_dir, &store.vault_key);
+        let now_init = now_unix_secs();
+        let archived = store.archive_expired_completed_todos(now_init);
+        let purged_sec = store.purge_expired_unpinned_secrets(now_init, 86_400);
+        if (healed_from_backup || legacy_migrated) && archived == 0 && purged_sec == 0 {
             store.save_history();
         }
         store
+    }
+
+    pub fn write_image_bytes(&self, file_name: &str, plain_png: &[u8]) -> std::io::Result<()> {
+        crate::security::write_encrypted_image_to_dir(&self.images_dir, file_name, plain_png)
+    }
+
+    pub fn read_image_bytes(&self, file_name: &str) -> Option<Vec<u8>> {
+        crate::security::read_decrypted_image_from_dir(&self.images_dir, file_name)
     }
 
     pub fn default_app_data_dir() -> PathBuf {
@@ -976,6 +990,18 @@ impl ClipboardStore {
                 "已改为仅复制不自动粘贴".to_string()
             });
         }
+        if lower.contains("敏感清理")
+            || lower.contains("敏感自毁")
+            || lower.contains("24h自毁")
+            || lower.contains("24小时清理")
+        {
+            self.config.auto_expire_unpinned_secrets = !is_off;
+            effects.push(if !is_off {
+                "已开启未收藏敏感凭据 24h 自动销毁".to_string()
+            } else {
+                "已关闭未收藏敏感凭据自动销毁".to_string()
+            });
+        }
         if lower.contains("双击") && (lower.contains("ctrl") || lower.contains("control")) {
             self.config.hotkey_toggle = WinHotKeyShortcut::double_tap(WinSingleModifier::Control);
             effects.push("呼出热键已切换为「双击 Ctrl」".to_string());
@@ -1180,8 +1206,10 @@ impl ClipboardStore {
         self.undo_stack
             .retain(|snap| current_unix_secs.saturating_sub(snap.deleted_at_secs) <= 10);
 
+        let purged_secrets = self.purge_expired_unpinned_secrets(current_unix_secs, 86_400);
+
         if self.pending_otp_expirations.is_empty() {
-            return 0;
+            return purged_secrets;
         }
         let mut expired_ids = Vec::new();
         self.pending_otp_expirations.retain(|(id, deadline)| {
@@ -1193,7 +1221,7 @@ impl ClipboardStore {
             }
         });
 
-        let mut count = 0;
+        let mut count = purged_secrets;
         for id in expired_ids {
             if let Some(it) = self.items.iter().find(|i| i.id == id) {
                 let is_burn = it.is_burn_after_paste();
@@ -1206,6 +1234,33 @@ impl ClipboardStore {
                     count += 1;
                 }
             }
+        }
+        count
+    }
+
+    /// 清理超过指定存活窗口（默认 24h）的未收藏、非待办高敏凭据（含加密截图原文件）
+    pub fn purge_expired_unpinned_secrets(
+        &mut self,
+        current_unix_secs: u64,
+        max_age_secs: u64,
+    ) -> usize {
+        if self.config.minimal_mode_enabled || !self.config.auto_expire_unpinned_secrets {
+            return 0;
+        }
+        let expired_ids: Vec<String> = self
+            .items
+            .iter()
+            .filter(|it| {
+                !it.is_pinned
+                    && !it.is_pending_todo()
+                    && it.detected_sensitive_kind().is_some()
+                    && current_unix_secs.saturating_sub(it.created_unix_secs) >= max_age_secs
+            })
+            .map(|it| it.id.clone())
+            .collect();
+        let count = expired_ids.len();
+        for id in expired_ids {
+            self.delete_by_id_with_undo(&id, false);
         }
         count
     }

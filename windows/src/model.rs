@@ -208,12 +208,17 @@ impl ClipItem {
     }
 
     pub fn detected_sensitive_kind(&self) -> Option<crate::security::SensitiveSecretKind> {
-        if self.kind != ClipContentType::Text {
-            return None;
+        match self.kind {
+            ClipContentType::Text | ClipContentType::Link => self
+                .text
+                .as_deref()
+                .and_then(crate::security::classify_sensitive_text),
+            ClipContentType::Image => self
+                .ocr_text
+                .as_deref()
+                .and_then(crate::security::classify_sensitive_text),
+            ClipContentType::File => None,
         }
-        self.text
-            .as_deref()
-            .and_then(crate::security::classify_sensitive_text)
     }
 
     pub fn display_title(&self, minimal_mode: bool, veil_active: bool) -> String {
@@ -225,7 +230,10 @@ impl ClipItem {
                 }
             }
         }
-        if veil_active && self.detected_sensitive_kind().is_some() {
+        if veil_active
+            && matches!(self.kind, ClipContentType::Text | ClipContentType::Link)
+            && self.detected_sensitive_kind().is_some()
+        {
             if let Some(raw) = &self.text {
                 return crate::security::veiled_sensitive_preview(raw);
             }
@@ -410,11 +418,15 @@ impl ClipItem {
     pub fn subtitle_info_veiled(&self, veil_active: bool) -> String {
         if let Some(alias) = &self.custom_alias {
             if !alias.trim().is_empty() {
-                if veil_active {
+                if veil_active && self.detected_sensitive_kind().is_some() {
                     if let Some(raw) = &self.text {
-                        if self.detected_sensitive_kind().is_some() {
-                            return crate::security::veiled_sensitive_preview(raw);
-                        }
+                        return crate::security::veiled_sensitive_preview(raw);
+                    }
+                    if let Some(ocr) = &self.ocr_text {
+                        return format!(
+                            "实况文本：{}",
+                            crate::security::veiled_sensitive_preview(ocr)
+                        );
                     }
                 }
                 let p: String = self.raw_content_preview().chars().take(28).collect();
@@ -450,6 +462,13 @@ impl ClipItem {
                 if let Some(ocr) = &self.ocr_text {
                     let clean = ocr.trim();
                     if !clean.is_empty() {
+                        if veil_active && crate::security::classify_sensitive_text(clean).is_some()
+                        {
+                            return format!(
+                                "实况文本：{}",
+                                crate::security::veiled_sensitive_preview(clean)
+                            );
+                        }
                         let preview: String = clean.replace('\n', " ").chars().take(24).collect();
                         return format!("实况文本：{preview}");
                     }

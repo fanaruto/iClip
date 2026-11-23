@@ -357,6 +357,15 @@ final class ClipboardStore: ObservableObject {
     @Published var autoClearConcealedPasteboard: Bool {
         didSet { UserDefaults.standard.set(autoClearConcealedPasteboard, forKey: "autoClearConcealedPasteboard") }
     }
+    /// 未收藏敏感凭据 24 小时自动无痕销毁（收藏记录与未完成待办永久保护）
+    @Published var autoExpireUnpinnedSecrets: Bool {
+        didSet {
+            UserDefaults.standard.set(autoExpireUnpinnedSecrets, forKey: "autoExpireUnpinnedSecrets")
+            if autoExpireUnpinnedSecrets {
+                _ = purgeExpiredUnpinnedSecrets()
+            }
+        }
+    }
     @Published private(set) var launchAtLoginEnabled: Bool = false
     @Published var hotKeyShortcut: HotKeyShortcut {
         didSet {
@@ -490,6 +499,7 @@ final class ClipboardStore: ObservableObject {
         self.screenSharePrivacyEnabled = UserDefaults.standard.object(forKey: "screenSharePrivacyEnabled") as? Bool ?? true
         self.maskSensitivePreviews = UserDefaults.standard.object(forKey: "maskSensitivePreviews") as? Bool ?? true
         self.autoClearConcealedPasteboard = UserDefaults.standard.object(forKey: "autoClearConcealedPasteboard") as? Bool ?? true
+        self.autoExpireUnpinnedSecrets = UserDefaults.standard.object(forKey: "autoExpireUnpinnedSecrets") as? Bool ?? true
         // 统一既定视觉风格：默认固定原生液态玻璃与纯净无分割线布局，仅暴露单一「背景模糊浓度」调节
         self.surfaceStyle = .liquidGlass
         let savedMask = UserDefaults.standard.object(forKey: "liquidGlassMaskOpacity") as? Double
@@ -705,8 +715,10 @@ final class ClipboardStore: ObservableObject {
 
     private func ensureDirectories() {
         let fm = FileManager.default
-        try? fm.createDirectory(at: appSupportURL, withIntermediateDirectories: true)
-        try? fm.createDirectory(at: imagesDirectoryURL, withIntermediateDirectories: true)
+        try? fm.createDirectory(at: appSupportURL, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try? fm.createDirectory(at: imagesDirectoryURL, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: appSupportURL.path)
+        try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: imagesDirectoryURL.path)
     }
 
     private func loadHistory() {
@@ -716,6 +728,7 @@ final class ClipboardStore: ObservableObject {
             corruptURL: historyCorruptFileURL
         )
         self.items = sortItems(outcome.items)
+        _ = purgeExpiredUnpinnedSecrets()
         if case .recoveredFromBackup(let recovered) = outcome, !recovered.isEmpty {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
                 self?.showToast("已从原子备份自动恢复 \(recovered.count) 条历史记录", duration: 3.0)
@@ -723,14 +736,46 @@ final class ClipboardStore: ObservableObject {
         }
     }
 
-    /// 启动 5 秒后在后台低优串行队列清理无主孤儿图片（保护在库图片、8 秒撤销缓冲图片及 60 秒内新写入图片）
+    /// 清理超过指定存活窗口（默认 24 小时）的未收藏、非待办高敏凭据（API Key / 私钥 / 连接密码 / 身份证 / 银行卡 / 含敏截图）
+    @discardableResult
+    func purgeExpiredUnpinnedSecrets(now: Date = Date(), maxAgeSeconds: TimeInterval = 86_400) -> Int {
+        guard autoExpireUnpinnedSecrets, !minimalModeEnabled else { return 0 }
+        var kept: [ClipItem] = []
+        kept.reserveCapacity(items.count)
+        var purged: [ClipItem] = []
+
+        for item in items {
+            let isProtected = item.isPinned || item.isPendingTodo
+            if !isProtected,
+               item.detectedSensitiveKind != nil,
+               now.timeIntervalSince(item.createdAt) >= maxAgeSeconds {
+                purged.append(item)
+            } else {
+                kept.append(item)
+            }
+        }
+
+        guard !purged.isEmpty else { return 0 }
+        items = kept
+        for dead in purged {
+            pendingOTPExpirationTasks[dead.id]?.cancel()
+            pendingOTPExpirationTasks.removeValue(forKey: dead.id)
+            deleteImageFileIfNeeded(for: dead)
+        }
+        saveHistory()
+        return purged.count
+    }
+
+    /// 启动 5 秒后在后台低优串行队列静默加密存量明文图片并清理无主孤儿图片
     private func scheduleOrphanedImageCleanup() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
             guard let self else { return }
+            _ = self.purgeExpiredUnpinnedSecrets()
             let referenced = Set((self.items + self.undoRemovedItems).compactMap(\.imageFileName))
             let imagesDir = self.imagesDirectoryURL
             let rootDir = self.appSupportURL
             self.diskQueue.async {
+                _ = LocalVaultCrypto.upgradePlainImagesInDirectoryIfNeeded(imagesDir)
                 _ = HistoryPersistenceHelper.pruneOrphanedImages(
                     in: imagesDir,
                     referencedFileNames: referenced,
@@ -978,7 +1023,7 @@ final class ClipboardStore: ObservableObject {
                     let fileName = "\(UUID().uuidString).png"
                     let fileURL = imagesDir.appendingPathComponent(fileName)
                     do {
-                        try pngData.write(to: fileURL, options: .atomic)
+                        try LocalVaultCrypto.writeEncryptedImage(pngData, to: fileURL)
                     } catch {
                         return
                     }
@@ -1637,7 +1682,7 @@ final class ClipboardStore: ObservableObject {
             let fileName = "\(UUID().uuidString).png"
             let fileURL = imagesDir.appendingPathComponent(fileName)
             do {
-                try pngData.write(to: fileURL, options: .atomic)
+                try LocalVaultCrypto.writeEncryptedImage(pngData, to: fileURL)
             } catch {
                 return
             }
@@ -1761,6 +1806,9 @@ final class ClipboardStore: ObservableObject {
         if shouldAutoPaste {
             scheduleOTPAutoExpireIfNeeded(for: item)
             scheduleBurnAfterPasteIfNeeded(for: item)
+            if !item.isPinned && !item.isBurnAfterPaste && item.detectedSensitiveKind != nil {
+                scheduleConcealedPasteboardScrubIfNeeded(capturedChangeCount: pasteboard.changeCount, delaySeconds: 45.0)
+            }
         }
 
         refreshAccessibilityStatus()
@@ -1821,8 +1869,9 @@ final class ClipboardStore: ObservableObject {
 
         case .image:
             guard let url = imageURL(for: item) else { return false }
+            let previewURL = DragFileExportHelper.materializeExportFile(for: item, sourceImageURL: url)?.url ?? url
             TactileFeedbackEngine.shared.perform(.openLink)
-            NSWorkspace.shared.activateFileViewerSelecting([url])
+            NSWorkspace.shared.activateFileViewerSelecting([previewURL])
             onAfterOpenExternalURL?()
             return true
 
@@ -1832,9 +1881,9 @@ final class ClipboardStore: ObservableObject {
                 openLinkInBrowser(item)
                 return true
             }
-            // 支持混排分享口令 / 群聊消息内嵌网页链接直接按 ⌘O 在浏览器打开（自动剥离追踪尾巴）
+            // 支持混排分享口令 / 群聊消息内嵌网页链接直接按 ⌘O 在浏览器打开（严格通过协议白名单）
             if let embeddedURLString = URLTrackingCleaner.extractFirstCleanedWebURL(from: trimmed),
-               let embeddedURL = URL(string: embeddedURLString) {
+               let embeddedURL = OutboundLinkSafety.validatedBrowserURL(from: embeddedURLString) {
                 TactileFeedbackEngine.shared.perform(.openLink)
                 NSWorkspace.shared.open(embeddedURL)
                 onAfterOpenExternalURL?()
@@ -1855,12 +1904,13 @@ final class ClipboardStore: ObservableObject {
     /// 面板内按 ⌥⌘C（对齐 Finder 拷贝路径直觉）：文件与图片复制本地路径，链接与文本复制纯文本
     func copyPlainPathOrText(_ item: ClipItem) {
         if item.type == .image, let url = imageURL(for: item) {
+            let exportPath = (DragFileExportHelper.materializeExportFile(for: item, sourceImageURL: url)?.url ?? url).path
             pasteboard.clearContents()
-            pasteboard.setString(url.path, forType: .string)
+            pasteboard.setString(exportPath, forType: .string)
             ignoreNextChangeCount = pasteboard.changeCount
             lastChangeCount = pasteboard.changeCount
             TactileFeedbackEngine.shared.performNavigationStepHaptic()
-            showToast("已复制图片本地路径")
+            showToast("已复制图片可读本地路径")
             return
         }
         copyAndOptionallyPaste(item, plainTextOnly: true, shouldAutoPaste: false, onBeforePaste: nil)
@@ -1994,8 +2044,9 @@ final class ClipboardStore: ObservableObject {
             }
         case .image:
             if plainTextOnly, let url = imageURL(for: item) {
-                pasteboard.setString(url.path, forType: .string)
-            } else if let url = imageURL(for: item), let pngData = try? Data(contentsOf: url) {
+                let exportPath = (DragFileExportHelper.materializeExportFile(for: item, sourceImageURL: url)?.url ?? url).path
+                pasteboard.setString(exportPath, forType: .string)
+            } else if let url = imageURL(for: item), let pngData = LocalVaultCrypto.readDecryptedImageData(at: url) {
                 pasteboard.setData(pngData, forType: .png)
             }
         case .file:
@@ -3193,7 +3244,7 @@ final class ClipboardStore: ObservableObject {
             Task.detached(priority: .background) { [weak self] in
                 for (id, url) in pending {
                     let qrFound: String? = {
-                        guard let raw = try? Data(contentsOf: url, options: [.mappedIfSafe]) else { return nil }
+                        guard let raw = LocalVaultCrypto.readDecryptedImageData(at: url) else { return nil }
                         return VisionOCRService.detectBarcodesFast(in: raw)
                     }()
                     let recognized = await VisionOCRService.recognizeText(at: url)
@@ -3250,7 +3301,7 @@ final class ClipboardStore: ObservableObject {
         Task { @MainActor [weak self] in
             guard let self else { return }
             let detectedQR: String? = await Task.detached(priority: .userInitiated) {
-                guard let data = try? Data(contentsOf: url, options: [.mappedIfSafe]) else { return nil }
+                guard let data = LocalVaultCrypto.readDecryptedImageData(at: url) else { return nil }
                 return VisionOCRService.detectBarcodesFast(in: data)
             }.value
 
@@ -3279,8 +3330,7 @@ final class ClipboardStore: ObservableObject {
 
     func openImageQRCodeURLIfAvailable(_ item: ClipItem) {
         guard let qr = item.qrCodePayload?.trimmingCharacters(in: .whitespacesAndNewlines),
-              Self.isValidWebURL(qr),
-              let url = URL(string: qr) else {
+              let url = OutboundLinkSafety.validatedBrowserURL(from: qr) else {
             return
         }
         TactileFeedbackEngine.shared.perform(.openLink)
@@ -3520,7 +3570,8 @@ final class ClipboardStore: ObservableObject {
     }
 
     nonisolated static func decodeImage(at url: URL, maxPixelSize: Int) -> NSImage? {
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+        guard let imgData = LocalVaultCrypto.readDecryptedImageData(at: url),
+              let source = CGImageSourceCreateWithData(imgData as CFData, nil) else {
             return nil
         }
         let options: [CFString: Any] = [

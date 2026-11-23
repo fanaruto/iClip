@@ -263,16 +263,29 @@ struct ClipItem: Identifiable, Codable, Equatable {
         self.burnAfterPaste = burnAfterPaste
     }
 
-    /// 离线敏感凭据识别（仅对普通文本生效，微秒级）
+    /// 离线全模态敏感凭据识别（覆盖文本、含参链接以及图片二维码/实况文本 OCR，微秒级）
     var detectedSensitiveKind: SensitiveSecretKind? {
-        guard type == .text, let raw = text else { return nil }
-        return SensitiveCredentialVeil.classify(raw)
+        switch type {
+        case .text, .link:
+            guard let raw = text else { return nil }
+            return SensitiveCredentialVeil.classify(raw)
+        case .image:
+            if let qr = qrCodePayload, let kind = SensitiveCredentialVeil.classify(qr) {
+                return kind
+            }
+            if let ocr = ocrText, let kind = SensitiveCredentialVeil.classify(ocr) {
+                return kind
+            }
+            return nil
+        case .file:
+            return nil
+        }
     }
 
-    /// 根据隐私遮罩状态返回卡片标题（未选中且未悬停时对无备注的高敏密钥做圆点防肩窥遮罩，零高度抖动）
+    /// 根据隐私遮罩状态返回卡片标题（未选中且未悬停时对无备注的高敏文本/链接做圆点防肩窥遮罩，零高度抖动）
     func displayTitle(minimalMode: Bool, veilActive: Bool) -> String {
         if minimalMode {
-            if veilActive, let raw = text, detectedSensitiveKind != nil {
+            if veilActive, (type == .text || type == .link), let raw = text, detectedSensitiveKind != nil {
                 return SensitiveCredentialVeil.veiledPreview(for: raw)
             }
             return rawContentPreview
@@ -280,7 +293,7 @@ struct ClipItem: Identifiable, Codable, Equatable {
         if let alias = customAlias?.trimmingCharacters(in: .whitespacesAndNewlines), !alias.isEmpty {
             return alias
         }
-        if veilActive, let raw = text, detectedSensitiveKind != nil {
+        if veilActive, (type == .text || type == .link), let raw = text, detectedSensitiveKind != nil {
             return SensitiveCredentialVeil.veiledPreview(for: raw)
         }
         return rawContentPreview
@@ -329,8 +342,16 @@ struct ClipItem: Identifiable, Codable, Equatable {
 
     func subtitleInfo(veilActive: Bool) -> String {
         if let alias = customAlias?.trimmingCharacters(in: .whitespacesAndNewlines), !alias.isEmpty {
-            if veilActive, let raw = text, detectedSensitiveKind != nil {
-                return SensitiveCredentialVeil.veiledPreview(for: raw)
+            if veilActive, detectedSensitiveKind != nil {
+                if let raw = text {
+                    return SensitiveCredentialVeil.veiledPreview(for: raw)
+                }
+                if let qr = qrCodePayload {
+                    return "二维码：\(SensitiveCredentialVeil.veiledPreview(for: qr))"
+                }
+                if let ocr = ocrText {
+                    return "实况文本：\(SensitiveCredentialVeil.veiledPreview(for: ocr))"
+                }
             }
             let preview = rawContentPreview.replacingOccurrences(of: "\n", with: " ")
             return preview.count > 28 ? String(preview.prefix(28)) + "…" : preview
@@ -357,11 +378,17 @@ struct ClipItem: Identifiable, Codable, Equatable {
         case .image:
             if let qr = qrCodePayload?.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespacesAndNewlines),
                !qr.isEmpty {
+                if veilActive, SensitiveCredentialVeil.classify(qr) != nil {
+                    return "二维码：\(SensitiveCredentialVeil.veiledPreview(for: qr))"
+                }
                 let preview = qr.count > 26 ? String(qr.prefix(26)) + "…" : qr
                 return "二维码：\(preview)"
             }
             if let ocr = ocrText?.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespacesAndNewlines),
                !ocr.isEmpty {
+                if veilActive, SensitiveCredentialVeil.classify(ocr) != nil {
+                    return "实况文本：\(SensitiveCredentialVeil.veiledPreview(for: ocr))"
+                }
                 let preview = ocr.count > 26 ? String(ocr.prefix(26)) + "…" : ocr
                 return "实况文本：\(preview)"
             }
@@ -1036,7 +1063,7 @@ enum DragFileExportHelper {
         return "\(stem)-\(ts)\(suffix)"
     }
 
-    /// 在临时导出目录物化可直拖发送的真实文件（图片采用 APFS 零拷贝硬链接优先，自动回收超 1 小时旧临时件）
+    /// 在 `0700` 受保护临时导出目录按需解密物化可直拖发送的真实文件（自动回收超 10 分钟旧临时件）
     static func materializeExportFile(
         for item: ClipItem,
         sourceImageURL: URL? = nil,
@@ -1044,7 +1071,8 @@ enum DragFileExportHelper {
     ) -> (url: URL, utType: UTType)? {
         let fm = FileManager.default
         let dir = exportDirectory ?? fm.temporaryDirectory.appendingPathComponent("iClipDragExports", isDirectory: true)
-        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
         pruneStaleExports(in: dir)
 
         switch item.type {
@@ -1052,16 +1080,24 @@ enum DragFileExportHelper {
             guard let src = sourceImageURL, fm.fileExists(atPath: src.path) else { return nil }
             let name = suggestedFileName(for: item, ext: "png")
             let dst = dir.appendingPathComponent(name)
+            guard let plainImageData = LocalVaultCrypto.readDecryptedImageData(at: src) else {
+                return nil
+            }
             if dst.standardizedFileURL == src.standardizedFileURL {
-                return (src, .png)
+                if let raw = try? Data(contentsOf: src), !raw.starts(with: LocalVaultCrypto.imageEncryptedMagic) {
+                    return (src, .png)
+                }
+                let altDst = dir.appendingPathComponent("export-" + name)
+                try? LocalVaultCrypto.writeProtectedFile(plainImageData, to: altDst)
+                return fm.fileExists(atPath: altDst.path) ? (altDst, .png) : nil
             }
             try? fm.removeItem(at: dst)
             do {
-                try fm.linkItem(at: src, to: dst)
+                try LocalVaultCrypto.writeProtectedFile(plainImageData, to: dst)
+                return (dst, .png)
             } catch {
-                try? fm.copyItem(at: src, to: dst)
+                return nil
             }
-            return fm.fileExists(atPath: dst.path) ? (dst, .png) : (src, .png)
 
         case .text:
             guard let raw = item.text, !raw.isEmpty else { return nil }
@@ -1069,7 +1105,7 @@ enum DragFileExportHelper {
             let name = suggestedFileName(for: item, ext: spec.ext, fallbackStem: spec.fallbackStem)
             let dst = dir.appendingPathComponent(name)
             do {
-                try Data(raw.utf8).write(to: dst, options: .atomic)
+                try LocalVaultCrypto.writeProtectedFile(Data(raw.utf8), to: dst)
                 return (dst, spec.utType)
             } catch {
                 return nil
@@ -1106,7 +1142,7 @@ enum DragFileExportHelper {
         let now = Date()
         for f in files {
             if let mod = (try? f.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate,
-               now.timeIntervalSince(mod) > 3_600 {
+               now.timeIntervalSince(mod) > 600 {
                 try? fm.removeItem(at: f)
             }
         }

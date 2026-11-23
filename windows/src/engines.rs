@@ -1687,8 +1687,13 @@ pub fn redact_secrets(text: &str) -> String {
         ),
         (
             "://",
-            r"([a-zA-Z][a-zA-Z0-9+.\-]*://[^:\s/@]+:)([^@\s]+)(@)",
+            r"([a-zA-Z][a-zA-Z0-9+.\-]*://[^:\s/@]+:)([^@\s/]+)(@)",
             "${1}***REDACTED***${3}",
+        ),
+        (
+            "=",
+            r"(?i)([?&](?:api_key|apikey|access_token|auth_token|client_secret|secret|password|passwd)=)([^&\s#]{8,})",
+            "${1}***REDACTED***",
         ),
     ];
     for (hint, pat, rep) in rules {

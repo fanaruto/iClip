@@ -123,7 +123,7 @@ enum ArchiveBackupService {
             var base64PNG: String? = nil
             if item.type == .image, let fileName = item.imageFileName {
                 let imgURL = imagesDirectoryURL.appendingPathComponent(fileName)
-                if let imgData = try? Data(contentsOf: imgURL),
+                if let imgData = LocalVaultCrypto.readDecryptedImageData(at: imgURL),
                    imgData.count <= maxEmbeddedImageBytes {
                     base64PNG = imgData.base64EncodedString()
                 }
@@ -270,7 +270,7 @@ enum ArchiveBackupService {
                     if missingLocalFile {
                         let restoredName = "\(UUID().uuidString).png"
                         let targetURL = imagesDirectoryURL.appendingPathComponent(restoredName)
-                        if (try? pngData.write(to: targetURL, options: .atomic)) != nil {
+                        if (try? LocalVaultCrypto.writeEncryptedImage(pngData, to: targetURL)) != nil {
                             current.imageFileName = restoredName
                             didChange = true
                         }
@@ -292,7 +292,7 @@ enum ArchiveBackupService {
                     let fileName = "\(UUID().uuidString).png"
                     let fileURL = imagesDirectoryURL.appendingPathComponent(fileName)
                     do {
-                        try pngData.write(to: fileURL, options: .atomic)
+                        try LocalVaultCrypto.writeEncryptedImage(pngData, to: fileURL)
                         savedImageName = fileName
                     } catch {
                         continue
