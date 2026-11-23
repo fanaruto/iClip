@@ -76,6 +76,68 @@ struct InstantMathCardView: View {
     }
 }
 
+/// 搜索框 `@pw` / `@密码` / `@genkey` 硬件级随机强密码直出卡片（↵ 无痕键入并 45s 擦除 / ⇧↵ 加密收藏入库）
+struct SecurePasswordCardView: View {
+    let candidate: SecurePasswordGenerator.Candidate
+    let onCommitEphemeral: () -> Void
+    let onCommitPinToVault: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "key.fill")
+                .font(.system(size: 12.5, weight: .bold))
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 28, height: 28)
+                .background(Circle().fill(Color.accentColor.opacity(0.14)))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(candidate.secretValue)
+                    .font(.system(size: 13.5, weight: .bold, design: .monospaced))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+
+                Text(candidate.subtitle)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 4)
+
+            Button(action: onCommitPinToVault) {
+                Text("收藏 ⇧↵")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Capsule().fill(Color.accentColor.opacity(0.13)))
+            }
+            .buttonStyle(.plain)
+
+            Button(action: onCommitEphemeral) {
+                Text("无痕键入 ↵")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4.5)
+                    .background(Capsule().fill(Color.accentColor))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 11)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .fill(Color.accentColor.opacity(0.09))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .strokeBorder(Color.accentColor.opacity(0.24), lineWidth: 0.65)
+        )
+    }
+}
+
 /// 顶栏「始终在前（Always on Top · ⌘P）」32×32 原生玻璃图钉圆钮（锁死外框尺寸，零布局抖动）
 struct AlwaysOnTopPinButton: View {
     @ObservedObject var store: ClipboardStore

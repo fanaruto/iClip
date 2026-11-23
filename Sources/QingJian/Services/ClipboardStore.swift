@@ -2407,10 +2407,41 @@ final class ClipboardStore: ObservableObject {
         }
     }
 
+    /// 将 `@pw` / `@genkey` 生成的一次性高强度随机密码无痕键入目标输入框（不写入历史列表、阻断 Handoff 云同步、45s 后自动清擦剪贴板）
+    func pasteEphemeralSecret(
+        _ secretValue: String,
+        toast: String,
+        shouldAutoPaste: Bool = true,
+        onBeforePaste: (() -> Void)? = nil
+    ) {
+        SecurePasswordGenerator.bumpGenerationSalt()
+        pasteboard.clearContents()
+        pasteboard.setString(secretValue, forType: .string)
+        PasteboardPrivacyStandards.applyLocalOnlyConcealedProtection(to: pasteboard)
+        let writtenCount = pasteboard.changeCount
+        ignoreNextChangeCount = writtenCount
+        lastChangeCount = writtenCount
+        scheduleConcealedPasteboardScrubIfNeeded(capturedChangeCount: writtenCount, delaySeconds: 45.0)
+
+        TactileFeedbackEngine.shared.perform(.pasteCommit)
+        onBeforePaste?()
+        refreshAccessibilityStatus()
+        if shouldAutoPaste && autoPasteEnabled && isAccessibilityGranted {
+            Self.schedulePasteWhenTargetReady()
+            showToast(toast)
+        } else {
+            showToast("\(toast)（已复制）")
+        }
+    }
+
     // MARK: - 收藏话术与模板离线归档迁移（.iclip）
 
     var pinnedItemCount: Int {
         items.filter(\.isPinned).count
+    }
+
+    var pinnedSensitiveItemCount: Int {
+        items.filter { $0.isPinned && $0.detectedSensitiveKind != nil }.count
     }
 
     func exportPinnedArchive(to destinationURL: URL, passphrase: String? = nil) throws -> Int {
@@ -2420,6 +2451,7 @@ final class ClipboardStore: ObservableObject {
             passphrase: passphrase
         )
         try data.write(to: destinationURL, options: .atomic)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destinationURL.path)
         return pinnedItemCount
     }
 
@@ -2583,15 +2615,17 @@ final class ClipboardStore: ObservableObject {
     /// 将用户在搜索框输入的速记或模板一步写入系统剪贴板并收录（支持同时绑定备注别名与直接收藏）
     @discardableResult
     func captureQuickNote(body: String, alias: String?, pin: Bool) -> Bool {
-        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return false }
+        let rawTrimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rawTrimmed.isEmpty else { return false }
+        let expandedSecret = SecurePasswordGenerator.expandQuickCaptureBodyIfApplicable(rawTrimmed)
+        let trimmed = expandedSecret ?? rawTrimmed
 
         let cleanAlias: String? = {
             guard let a = alias?.trimmingCharacters(in: .whitespacesAndNewlines), !a.isEmpty else { return nil }
             return a
         }()
-        let isTemplate = SnippetTemplateEngine.containsPlaceholders(trimmed)
-        let isLink = !isTemplate && isValidWebURL(trimmed)
+        let isTemplate = expandedSecret == nil && SnippetTemplateEngine.containsPlaceholders(trimmed)
+        let isLink = !isTemplate && expandedSecret == nil && isValidWebURL(trimmed)
         let prefix = isTemplate ? "tpl" : (isLink ? "link" : "text")
         let contentHash = "\(prefix):\(Self.sha256(trimmed))"
 
@@ -2605,8 +2639,15 @@ final class ClipboardStore: ObservableObject {
         if isLink {
             pasteboard.setString(clipboardValue, forType: .URL)
         }
-        ignoreNextChangeCount = pasteboard.changeCount
-        lastChangeCount = pasteboard.changeCount
+        if expandedSecret != nil || SensitiveCredentialVeil.classify(clipboardValue) != nil {
+            PasteboardPrivacyStandards.applyLocalOnlyConcealedProtection(to: pasteboard)
+        }
+        let writtenCount = pasteboard.changeCount
+        ignoreNextChangeCount = writtenCount
+        lastChangeCount = writtenCount
+        if !pin && (expandedSecret != nil || SensitiveCredentialVeil.classify(clipboardValue) != nil) {
+            scheduleConcealedPasteboardScrubIfNeeded(capturedChangeCount: writtenCount, delaySeconds: 45.0)
+        }
 
         let inferredCategory = pin ? PinCategory.infer(alias: cleanAlias, text: trimmed) : nil
         let newItem = ClipItem(

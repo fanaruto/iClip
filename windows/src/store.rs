@@ -486,14 +486,16 @@ impl ClipboardStore {
 
     /// 搜索框 `[] 事项` / `> 备注 :: 正文` 一行闪念入库
     pub fn capture_quick_note(&mut self, intent: &QuickCaptureIntent) -> Option<String> {
-        let body = intent.body.trim();
-        if body.is_empty() {
+        let raw_body = intent.body.trim();
+        if raw_body.is_empty() {
             return None;
         }
         if intent.default_todo {
-            return self.capture_quick_todo(body, intent.alias.as_deref());
+            return self.capture_quick_todo(raw_body, intent.alias.as_deref());
         }
-        let mut item = ClipItem::new_text(body.to_string(), Some("闪念速记".to_string()));
+        let expanded = crate::security::expand_quick_capture_secret_body(raw_body);
+        let final_body = expanded.as_deref().unwrap_or(raw_body);
+        let mut item = ClipItem::new_text(final_body.to_string(), Some("闪念速记".to_string()));
         if let Some(alias) = &intent.alias {
             if !alias.trim().is_empty() {
                 item.custom_alias = Some(alias.trim().to_string());
@@ -747,8 +749,9 @@ impl ClipboardStore {
         query: &str,
         active_target_app: Option<&str>,
     ) -> Vec<usize> {
-        let is_cmd =
-            extract_suggestion_payload(query).is_some() || parse_quick_capture(query).is_some();
+        let is_cmd = extract_suggestion_payload(query).is_some()
+            || parse_quick_capture(query).is_some()
+            || crate::security::evaluate_secure_password_query(query).is_some();
         let effective_q = if is_cmd { "" } else { query.trim() };
 
         let mut matched: Vec<usize> = self
@@ -1509,15 +1512,40 @@ impl ClipboardStore {
         self.items.iter().filter(|it| it.is_pinned).count()
     }
 
+    pub fn pinned_sensitive_count(&self) -> usize {
+        self.items
+            .iter()
+            .filter(|it| it.is_pinned && it.detected_sensitive_kind().is_some())
+            .count()
+    }
+
     pub fn export_archive_to_file(&self, dest: &Path) -> Result<usize, ArchiveBackupError> {
-        let data = export_pinned_archive_data(
+        self.export_archive_to_file_with_passphrase(dest, None)
+            .map(|(n, _)| n)
+    }
+
+    pub fn export_archive_to_file_with_passphrase(
+        &self,
+        dest: &Path,
+        passphrase: Option<&str>,
+    ) -> Result<(usize, bool), ArchiveBackupError> {
+        let plain_data = export_pinned_archive_data(
             &self.items,
             &self.images_dir,
             env!("CARGO_PKG_VERSION"),
             Self::edition_key(),
         )?;
-        fs::write(dest, &data).map_err(|_| ArchiveBackupError::InvalidArchiveFormat)?;
-        Ok(self.pinned_count())
+        let (final_bytes, encrypted) =
+            if let Some(pw) = passphrase.map(str::trim).filter(|s| !s.is_empty()) {
+                (
+                    crate::security::seal_archive_with_passphrase(&plain_data, pw, &self.data_dir),
+                    true,
+                )
+            } else {
+                (plain_data, false)
+            };
+        fs::write(dest, &final_bytes).map_err(|_| ArchiveBackupError::InvalidArchiveFormat)?;
+        Ok((self.pinned_count(), encrypted))
     }
 
     pub fn import_archive_from_file(

@@ -267,22 +267,30 @@ pub fn merge_archive_data_full(
             }
             if existing.kind == ClipContentType::Image {
                 if let Some(b64) = &entry.embedded_png_base64 {
-                    if let Ok(png_bytes) = BASE64.decode(b64) {
-                        let missing = existing
-                            .image_file_name
-                            .as_ref()
-                            .map(|n| !images_dir.join(n).exists())
-                            .unwrap_or(true);
-                        if missing {
-                            let file_name =
-                                format!("{}.png", generate_pseudo_uuid(&entry.content_hash));
-                            if crate::security::write_encrypted_image_to_dir(
-                                images_dir, &file_name, &png_bytes,
-                            )
-                            .is_ok()
+                    if b64.len() <= (MAX_EMBEDDED_IMAGE_BYTES * 4 / 3 + 64) {
+                        if let Ok(png_bytes) = BASE64.decode(b64) {
+                            if png_bytes.len() <= MAX_EMBEDDED_IMAGE_BYTES
+                                && is_valid_raster_image_header(&png_bytes)
                             {
-                                existing.image_file_name = Some(file_name);
-                                changed = true;
+                                let missing = existing
+                                    .image_file_name
+                                    .as_ref()
+                                    .map(|n| !images_dir.join(n).exists())
+                                    .unwrap_or(true);
+                                if missing {
+                                    let file_name = format!(
+                                        "{}.png",
+                                        generate_pseudo_uuid(&entry.content_hash)
+                                    );
+                                    if crate::security::write_encrypted_image_to_dir(
+                                        images_dir, &file_name, &png_bytes,
+                                    )
+                                    .is_ok()
+                                    {
+                                        existing.image_file_name = Some(file_name);
+                                        changed = true;
+                                    }
+                                }
                             }
                         }
                     }
@@ -297,9 +305,17 @@ pub fn merge_archive_data_full(
                 let Some(b64) = &entry.embedded_png_base64 else {
                     continue;
                 };
+                if b64.len() > (MAX_EMBEDDED_IMAGE_BYTES * 4 / 3 + 64) {
+                    continue;
+                }
                 let Ok(png_bytes) = BASE64.decode(b64) else {
                     continue;
                 };
+                if png_bytes.len() > MAX_EMBEDDED_IMAGE_BYTES
+                    || !is_valid_raster_image_header(&png_bytes)
+                {
+                    continue;
+                }
                 let file_name = format!("{}.png", generate_pseudo_uuid(&entry.content_hash));
                 if crate::security::write_encrypted_image_to_dir(images_dir, &file_name, &png_bytes)
                     .is_err()
@@ -405,4 +421,23 @@ fn merge_external_candidates(
             source_format_label: format_label.to_string(),
         },
     )
+}
+
+pub fn is_valid_raster_image_header(bytes: &[u8]) -> bool {
+    if bytes.len() < 12 {
+        return false;
+    }
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return true;
+    }
+    if bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF {
+        return true;
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return true;
+    }
+    if &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return true;
+    }
+    false
 }

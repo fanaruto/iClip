@@ -1629,3 +1629,237 @@ fn candidates_from_table_rows(rows: &[Vec<String>]) -> Vec<ExternalImportCandida
     }
     out
 }
+
+// ============================================================================
+// 4. 硬件级 CSPRNG 零离手强密码与随机密钥生成器（阻断 Win+V / 云同步 + 45s 自动擦除）
+// ============================================================================
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecurePasswordCandidate {
+    pub secret_value: String,
+    pub subtitle: String,
+    pub ephemeral_toast: String,
+    pub default_vault_alias: String,
+}
+
+#[derive(Clone, Copy)]
+enum PasswordSpecKind {
+    StrongPassword { len: usize, include_symbols: bool },
+    NumericPin { len: usize },
+    HexSecretKey { byte_count: usize },
+}
+
+static PW_GEN_EPOCH: AtomicU64 = AtomicU64::new(0);
+static PW_SESSION_SEED: OnceLock<[u8; 32]> = OnceLock::new();
+
+fn pw_session_seed() -> &'static [u8; 32] {
+    PW_SESSION_SEED.get_or_init(|| {
+        let mut s = [0u8; 32];
+        fill_os_csprng(&mut s);
+        s
+    })
+}
+
+/// 每次键入或保存生成密码后推进轮次，使界面悬停重绘零跳变，而下次输入 `@pw` 必定生成全新密码
+pub fn bump_password_generation_salt() {
+    PW_GEN_EPOCH.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn evaluate_secure_password_query(raw_query: &str) -> Option<SecurePasswordCandidate> {
+    let (spec, norm_key) = parse_password_spec(raw_query)?;
+    let epoch = PW_GEN_EPOCH.load(Ordering::Relaxed);
+    let tag = format!("{epoch}|{norm_key}");
+    Some(build_password_candidate(spec, Some(&tag)))
+}
+
+pub fn expand_quick_capture_secret_body(raw_body: &str) -> Option<String> {
+    let (spec, _) = parse_password_spec(raw_body)?;
+    bump_password_generation_salt();
+    Some(build_password_candidate(spec, None).secret_value)
+}
+
+fn parse_password_spec(raw_input: &str) -> Option<(PasswordSpecKind, String)> {
+    let trimmed = raw_input.trim();
+    let rest_after_at = trimmed
+        .strip_prefix('@')
+        .or_else(|| trimmed.strip_prefix('＠'))?;
+    let normalized = format!("@{rest_after_at}");
+    let lower = normalized.to_lowercase();
+    let tokens: Vec<&str> = lower.split_whitespace().collect();
+    let head = *tokens.first()?;
+
+    if matches!(head, "@genkey" | "@hexkey" | "@随机密钥" | "@生成密钥") {
+        let req = tokens
+            .iter()
+            .skip(1)
+            .find_map(|t| t.parse::<usize>().ok())
+            .unwrap_or(32)
+            .clamp(16, 64);
+        return Some((
+            PasswordSpecKind::HexSecretKey { byte_count: req },
+            format!("hex:{req}"),
+        ));
+    }
+
+    // 严密避开 `@pin` 收藏筛选词
+    if matches!(head, "@pin码" | "@随机码" | "@数字码" | "@genpin")
+        || (head == "@pw" && tokens.contains(&"pin"))
+    {
+        let req = tokens
+            .iter()
+            .skip(1)
+            .find_map(|t| t.parse::<usize>().ok())
+            .unwrap_or(6)
+            .clamp(4, 12);
+        return Some((
+            PasswordSpecKind::NumericPin { len: req },
+            format!("pin:{req}"),
+        ));
+    }
+
+    if !matches!(head, "@pw" | "@密码" | "@强密码" | "@生成密码" | "@genpw") {
+        return None;
+    }
+
+    let no_symbols = lower.contains("无符号")
+        || lower.contains("纯字母")
+        || lower.contains("nosym")
+        || lower.contains("alnum");
+    let len = tokens
+        .iter()
+        .skip(1)
+        .find_map(|t| t.parse::<usize>().ok())
+        .unwrap_or(20)
+        .clamp(8, 64);
+    Some((
+        PasswordSpecKind::StrongPassword {
+            len,
+            include_symbols: !no_symbols,
+        },
+        format!("pw:{len}:{}", if no_symbols { 0 } else { 1 }),
+    ))
+}
+
+struct ByteStreamGen<'a> {
+    tag: Option<&'a str>,
+    counter: u64,
+    buf: [u8; 32],
+    offset: usize,
+}
+
+impl<'a> ByteStreamGen<'a> {
+    fn new(tag: Option<&'a str>) -> Self {
+        Self {
+            tag,
+            counter: 0,
+            buf: [0u8; 32],
+            offset: 32,
+        }
+    }
+
+    fn next_byte(&mut self) -> u8 {
+        if self.offset >= 32 {
+            self.offset = 0;
+            if let Some(t) = self.tag {
+                let msg = format!("{t}|{}", self.counter);
+                self.counter = self.counter.wrapping_add(1);
+                self.buf = hmac_sha256(pw_session_seed(), msg.as_bytes());
+            } else {
+                fill_os_csprng(&mut self.buf);
+            }
+        }
+        let b = self.buf[self.offset];
+        self.offset += 1;
+        b
+    }
+
+    fn next_index(&mut self, upper: usize) -> usize {
+        if upper <= 1 {
+            return 0;
+        }
+        let limit = 256 - (256 % upper);
+        loop {
+            let b = self.next_byte() as usize;
+            if b < limit {
+                return b % upper;
+            }
+        }
+    }
+}
+
+fn build_password_candidate(spec: PasswordSpecKind, tag: Option<&str>) -> SecurePasswordCandidate {
+    let mut rng = ByteStreamGen::new(tag);
+    match spec {
+        PasswordSpecKind::HexSecretKey { byte_count } => {
+            let mut hex = String::with_capacity(byte_count * 2);
+            for _ in 0..byte_count {
+                let b = rng.next_byte();
+                hex.push_str(&format!("{b:02x}"));
+            }
+            let bits = byte_count * 8;
+            SecurePasswordCandidate {
+                secret_value: hex,
+                subtitle: format!("CSPRNG {bits}-bit 随机密钥 · 禁Win+V/云同步 · 45s擦除"),
+                ephemeral_toast: format!("已无痕键入 {bits}-bit 随机密钥（45s后自动擦除）"),
+                default_vault_alias: format!("随机密钥 ({bits}-bit)"),
+            }
+        }
+        PasswordSpecKind::NumericPin { len } => {
+            let digits = b"0123456789";
+            let mut out = String::with_capacity(len);
+            for _ in 0..len {
+                out.push(digits[rng.next_index(digits.len())] as char);
+            }
+            SecurePasswordCandidate {
+                secret_value: out,
+                subtitle: format!("CSPRNG {len} 位随机数字码 · 禁Win+V/云同步 · 45s擦除"),
+                ephemeral_toast: format!("已无痕键入 {len} 位随机数字码（45s后自动擦除）"),
+                default_vault_alias: "随机数字码".to_string(),
+            }
+        }
+        PasswordSpecKind::StrongPassword {
+            len,
+            include_symbols,
+        } => {
+            let upper = b"ABCDEFGHJKLMNPQRSTUVWXYZ";
+            let lower = b"abcdefghijkmnopqrstuvwxyz";
+            let digits = b"23456789";
+            let symbols = b"!@#$%^&*-_=+?";
+
+            let mut pool = Vec::with_capacity(80);
+            pool.extend_from_slice(upper);
+            pool.extend_from_slice(lower);
+            pool.extend_from_slice(digits);
+            if include_symbols {
+                pool.extend_from_slice(symbols);
+            }
+
+            let mut chars = Vec::with_capacity(len);
+            chars.push(upper[rng.next_index(upper.len())]);
+            chars.push(lower[rng.next_index(lower.len())]);
+            chars.push(digits[rng.next_index(digits.len())]);
+            if include_symbols {
+                chars.push(symbols[rng.next_index(symbols.len())]);
+            }
+            while chars.len() < len {
+                chars.push(pool[rng.next_index(pool.len())]);
+            }
+            for i in (1..chars.len()).rev() {
+                let j = rng.next_index(i + 1);
+                chars.swap(i, j);
+            }
+            let pw = String::from_utf8(chars).unwrap_or_default();
+            let mode = if include_symbols {
+                "含符号"
+            } else {
+                "纯字母数字"
+            };
+            SecurePasswordCandidate {
+                secret_value: pw,
+                subtitle: format!("CSPRNG {len}位强密码({mode}) · 禁Win+V/云同步 · 45s擦除"),
+                ephemeral_toast: format!("已无痕键入 {len} 位强密码（本地隔离 · 45s后擦除）"),
+                default_vault_alias: format!("随机强密码 ({len}位)"),
+            }
+        }
+    }
+}

@@ -176,6 +176,14 @@ enum HitAction {
     SelectTab(ClipFilterTab),
     SelectPinCategory(Option<PinCategory>),
     CommitMathResult(String),
+    CommitEphemeralSecret {
+        secret: String,
+        toast: String,
+    },
+    PinGeneratedSecret {
+        secret: String,
+        alias: String,
+    },
     CommitQuickCapture,
     CommitSuggestion(String),
     SelectCard(usize),
@@ -2800,6 +2808,48 @@ unsafe fn commit_paste_item_by_index(hwnd: HWND, item_idx: usize, force_plain: b
     }
 }
 
+unsafe fn commit_ephemeral_secret_paste(hwnd: HWND, secret: &str, toast: String) {
+    iclip_core::security::bump_password_generation_salt();
+    let (auto_paste, always_top, target_fg, guard) = APP_STATE.with(|c| {
+        let mut b = c.borrow_mut();
+        let st = b.as_mut().unwrap();
+        st.ignore_next_clipboard_seq = true;
+        st.search_query.clear();
+        (
+            st.store.config.auto_paste_enabled,
+            st.store.config.always_on_top,
+            st.previous_foreground,
+            WinClipboardLocalOnlyGuard {
+                block_cloud_and_history: true,
+                cf_excl: st.cf_exclude_monitor,
+                cf_can_hist: st.cf_can_include_history,
+                cf_can_cloud: st.cf_can_upload_cloud,
+            },
+        )
+    });
+    let _ = write_text_and_html_to_clipboard_ext(hwnd, secret, None, guard);
+    let seq = GetClipboardSequenceNumber();
+    APP_STATE.with(|c| {
+        if let Some(st) = c.borrow_mut().as_mut() {
+            st.scrub_expected_seq_num = seq;
+        }
+    });
+    SetTimer(hwnd, TIMER_ID_CONCEALED_SCRUB, 45_000, None);
+
+    if always_top {
+        if !target_fg.is_null() && IsWindow(target_fg) != FALSE {
+            let _ = SetForegroundWindow(target_fg);
+        }
+        set_toast(hwnd, toast);
+    } else {
+        hide_panel(hwnd, true);
+    }
+    if auto_paste {
+        std::thread::sleep(std::time::Duration::from_millis(35));
+        simulate_ctrl_v(false);
+    }
+}
+
 unsafe fn commit_direct_text_paste(hwnd: HWND, text: &str, toast: String) {
     let (auto_paste, always_top, target_fg) = APP_STATE.with(|c| {
         let mut b = c.borrow_mut();
@@ -3798,6 +3848,136 @@ fn layout_and_draw_main_view(
                 },
                 interactive_cursor: true,
                 action: HitAction::CommitQuickCapture,
+            });
+            cur_y += bh + s(8);
+        } else if let Some(pw_cand) =
+            iclip_core::security::evaluate_secure_password_query(&st.search_query)
+        {
+            let bh = s(48);
+            canvas.fill_round_rect(
+                pad,
+                cur_y,
+                track_w,
+                bh,
+                sf(13.0),
+                palette.cobalt.with_alpha(24),
+            );
+            canvas.stroke_round_rect(
+                pad,
+                cur_y,
+                track_w,
+                bh,
+                sf(13.0),
+                sf(0.75),
+                palette.cobalt.with_alpha(64),
+            );
+            let ic_cx = (pad + s(24)) as f32;
+            let ic_cy = (cur_y + bh / 2) as f32;
+            canvas.fill_circle(ic_cx, ic_cy, sf(13.0), palette.cobalt.with_alpha(36));
+            texts.push(TextDrawCmd {
+                text: "PW".to_string(),
+                rect: RECT {
+                    left: pad + s(11),
+                    top: cur_y,
+                    right: pad + s(37),
+                    bottom: cur_y + bh,
+                },
+                color: palette.cobalt,
+                font_kind: FontKind::BadgeBold,
+                flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            });
+
+            let btn_w = s(78);
+            let btn_h = s(24);
+            let btn_x = w - pad - btn_w - s(10);
+            let btn_y = cur_y + (bh - btn_h) / 2;
+            canvas.fill_round_rect(btn_x, btn_y, btn_w, btn_h, sf(12.0), palette.cobalt);
+            texts.push(TextDrawCmd {
+                text: "无痕键入 ↵".to_string(),
+                rect: RECT {
+                    left: btn_x,
+                    top: btn_y,
+                    right: btn_x + btn_w,
+                    bottom: btn_y + btn_h,
+                },
+                color: Color4::rgb(255, 255, 255),
+                font_kind: FontKind::BadgeBold,
+                flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            });
+
+            let pin_w = s(64);
+            let pin_x = btn_x - s(6) - pin_w;
+            canvas.fill_round_rect(
+                pin_x,
+                btn_y,
+                pin_w,
+                btn_h,
+                sf(12.0),
+                palette.cobalt.with_alpha(34),
+            );
+            texts.push(TextDrawCmd {
+                text: "收藏 ⇧↵".to_string(),
+                rect: RECT {
+                    left: pin_x,
+                    top: btn_y,
+                    right: pin_x + pin_w,
+                    bottom: btn_y + btn_h,
+                },
+                color: palette.cobalt,
+                font_kind: FontKind::BadgeBold,
+                flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            });
+            st.hit_regions.push(HitRegion {
+                rect: RECT {
+                    left: pin_x,
+                    top: btn_y,
+                    right: pin_x + pin_w,
+                    bottom: btn_y + btn_h,
+                },
+                interactive_cursor: true,
+                action: HitAction::PinGeneratedSecret {
+                    secret: pw_cand.secret_value.clone(),
+                    alias: pw_cand.default_vault_alias.clone(),
+                },
+            });
+
+            let text_right = pin_x - s(8);
+            texts.push(TextDrawCmd {
+                text: pw_cand.secret_value.clone(),
+                rect: RECT {
+                    left: pad + s(44),
+                    top: cur_y + s(5),
+                    right: text_right,
+                    bottom: cur_y + s(26),
+                },
+                color: palette.text_primary,
+                font_kind: FontKind::Headline,
+                flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+            });
+            texts.push(TextDrawCmd {
+                text: pw_cand.subtitle,
+                rect: RECT {
+                    left: pad + s(44),
+                    top: cur_y + s(25),
+                    right: text_right,
+                    bottom: cur_y + bh - s(4),
+                },
+                color: palette.text_secondary,
+                font_kind: FontKind::Meta,
+                flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+            });
+            st.hit_regions.push(HitRegion {
+                rect: RECT {
+                    left: pad,
+                    top: cur_y,
+                    right: w - pad,
+                    bottom: cur_y + bh,
+                },
+                interactive_cursor: true,
+                action: HitAction::CommitEphemeralSecret {
+                    secret: pw_cand.secret_value,
+                    toast: pw_cand.ephemeral_toast,
+                },
             });
             cur_y += bh + s(8);
         } else if let Some(math) = evaluate_instant_math(&st.search_query, latest_txt) {
@@ -7344,6 +7524,28 @@ unsafe fn handle_left_click(hwnd: HWND, x: i32, y: i32, is_double: bool) {
         HitAction::CommitMathResult(val) => {
             commit_direct_text_paste(hwnd, &val, format!("已键入计算结果 {val}"));
         }
+        HitAction::CommitEphemeralSecret { secret, toast } => {
+            commit_ephemeral_secret_paste(hwnd, &secret, toast);
+        }
+        HitAction::PinGeneratedSecret { secret, alias } => {
+            let new_idx = APP_STATE.with(|c| {
+                let mut b = c.borrow_mut();
+                let st = b.as_mut()?;
+                let intent = iclip_core::intelligence::QuickCaptureIntent {
+                    alias: Some(alias),
+                    body: secret.clone(),
+                    default_pin: true,
+                    default_todo: false,
+                };
+                let id = st.store.capture_quick_note(&intent)?;
+                st.search_query.clear();
+                st.store.items.iter().position(|i| i.id == id)
+            });
+            iclip_core::security::bump_password_generation_salt();
+            if let Some(idx) = new_idx {
+                commit_paste_item_by_index(hwnd, idx, false);
+            }
+        }
         HitAction::CommitQuickCapture => {
             commit_quick_capture_from_search(hwnd);
         }
@@ -8306,6 +8508,31 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32) {
             commit_quick_capture_from_search(hwnd);
             return;
         }
+        if let Some(pw_cand) = iclip_core::security::evaluate_secure_password_query(&query_snapshot)
+        {
+            if shift_down {
+                let new_idx = APP_STATE.with(|c| {
+                    let mut b = c.borrow_mut();
+                    let st = b.as_mut()?;
+                    let intent = iclip_core::intelligence::QuickCaptureIntent {
+                        alias: Some(pw_cand.default_vault_alias),
+                        body: pw_cand.secret_value.clone(),
+                        default_pin: true,
+                        default_todo: false,
+                    };
+                    let id = st.store.capture_quick_note(&intent)?;
+                    st.search_query.clear();
+                    st.store.items.iter().position(|i| i.id == id)
+                });
+                iclip_core::security::bump_password_generation_salt();
+                if let Some(idx) = new_idx {
+                    commit_paste_item_by_index(hwnd, idx, false);
+                }
+            } else {
+                commit_ephemeral_secret_paste(hwnd, &pw_cand.secret_value, pw_cand.ephemeral_toast);
+            }
+            return;
+        }
         let math_res = APP_STATE.with(|c| {
             let b = c.borrow();
             let st = b.as_ref()?;
@@ -8834,16 +9061,47 @@ unsafe fn export_archive_via_dialog(hwnd: HWND) {
 
     if ok {
         let dest = PathBuf::from(from_wide_slice(&file_buf));
-        let res = APP_STATE.with(|c| {
-            c.borrow()
-                .as_ref()
-                .unwrap()
+        let (res, sensitive_pinned) = APP_STATE.with(|c| {
+            let mut b = c.borrow_mut();
+            let st = b.as_mut().unwrap();
+            let raw_q = st.search_query.trim().to_string();
+            let pw_opt = raw_q
+                .strip_prefix("@口令 ")
+                .or_else(|| raw_q.strip_prefix("@密码 "))
+                .or_else(|| raw_q.strip_prefix("pw:"))
+                .map(|s| s.trim().to_string())
+                .or_else(|| {
+                    if st.view_mode == ActiveViewMode::Settings && !raw_q.is_empty() {
+                        Some(raw_q)
+                    } else {
+                        None
+                    }
+                })
+                .filter(|s| !s.is_empty());
+            if pw_opt.is_some() {
+                st.search_query.clear();
+            }
+            let r = st
                 .store
-                .export_archive_to_file(&dest)
+                .export_archive_to_file_with_passphrase(&dest, pw_opt.as_deref());
+            (r, st.store.pinned_sensitive_count())
         });
         show_panel_near_cursor(hwnd);
         match res {
-            Ok(n) => set_toast(hwnd, format!("已成功导出 {n} 条收藏资产")),
+            Ok((n, true)) => set_toast(
+                hwnd,
+                format!("已口令加密导出 {n} 条收藏资产（与 Mac 互通）"),
+            ),
+            Ok((n, false)) => {
+                if sensitive_pinned > 0 {
+                    set_toast(
+                        hwnd,
+                        format!("已导出 {n} 条收藏（提示：搜索框输入 @口令 xxx 再导出可加密）"),
+                    );
+                } else {
+                    set_toast(hwnd, format!("已成功导出 {n} 条收藏资产"));
+                }
+            }
             Err(e) => set_toast(hwnd, e.message()),
         }
     }

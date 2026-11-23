@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import CryptoKit
 
 /// 单条可跨机迁移的收藏知识资产快照（自包含文本、链接、动态模板、分组槽、备注名及内嵌图片数据）
@@ -271,10 +272,13 @@ enum ArchiveBackupService {
                     current.ocrChecked = true
                     didChange = true
                 }
-                // 若本地图片文件缺失但归档内有内嵌 PNG，自动修复落盘
+                // 若本地图片文件缺失但归档内有内嵌 PNG，校验体积上限与图像魔数后安全修复落盘
                 if current.type == .image,
                    let base64 = entry.embeddedPNGBase64,
-                   let pngData = Data(base64Encoded: base64) {
+                   base64.utf8.count <= (maxEmbeddedImageBytes * 4 / 3 + 64),
+                   let pngData = Data(base64Encoded: base64),
+                   pngData.count <= maxEmbeddedImageBytes,
+                   isValidRasterImageHeader(pngData) {
                     let missingLocalFile: Bool = {
                         guard let name = current.imageFileName else { return true }
                         return !FileManager.default.fileExists(atPath: imagesDirectoryURL.appendingPathComponent(name).path)
@@ -297,8 +301,11 @@ enum ArchiveBackupService {
                 var savedImageName: String? = nil
                 if entry.type == .image {
                     guard let base64 = entry.embeddedPNGBase64,
-                          let pngData = Data(base64Encoded: base64) else {
-                        // 无可用内嵌数据的跨机图片记录跳过，避免生成坏死空图卡片
+                          base64.utf8.count <= (maxEmbeddedImageBytes * 4 / 3 + 64),
+                          let pngData = Data(base64Encoded: base64),
+                          pngData.count <= maxEmbeddedImageBytes,
+                          isValidRasterImageHeader(pngData) else {
+                        // 无可用合法内嵌图片数据或超限的图片记录跳过，防止内存炸弹与坏死空图
                         continue
                     }
                     let fileName = "\(UUID().uuidString).png"
@@ -402,5 +409,67 @@ enum ArchiveBackupService {
             sourceFormatLabel: formatLabel
         )
         return (working, summary)
+    }
+
+    static func isValidRasterImageHeader(_ data: Data) -> Bool {
+        guard data.count >= 12 else { return false }
+        let b = [UInt8](data.prefix(12))
+        if b[0] == 0x89 && b[1] == 0x50 && b[2] == 0x4E && b[3] == 0x47 { return true } // PNG
+        if b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF { return true } // JPEG
+        if b[0] == 0x47 && b[1] == 0x49 && b[2] == 0x46 && b[3] == 0x38 { return true } // GIF
+        if b[0] == 0x52 && b[1] == 0x49 && b[2] == 0x46 && b[3] == 0x46
+            && b[8] == 0x57 && b[9] == 0x45 && b[10] == 0x42 && b[11] == 0x50 { return true } // WebP
+        return false
+    }
+}
+
+/// 跨角色共享的 `.iclip` 保存面板加密口令附件与加密归档解锁提示组件（零冗余模态弹窗）
+@MainActor
+enum ArchivePassphraseUIHelper {
+    static func attachExportPassphraseAccessory(
+        to savePanel: NSSavePanel,
+        sensitivePinnedCount: Int
+    ) -> NSSecureTextField {
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: sensitivePinnedCount > 0 ? 64 : 42))
+        let label = NSTextField(labelWithString: "加密口令（可选 · Mac/Win 互通）：")
+        label.font = .systemFont(ofSize: 12, weight: .medium)
+        label.frame = NSRect(x: 12, y: sensitivePinnedCount > 0 ? 32 : 11, width: 196, height: 18)
+
+        let field = NSSecureTextField(frame: NSRect(x: 210, y: sensitivePinnedCount > 0 ? 29 : 8, width: 158, height: 24))
+        field.placeholderString = "留空则不设口令"
+        field.font = .systemFont(ofSize: 12)
+
+        container.addSubview(label)
+        container.addSubview(field)
+
+        if sensitivePinnedCount > 0 {
+            let warn = NSTextField(labelWithString: "⚠ 检测到 \(sensitivePinnedCount) 条收藏含敏感凭据，建议输入口令加密导出")
+            warn.font = .systemFont(ofSize: 11)
+            warn.textColor = .systemOrange
+            warn.frame = NSRect(x: 12, y: 6, width: 356, height: 16)
+            container.addSubview(warn)
+        }
+
+        savePanel.accessoryView = container
+        return field
+    }
+
+    static func promptImportPassphrase(for fileName: String) -> String? {
+        let alert = NSAlert()
+        alert.messageText = "解锁加密归档「\(fileName)」"
+        alert.informativeText = "该 .iclip 归档受口令加密保护（兼容 macOS 与 Windows），请输入导出时设置的口令："
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "解锁并导入")
+        alert.addButton(withTitle: "取消")
+
+        let input = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        input.placeholderString = "输入归档加密口令"
+        alert.accessoryView = input
+        alert.window.initialFirstResponder = input
+
+        let resp = alert.runModal()
+        guard resp == .alertFirstButtonReturn else { return nil }
+        let pw = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        return pw.isEmpty ? nil : pw
     }
 }

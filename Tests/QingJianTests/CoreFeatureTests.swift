@@ -2348,4 +2348,43 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertFalse(keyItem.matches(query: "@jwt"))
         XCTAssertTrue(jwtItem.matches(query: "@jwt"))
     }
+
+    // MARK: - 48. CSPRNG 强密码生成器（零 `@pin` 冲突、重绘稳定与提交刷新）及归档内嵌图片魔数防护测试
+
+    @MainActor
+    func testCSPRNGPasswordGeneratorPinGuardAndArchiveImageHeaderValidation() throws {
+        // 1. 严密保护 `@pin` 收藏筛选词零冲突，验证 `@pw` / `@密码 24` / `@pin码 8` / `@genkey`
+        XCTAssertNil(SecurePasswordGenerator.evaluate("@pin"))
+        XCTAssertNil(SecurePasswordGenerator.evaluate("@secret"))
+
+        let c1 = try XCTUnwrap(SecurePasswordGenerator.evaluate("@pw 24"))
+        let c1Repeat = try XCTUnwrap(SecurePasswordGenerator.evaluate("@pw 24"))
+        XCTAssertEqual(c1.secretValue.count, 24)
+        // 未提交前同一查询保持稳定零跳变
+        XCTAssertEqual(c1.secretValue, c1Repeat.secretValue)
+        // 提交推进轮次后立即生成全新随机串
+        SecurePasswordGenerator.bumpGenerationSalt()
+        let c2 = try XCTUnwrap(SecurePasswordGenerator.evaluate("@pw 24"))
+        XCTAssertNotEqual(c1.secretValue, c2.secretValue)
+
+        let alnum = try XCTUnwrap(SecurePasswordGenerator.evaluate("@密码 18 无符号"))
+        XCTAssertEqual(alnum.secretValue.count, 18)
+        XCTAssertTrue(alnum.secretValue.allSatisfy { $0.isLetter || $0.isNumber })
+
+        let pin8 = try XCTUnwrap(SecurePasswordGenerator.evaluate("@pin码 8"))
+        XCTAssertEqual(pin8.secretValue.count, 8)
+        XCTAssertTrue(pin8.secretValue.allSatisfy(\.isNumber))
+
+        let hexKey = try XCTUnwrap(SecurePasswordGenerator.evaluate("@genkey"))
+        XCTAssertEqual(hexKey.secretValue.count, 64)
+
+        // 2. 验证 `> 备注 :: @pw 24` 速记展开为真实高熵随机密码
+        let expanded = try XCTUnwrap(SecurePasswordGenerator.expandQuickCaptureBodyIfApplicable("@pw 22"))
+        XCTAssertEqual(expanded.count, 22)
+        XCTAssertNotEqual(expanded, "@pw 22")
+
+        // 3. 验证归档导入拒绝伪造非图像二进制载荷，仅放行合法 PNG/JPEG/GIF/WebP 魔数
+        XCTAssertFalse(ArchiveBackupService.isValidRasterImageHeader(Data("MZ_FAKE_EXE_PAYLOAD_1234".utf8)))
+        XCTAssertTrue(ArchiveBackupService.isValidRasterImageHeader(Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13])))
+    }
 }

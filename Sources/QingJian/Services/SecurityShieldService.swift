@@ -1280,3 +1280,204 @@ private extension Optional {
         }
     }
 }
+
+/// 6. 硬件级 CSPRNG 零离手强密码与随机密钥生成器（本地隔离不上云 + 45s 自动擦除 + 支持 `> 备注 :: @pw 24` 命名加密入库）
+enum SecurePasswordGenerator {
+    struct Candidate: Equatable {
+        let secretValue: String
+        let subtitle: String
+        let ephemeralToast: String
+        let defaultVaultAlias: String
+    }
+
+    private enum SpecKind {
+        case strongPassword(length: Int, includeSymbols: Bool)
+        case numericPIN(length: Int)
+        case hexSecretKey(byteCount: Int)
+    }
+
+    private static let lock = NSLock()
+    private static var generationEpoch: UInt64 = 0
+    private static let sessionSeedKey: SymmetricKey = {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        return SymmetricKey(data: Data(bytes))
+    }()
+
+    /// 每次提交密码后推进熵轮次，确保悬停重绘零跳变，而下一次重新输入 `@pw` 必定生成全新随机密码
+    static func bumpGenerationSalt() {
+        lock.lock()
+        generationEpoch &+= 1
+        lock.unlock()
+    }
+
+    private static func currentEpoch() -> UInt64 {
+        lock.lock()
+        let v = generationEpoch
+        lock.unlock()
+        return v
+    }
+
+    /// 解析搜索框中的 `@pw` / `@密码` / `@pin码` / `@genkey` 指令，返回零跳变实时预览候选
+    static func evaluate(_ rawQuery: String) -> Candidate? {
+        guard let (spec, normalizedKey) = parseSpec(from: rawQuery) else { return nil }
+        let streamSeed = "\(currentEpoch())|\(normalizedKey)"
+        return buildCandidate(for: spec, deterministicTag: streamSeed)
+    }
+
+    /// 若 `> 备注 :: @pw 24` 正文为密码生成指令，直接从硬件 CSPRNG 抽取全新高熵随机串展开
+    static func expandQuickCaptureBodyIfApplicable(_ rawBody: String) -> String? {
+        guard let (spec, _) = parseSpec(from: rawBody) else { return nil }
+        bumpGenerationSalt()
+        return buildCandidate(for: spec, deterministicTag: nil).secretValue
+    }
+
+    private static func parseSpec(from rawInput: String) -> (SpecKind, String)? {
+        let trimmed = rawInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("@") || trimmed.hasPrefix("＠") else { return nil }
+        let normalized = "@" + String(trimmed.dropFirst())
+        let lower = normalized.lowercased()
+        let tokens = lower.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        guard let head = tokens.first else { return nil }
+
+        // 1. 256-bit / 自定义字节 Hex 随机密钥（严密避开筛选词 `@key` / `@secret`）
+        let hexKeyTriggers: Set<String> = ["@genkey", "@hexkey", "@随机密钥", "@生成密钥"]
+        if hexKeyTriggers.contains(head) {
+            let requested = tokens.dropFirst().compactMap { Int($0) }.first ?? 32
+            let byteCount = min(max(requested, 16), 64)
+            return (.hexSecretKey(byteCount: byteCount), "hex:\(byteCount)")
+        }
+
+        // 2. 纯数字随机码（严密避开收藏筛选词 `@pin`！）
+        let pinTriggers: Set<String> = ["@pin码", "@随机码", "@数字码", "@genpin"]
+        if pinTriggers.contains(head) || (head == "@pw" && tokens.contains("pin")) {
+            let requested = tokens.dropFirst().compactMap { Int($0) }.first ?? 6
+            let len = min(max(requested, 4), 12)
+            return (.numericPIN(length: len), "pin:\(len)")
+        }
+
+        // 3. 硬件级强密码（`@pw` / `@密码` / `@强密码` / `@genpw`）
+        let pwTriggers: Set<String> = ["@pw", "@密码", "@强密码", "@生成密码", "@genpw"]
+        guard pwTriggers.contains(head) else { return nil }
+        let noSymbols = lower.contains("无符号")
+            || lower.contains("纯字母")
+            || lower.contains("nosym")
+            || lower.contains("alnum")
+        let requestedLen = tokens.dropFirst().compactMap { Int($0) }.first ?? 20
+        let length = min(max(requestedLen, 8), 64)
+        return (.strongPassword(length: length, includeSymbols: !noSymbols), "pw:\(length):\(noSymbols ? 0 : 1)")
+    }
+
+    private static func buildCandidate(for spec: SpecKind, deterministicTag: String?) -> Candidate {
+        var rng = ByteStreamSource(deterministicTag: deterministicTag, sessionKey: sessionSeedKey)
+        switch spec {
+        case .hexSecretKey(let byteCount):
+            var raw = [UInt8](repeating: 0, count: byteCount)
+            for i in 0..<byteCount { raw[i] = rng.nextByte() }
+            let hex = raw.map { String(format: "%02x", $0) }.joined()
+            return Candidate(
+                secretValue: hex,
+                subtitle: "CSPRNG \(byteCount * 8)-bit 随机密钥 · 本地隔离不上云 · 45s擦除",
+                ephemeralToast: "已无痕键入 \(byteCount * 8)-bit 随机密钥（45s后自动擦除）",
+                defaultVaultAlias: "随机密钥 (\(byteCount * 8)-bit)"
+            )
+
+        case .numericPIN(let length):
+            let digits = Array("0123456789".utf8)
+            var out = [UInt8]()
+            out.reserveCapacity(length)
+            for _ in 0..<length {
+                out.append(digits[rng.nextIndex(upperBound: digits.count)])
+            }
+            let pinStr = String(decoding: out, as: UTF8.self)
+            return Candidate(
+                secretValue: pinStr,
+                subtitle: "CSPRNG \(length) 位随机数字码 · 本地隔离不上云 · 45s擦除",
+                ephemeralToast: "已无痕键入 \(length) 位随机数字码（45s后自动擦除）",
+                defaultVaultAlias: "随机数字码"
+            )
+
+        case .strongPassword(let length, let includeSymbols):
+            // 剔除易混淆字符 0/O/1/l/I，兼顾 115+ bit 密码学熵值与人工核对可读性
+            let upper = Array("ABCDEFGHJKLMNPQRSTUVWXYZ".utf8)
+            let lower = Array("abcdefghijkmnopqrstuvwxyz".utf8)
+            let digits = Array("23456789".utf8)
+            let symbols = Array("!@#$%^&*-_=+?".utf8)
+            let pool = includeSymbols ? (upper + lower + digits + symbols) : (upper + lower + digits)
+
+            var chars: [UInt8] = [
+                upper[rng.nextIndex(upperBound: upper.count)],
+                lower[rng.nextIndex(upperBound: lower.count)],
+                digits[rng.nextIndex(upperBound: digits.count)]
+            ]
+            if includeSymbols {
+                chars.append(symbols[rng.nextIndex(upperBound: symbols.count)])
+            }
+            while chars.count < length {
+                chars.append(pool[rng.nextIndex(upperBound: pool.count)])
+            }
+            // Fisher-Yates 无偏乱序洗牌
+            for i in stride(from: chars.count - 1, through: 1, by: -1) {
+                let j = rng.nextIndex(upperBound: i + 1)
+                if i != j { chars.swapAt(i, j) }
+            }
+            let pw = String(decoding: chars, as: UTF8.self)
+            let modeLabel = includeSymbols ? "含符号" : "纯字母数字"
+            return Candidate(
+                secretValue: pw,
+                subtitle: "CSPRNG \(length)位强密码(\(modeLabel)) · 禁Handoff/云同步 · 45s擦除",
+                ephemeralToast: "已无痕键入 \(length) 位强密码（本地隔离 · 45s后擦除）",
+                defaultVaultAlias: "随机强密码 (\(length)位)"
+            )
+        }
+    }
+
+    private struct ByteStreamSource {
+        let deterministicTag: String?
+        let sessionKey: SymmetricKey
+        private var counter: UInt64 = 0
+        private var buffer: [UInt8] = []
+        private var offset: Int = 0
+
+        init(deterministicTag: String?, sessionKey: SymmetricKey) {
+            self.deterministicTag = deterministicTag
+            self.sessionKey = sessionKey
+        }
+
+        mutating func nextByte() -> UInt8 {
+            if offset >= buffer.count {
+                refill()
+            }
+            let b = buffer[offset]
+            offset += 1
+            return b
+        }
+
+        mutating func nextIndex(upperBound: Int) -> Int {
+            guard upperBound > 1 else { return 0 }
+            let bound = UInt16(upperBound)
+            let limit = UInt16(256 - (256 % Int(bound)))
+            while true {
+                let b = UInt16(nextByte())
+                if b < limit {
+                    return Int(b % bound)
+                }
+            }
+        }
+
+        private mutating func refill() {
+            offset = 0
+            if let tag = deterministicTag {
+                var msg = Data("\(tag)|\(counter)".utf8)
+                counter &+= 1
+                let mac = HMAC<SHA256>.authenticationCode(for: msg, using: sessionKey)
+                msg.removeAll()
+                buffer = Array(mac)
+            } else {
+                var raw = [UInt8](repeating: 0, count: 32)
+                _ = SecRandomCopyBytes(kSecRandomDefault, raw.count, &raw)
+                buffer = raw
+            }
+        }
+    }
+}

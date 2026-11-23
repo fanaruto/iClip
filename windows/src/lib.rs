@@ -1241,4 +1241,78 @@ mod tests {
         assert!(!key_item.matches_query("@jwt"));
         assert!(jwt_item.matches_query("@jwt"));
     }
+
+    #[test]
+    fn test_csprng_password_generator_pin_guard_and_archive_image_header_validation() {
+        use crate::archive::is_valid_raster_image_header;
+        use crate::intelligence::parse_quick_capture;
+        use crate::security::{
+            bump_password_generation_salt, evaluate_secure_password_query,
+            expand_quick_capture_secret_body,
+        };
+
+        // 1. `@pin` 收藏筛选词零误伤，且重绘稳定、提交后轮换新熵
+        assert_eq!(evaluate_secure_password_query("@pin"), None);
+        assert_eq!(evaluate_secure_password_query("@secret"), None);
+
+        let c1 = evaluate_secure_password_query("@pw 24").unwrap();
+        let c1_repeat = evaluate_secure_password_query("@pw 24").unwrap();
+        assert_eq!(c1.secret_value.len(), 24);
+        assert_eq!(c1.secret_value, c1_repeat.secret_value);
+
+        bump_password_generation_salt();
+        let c2 = evaluate_secure_password_query("@pw 24").unwrap();
+        assert_ne!(c1.secret_value, c2.secret_value);
+
+        let alnum = evaluate_secure_password_query("@密码 18 无符号").unwrap();
+        assert_eq!(alnum.secret_value.len(), 18);
+        assert!(alnum
+            .secret_value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric()));
+
+        let pin8 = evaluate_secure_password_query("@pin码 8").unwrap();
+        assert_eq!(pin8.secret_value.len(), 8);
+        assert!(pin8.secret_value.chars().all(|c| c.is_ascii_digit()));
+
+        let hex_key = evaluate_secure_password_query("@genkey").unwrap();
+        assert_eq!(hex_key.secret_value.len(), 64);
+
+        // 2. `> 生产数据库 :: @pw 24` 命名加密入库展开 + 口令加密归档文件导出测试
+        let expanded = expand_quick_capture_secret_body("@pw 22").unwrap();
+        assert_eq!(expanded.len(), 22);
+        assert_ne!(expanded, "@pw 22");
+
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "iclip-iter8-test-{}-{}",
+            std::process::id(),
+            crate::model::now_unix_secs()
+        ));
+        let _ = fs::create_dir_all(&tmp_dir);
+        let mut store = ClipboardStore::new(tmp_dir.clone());
+        let intent = parse_quick_capture("> 生产RDS口令 :: @pw 24").unwrap();
+        let saved_id = store.capture_quick_note(&intent).unwrap();
+        let saved_item = store.items.iter().find(|i| i.id == saved_id).unwrap();
+        assert!(saved_item.is_pinned);
+        assert_eq!(saved_item.custom_alias.as_deref(), Some("生产RDS口令"));
+        assert_eq!(saved_item.text.as_deref().unwrap().len(), 24);
+
+        let enc_dest = tmp_dir.join("vault_export.iclip");
+        let (cnt, is_enc) = store
+            .export_archive_to_file_with_passphrase(&enc_dest, Some("ExportKey#2026"))
+            .unwrap();
+        assert_eq!(cnt, 1);
+        assert!(is_enc);
+        assert!(crate::security::is_encrypted_archive_bytes(
+            &fs::read(&enc_dest).unwrap()
+        ));
+
+        // 3. 归档内嵌图片魔数校验拦截伪造可执行载荷
+        assert!(!is_valid_raster_image_header(b"MZ_FAKE_EXE_PAYLOAD_1234"));
+        assert!(is_valid_raster_image_header(
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0d"
+        ));
+
+        let _ = fs::remove_dir_all(tmp_dir);
+    }
 }

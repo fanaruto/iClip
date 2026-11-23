@@ -129,6 +129,7 @@ final class PanelNavigationModel: ObservableObject {
         let resolvedStore = storeRef ?? .shared
         let isCommandInput = (QuickSuggestionCommandBanner.extractPayload(from: query) != nil)
             || (QuickCaptureParser.parse(from: query) != nil)
+            || (SecurePasswordGenerator.evaluate(query) != nil)
         let effectiveQuery = isCommandInput ? "" : query
         let rawMatched = items.filter { item in
             let tabMatches: Bool
@@ -346,65 +347,7 @@ struct ClipboardPopoverView: View {
                         .padding(.horizontal, 14)
                         .padding(.bottom, 8)
 
-                    if QuickSuggestionCommandBanner.extractPayload(from: nav.searchText) != nil {
-                        QuickSuggestionCommandBanner(rawQuery: nav.searchText) { payload in
-                            let outcome = AdaptiveIntelligenceEngine.shared.adoptUserSuggestion(payload, in: store)
-                            nav.searchText = ""
-                            store.showToast(outcome.message)
-                        }
-                        .padding(.horizontal, 14)
-                        .padding(.bottom, 8)
-                        .transition(.opacity.combined(with: .move(edge: .top)))
-                    } else if let capture = QuickCaptureParser.parse(from: nav.searchText) {
-                        QuickCaptureCommandBanner(
-                            intent: capture,
-                            onCommitDefault: {
-                                guard !capture.isEmptyBody else { return }
-                                if capture.defaultTodo {
-                                    store.captureQuickTodo(body: capture.bodyText, alias: capture.customAlias, copyToClipboard: false)
-                                } else {
-                                    store.captureQuickNote(body: capture.bodyText, alias: capture.customAlias, pin: capture.defaultPin)
-                                }
-                                nav.searchText = ""
-                            },
-                            onCommitForcePin: {
-                                guard !capture.isEmptyBody else { return }
-                                if capture.defaultTodo {
-                                    store.captureQuickTodo(body: capture.bodyText, alias: capture.customAlias, copyToClipboard: true)
-                                } else {
-                                    store.captureQuickNote(body: capture.bodyText, alias: capture.customAlias, pin: true)
-                                }
-                                nav.searchText = ""
-                            }
-                        )
-                        .padding(.horizontal, 14)
-                        .padding(.bottom, 8)
-                        .transition(.opacity.combined(with: .move(edge: .top)))
-                    } else if let math = InstantMathEvaluator.evaluate(nav.searchText, latestClipboardText: store.items.first?.text) {
-                        InstantMathCardView(
-                            math: math,
-                            onCommitPlain: {
-                                nav.searchText = ""
-                                store.pasteInstantValue(math.plainValue, toast: "已键入计算结果 \(math.plainValue)", shouldAutoPaste: true, onBeforePaste: onDismiss)
-                            },
-                            onCommitRMB: math.rmbUppercase.map { rmb in
-                                {
-                                    nav.searchText = ""
-                                    store.pasteInstantValue(rmb, toast: "已键入大写金额", shouldAutoPaste: true, onBeforePaste: onDismiss)
-                                }
-                            }
-                        )
-                        .padding(.horizontal, 14)
-                        .padding(.bottom, 8)
-                        .transition(.opacity.combined(with: .move(edge: .top)))
-                    } else if nav.selectedTab == .todo,
-                              !nav.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                              !nav.searchText.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("@") {
-                        todoInlineCreateBanner
-                            .padding(.horizontal, 14)
-                            .padding(.bottom, 8)
-                            .transition(.opacity.combined(with: .move(edge: .top)))
-                    }
+                    searchCommandOverlayBanner
 
                     if !store.minimalModeEnabled && nav.selectedTab == .todo && (!filteredItems.isEmpty || store.completedTodoCount > 0) {
                         todoSummaryBar
@@ -615,6 +558,86 @@ struct ClipboardPopoverView: View {
             } else {
                 nav.hotKeyConflictWarning = nil
             }
+        }
+    }
+
+    @ViewBuilder
+    private var searchCommandOverlayBanner: some View {
+        if QuickSuggestionCommandBanner.extractPayload(from: nav.searchText) != nil {
+            QuickSuggestionCommandBanner(rawQuery: nav.searchText) { payload in
+                let outcome = AdaptiveIntelligenceEngine.shared.adoptUserSuggestion(payload, in: store)
+                nav.searchText = ""
+                store.showToast(outcome.message)
+            }
+            .padding(.horizontal, 14)
+            .padding(.bottom, 8)
+            .transition(.opacity.combined(with: .move(edge: .top)))
+        } else if let capture = QuickCaptureParser.parse(from: nav.searchText) {
+            QuickCaptureCommandBanner(
+                intent: capture,
+                onCommitDefault: {
+                    guard !capture.isEmptyBody else { return }
+                    if capture.defaultTodo {
+                        store.captureQuickTodo(body: capture.bodyText, alias: capture.customAlias, copyToClipboard: false)
+                    } else {
+                        store.captureQuickNote(body: capture.bodyText, alias: capture.customAlias, pin: capture.defaultPin)
+                    }
+                    nav.searchText = ""
+                },
+                onCommitForcePin: {
+                    guard !capture.isEmptyBody else { return }
+                    if capture.defaultTodo {
+                        store.captureQuickTodo(body: capture.bodyText, alias: capture.customAlias, copyToClipboard: true)
+                    } else {
+                        store.captureQuickNote(body: capture.bodyText, alias: capture.customAlias, pin: true)
+                    }
+                    nav.searchText = ""
+                }
+            )
+            .padding(.horizontal, 14)
+            .padding(.bottom, 8)
+            .transition(.opacity.combined(with: .move(edge: .top)))
+        } else if let pwGen = SecurePasswordGenerator.evaluate(nav.searchText) {
+            SecurePasswordCardView(
+                candidate: pwGen,
+                onCommitEphemeral: {
+                    nav.searchText = ""
+                    store.pasteEphemeralSecret(pwGen.secretValue, toast: pwGen.ephemeralToast, shouldAutoPaste: true, onBeforePaste: onDismiss)
+                },
+                onCommitPinToVault: {
+                    SecurePasswordGenerator.bumpGenerationSalt()
+                    nav.searchText = ""
+                    store.captureQuickNote(body: pwGen.secretValue, alias: pwGen.defaultVaultAlias, pin: true)
+                    onDismiss()
+                }
+            )
+            .padding(.horizontal, 14)
+            .padding(.bottom, 8)
+            .transition(.opacity.combined(with: .move(edge: .top)))
+        } else if let math = InstantMathEvaluator.evaluate(nav.searchText, latestClipboardText: store.items.first?.text) {
+            InstantMathCardView(
+                math: math,
+                onCommitPlain: {
+                    nav.searchText = ""
+                    store.pasteInstantValue(math.plainValue, toast: "已键入计算结果 \(math.plainValue)", shouldAutoPaste: true, onBeforePaste: onDismiss)
+                },
+                onCommitRMB: math.rmbUppercase.map { rmb in
+                    {
+                        nav.searchText = ""
+                        store.pasteInstantValue(rmb, toast: "已键入大写金额", shouldAutoPaste: true, onBeforePaste: onDismiss)
+                    }
+                }
+            )
+            .padding(.horizontal, 14)
+            .padding(.bottom, 8)
+            .transition(.opacity.combined(with: .move(edge: .top)))
+        } else if nav.selectedTab == .todo,
+                  !nav.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  !nav.searchText.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("@") {
+            todoInlineCreateBanner
+                .padding(.horizontal, 14)
+                .padding(.bottom, 8)
+                .transition(.opacity.combined(with: .move(edge: .top)))
         }
     }
 
@@ -2426,6 +2449,11 @@ struct ClipboardPopoverView: View {
         if nav.selectedTab == .todo && filteredItems.isEmpty && commitEmptySearchCaptureIfApplicable(forcePin: false) {
             return
         }
+        if let pwGen = SecurePasswordGenerator.evaluate(nav.searchText) {
+            nav.searchText = ""
+            store.pasteEphemeralSecret(pwGen.secretValue, toast: pwGen.ephemeralToast, shouldAutoPaste: true, onBeforePaste: onDismiss)
+            return
+        }
         if let math = InstantMathEvaluator.evaluate(nav.searchText, latestClipboardText: store.items.first?.text),
            (filteredItems.isEmpty || math.isExplicitOrContextual) {
             nav.searchText = ""
@@ -2605,6 +2633,13 @@ struct ClipboardPopoverView: View {
             nav.searchText = ""
             return
         }
+        if let pwGen = SecurePasswordGenerator.evaluate(nav.searchText) {
+            SecurePasswordGenerator.bumpGenerationSalt()
+            nav.searchText = ""
+            store.captureQuickNote(body: pwGen.secretValue, alias: pwGen.defaultVaultAlias, pin: true)
+            onDismiss()
+            return
+        }
         if let math = InstantMathEvaluator.evaluate(nav.searchText, latestClipboardText: store.items.first?.text),
            (filteredItems.isEmpty || math.isExplicitOrContextual),
            let rmb = math.rmbUppercase {
@@ -2738,6 +2773,11 @@ struct ClipboardPopoverView: View {
             panel.allowedContentTypes = [iclipType]
         }
 
+        let passField = ArchivePassphraseUIHelper.attachExportPassphraseAccessory(
+            to: panel,
+            sensitivePinnedCount: store.pinnedSensitiveItemCount
+        )
+
         let response = panel.runModal()
         nav.suppressAutoHide = false
 
@@ -2745,10 +2785,11 @@ struct ClipboardPopoverView: View {
         if targetURL.pathExtension.isEmpty {
             targetURL = targetURL.appendingPathExtension("iclip")
         }
+        let pw = passField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
 
         do {
-            let count = try store.exportPinnedArchive(to: targetURL)
-            store.showToast("已导出 \(count) 条收藏至 \(targetURL.lastPathComponent)")
+            let count = try store.exportPinnedArchive(to: targetURL, passphrase: pw.isEmpty ? nil : pw)
+            store.showToast(pw.isEmpty ? "已导出 \(count) 条收藏至 \(targetURL.lastPathComponent)" : "已口令加密导出 \(count) 条收藏（Mac/Win 互通）")
         } catch {
             store.showToast(error.localizedDescription)
         }
@@ -2773,7 +2814,16 @@ struct ClipboardPopoverView: View {
 
         guard response == .OK, let sourceURL = panel.url else { return }
         do {
-            let summary = try store.importPinnedArchive(from: sourceURL)
+            let summary: ArchiveImportSummary
+            do {
+                summary = try store.importPinnedArchive(from: sourceURL, passphrase: nil)
+            } catch ArchiveBackupError.passphraseRequiredOrIncorrect {
+                nav.suppressAutoHide = true
+                let entered = ArchivePassphraseUIHelper.promptImportPassphrase(for: sourceURL.lastPathComponent)
+                nav.suppressAutoHide = false
+                guard let pw = entered else { return }
+                summary = try store.importPinnedArchive(from: sourceURL, passphrase: pw)
+            }
             if summary.importedNewCount > 0 && summary.updatedExistingCount > 0 {
                 store.showToast("已从\(summary.sourceFormatLabel)迁入 \(summary.importedNewCount) 条，更新 \(summary.updatedExistingCount) 条")
             } else if summary.importedNewCount > 0 {
@@ -2952,6 +3002,7 @@ final class PanelNavigationModel: ObservableObject {
         // 解析可选的 @语义 速筛前缀（例如 "@json user" 或 "@secret"）
         let isCommandInput = (QuickSuggestionCommandBanner.extractPayload(from: query) != nil)
             || (QuickCaptureParser.parse(from: query) != nil)
+            || (SecurePasswordGenerator.evaluate(query) != nil)
         let trimmedQuery = isCommandInput
             ? ""
             : query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -3183,69 +3234,7 @@ struct ClipboardPopoverView: View {
                         .padding(.horizontal, 14)
                         .padding(.bottom, nav.searchText.trimmingCharacters(in: .whitespaces).hasPrefix("@") ? 6 : 10)
 
-                    if QuickSuggestionCommandBanner.extractPayload(from: nav.searchText) != nil {
-                        QuickSuggestionCommandBanner(rawQuery: nav.searchText) { payload in
-                            let outcome = AdaptiveIntelligenceEngine.shared.adoptUserSuggestion(payload, in: store)
-                            nav.searchText = ""
-                            store.showToast(outcome.message)
-                        }
-                        .padding(.horizontal, 14)
-                        .padding(.bottom, 8)
-                        .transition(.opacity.combined(with: .move(edge: .top)))
-                    } else if let capture = QuickCaptureParser.parse(from: nav.searchText) {
-                        QuickCaptureCommandBanner(
-                            intent: capture,
-                            onCommitDefault: {
-                                guard !capture.isEmptyBody else { return }
-                                if capture.defaultTodo {
-                                    store.captureQuickTodo(body: capture.bodyText, alias: capture.customAlias, copyToClipboard: false)
-                                } else {
-                                    store.captureQuickNote(body: capture.bodyText, alias: capture.customAlias, pin: capture.defaultPin)
-                                }
-                                nav.searchText = ""
-                            },
-                            onCommitForcePin: {
-                                guard !capture.isEmptyBody else { return }
-                                if capture.defaultTodo {
-                                    store.captureQuickTodo(body: capture.bodyText, alias: capture.customAlias, copyToClipboard: true)
-                                } else {
-                                    store.captureQuickNote(body: capture.bodyText, alias: capture.customAlias, pin: true)
-                                }
-                                nav.searchText = ""
-                            }
-                        )
-                        .padding(.horizontal, 14)
-                        .padding(.bottom, 8)
-                        .transition(.opacity.combined(with: .move(edge: .top)))
-                    } else if let math = InstantMathEvaluator.evaluate(nav.searchText, latestClipboardText: store.items.first?.text) {
-                        InstantMathCardView(
-                            math: math,
-                            onCommitPlain: {
-                                nav.searchText = ""
-                                store.pasteInstantValue(math.plainValue, toast: "已键入计算结果 \(math.plainValue)", shouldAutoPaste: true, onBeforePaste: onDismiss)
-                            },
-                            onCommitRMB: math.rmbUppercase.map { rmb in
-                                {
-                                    nav.searchText = ""
-                                    store.pasteInstantValue(rmb, toast: "已键入大写金额", shouldAutoPaste: true, onBeforePaste: onDismiss)
-                                }
-                            }
-                        )
-                        .padding(.horizontal, 14)
-                        .padding(.bottom, 8)
-                        .transition(.opacity.combined(with: .move(edge: .top)))
-                    } else if !store.minimalModeEnabled && nav.searchText.trimmingCharacters(in: .whitespaces).hasPrefix("@") {
-                        semanticTokenHintBar
-                            .padding(.horizontal, 14)
-                            .padding(.bottom, 8)
-                            .transition(.opacity.combined(with: .move(edge: .top)))
-                    } else if nav.selectedTab == .todo,
-                              !nav.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        todoInlineCreateBanner
-                            .padding(.horizontal, 14)
-                            .padding(.bottom, 8)
-                            .transition(.opacity.combined(with: .move(edge: .top)))
-                    }
+                    searchCommandOverlayBanner
 
                     if !store.minimalModeEnabled && nav.selectedTab == .todo && (!filteredItems.isEmpty || store.completedTodoCount > 0) {
                         todoSummaryBar
@@ -3440,6 +3429,90 @@ struct ClipboardPopoverView: View {
             } else {
                 nav.hotKeyConflictWarning = nil
             }
+        }
+    }
+
+    @ViewBuilder
+    private var searchCommandOverlayBanner: some View {
+        if QuickSuggestionCommandBanner.extractPayload(from: nav.searchText) != nil {
+            QuickSuggestionCommandBanner(rawQuery: nav.searchText) { payload in
+                let outcome = AdaptiveIntelligenceEngine.shared.adoptUserSuggestion(payload, in: store)
+                nav.searchText = ""
+                store.showToast(outcome.message)
+            }
+            .padding(.horizontal, 14)
+            .padding(.bottom, 8)
+            .transition(.opacity.combined(with: .move(edge: .top)))
+        } else if let capture = QuickCaptureParser.parse(from: nav.searchText) {
+            QuickCaptureCommandBanner(
+                intent: capture,
+                onCommitDefault: {
+                    guard !capture.isEmptyBody else { return }
+                    if capture.defaultTodo {
+                        store.captureQuickTodo(body: capture.bodyText, alias: capture.customAlias, copyToClipboard: false)
+                    } else {
+                        store.captureQuickNote(body: capture.bodyText, alias: capture.customAlias, pin: capture.defaultPin)
+                    }
+                    nav.searchText = ""
+                },
+                onCommitForcePin: {
+                    guard !capture.isEmptyBody else { return }
+                    if capture.defaultTodo {
+                        store.captureQuickTodo(body: capture.bodyText, alias: capture.customAlias, copyToClipboard: true)
+                    } else {
+                        store.captureQuickNote(body: capture.bodyText, alias: capture.customAlias, pin: true)
+                    }
+                    nav.searchText = ""
+                }
+            )
+            .padding(.horizontal, 14)
+            .padding(.bottom, 8)
+            .transition(.opacity.combined(with: .move(edge: .top)))
+        } else if let pwGen = SecurePasswordGenerator.evaluate(nav.searchText) {
+            SecurePasswordCardView(
+                candidate: pwGen,
+                onCommitEphemeral: {
+                    nav.searchText = ""
+                    store.pasteEphemeralSecret(pwGen.secretValue, toast: pwGen.ephemeralToast, shouldAutoPaste: true, onBeforePaste: onDismiss)
+                },
+                onCommitPinToVault: {
+                    SecurePasswordGenerator.bumpGenerationSalt()
+                    nav.searchText = ""
+                    store.captureQuickNote(body: pwGen.secretValue, alias: pwGen.defaultVaultAlias, pin: true)
+                    onDismiss()
+                }
+            )
+            .padding(.horizontal, 14)
+            .padding(.bottom, 8)
+            .transition(.opacity.combined(with: .move(edge: .top)))
+        } else if let math = InstantMathEvaluator.evaluate(nav.searchText, latestClipboardText: store.items.first?.text) {
+            InstantMathCardView(
+                math: math,
+                onCommitPlain: {
+                    nav.searchText = ""
+                    store.pasteInstantValue(math.plainValue, toast: "已键入计算结果 \(math.plainValue)", shouldAutoPaste: true, onBeforePaste: onDismiss)
+                },
+                onCommitRMB: math.rmbUppercase.map { rmb in
+                    {
+                        nav.searchText = ""
+                        store.pasteInstantValue(rmb, toast: "已键入大写金额", shouldAutoPaste: true, onBeforePaste: onDismiss)
+                    }
+                }
+            )
+            .padding(.horizontal, 14)
+            .padding(.bottom, 8)
+            .transition(.opacity.combined(with: .move(edge: .top)))
+        } else if !store.minimalModeEnabled && nav.searchText.trimmingCharacters(in: .whitespaces).hasPrefix("@") {
+            semanticTokenHintBar
+                .padding(.horizontal, 14)
+                .padding(.bottom, 8)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+        } else if nav.selectedTab == .todo,
+                  !nav.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            todoInlineCreateBanner
+                .padding(.horizontal, 14)
+                .padding(.bottom, 8)
+                .transition(.opacity.combined(with: .move(edge: .top)))
         }
     }
 
@@ -5067,6 +5140,11 @@ struct ClipboardPopoverView: View {
         if nav.selectedTab == .todo && filteredItems.isEmpty && commitEmptySearchCaptureIfApplicable(forcePin: false) {
             return
         }
+        if let pwGen = SecurePasswordGenerator.evaluate(nav.searchText) {
+            nav.searchText = ""
+            store.pasteEphemeralSecret(pwGen.secretValue, toast: pwGen.ephemeralToast, shouldAutoPaste: true, onBeforePaste: onDismiss)
+            return
+        }
         if let math = InstantMathEvaluator.evaluate(nav.searchText, latestClipboardText: store.items.first?.text),
            (filteredItems.isEmpty || math.isExplicitOrContextual) {
             nav.searchText = ""
@@ -5265,6 +5343,13 @@ struct ClipboardPopoverView: View {
             nav.searchText = ""
             return
         }
+        if let pwGen = SecurePasswordGenerator.evaluate(nav.searchText) {
+            SecurePasswordGenerator.bumpGenerationSalt()
+            nav.searchText = ""
+            store.captureQuickNote(body: pwGen.secretValue, alias: pwGen.defaultVaultAlias, pin: true)
+            onDismiss()
+            return
+        }
         if let math = InstantMathEvaluator.evaluate(nav.searchText, latestClipboardText: store.items.first?.text),
            (filteredItems.isEmpty || math.isExplicitOrContextual),
            let rmb = math.rmbUppercase {
@@ -5386,6 +5471,11 @@ struct ClipboardPopoverView: View {
             panel.allowedContentTypes = [iclipType]
         }
 
+        let passField = ArchivePassphraseUIHelper.attachExportPassphraseAccessory(
+            to: panel,
+            sensitivePinnedCount: store.pinnedSensitiveItemCount
+        )
+
         let response = panel.runModal()
         nav.suppressAutoHide = false
 
@@ -5393,10 +5483,11 @@ struct ClipboardPopoverView: View {
         if targetURL.pathExtension.isEmpty {
             targetURL = targetURL.appendingPathExtension("iclip")
         }
+        let pw = passField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
 
         do {
-            let count = try store.exportPinnedArchive(to: targetURL)
-            store.showToast("已导出 \(count) 条收藏至 \(targetURL.lastPathComponent)")
+            let count = try store.exportPinnedArchive(to: targetURL, passphrase: pw.isEmpty ? nil : pw)
+            store.showToast(pw.isEmpty ? "已导出 \(count) 条收藏至 \(targetURL.lastPathComponent)" : "已口令加密导出 \(count) 条收藏（Mac/Win 互通）")
         } catch {
             store.showToast(error.localizedDescription)
         }
@@ -5421,7 +5512,16 @@ struct ClipboardPopoverView: View {
 
         guard response == .OK, let sourceURL = panel.url else { return }
         do {
-            let summary = try store.importPinnedArchive(from: sourceURL)
+            let summary: ArchiveImportSummary
+            do {
+                summary = try store.importPinnedArchive(from: sourceURL, passphrase: nil)
+            } catch ArchiveBackupError.passphraseRequiredOrIncorrect {
+                nav.suppressAutoHide = true
+                let entered = ArchivePassphraseUIHelper.promptImportPassphrase(for: sourceURL.lastPathComponent)
+                nav.suppressAutoHide = false
+                guard let pw = entered else { return }
+                summary = try store.importPinnedArchive(from: sourceURL, passphrase: pw)
+            }
             if summary.importedNewCount > 0 && summary.updatedExistingCount > 0 {
                 store.showToast("已从\(summary.sourceFormatLabel)迁入 \(summary.importedNewCount) 条，更新 \(summary.updatedExistingCount) 条")
             } else if summary.importedNewCount > 0 {
