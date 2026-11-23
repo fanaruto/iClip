@@ -33,7 +33,7 @@ use std::sync::atomic::{AtomicIsize, Ordering};
 use std::time::Instant;
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, FALSE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+    CloseHandle, FALSE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
 };
 use windows_sys::Win32::Graphics::Dwm::{DwmExtendFrameIntoClientArea, DwmSetWindowAttribute};
 use windows_sys::Win32::Graphics::Gdi::{
@@ -301,7 +301,7 @@ unsafe fn query_windows_system_dark_mode() -> bool {
     status == 0 && data == 0
 }
 
-unsafe fn load_embedded_app_icon(hinstance: HMODULE, metric: WINDOWS_SYSTEM_METRICS_INDEX) -> HICON {
+unsafe fn load_embedded_app_icon(hinstance: HINSTANCE, metric: SYSTEM_METRICS_INDEX) -> HICON {
     let sz = GetSystemMetrics(metric).max(16);
     let h = LoadImageW(hinstance, 1usize as *const u16, IMAGE_ICON, sz, sz, 0) as HICON;
     if !h.is_null() {
