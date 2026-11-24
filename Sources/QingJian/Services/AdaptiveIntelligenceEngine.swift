@@ -1578,7 +1578,9 @@ enum URLTrackingCleaner {
 
         if s.lowercased().hasPrefix("file://") {
             let withoutAnchor = s.replacingOccurrences(of: #"#L\d+(?:-L?\d+)?$"#, with: "", options: .regularExpression)
-            if let fileURL = URL(string: withoutAnchor), fileURL.isFileURL {
+            if let fileURL = URL(string: withoutAnchor),
+               fileURL.isFileURL,
+               (fileURL.host == nil || fileURL.host?.isEmpty == true || fileURL.host?.lowercased() == "localhost") {
                 s = fileURL.path
             } else {
                 return []

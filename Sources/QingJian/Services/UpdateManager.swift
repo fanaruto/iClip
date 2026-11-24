@@ -346,48 +346,43 @@ final class UpdateManager: NSObject, ObservableObject {
                     throw OTAError.editionMismatch
                 }
 
-                let scriptURL = stageDir.appendingPathComponent("apply_ota.sh")
-                let scriptContent = """
-                #!/bin/zsh
+                // 零临时脚本落盘切换：通过内核环境变量数组隔离传递路径，根除 `.sh` TOCTOU 竞态与路径元字符注入（CWE-78/CWE-377）
+                let inlineOTAScript = """
                 set -e
-                OLD_PID=\(currentPID)
-                TARGET_APP=\(Self.shellQuote(currentAppURL.path))
-                NEW_APP=\(Self.shellQuote(newAppURL.path))
-                STAGE_DIR=\(Self.shellQuote(stageDir.path))
-                BACKUP_APP="${TARGET_APP}.ota-backup"
-
+                BACKUP_APP="${ICLIP_TARGET_APP}.ota-backup"
                 for i in {1..40}; do
-                  if ! kill -0 "$OLD_PID" 2>/dev/null; then
+                  if ! kill -0 "$ICLIP_OLD_PID" 2>/dev/null; then
                     break
                   fi
                   sleep 0.2
                 done
-
-                rm -rf "$BACKUP_APP"
-                if [ -d "$TARGET_APP" ]; then
-                  mv "$TARGET_APP" "$BACKUP_APP"
+                rm -rf -- "$BACKUP_APP"
+                if [ -d "$ICLIP_TARGET_APP" ]; then
+                  mv -- "$ICLIP_TARGET_APP" "$BACKUP_APP"
                 fi
-
-                if mv "$NEW_APP" "$TARGET_APP"; then
-                  xattr -cr "$TARGET_APP" 2>/dev/null || true
-                  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$TARGET_APP" >/dev/null 2>&1 || true
-                  rm -rf "$BACKUP_APP"
-                  open -n "$TARGET_APP"
+                if mv -- "$ICLIP_NEW_APP" "$ICLIP_TARGET_APP"; then
+                  xattr -cr -- "$ICLIP_TARGET_APP" 2>/dev/null || true
+                  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$ICLIP_TARGET_APP" >/dev/null 2>&1 || true
+                  rm -rf -- "$BACKUP_APP"
+                  open -n -- "$ICLIP_TARGET_APP"
                 else
                   if [ -d "$BACKUP_APP" ]; then
-                    mv "$BACKUP_APP" "$TARGET_APP"
+                    mv -- "$BACKUP_APP" "$ICLIP_TARGET_APP"
                   fi
-                  open -n "$TARGET_APP"
+                  open -n -- "$ICLIP_TARGET_APP"
                 fi
-
-                rm -rf "$STAGE_DIR"
+                rm -rf -- "$ICLIP_STAGE_DIR"
                 """
-                try scriptContent.write(to: scriptURL, atomically: true, encoding: .utf8)
-                try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: scriptURL.path)
 
                 let launcher = Process()
                 launcher.executableURL = URL(fileURLWithPath: "/bin/zsh")
-                launcher.arguments = ["-c", "nohup \(Self.shellQuote(scriptURL.path)) >/dev/null 2>&1 &"]
+                var env = ProcessInfo.processInfo.environment
+                env["ICLIP_OLD_PID"] = String(currentPID)
+                env["ICLIP_TARGET_APP"] = currentAppURL.path
+                env["ICLIP_NEW_APP"] = newAppURL.path
+                env["ICLIP_STAGE_DIR"] = stageDir.path
+                launcher.environment = env
+                launcher.arguments = ["-c", "nohup /bin/zsh -c \(Self.shellQuote(inlineOTAScript)) >/dev/null 2>&1 &"]
                 try launcher.run()
                 launcher.waitUntilExit()
 

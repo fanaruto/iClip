@@ -78,31 +78,28 @@ enum AppInstallHelper {
         let destPath = (destDir as NSString).appendingPathComponent("iClip.app")
 
         let pid = ProcessInfo.processInfo.processIdentifier
-        let qSrc = shellQuote(srcURL.path)
-        let qDest = shellQuote(destPath)
-
-        let script = """
-        #!/bin/zsh
+        let inlineScript = """
         for i in {1..30}; do
-          kill -0 \(pid) 2>/dev/null || break
+          kill -0 "$ICLIP_OLD_PID" 2>/dev/null || break
           sleep 0.15
         done
-        rm -rf \(qDest)
-        ditto \(qSrc) \(qDest)
-        xattr -cr \(qDest) 2>/dev/null || true
-        codesign --force --deep --identifier com.qingjian.clipboard --sign - \(qDest) >/dev/null 2>&1 || true
-        /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f \(qDest) >/dev/null 2>&1 || true
-        open -n \(qDest)
-        rm -f "$0"
+        rm -rf -- "$ICLIP_DEST_APP"
+        ditto -- "$ICLIP_SRC_APP" "$ICLIP_DEST_APP"
+        xattr -cr -- "$ICLIP_DEST_APP" 2>/dev/null || true
+        codesign --force --deep --identifier com.qingjian.clipboard --sign - -- "$ICLIP_DEST_APP" >/dev/null 2>&1 || true
+        /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$ICLIP_DEST_APP" >/dev/null 2>&1 || true
+        open -n -- "$ICLIP_DEST_APP"
         """
 
-        let tmpScript = fm.temporaryDirectory.appendingPathComponent("iclip-move-\(UUID().uuidString).sh")
         do {
-            try script.write(to: tmpScript, atomically: true, encoding: .utf8)
-            try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: tmpScript.path)
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: "/bin/zsh")
-            proc.arguments = ["-c", "nohup \(shellQuote(tmpScript.path)) >/dev/null 2>&1 &"]
+            var env = ProcessInfo.processInfo.environment
+            env["ICLIP_OLD_PID"] = String(pid)
+            env["ICLIP_SRC_APP"] = srcURL.path
+            env["ICLIP_DEST_APP"] = destPath
+            proc.environment = env
+            proc.arguments = ["-c", "nohup /bin/zsh -c \(shellQuote(inlineScript)) >/dev/null 2>&1 &"]
             try proc.run()
             proc.waitUntilExit()
             NSApp.terminate(nil)

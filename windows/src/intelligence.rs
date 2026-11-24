@@ -412,7 +412,12 @@ pub fn evaluate_instant_math(
         return None;
     }
 
-    // 优先检测离线全能单位换算（存储 B/KB/MB/GB/TB、时长 ms/s/min/h/d、温度 C/F、重量长度 kg/lb、cm/in、km/mi）
+    // 0. 优先检测离线日期加减、跨时区换算与 Unix 时间戳双向直算（如 `2026-11-24 + 90天`、`30天后`、`10:00 pst`、`ts 1763971200`）
+    if let Some(temp_res) = evaluate_temporal_expression(clean_expr, has_leading_eq) {
+        return Some(temp_res);
+    }
+
+    // 1. 离线全能单位换算（存储 B/KB/MB/GB/TB、时长 ms/s/min/h/d、温度 C/F、重量长度 kg/lb、cm/in、km/mi）
     if let Some(unit_res) = evaluate_unit_conversion(clean_expr, has_leading_eq) {
         return Some(unit_res);
     }
@@ -477,6 +482,291 @@ pub fn evaluate_instant_math(
         rmb_uppercase: rmb,
         used_clipboard_context: used_ctx,
     })
+}
+
+fn timezone_offset_minutes(code: &str) -> Option<(i32, &'static str)> {
+    match code.to_ascii_lowercase().as_str() {
+        "utc" | "gmt" => Some((0, "UTC")),
+        "cst" | "bj" | "bjt" | "hkt" | "sgt" => Some((480, "UTC+8")),
+        "jst" | "kst" => Some((540, "UTC+9")),
+        "pst" => Some((-480, "PST")),
+        "pdt" => Some((-420, "PDT")),
+        "est" => Some((-300, "EST")),
+        "edt" => Some((-240, "EDT")),
+        "cet" => Some((60, "CET")),
+        "cest" => Some((120, "CEST")),
+        "bst" => Some((120, "BST")),
+        "ist" => Some((330, "IST")),
+        "aest" => Some((600, "AEST")),
+        _ => None,
+    }
+}
+
+fn civil_from_days(z: i64) -> (i32, u32, u32, &'static str) {
+    let z_shift = z + 719_468;
+    let era = if z_shift >= 0 {
+        z_shift
+    } else {
+        z_shift - 146_096
+    } / 146_097;
+    let doe = z_shift - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut y = (yoe + era * 400) as i32;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
+    if m <= 2 {
+        y += 1;
+    }
+    let wd_idx = (z + 4).rem_euclid(7) as usize;
+    const WD_NAMES: [&str; 7] = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+    (y, m, d, WD_NAMES[wd_idx])
+}
+
+fn days_from_civil(year: i32, month: u32, day: u32) -> Option<i64> {
+    if !(1970..=9999).contains(&year) || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let y = (year - if month <= 2 { 1 } else { 0 }) as i64;
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = month as i64 + if month > 2 { -3 } else { 9 };
+    let doy = (153 * mp + 2) / 5 + day as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let z = era * 146_097 + doe - 719_468;
+    let (cy, cm, cd, _) = civil_from_days(z);
+    if cy == year && cm == month && cd == day {
+        Some(z)
+    } else {
+        None
+    }
+}
+
+fn evaluate_temporal_expression(input: &str, has_leading_eq: bool) -> Option<InstantMathResult> {
+    use regex_lite::Regex;
+    use std::sync::OnceLock;
+
+    let trimmed = input.trim();
+    static EXPLICIT_DATE_RE: OnceLock<Regex> = OnceLock::new();
+    static REL_DATE_RE: OnceLock<Regex> = OnceLock::new();
+    static TZ_CONV_RE: OnceLock<Regex> = OnceLock::new();
+    static TS_DATE_RE: OnceLock<Regex> = OnceLock::new();
+
+    let exp_re = EXPLICIT_DATE_RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})\s*([+-])\s*(\d{1,4})\s*(天|日|周|星期|d|day|days|w|week|weeks)?$",
+        )
+        .unwrap()
+    });
+    if let Some(caps) = exp_re.captures(trimmed) {
+        let y: i32 = caps.get(1)?.as_str().parse().ok()?;
+        let mo: u32 = caps.get(2)?.as_str().parse().ok()?;
+        let d: u32 = caps.get(3)?.as_str().parse().ok()?;
+        let sign: i64 = if caps.get(4)?.as_str() == "-" { -1 } else { 1 };
+        let n: i64 = caps.get(5)?.as_str().parse().ok()?;
+        let base_z = days_from_civil(y, mo, d)?;
+        let unit = caps
+            .get(6)
+            .map(|m| m.as_str().to_lowercase())
+            .unwrap_or_else(|| "d".to_string());
+        let mult = if unit == "周" || unit == "星期" || unit.starts_with('w') {
+            7
+        } else {
+            1
+        };
+        let (ty, tm, td, wd) = civil_from_days(base_z + sign * n * mult);
+        let iso = format!("{ty:04}-{tm:02}-{td:02}");
+        return Some(InstantMathResult {
+            expression_display: format!("{trimmed} · {wd}"),
+            plain_value: iso,
+            rmb_uppercase: None,
+            used_clipboard_context: false,
+        });
+    }
+
+    let rel_re = REL_DATE_RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)^([+-]?\d{1,4})\s*(天|日|周|星期|d|day|days|w|week|weeks)\s*(后|之后|前|之前|later|ago)?$",
+        )
+        .unwrap()
+    });
+    if let Some(caps) = rel_re.captures(trimmed) {
+        let num_str = caps.get(1)?.as_str();
+        let raw_num: i64 = num_str.parse().ok()?;
+        let has_sign = num_str.starts_with('+') || num_str.starts_with('-');
+        let dir = caps
+            .get(3)
+            .map(|m| m.as_str().to_lowercase())
+            .unwrap_or_default();
+        if has_sign || !dir.is_empty() {
+            let unit = caps.get(2)?.as_str().to_lowercase();
+            let mult = if unit == "周" || unit == "星期" || unit.starts_with('w') {
+                7
+            } else {
+                1
+            };
+            let mut delta = raw_num.abs() * mult;
+            if num_str.starts_with('-') || dir == "前" || dir == "之前" || dir == "ago" {
+                delta = -delta;
+            }
+            let now_secs = crate::model::now_unix_secs() as i64;
+            let today_z = (now_secs + 8 * 3_600).div_euclid(86_400);
+            let (ty, tm, td, wd) = civil_from_days(today_z + delta);
+            let iso = format!("{ty:04}-{tm:02}-{td:02}");
+            return Some(InstantMathResult {
+                expression_display: format!("{trimmed} · {wd}"),
+                plain_value: iso,
+                rmb_uppercase: None,
+                used_clipboard_context: false,
+            });
+        }
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    let is_ts_prefix = lower.starts_with("ts ") || lower.starts_with("unix ");
+    if is_ts_prefix || has_leading_eq {
+        let body = if is_ts_prefix {
+            trimmed
+                .split_once(char::is_whitespace)
+                .map(|(_, r)| r.trim())
+                .unwrap_or("")
+        } else {
+            trimmed
+        };
+        if (body.len() == 10 || body.len() == 13) && body.bytes().all(|b| b.is_ascii_digit()) {
+            if let Ok(raw_int) = body.parse::<i64>() {
+                let sec = if body.len() == 13 {
+                    raw_int / 1_000
+                } else {
+                    raw_int
+                };
+                if (946_684_800..=4_102_444_800).contains(&sec) {
+                    let bj_total = sec + 8 * 3_600;
+                    let day_z = bj_total.div_euclid(86_400);
+                    let rem = bj_total.rem_euclid(86_400);
+                    let hh = rem / 3_600;
+                    let mm = (rem % 3_600) / 60;
+                    let ss = rem % 60;
+                    let (cy, cm, cd, _) = civil_from_days(day_z);
+                    let formatted = format!("{cy:04}-{cm:02}-{cd:02} {hh:02}:{mm:02}:{ss:02}");
+                    return Some(InstantMathResult {
+                        expression_display: format!("Unix {sec} (UTC+8)"),
+                        plain_value: formatted,
+                        rmb_uppercase: None,
+                        used_clipboard_context: false,
+                    });
+                }
+            }
+        }
+        if is_ts_prefix {
+            let ts_re = TS_DATE_RE.get_or_init(|| {
+                Regex::new(
+                    r"(?i)^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?\s*(utc|z)?$",
+                )
+                .unwrap()
+            });
+            if let Some(caps) = ts_re.captures(body) {
+                let y: i32 = caps.get(1)?.as_str().parse().ok()?;
+                let mo: u32 = caps.get(2)?.as_str().parse().ok()?;
+                let d: u32 = caps.get(3)?.as_str().parse().ok()?;
+                let z = days_from_civil(y, mo, d)?;
+                let hh: i64 = caps
+                    .get(4)
+                    .and_then(|m| m.as_str().parse().ok())
+                    .unwrap_or(0);
+                let mm: i64 = caps
+                    .get(5)
+                    .and_then(|m| m.as_str().parse().ok())
+                    .unwrap_or(0);
+                let ss: i64 = caps
+                    .get(6)
+                    .and_then(|m| m.as_str().parse().ok())
+                    .unwrap_or(0);
+                if !(0..=23).contains(&hh) || !(0..=59).contains(&mm) || !(0..=59).contains(&ss) {
+                    return None;
+                }
+                let is_utc = caps.get(7).is_some();
+                let tz_shift = if is_utc { 0 } else { 8 * 3_600 };
+                let epoch_sec = z * 86_400 + hh * 3_600 + mm * 60 + ss - tz_shift;
+                return Some(InstantMathResult {
+                    expression_display: format!("{body} -> Unix 秒"),
+                    plain_value: epoch_sec.to_string(),
+                    rmb_uppercase: None,
+                    used_clipboard_context: false,
+                });
+            }
+        }
+    }
+
+    let tz_re = TZ_CONV_RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*([a-z]{2,4})(?:\s*(?:to|in|->|=>|转)\s*([a-z]{2,4}))?$",
+        )
+        .unwrap()
+    });
+    if let Some(caps) = tz_re.captures(trimmed) {
+        let mut hour: i32 = caps.get(1)?.as_str().parse().ok()?;
+        let has_colon = caps.get(2).is_some();
+        let minute: i32 = caps
+            .get(2)
+            .and_then(|m| m.as_str().parse().ok())
+            .unwrap_or(0);
+        let ampm = caps
+            .get(3)
+            .map(|m| m.as_str().to_ascii_lowercase())
+            .unwrap_or_default();
+        let (src_min, _) = timezone_offset_minutes(caps.get(4)?.as_str())?;
+        let dst_opt = caps.get(5).map(|m| m.as_str());
+        if !has_colon && ampm.is_empty() && dst_opt.is_none() && !has_leading_eq {
+            return None;
+        }
+        if !ampm.is_empty() {
+            if !(1..=12).contains(&hour) {
+                return None;
+            }
+            if ampm == "pm" && hour != 12 {
+                hour += 12;
+            }
+            if ampm == "am" && hour == 12 {
+                hour = 0;
+            }
+        }
+        if !(0..=23).contains(&hour) || !(0..=59).contains(&minute) {
+            return None;
+        }
+        let (dst_min, dst_lbl) = if let Some(dr) = dst_opt {
+            timezone_offset_minutes(dr)?
+        } else if src_min == 480 {
+            (0, "UTC")
+        } else {
+            (480, "UTC+8")
+        };
+        if dst_min == src_min {
+            return None;
+        }
+        let total = hour * 60 + minute - src_min + dst_min;
+        let day_shift = total.div_euclid(1_440);
+        let norm_min = total.rem_euclid(1_440);
+        let out_hh = norm_min / 60;
+        let out_mm = norm_min % 60;
+        let suffix = if day_shift > 0 {
+            format!(" (+{day_shift}天)")
+        } else if day_shift < 0 {
+            format!(" ({day_shift}天)")
+        } else {
+            String::new()
+        };
+        let plain = format!("{out_hh:02}:{out_mm:02}{suffix}");
+        return Some(InstantMathResult {
+            expression_display: format!("{trimmed} -> {dst_lbl}"),
+            plain_value: plain,
+            rmb_uppercase: None,
+            used_clipboard_context: false,
+        });
+    }
+
+    None
 }
 
 #[derive(Clone, Copy)]

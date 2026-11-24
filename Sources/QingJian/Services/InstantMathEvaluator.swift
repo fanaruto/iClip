@@ -29,7 +29,12 @@ enum InstantMathEvaluator {
         }
         guard !input.isEmpty else { return nil }
 
-        // 优先检测离线全能单位换算（存储 B/KB/MB/GB/TB、时长 ms/s/min/h/d、温度 C/F、重量长度 kg/lb、cm/in、km/mi）
+        // 0. 优先检测离线时间/时区/日期加减/Unix 时间戳直算（如 `2026-11-24 + 90天`、`30天后`、`10:00 pst`、`ts 1763971200`）
+        if let temporalRes = evaluateTemporalExpression(input, hasLeadingEquals: hasLeadingEquals) {
+            return temporalRes
+        }
+
+        // 1. 离线全能单位换算（存储 B/KB/MB/GB/TB、时长 ms/s/min/h/d、温度 C/F、重量长度 kg/lb、cm/in、km/mi）
         if let unitRes = evaluateUnitConversion(input, hasLeadingEquals: hasLeadingEquals) {
             return unitRes
         }
@@ -565,5 +570,239 @@ enum InstantMathEvaluator {
             guard token != "." else { return nil }
             return Double(token)
         }
+    }
+
+    // MARK: - 离线零延迟日期推算、跨时区秒换算与 Unix 时间戳双向直算（Howard Hinnant 公历整数公式，0 外部依赖）
+
+    private static let relativeDateSuffixRegex = try! NSRegularExpression(
+        pattern: #"^([+-]?\d{1,4})\s*(天|日|周|星期|d|day|days|w|week|weeks)\s*(后|之后|前|之前|later|ago)?$"#,
+        options: [.caseInsensitive]
+    )
+    private static let explicitDateShiftRegex = try! NSRegularExpression(
+        pattern: #"^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})\s*([+-])\s*(\d{1,4})\s*(天|日|周|星期|d|day|days|w|week|weeks)?$"#,
+        options: [.caseInsensitive]
+    )
+    private static let timezoneConvertRegex = try! NSRegularExpression(
+        pattern: #"^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*([a-z]{2,4})(?:\s*(?:to|in|->|=>|转)\s*([a-z]{2,4}))?$"#,
+        options: [.caseInsensitive]
+    )
+    private static let tsDateRegex = try! NSRegularExpression(
+        pattern: #"^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?\s*(utc|z)?$"#,
+        options: [.caseInsensitive]
+    )
+
+    private static func timezoneOffsetMinutes(_ code: String) -> (minutes: Int, label: String)? {
+        switch code.lowercased() {
+        case "utc", "gmt": return (0, "UTC")
+        case "cst", "bj", "bjt", "hkt", "sgt": return (480, "UTC+8")
+        case "jst", "kst": return (540, "UTC+9")
+        case "pst": return (-480, "PST")
+        case "pdt": return (-420, "PDT")
+        case "est": return (-300, "EST")
+        case "edt": return (-240, "EDT")
+        case "cet": return (60, "CET")
+        case "cest", "bst": return (120, code.uppercased())
+        case "ist": return (330, "IST")
+        case "aest": return (600, "AEST")
+        default: return nil
+        }
+    }
+
+    private static func daysFromCivil(year: Int, month: Int, day: Int) -> Int? {
+        guard (1...12).contains(month), (1...31).contains(day), (1970...9999).contains(year) else { return nil }
+        let y = year - (month <= 2 ? 1 : 0)
+        let era = (y >= 0 ? y : y - 399) / 400
+        let yoe = y - era * 400
+        let mp = month + (month > 2 ? -3 : 9)
+        let doy = (153 * mp + 2) / 5 + day - 1
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+        let z = era * 146_097 + doe - 719_468
+        // 反向校验防止 2 月 30 日等非法日期
+        let check = civilFromDays(z)
+        guard check.year == year && check.month == month && check.day == day else { return nil }
+        return z
+    }
+
+    private static func civilFromDays(_ z: Int) -> (year: Int, month: Int, day: Int, weekdayCN: String) {
+        let zShift = z + 719_468
+        let era = (zShift >= 0 ? zShift : zShift - 146_096) / 146_097
+        let doe = zShift - era * 146_097
+        let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365
+        var y = yoe + era * 400
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+        let mp = (5 * doy + 2) / 153
+        let d = doy - (153 * mp + 2) / 5 + 1
+        let m = mp + (mp < 10 ? 3 : -9)
+        if m <= 2 { y += 1 }
+        let wdIdx = ((z + 4) % 7 + 7) % 7
+        let wdNames = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"]
+        return (y, m, d, wdNames[wdIdx])
+    }
+
+    private static func evaluateTemporalExpression(_ input: String, hasLeadingEquals: Bool) -> InstantMathResult? {
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fullRange = NSRange(trimmed.startIndex..<trimmed.endIndex, in: trimmed)
+
+        // A. 指定日期加减：如 `2026-11-24 + 90天` / `2026-11-24 - 15d`
+        if let m = explicitDateShiftRegex.firstMatch(in: trimmed, range: fullRange),
+           let yR = Range(m.range(at: 1), in: trimmed),
+           let moR = Range(m.range(at: 2), in: trimmed),
+           let dR = Range(m.range(at: 3), in: trimmed),
+           let opR = Range(m.range(at: 4), in: trimmed),
+           let nR = Range(m.range(at: 5), in: trimmed),
+           let y = Int(trimmed[yR]), let mo = Int(trimmed[moR]), let d = Int(trimmed[dR]),
+           let n = Int(trimmed[nR]),
+           let baseZ = daysFromCivil(year: y, month: mo, day: d) {
+            let unitStr = m.range(at: 6).location != NSNotFound ? String(trimmed[Range(m.range(at: 6), in: trimmed)!]).lowercased() : "d"
+            let mult = (unitStr == "周" || unitStr == "星期" || unitStr.hasPrefix("w")) ? 7 : 1
+            let sign = trimmed[opR] == "-" ? -1 : 1
+            let target = civilFromDays(baseZ + sign * n * mult)
+            let iso = String(format: "%04d-%02d-%02d", target.year, target.month, target.day)
+            return InstantMathResult(
+                expressionDisplay: trimmed,
+                plainValue: iso,
+                formattedThousands: "\(iso)（\(target.weekdayCN)）",
+                rmbUppercase: nil,
+                isExplicitOrContextual: true
+            )
+        }
+
+        // B. 相对今日推算：如 `90天后`、`15天前`、`+30天`、`-7天`、`2周后`（无符号且无前后缀的 `30天` 留给单位换算转小时）
+        if let m = relativeDateSuffixRegex.firstMatch(in: trimmed, range: fullRange),
+           let numR = Range(m.range(at: 1), in: trimmed),
+           let unitR = Range(m.range(at: 2), in: trimmed),
+           let rawNum = Int(trimmed[numR]) {
+            let numStr = String(trimmed[numR])
+            let hasExplicitSign = numStr.hasPrefix("+") || numStr.hasPrefix("-")
+            let dirStr = m.range(at: 3).location != NSNotFound ? String(trimmed[Range(m.range(at: 3), in: trimmed)!]).lowercased() : ""
+            if hasExplicitSign || !dirStr.isEmpty {
+                let unitStr = String(trimmed[unitR]).lowercased()
+                let mult = (unitStr == "周" || unitStr == "星期" || unitStr.hasPrefix("w")) ? 7 : 1
+                var delta = abs(rawNum) * mult
+                if numStr.hasPrefix("-") || dirStr == "前" || dirStr == "之前" || dirStr == "ago" {
+                    delta = -delta
+                }
+                let cal = Calendar(identifier: .gregorian)
+                let comps = cal.dateComponents([.year, .month, .day], from: Date())
+                if let y = comps.year, let mo = comps.month, let d = comps.day,
+                   let todayZ = daysFromCivil(year: y, month: mo, day: d) {
+                    let target = civilFromDays(todayZ + delta)
+                    let iso = String(format: "%04d-%02d-%02d", target.year, target.month, target.day)
+                    return InstantMathResult(
+                        expressionDisplay: trimmed,
+                        plainValue: iso,
+                        formattedThousands: "\(iso)（\(target.weekdayCN)）",
+                        rmbUppercase: nil,
+                        isExplicitOrContextual: true
+                    )
+                }
+            }
+        }
+
+        // C. Unix 时间戳 ↔ 标准时间双向秒转：`ts 1763971200` / `= 1763971200` / `ts 2026-11-24 18:00:00`
+        let lower = trimmed.lowercased()
+        let isTSPrefix = lower.hasPrefix("ts ") || lower.hasPrefix("unix ")
+        if isTSPrefix || hasLeadingEquals {
+            let body = isTSPrefix
+                ? String(trimmed.drop(while: { !$0.isWhitespace })).trimmingCharacters(in: .whitespaces)
+                : trimmed
+            if (body.count == 10 || body.count == 13), body.allSatisfy({ $0.isASCII && $0.isNumber }),
+               let rawInt = Int64(body) {
+                let sec = body.count == 13 ? rawInt / 1_000 : rawInt
+                if (946_684_800...4_102_444_800).contains(sec) {
+                    let bjTotal = sec + 8 * 3_600
+                    let dayZ = Int(bjTotal >= 0 ? bjTotal / 86_400 : (bjTotal - 86_399) / 86_400)
+                    let rem = Int(((bjTotal % 86_400) + 86_400) % 86_400)
+                    let hh = rem / 3_600
+                    let mm = (rem % 3_600) / 60
+                    let ss = rem % 60
+                    let civ = civilFromDays(dayZ)
+                    let formatted = String(format: "%04d-%02d-%02d %02d:%02d:%02d", civ.year, civ.month, civ.day, hh, mm, ss)
+                    return InstantMathResult(
+                        expressionDisplay: "Unix \(sec)",
+                        plainValue: formatted,
+                        formattedThousands: "\(formatted) (UTC+8)",
+                        rmbUppercase: nil,
+                        isExplicitOrContextual: true
+                    )
+                }
+            }
+            if isTSPrefix {
+                let bodyRange = NSRange(body.startIndex..<body.endIndex, in: body)
+                if let dm = tsDateRegex.firstMatch(in: body, range: bodyRange),
+                   let y = Int(body[Range(dm.range(at: 1), in: body)!]),
+                   let mo = Int(body[Range(dm.range(at: 2), in: body)!]),
+                   let d = Int(body[Range(dm.range(at: 3), in: body)!]),
+                   let z = daysFromCivil(year: y, month: mo, day: d) {
+                    let hh = dm.range(at: 4).location != NSNotFound ? (Int(body[Range(dm.range(at: 4), in: body)!]) ?? 0) : 0
+                    let mm = dm.range(at: 5).location != NSNotFound ? (Int(body[Range(dm.range(at: 5), in: body)!]) ?? 0) : 0
+                    let ss = dm.range(at: 6).location != NSNotFound ? (Int(body[Range(dm.range(at: 6), in: body)!]) ?? 0) : 0
+                    guard (0...23).contains(hh), (0...59).contains(mm), (0...59).contains(ss) else { return nil }
+                    let isUTC = dm.range(at: 7).location != NSNotFound
+                    let tzShift = isUTC ? 0 : (8 * 3_600)
+                    let epochSec = Int64(z) * 86_400 + Int64(hh * 3_600 + mm * 60 + ss - tzShift)
+                    let secStr = String(epochSec)
+                    return InstantMathResult(
+                        expressionDisplay: body,
+                        plainValue: secStr,
+                        formattedThousands: "\(secStr) s",
+                        rmbUppercase: nil,
+                        isExplicitOrContextual: true
+                    )
+                }
+            }
+        }
+
+        // D. 跨时区钟点换算：如 `10:00 pst`、`14:30 utc`、`9am est`、`20:00 bj to pst`
+        if let tm = timezoneConvertRegex.firstMatch(in: trimmed, range: fullRange),
+           let hR = Range(tm.range(at: 1), in: trimmed),
+           let srcTzR = Range(tm.range(at: 4), in: trimmed),
+           var hour = Int(trimmed[hR]),
+           let srcTZ = timezoneOffsetMinutes(String(trimmed[srcTzR])) {
+            let minute = tm.range(at: 2).location != NSNotFound ? (Int(trimmed[Range(tm.range(at: 2), in: trimmed)!]) ?? 0) : 0
+            let hasColon = tm.range(at: 2).location != NSNotFound
+            let ampm = tm.range(at: 3).location != NSNotFound ? String(trimmed[Range(tm.range(at: 3), in: trimmed)!]).lowercased() : ""
+            let dstRaw = tm.range(at: 5).location != NSNotFound ? String(trimmed[Range(tm.range(at: 5), in: trimmed)!]) : nil
+            // 防误伤：若既无冒号、无 am/pm、无目标时区且无前导 `=`（例如搜型号 `10 pst` 除外，要求带冒号或 am/pm 或 to）
+            guard hasColon || !ampm.isEmpty || dstRaw != nil || hasLeadingEquals else { return nil }
+            if !ampm.isEmpty {
+                guard (1...12).contains(hour) else { return nil }
+                if ampm == "pm" && hour != 12 { hour += 12 }
+                if ampm == "am" && hour == 12 { hour = 0 }
+            }
+            guard (0...23).contains(hour), (0...59).contains(minute) else { return nil }
+            let dstTZ: (minutes: Int, label: String)
+            if let dr = dstRaw {
+                guard let parsed = timezoneOffsetMinutes(dr) else { return nil }
+                dstTZ = parsed
+            } else {
+                dstTZ = (srcTZ.minutes == 480) ? (0, "UTC") : (480, "UTC+8")
+            }
+            guard dstTZ.minutes != srcTZ.minutes else { return nil }
+            let totalTargetMin = hour * 60 + minute - srcTZ.minutes + dstTZ.minutes
+            var dayShift = 0
+            var normMin = totalTargetMin
+            while normMin < 0 {
+                normMin += 1_440
+                dayShift -= 1
+            }
+            while normMin >= 1_440 {
+                normMin -= 1_440
+                dayShift += 1
+            }
+            let outHH = normMin / 60
+            let outMM = normMin % 60
+            let daySuffix = dayShift > 0 ? " (+\(dayShift)天)" : (dayShift < 0 ? " (\(dayShift)天)" : "")
+            let plain = String(format: "%02d:%02d%@", outHH, outMM, daySuffix)
+            return InstantMathResult(
+                expressionDisplay: trimmed,
+                plainValue: plain,
+                formattedThousands: "\(plain) · \(dstTZ.label)",
+                rmbUppercase: nil,
+                isExplicitOrContextual: true
+            )
+        }
+
+        return nil
     }
 }

@@ -3172,5 +3172,19 @@ final class CoreFeatureTests: XCTestCase {
         let splitActs = UniversalEscapeDecoder.analyzeListBatchConversion(inlineNames, includeSQLIn: false)
         XCTAssertEqual(splitActs.first?.resultText, "陈伟峰\n林晓明\n张思远\n王梓涵")
         XCTAssertTrue(UniversalEscapeDecoder.analyzeListBatchConversion("1,234,567,890", includeSQLIn: true).isEmpty)
+
+        // 10. 第 27 轮自省：验证外跳 URL userinfo / 十六进制混淆 IP / 远程 file:// 主机拦截，以及离线日期推算、跨时区换算与 Unix 时间戳双向直算
+        XCTAssertNil(OutboundLinkSafety.validatedBrowserURL(from: "https://login.microsoft.com@evil.example.com/auth"))
+        XCTAssertNil(OutboundLinkSafety.validatedBrowserURL(from: "http://0x7f.0.0.1/admin"))
+        XCTAssertNil(OutboundLinkSafety.validatedBrowserURL(from: "http://0177.0.0.1/admin"))
+        XCTAssertNil(URLTrackingCleaner.resolveExistingLocalFileURL(from: "file://evil-smb.example.com/share/doc.pdf"))
+
+        XCTAssertEqual(InstantMathEvaluator.evaluate("2026-11-24 + 90天")?.plainValue, "2027-02-22")
+        XCTAssertEqual(InstantMathEvaluator.evaluate("2026-11-24 + 90天")?.formattedThousands, "2027-02-22（周一）")
+        XCTAssertEqual(InstantMathEvaluator.evaluate("10:00 pst")?.plainValue, "02:00 (+1天)")
+        XCTAssertEqual(InstantMathEvaluator.evaluate("14:30 utc")?.plainValue, "22:30")
+        XCTAssertEqual(InstantMathEvaluator.evaluate("ts 1763971200")?.plainValue, "2025-11-24 16:00:00")
+        XCTAssertEqual(InstantMathEvaluator.evaluate("= 1763971200000")?.plainValue, "2025-11-24 16:00:00")
+        XCTAssertEqual(InstantMathEvaluator.evaluate("ts 2025-11-24 16:00:00")?.plainValue, "1763971200")
     }
 }

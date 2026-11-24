@@ -2278,5 +2278,54 @@ mod tests {
         assert_eq!(split_acts[0].0, "list-split-lines");
         assert_eq!(split_acts[0].2, "陈伟峰\n林晓明\n张思远\n王梓涵");
         assert!(crate::security::analyze_list_batch_conversion("1,234,567,890", true).is_empty());
+
+        // 11. 第 27 轮自省：验证十六进制/八进制混淆 IP 拦截、Explorer 远程 UNC NTLM 防护与逗号参数降级，以及离线日期推算/时区换算/时间戳互转
+        assert!(crate::security::sanitize_safe_browser_url("http://0x7f.0.0.1/admin").is_none());
+        assert!(crate::security::sanitize_safe_browser_url("http://0177.0.0.1/admin").is_none());
+        assert!(crate::security::sanitize_safe_local_explorer_param(
+            r"\\evil-smb.example.com\share\leak.pdf"
+        )
+        .is_none());
+        assert_eq!(
+            crate::security::sanitize_safe_local_explorer_param(r"C:\Work\report,calc.exe.txt"),
+            Some(r#""C:\Work""#.to_string())
+        );
+
+        assert_eq!(
+            crate::intelligence::evaluate_instant_math("2026-11-24 + 90天", None)
+                .unwrap()
+                .plain_value,
+            "2027-02-22"
+        );
+        assert_eq!(
+            crate::intelligence::evaluate_instant_math("10:00 pst", None)
+                .unwrap()
+                .plain_value,
+            "02:00 (+1天)"
+        );
+        assert_eq!(
+            crate::intelligence::evaluate_instant_math("14:30 utc", None)
+                .unwrap()
+                .plain_value,
+            "22:30"
+        );
+        assert_eq!(
+            crate::intelligence::evaluate_instant_math("ts 1763971200", None)
+                .unwrap()
+                .plain_value,
+            "2025-11-24 16:00:00"
+        );
+        assert_eq!(
+            crate::intelligence::evaluate_instant_math("= 1763971200000", None)
+                .unwrap()
+                .plain_value,
+            "2025-11-24 16:00:00"
+        );
+        assert_eq!(
+            crate::intelligence::evaluate_instant_math("ts 2025-11-24 16:00:00", None)
+                .unwrap()
+                .plain_value,
+            "1763971200"
+        );
     }
 }

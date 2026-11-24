@@ -1046,8 +1046,15 @@ enum OutboundLinkSafety {
             return url
         }
 
-        // 独立打开时严禁包含换行、回车、空字节等注入控制符
+        // 独立打开时严禁包含换行、回车、空字节、Bidi 双向伪装符或零宽欺骗字符
         if raw.contains("\n") || raw.contains("\r") || raw.contains("\0") || raw.contains("\t") {
+            return nil
+        }
+        if raw.unicodeScalars.contains(where: { sc in
+            let v = sc.value
+            return (v >= 0x202A && v <= 0x202E) || (v >= 0x2066 && v <= 0x2069) || v == 0x061C
+                || v == 0x200B || v == 0x200C || v == 0x2060 || v == 0xFEFF
+        }) {
             return nil
         }
 
@@ -1106,12 +1113,24 @@ enum OutboundLinkSafety {
         guard let url = urlOpt,
               let scheme = url.scheme?.lowercased(),
               (scheme == "http" || scheme == "https"),
+              url.user == nil,
+              url.password == nil,
               let host = url.host?.lowercased(),
               !host.isEmpty else {
             return nil
         }
         guard host == "localhost" || host.contains(".") else {
             return nil
+        }
+        // 拦截十六进制 / 八进制混淆 IPv4 主机（如 http://0x7f.0.0.1 或 http://0177.0.0.1 绕过安全感知钓鱼）
+        let labels = host.split(separator: ".", omittingEmptySubsequences: false)
+        if labels.count == 4 && labels.allSatisfy({ !$0.isEmpty && ($0.hasPrefix("0x") || $0.allSatisfy(\.isNumber)) }) {
+            let hasHexOrOctal = labels.contains { seg in
+                seg.hasPrefix("0x") || (seg.count > 1 && seg.first == "0")
+            }
+            if hasHexOrOctal {
+                return nil
+            }
         }
         return url
     }

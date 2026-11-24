@@ -1310,11 +1310,16 @@ pub fn sanitize_safe_browser_url(raw_input: &str) -> Option<String> {
         return None;
     }
 
-    // 控制符、空白或命令行引号一律拒绝，防止 ShellExecute 参数欺骗
-    if raw
-        .chars()
-        .any(|c| c.is_control() || c == ' ' || c == '"' || c == '<' || c == '>')
-    {
+    // 控制符、空白、命令行引号或隐藏 Bidi / 零宽欺骗字符一律拒绝，防止 ShellExecute 参数欺骗与视觉钓鱼
+    if raw.chars().any(|c| {
+        c.is_control()
+            || c == ' '
+            || c == '"'
+            || c == '<'
+            || c == '>'
+            || is_bidi_override_char(c)
+            || is_zero_width_char(c)
+    }) {
         return None;
     }
 
@@ -1401,7 +1406,56 @@ pub fn sanitize_safe_browser_url(raw_input: &str) -> Option<String> {
     if host.is_empty() || (host != "localhost" && !host.contains('.')) {
         return None;
     }
+    // 拦截十六进制 / 八进制混淆 IPv4 主机（如 http://0x7f.0.0.1 或 http://0177.0.0.1 绕过安全感知钓鱼）
+    let segs: Vec<&str> = host.split('.').collect();
+    if segs.len() == 4
+        && segs.iter().all(|s| {
+            !s.is_empty() && (s.starts_with("0x") || s.bytes().all(|b| b.is_ascii_digit()))
+        })
+        && segs
+            .iter()
+            .any(|s| s.starts_with("0x") || (s.len() > 1 && s.starts_with('0')))
+    {
+        return None;
+    }
     Some(normalized)
+}
+
+/// 校验并构造供 `explorer.exe` 安全定位的本地路径参数：
+/// 1) 严禁远程 UNC 网络共享路径（`\\server\share` / `//server/share`），物理阻断公网 SMB 445 端口 NTLMv2 密码哈希外泄（CWE-200）；
+/// 2) 若文件名包含逗号 `,`（`explorer.exe` 非标命令行解析器会将引号内逗号拆为新参数执行 CWE-88），自动降级为打开不含逗号的父目录。
+pub fn sanitize_safe_local_explorer_param(raw_path: &str) -> Option<String> {
+    let trimmed = raw_path.trim();
+    if trimmed.is_empty()
+        || trimmed
+            .chars()
+            .any(|c| c.is_control() || c == '"' || is_bidi_override_char(c))
+    {
+        return None;
+    }
+    if trimmed.starts_with("//") {
+        return None;
+    }
+    if trimmed.starts_with(r"\\") {
+        // 仅允许本地盘符扩展长路径前缀 `\\?\C:\...`，拒绝 `\\?\UNC\...` 与普通 `\\server\...`
+        let rest = trimmed.strip_prefix(r"\\?\")?;
+        let rb = rest.as_bytes();
+        if rb.len() < 3 || !rb[0].is_ascii_alphabetic() || rb[1] != b':' || rb[2] != b'\\' {
+            return None;
+        }
+    }
+    if !trimmed.contains(',') {
+        return Some(format!("/select,\"{trimmed}\""));
+    }
+    let idx = trimmed.rfind(['\\', '/'])?;
+    let mut parent = trimmed[..idx].to_string();
+    if parent.len() == 2 && parent.as_bytes()[1] == b':' {
+        parent.push('\\');
+    }
+    if parent.is_empty() || parent.contains(',') || parent.contains('"') {
+        return None;
+    }
+    Some(format!("\"{parent}\""))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

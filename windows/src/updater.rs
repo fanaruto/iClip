@@ -613,9 +613,17 @@ pub mod win_runtime {
         let z_esc = zip_path.display().to_string().replace('\'', "''");
         let u_esc = unpack_dir.display().to_string().replace('\'', "''");
         let ps_cmd = format!(
-            "$ErrorActionPreference='Stop'; Expand-Archive -Path '{z_esc}' -DestinationPath '{u_esc}' -Force"
+            "$ErrorActionPreference='Stop'; Expand-Archive -LiteralPath '{z_esc}' -DestinationPath '{u_esc}' -Force"
         );
-        let status = std::process::Command::new("powershell")
+        let sys_root = std::env::var_os("SystemRoot")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+        let ps_bin = sys_root
+            .join("System32")
+            .join("WindowsPowerShell")
+            .join("v1.0")
+            .join("powershell.exe");
+        let status = std::process::Command::new(&ps_bin)
             .args([
                 "-NoProfile",
                 "-NonInteractive",
@@ -649,9 +657,9 @@ pub mod win_runtime {
 
         let new_exe_path = install_dir.join("iClip.exe.new");
         let old_exe_path = install_dir.join("iClip.exe.old");
-        fs::write(&new_exe_path, &exe_bytes).map_err(|e| {
+        crate::security::write_protected_atomic(&new_exe_path, &exe_bytes).map_err(|e| {
             let _ = fs::remove_dir_all(&stage_dir);
-            format!("当前安装目录无写入权限（{e}），请移至用户目录后重试")
+            format!("当前安装目录无写入权限或存在异常链接（{e}），请移至用户目录后重试")
         })?;
         strip_zone_identifier(&new_exe_path);
         let _ = fs::remove_dir_all(&stage_dir);

@@ -2484,9 +2484,17 @@ unsafe fn open_item_external_target(hwnd: HWND, store_idx: usize) {
         }
         ClipContentType::File => {
             if let Some(first_path) = item.file_paths.as_ref().and_then(|p| p.first()) {
+                let Some(safe_param) =
+                    iclip_core::security::sanitize_safe_local_explorer_param(first_path)
+                else {
+                    set_toast(
+                        hwnd,
+                        "已拦截远程网络共享路径或异常参数，保护本机凭据".to_string(),
+                    );
+                    return;
+                };
                 let explorer = to_wide("explorer.exe");
-                let safe_path = first_path.replace('"', "");
-                let param = to_wide(&format!("/select,\"{safe_path}\""));
+                let param = to_wide(&safe_param);
                 let always_top = APP_STATE.with(|c| {
                     c.borrow()
                         .as_ref()
@@ -2518,17 +2526,20 @@ unsafe fn open_item_external_target(hwnd: HWND, store_idx: usize) {
                 })
             });
             if let Some(p) = img_path {
-                let explorer = to_wide("explorer.exe");
-                let safe_path = p.to_string_lossy().replace('"', "");
-                let param = to_wide(&format!("/select,\"{safe_path}\""));
-                let _ = ShellExecuteW(
-                    null_mut(),
-                    op_open.as_ptr(),
-                    explorer.as_ptr(),
-                    param.as_ptr(),
-                    null(),
-                    SW_SHOWNORMAL,
-                );
+                if let Some(safe_param) =
+                    iclip_core::security::sanitize_safe_local_explorer_param(&p.to_string_lossy())
+                {
+                    let explorer = to_wide("explorer.exe");
+                    let param = to_wide(&safe_param);
+                    let _ = ShellExecuteW(
+                        null_mut(),
+                        op_open.as_ptr(),
+                        explorer.as_ptr(),
+                        param.as_ptr(),
+                        null(),
+                        SW_SHOWNORMAL,
+                    );
+                }
             }
         }
     }
