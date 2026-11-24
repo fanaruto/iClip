@@ -490,16 +490,68 @@ fn merge_external_candidates(
         if trimmed.is_empty() {
             continue;
         }
-        let mut temp_item = ClipItem::new_text(safe_body.clone(), Some(cand.source_label.clone()));
-        let inferred_cat = PinCategory::infer(safe_alias.as_deref(), Some(&safe_body));
+        let single_line = !trimmed.contains('\n') && !trimmed.contains('\r');
+        let lower_trim = trimmed.to_lowercase();
+        let is_explicit_todo = single_line
+            && (trimmed.starts_with("- [ ] ")
+                || trimmed.starts_with("* [ ] ")
+                || trimmed.starts_with("☐ ")
+                || lower_trim.starts_with("todo:")
+                || lower_trim.starts_with("todo：")
+                || trimmed.starts_with("待办:")
+                || trimmed.starts_with("待办："));
+        let normalized_body = if is_explicit_todo {
+            [
+                "- [ ] ", "* [ ] ", "☐ ", "TODO:", "TODO：", "todo:", "todo：", "待办:", "待办：",
+            ]
+            .iter()
+            .find_map(|p| trimmed.strip_prefix(p).map(str::trim))
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| safe_body.clone())
+        } else {
+            safe_body.clone()
+        };
+
+        let is_win_file_path = single_line && {
+            let b = trimmed.as_bytes();
+            b.len() >= 4
+                && b[0].is_ascii_alphabetic()
+                && b[1] == b':'
+                && (b[2] == b'\\' || b[2] == b'/')
+                && std::path::Path::new(trimmed).exists()
+        };
+
+        let mut temp_item = if is_win_file_path {
+            ClipItem::new_files(
+                vec![trimmed.to_string()],
+                Some(cand.source_label.clone()),
+            )
+        } else {
+            ClipItem::new_text(normalized_body.clone(), Some(cand.source_label.clone()))
+        };
+        let should_pin = cand.is_pinned_hint;
+        let inferred_cat = if should_pin {
+            PinCategory::infer_with_hint(
+                safe_alias.as_deref(),
+                Some(&normalized_body),
+                cand.category_hint.as_deref(),
+            )
+        } else {
+            None
+        };
 
         if let Some(existing) = working
             .iter_mut()
             .find(|it| it.content_hash == temp_item.content_hash)
         {
             let mut changed = false;
-            if !existing.is_pinned {
+            if should_pin && !existing.is_pinned {
                 existing.is_pinned = true;
+                changed = true;
+            }
+            if is_explicit_todo && !existing.is_todo() {
+                existing.is_todo_item = Some(true);
                 changed = true;
             }
             let alias_empty = existing
@@ -521,9 +573,12 @@ fn merge_external_candidates(
                 updated_existing += 1;
             }
         } else {
-            temp_item.is_pinned = true;
+            temp_item.is_pinned = should_pin;
             temp_item.custom_alias = safe_alias;
             temp_item.pin_category = inferred_cat;
+            if is_explicit_todo {
+                temp_item.is_todo_item = Some(true);
+            }
             working.push(temp_item);
             imported_new += 1;
         }

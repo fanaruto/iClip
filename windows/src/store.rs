@@ -1719,6 +1719,7 @@ impl ClipboardStore {
         )?;
         Self::sort_items(&mut merged);
         self.items = merged;
+        self.trim_history_if_needed();
         self.save_history();
         Ok(summary)
     }

@@ -388,6 +388,13 @@ struct ClipboardPopoverView: View {
                             .transition(.move(edge: .top).combined(with: .opacity))
                     }
 
+                    if let blockedChatApp = store.blockedChatImageAppName {
+                        chatImagePermissionBanner(appName: blockedChatApp)
+                            .padding(.horizontal, 14)
+                            .padding(.bottom, 7)
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                    }
+
                     if !store.borderlessPanel {
                         Divider()
                             .opacity(0.28)
@@ -457,6 +464,22 @@ struct ClipboardPopoverView: View {
                 CoreHighlightsOverlay(
                     controller: playground,
                     store: store,
+                    onStartHotKeyRecording: {
+                        nav.hotKeyConflictWarning = nil
+                        HotKeyManager.shared.suspendForRecording()
+                        nav.isRecordingHotKey = true
+                    },
+                    onStopHotKeyRecording: {
+                        nav.isRecordingHotKey = false
+                        nav.hotKeyConflictWarning = nil
+                        HotKeyManager.shared.resumeAfterRecording()
+                    },
+                    isRecordingHotKey: nav.isRecordingHotKey,
+                    hotKeyConflictWarning: nav.hotKeyConflictWarning,
+                    hotKeyRecordingHint: nav.hotKeyRecordingHint,
+                    onOpenFileImportPanel: {
+                        importPinnedArchiveAction()
+                    },
                     glassPalette: glassPalette
                 )
                 .transition(.opacity.combined(with: .scale(scale: 0.96)))
@@ -1455,9 +1478,7 @@ struct ClipboardPopoverView: View {
                                         },
                                         onOpenQuickLook: {
                                             nav.selectedIndex = index
-                                            withAnimation(.spring(response: 0.24, dampingFraction: 0.88)) {
-                                                nav.showQuickLook = true
-                                            }
+                                            triggerSmartQuickLook(for: item)
                                         },
                                         onImageThumbnailHover: { hovering, rect in
                                             handleImageHover(item: item, hovering: hovering, tileRect: rect)
@@ -1535,9 +1556,7 @@ struct ClipboardPopoverView: View {
                                                 onOpenQuickLook: {
                                                     dismissImagePreview(clearItem: true)
                                                     nav.selectedIndex = entry.index
-                                                    withAnimation(.spring(response: 0.24, dampingFraction: 0.88)) {
-                                                        nav.showQuickLook = true
-                                                    }
+                                                    triggerSmartQuickLook(for: entry.item)
                                                 },
                                                 onDelete: {
                                                     if previewItem?.id == entry.item.id {
@@ -1740,6 +1759,49 @@ struct ClipboardPopoverView: View {
                             Button("前往开启") {
                                 store.requestAccessibilityPermission()
                                 store.openAccessibilitySettings()
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                        }
+                    }
+                }
+
+                if store.blockedChatImageAppName != nil || ClipboardStore.installedChatImageAppsSummary != nil {
+                    let isCurrentlyBlocked = (store.blockedChatImageAppName != nil)
+                    settingsGroup(title: "微信 / 飞书图片直显") {
+                        HStack(spacing: 8) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("允许读取\(ClipboardStore.installedChatImageAppsSummary ?? "微信 / 飞书")临时图片")
+                                    .font(.system(size: 13.5, weight: .medium))
+                                Text(
+                                    isCurrentlyBlocked
+                                        ? "当前复制聊天图片被系统拦截为文件 · 开启完全磁盘访问并重开 iClip 后自动恢复高清缩略图"
+                                        : "若微信/飞书复制图片变成文件，点击右侧前往开启完全磁盘访问即可直显高清原图"
+                                )
+                                    .font(.system(size: 11.5))
+                                    .foregroundStyle(isCurrentlyBlocked ? Color.orange : Color.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            Spacer()
+                            Button {
+                                let ok = store.healPermissionBlockedChatImageFilesIfAuthorized(manualTrigger: true)
+                                if ok {
+                                    store.showToast("✓ 微信 / 飞书图片直显权限已就绪")
+                                } else {
+                                    store.showToast("若刚勾选完全磁盘访问，请退出并重新打开 iClip 生效", duration: 3.2)
+                                }
+                            } label: {
+                                Image(systemName: "arrow.clockwise")
+                                    .font(.system(size: 11.5, weight: .semibold))
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 24, height: 24)
+                                    .background(Circle().fill(Color.primary.opacity(0.07)))
+                            }
+                            .buttonStyle(.plain)
+                            .help("检测聊天图片读取权限并自动恢复此前变成文件的图片")
+
+                            Button(isCurrentlyBlocked ? "前往开启" : "打开设置") {
+                                store.openFullDiskAccessSettings()
                             }
                             .buttonStyle(.borderedProminent)
                             .controlSize(.small)
@@ -2787,13 +2849,13 @@ struct ClipboardPopoverView: View {
         nav.suppressAutoHide = true
         NSApp.activate(ignoringOtherApps: true)
         let panel = NSOpenPanel()
-        panel.title = "导入 .iclip 归档或 Raycast / Alfred / Markdown / CSV 常用语"
+        panel.title = "导入 .iclip 或 Paste / Maccy / Raycast / Alfred / Clipy / Ditto / CSV 数据"
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
         panel.allowsOtherFileTypes = true
-        var allowed: [UTType] = [.json, .commaSeparatedText, .tabSeparatedText, .plainText, .data]
-        for ext in ["md", "markdown", "alfredsnippets", "alfredsnippet"] {
+        var allowed: [UTType] = [.json, .commaSeparatedText, .tabSeparatedText, .plainText, .xml, .propertyList, .data]
+        for ext in ["md", "markdown", "alfredsnippets", "alfredsnippet", "clipy", "dto"] {
             if let ut = UTType(filenameExtension: ext), !allowed.contains(ut) {
                 allowed.append(ut)
             }
@@ -2818,10 +2880,14 @@ struct ClipboardPopoverView: View {
                 guard let pw = entered else { return }
                 summary = try store.importPinnedArchive(from: sourceURL, passphrase: pw)
             }
+            let catSuffix = summary.categoryBreakdown.map { "（\($0)）" } ?? ""
+            if playground.isActive {
+                playground.lastImportFeedback = "✓ 已从\(summary.sourceFormatLabel)导入 \(summary.importedNewCount) 条\(catSuffix)"
+            }
             if summary.importedNewCount > 0 && summary.updatedExistingCount > 0 {
-                store.showToast("已从\(summary.sourceFormatLabel)迁入 \(summary.importedNewCount) 条，更新 \(summary.updatedExistingCount) 条")
+                store.showToast("已从\(summary.sourceFormatLabel)迁入 \(summary.importedNewCount) 条\(catSuffix)，更新 \(summary.updatedExistingCount) 条")
             } else if summary.importedNewCount > 0 {
-                store.showToast("已从\(summary.sourceFormatLabel)无损迁入 \(summary.importedNewCount) 条收藏")
+                store.showToast("已从\(summary.sourceFormatLabel)迁入 \(summary.importedNewCount) 条\(catSuffix)")
             } else if summary.updatedExistingCount > 0 {
                 store.showToast("已合并更新 \(summary.updatedExistingCount) 条既有收藏")
             } else {
@@ -2830,6 +2896,78 @@ struct ClipboardPopoverView: View {
         } catch {
             store.showToast(error.localizedDescription)
         }
+    }
+
+    private func triggerSmartQuickLook(for item: ClipItem) {
+        if SystemQuickLookController.supportsNativeLargePreview(item) {
+            let host = NSApp.windows.first(where: { $0 is KeyableFloatingPanel })
+            SystemQuickLookController.shared.onStepSelection = { dir in
+                self.moveSelection(direction: dir)
+                guard self.nav.selectedIndex >= 0, self.nav.selectedIndex < self.filteredItems.count else { return nil }
+                return self.filteredItems[self.nav.selectedIndex]
+            }
+            SystemQuickLookController.shared.onCommitPasteFromPreview = {
+                self.pasteSelected()
+            }
+            if SystemQuickLookController.shared.presentOrToggle(for: item, in: store, hostWindow: host) {
+                return
+            }
+        }
+        withAnimation(.spring(response: 0.24, dampingFraction: 0.88)) {
+            nav.showQuickLook = true
+        }
+    }
+
+    private func chatImagePermissionBanner(appName: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "photo.badge.exclamationmark")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Color.orange)
+
+            Text("\(appName)图片因系统权限变成文件 · 开启后直接回显高清图片")
+                .font(.system(size: 11.2, weight: .medium))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+
+            Spacer(minLength: 4)
+
+            Button {
+                withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
+                    nav.showSettings = true
+                }
+                store.openFullDiskAccessSettings()
+            } label: {
+                Text("去设置")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 8.5)
+                    .padding(.vertical, 3.5)
+                    .background(Capsule().fill(Color(red: 0.12, green: 0.37, blue: 1.0)))
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                withAnimation(.easeOut(duration: 0.16)) {
+                    store.blockedChatImageAppName = nil
+                }
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9.5, weight: .bold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 18, height: 18)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6.5)
+        .background(
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .fill(Color.orange.opacity(colorScheme == .dark ? 0.16 : 0.10))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .strokeBorder(Color.orange.opacity(0.32), lineWidth: 0.7)
+        )
     }
 
     private func clampSelection() {

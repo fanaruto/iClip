@@ -62,23 +62,26 @@ struct PinnedArchiveBundle: Codable, Equatable {
     let entries: [ArchivedClipEntry]
 }
 
-/// 归档导入结果统计（兼容原生 `.iclip` 与 Raycast / Maccy / Paste / CSV 跨软件搬家）
+/// 归档导入结果统计（兼容原生 `.iclip` 与 Raycast / Maccy / Paste / Alfred / Ditto / CopyQ / CSV 跨软件搬家及自动类目匹配）
 struct ArchiveImportSummary: Equatable {
     let importedNewCount: Int
     let updatedExistingCount: Int
     let totalInBundle: Int
     let sourceFormatLabel: String
+    let categoryBreakdown: String?
 
     init(
         importedNewCount: Int,
         updatedExistingCount: Int,
         totalInBundle: Int,
-        sourceFormatLabel: String = "iClip 归档"
+        sourceFormatLabel: String = "iClip 归档",
+        categoryBreakdown: String? = nil
     ) {
         self.importedNewCount = importedNewCount
         self.updatedExistingCount = updatedExistingCount
         self.totalInBundle = totalInBundle
         self.sourceFormatLabel = sourceFormatLabel
+        self.categoryBreakdown = categoryBreakdown
     }
 }
 
@@ -401,7 +404,7 @@ enum ArchiveBackupService {
         return (working, summary)
     }
 
-    private static func mergeExternalCompetitorCandidates(
+    static func mergeExternalCompetitorCandidates(
         _ candidates: [UniversalCompetitorImporter.ExternalCandidate],
         formatLabel: String,
         into existingItems: [ClipItem]
@@ -409,6 +412,13 @@ enum ArchiveBackupService {
         var working = existingItems
         var importedNew = 0
         var updatedExisting = 0
+        var linkCount = 0
+        var todoCount = 0
+        var fileCount = 0
+        var pinCount = 0
+        var textCount = 0
+
+        let fm = FileManager.default
 
         for cand in candidates {
             let safeBody: String = {
@@ -426,16 +436,90 @@ enum ArchiveBackupService {
             }
             let trimmed = safeBody.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { continue }
-            let isLink = trimmed.lowercased().hasPrefix("http://") || trimmed.lowercased().hasPrefix("https://")
-            let hash = SHA256.hash(data: Data(safeBody.utf8)).map { String(format: "%02x", $0) }.joined()
+
+            // 1. 自动识别本地文件类目（跳过 /Volumes 网络挂载卷探测，严防离线 SMB/NFS 阻塞）
+            let singleLine = !trimmed.contains("\n") && !trimmed.contains("\r")
+            let resolvedFilePath: String? = {
+                guard singleLine else { return nil }
+                if trimmed.lowercased().hasPrefix("file://"),
+                   let u = URL(string: trimmed), u.isFileURL, !u.path.isEmpty,
+                   !u.path.hasPrefix("/Volumes/") {
+                    return u.path
+                }
+                if (trimmed.hasPrefix("/Users/") || trimmed.hasPrefix("/Applications/")),
+                   fm.fileExists(atPath: trimmed) {
+                    return trimmed
+                }
+                return nil
+            }()
+
+            if let fPath = resolvedFilePath {
+                let hash = SHA256.hash(data: Data(fPath.utf8)).map { String(format: "%02x", $0) }.joined()
+                let contentHash = "file:\(hash)"
+                if let idx = working.firstIndex(where: { $0.contentHash == contentHash }) {
+                    if cand.isPinnedHint && !working[idx].isPinned {
+                        working[idx].isPinned = true
+                        updatedExisting += 1
+                    }
+                } else {
+                    working.append(ClipItem(
+                        type: .file,
+                        filePaths: [fPath],
+                        contentHash: contentHash,
+                        sourceAppName: cand.sourceLabel,
+                        createdAt: cand.createdAt ?? Date(),
+                        isPinned: cand.isPinnedHint,
+                        customAlias: safeAlias
+                    ))
+                    importedNew += 1
+                    fileCount += 1
+                    if cand.isPinnedHint { pinCount += 1 }
+                }
+                continue
+            }
+
+            // 2. 自动识别待办事项类目（- [ ] / * [ ] / ☐ / TODO: / 待办：）
+            let lowerTrimmed = trimmed.lowercased()
+            let isExplicitTodo = singleLine && (
+                trimmed.hasPrefix("- [ ] ")
+                || trimmed.hasPrefix("* [ ] ")
+                || trimmed.hasPrefix("☐ ")
+                || lowerTrimmed.hasPrefix("todo:")
+                || lowerTrimmed.hasPrefix("todo：")
+                || trimmed.hasPrefix("待办:")
+                || trimmed.hasPrefix("待办：")
+            )
+            let normalizedBody: String = {
+                guard isExplicitTodo else { return safeBody }
+                for p in ["- [ ] ", "* [ ] ", "☐ ", "TODO:", "TODO：", "todo:", "todo：", "待办:", "待办："] {
+                    if trimmed.hasPrefix(p) {
+                        let stripped = String(trimmed.dropFirst(p.count)).trimmingCharacters(in: .whitespaces)
+                        if !stripped.isEmpty { return stripped }
+                    }
+                }
+                return safeBody
+            }()
+
+            // 3. 自动识别网页链接类目 vs 文本类目，并推断对应收藏子类目
+            let cleanNormTrim = normalizedBody.trimmingCharacters(in: .whitespacesAndNewlines)
+            let isLink = !cleanNormTrim.contains(where: \.isWhitespace)
+                && (cleanNormTrim.lowercased().hasPrefix("http://") || cleanNormTrim.lowercased().hasPrefix("https://"))
+            let hash = SHA256.hash(data: Data(normalizedBody.utf8)).map { String(format: "%02x", $0) }.joined()
             let contentHash = "\(isLink ? "link" : "text"):\(hash)"
-            let inferredCat = PinCategory.infer(alias: safeAlias, text: safeBody)
+            let shouldPin = cand.isPinnedHint
+            let inferredCat = shouldPin
+                ? PinCategory.infer(alias: safeAlias, text: normalizedBody, categoryHint: cand.categoryHint)
+                : nil
 
             if let idx = working.firstIndex(where: { $0.contentHash == contentHash }) {
                 var cur = working[idx]
                 var changed = false
-                if !cur.isPinned {
+                if shouldPin && !cur.isPinned {
                     cur.isPinned = true
+                    changed = true
+                }
+                if isExplicitTodo && !cur.isTodo {
+                    cur.isTodo = true
                     changed = true
                 }
                 if (cur.customAlias?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true),
@@ -454,24 +538,37 @@ enum ArchiveBackupService {
             } else {
                 let newItem = ClipItem(
                     type: isLink ? .link : .text,
-                    text: safeBody,
+                    text: normalizedBody,
                     contentHash: contentHash,
                     sourceAppName: cand.sourceLabel,
                     createdAt: cand.createdAt ?? Date(),
-                    isPinned: true,
+                    isPinned: shouldPin,
                     pinCategory: inferredCat,
-                    customAlias: safeAlias
+                    customAlias: safeAlias,
+                    isTodoItem: isExplicitTodo ? true : nil
                 )
                 working.append(newItem)
                 importedNew += 1
+                if shouldPin { pinCount += 1 }
+                if isExplicitTodo { todoCount += 1 }
+                else if isLink { linkCount += 1 }
+                else { textCount += 1 }
             }
         }
+
+        var parts: [String] = []
+        if pinCount > 0 { parts.append("收藏 \(pinCount)") }
+        if linkCount > 0 { parts.append("链接 \(linkCount)") }
+        if todoCount > 0 { parts.append("待办 \(todoCount)") }
+        if fileCount > 0 { parts.append("文件 \(fileCount)") }
+        if textCount > 0 { parts.append("文本 \(textCount)") }
 
         let summary = ArchiveImportSummary(
             importedNewCount: importedNew,
             updatedExistingCount: updatedExisting,
             totalInBundle: candidates.count,
-            sourceFormatLabel: formatLabel
+            sourceFormatLabel: formatLabel,
+            categoryBreakdown: parts.isEmpty ? nil : parts.joined(separator: " · ")
         )
         return (working, summary)
     }

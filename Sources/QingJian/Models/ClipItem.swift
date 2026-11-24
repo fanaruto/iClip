@@ -30,25 +30,30 @@ enum PinCategory: String, Codable, CaseIterable, Identifiable {
         }
     }
 
-    /// 根据用户备注名与正文特征自动推断收藏分组（无明确特征时返回 nil 保持通用收藏）
-    static func infer(alias: String?, text: String?) -> PinCategory? {
+    /// 根据用户备注名、原软件分类目录名与正文特征自动推断收藏分组（无明确特征时返回 nil 保持通用收藏）
+    static func infer(alias: String?, text: String?, categoryHint: String? = nil) -> PinCategory? {
         if let rawText = text, SnippetTemplateEngine.containsPlaceholders(rawText) {
             return .template
         }
-        let combined = ((alias ?? "") + " " + String((text ?? "").prefix(160))).lowercased()
+        let combined = ((categoryHint ?? "") + " " + (alias ?? "") + " " + String((text ?? "").prefix(200))).lowercased()
         guard !combined.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return nil
         }
-        for kw in ["模板", "合同", "协议", "条款", "template", "snippet"] {
+        for kw in ["模板", "合同", "协议", "条款", "甲方", "乙方", "template"] {
             if combined.contains(kw) { return .template }
         }
-        for kw in ["税号", "开票", "发票", "抬头", "开户行", "对公", "联行号", "纳税人", "收款", "财务", "报价"] {
+        if let hint = categoryHint?.lowercased(), !hint.isEmpty {
+            for kw in ["代码", "脚本", "命令", "终端", "sql", "prompt", "code", "shell", "cmd", "snippet", "dev"] {
+                if hint.contains(kw) { return .template }
+            }
+        }
+        for kw in ["税号", "开票", "发票", "抬头", "开户行", "对公", "联行号", "纳税人", "收款", "财务", "报价", "报销", "账单", "invoice", "bank", "finance"] {
             if combined.contains(kw) { return .invoice }
         }
-        for kw in ["地址", "收货", "寄件", "快递", "电话", "手机", "名片", "联系", "邮箱", "邮编"] {
+        for kw in ["地址", "收货", "寄件", "快递", "电话", "手机", "名片", "联系", "邮箱", "邮编", "账号", "address", "contact", "email", "phone"] {
             if combined.contains(kw) { return .contact }
         }
-        for kw in ["话术", "回复", "客服", "问候", "售后", "催款", "通知", "欢迎语"] {
+        for kw in ["话术", "回复", "客服", "问候", "售后", "催款", "通知", "欢迎语", "邮件", "快捷语", "reply", "greeting", "mail", "message"] {
             if combined.contains(kw) { return .reply }
         }
         return nil

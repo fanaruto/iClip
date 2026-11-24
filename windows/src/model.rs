@@ -25,21 +25,46 @@ impl PinCategory {
         }
     }
 
-    /// 根据备注名与正文特征自动推断收藏分组（普通文本与代码保持 None 不乱分）
+    /// 根据备注名、原分类目录名与正文特征自动推断收藏分组（普通文本保持 None 不乱分）
     pub fn infer(alias: Option<&str>, text: Option<&str>) -> Option<Self> {
+        Self::infer_with_hint(alias, text, None)
+    }
+
+    pub fn infer_with_hint(
+        alias: Option<&str>,
+        text: Option<&str>,
+        category_hint: Option<&str>,
+    ) -> Option<Self> {
         if let Some(raw) = text {
             if raw.contains("{{") && raw.contains("}}") {
                 return Some(Self::Template);
             }
         }
-        let head: String = text.unwrap_or("").chars().take(160).collect();
-        let combined = format!("{} {}", alias.unwrap_or(""), head).to_lowercase();
+        let head: String = text.unwrap_or("").chars().take(200).collect();
+        let combined = format!(
+            "{} {} {}",
+            category_hint.unwrap_or(""),
+            alias.unwrap_or(""),
+            head
+        )
+        .to_lowercase();
         if combined.trim().is_empty() {
             return None;
         }
-        for kw in ["模板", "合同", "协议", "条款", "template", "snippet"] {
+        for kw in ["模板", "合同", "协议", "条款", "甲方", "乙方", "template"] {
             if combined.contains(kw) {
                 return Some(Self::Template);
+            }
+        }
+        if let Some(hint) = category_hint {
+            let lower_hint = hint.to_lowercase();
+            for kw in [
+                "代码", "脚本", "命令", "终端", "sql", "prompt", "code", "shell", "cmd",
+                "snippet", "dev",
+            ] {
+                if lower_hint.contains(kw) {
+                    return Some(Self::Template);
+                }
             }
         }
         for kw in [

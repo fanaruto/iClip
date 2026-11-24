@@ -1,7 +1,7 @@
 import SwiftUI
 import AppKit
 
-/// 新手与新功能引导条目模型（双端同源核心能力速览）
+/// 新手与新功能引导条目模型（供设置页「查看核心亮点」复盘）
 struct HighlightFeatureItem: Identifiable, Equatable {
     let id: String
     let symbol: String
@@ -10,15 +10,24 @@ struct HighlightFeatureItem: Identifiable, Equatable {
     let detail: String
 }
 
-/// 苹果原生风格「核心亮点速览（Feature Highlights）」控制器
-///
-/// 摒弃繁琐打卡与假数据注入：
-/// - 绝不向用户剪贴板塞入示例垃圾卡片；
-/// - 首次打开或升至 v2.7 新版时以通透居中浮层呈现 4 项最高频王牌能力，按 ↵ / Space / Esc 或点击「开始使用」即刻进入纯净主界面；
-/// - 支持随时从设置页「帮助」或菜单栏右键重新唤出。
+/// 首次上手直觉三步流与核心亮点控制器：
+/// 1. 肌肉记忆初体验：先让用户亲手试按一次预设 `⌥V`（实时键帽物理下沉与声学触感反馈）；
+/// 2. 直觉手势抉择：选择继续使用 `⌥V`，或切换为自己习惯的呼出手势（组合键 / 双击单键）；
+/// 3. 顺势无缝搬家：若用户选择设为自己的习惯手势，顺势引导从其习惯的剪贴板工具（Maccy / Paste / Raycast / Alfred / CopyQ / Ditto 等）一键导入并自动归入对应类目。
 @MainActor
 final class InteractivePlaygroundController: ObservableObject {
     static let shared = InteractivePlaygroundController()
+
+    enum OnboardingPhase: Equatable {
+        /// 第 1 步：亲手试按预设 `⌥V`
+        case tryDefaultHotKey
+        /// 第 2 步：选择沿用 `⌥V` 还是自定义习惯手势
+        case chooseGestureHabit
+        /// 第 3 步：原位录制专属手势 + 顺势从原剪贴板工具分类导入
+        case customizeAndImport
+        /// 从菜单栏或设置页主动查看核心功能亮点
+        case featureHighlights
+    }
 
     static let coreHighlights: [HighlightFeatureItem] = [
         HighlightFeatureItem(
@@ -26,7 +35,7 @@ final class InteractivePlaygroundController: ObservableObject {
             symbol: "bolt.horizontal.fill",
             tint: Color(red: 0.12, green: 0.37, blue: 1.0),
             title: "唤醒零失焦直贴",
-            detail: "在搜索框或弹层内呼出不丢原焦点，按 ↵ 瞬间顺手键入当前位置。"
+            detail: "在任何输入框内呼出不丢焦点，按 ↵ 顺手贴入，Space 独立大屏预览原图。"
         ),
         HighlightFeatureItem(
             id: "zero-trust-shield",
@@ -39,47 +48,117 @@ final class InteractivePlaygroundController: ObservableObject {
             id: "todo-clean-text",
             symbol: "checklist.checked",
             tint: Color(red: 0.22, green: 0.48, blue: 0.96),
-            title: "剪贴即待办与净文",
-            detail: "⌘T 一键转待办；AI 回复一键褪去 Markdown 符号，表格直粘 Excel 分列。"
+            title: "剪贴即待办与全能直算",
+            detail: "⌘T 转待办；搜索框秒算含税、日薪与 AA 分摊；微信与飞书图片高清直显。"
         ),
         HighlightFeatureItem(
             id: "drag-and-minimal",
-            symbol: "leaf.fill",
+            symbol: "hand.tap.fill",
             tint: Color(red: 0.16, green: 0.56, blue: 0.52),
-            title: "自由拖拽与极简开关",
-            detail: "图文双向自由拖入拖出，Tab 秒切分类，按 ⌘E 随时切回极简纯净模式。"
+            title: "3D 物理卡片与极简开关",
+            detail: "轻扫视差流光、重按 3D Touch 弹出速览，按 ⌘E 随时切换极简纯净模式。"
         )
     ]
 
-    private let seenHighlightsKey = "hasSeenCoreHighlightsV4_v27"
+    private let seenOnboardingKey = "hasCompletedIntuitiveOnboarding_v30"
     private let legacySampleHashesKey = "playgroundSampleContentHashes"
 
     @Published var isActive: Bool = false
+    @Published var phase: OnboardingPhase = .tryDefaultHotKey
+    @Published var didHitTrialHotKey: Bool = false
+    @Published var isOptionModifierDown: Bool = false
+    @Published var lastImportFeedback: String? = nil
+
+    private var flagsMonitor: Any?
 
     private init() {
-        let seen = UserDefaults.standard.bool(forKey: seenHighlightsKey)
-        if !seen && !ProcessInfo.processInfo.arguments.contains("--demo") && !ProcessInfo.processInfo.arguments.contains("--analyze-bloat") {
+        let ud = UserDefaults.standard
+        let completed = ud.bool(forKey: seenOnboardingKey)
+        let isReturningUser = ud.bool(forKey: "hasSeenPlaygroundOnboarding_v27")
+            || ud.bool(forKey: "hasSeenCoreHighlights_v27")
+            || ud.bool(forKey: "hasConfirmedRoleEdition")
+            || ud.data(forKey: "hotKeyShortcut") != nil
+        if isReturningUser && !completed {
+            ud.set(true, forKey: seenOnboardingKey)
+            return
+        }
+        if !completed
+            && !ProcessInfo.processInfo.arguments.contains("--demo")
+            && !ProcessInfo.processInfo.arguments.contains("--analyze-bloat") {
+            phase = .tryDefaultHotKey
+            isActive = true
+            startModifierTrackingIfNeeded()
+        }
+    }
+
+    /// 当处于第 1 步试按阶段时，拦截全局快捷键 `⌥V` 触发键帽物理触底反馈并丝滑推进第 2 步
+    func consumeHotKeyTrialIfNeeded() -> Bool {
+        guard isActive, phase == .tryDefaultHotKey else { return false }
+        guard !didHitTrialHotKey else { return true }
+        didHitTrialHotKey = true
+        TactileFeedbackEngine.shared.perform(.onboardingKeyHit)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.42) { [weak self] in
+            guard let self, self.isActive, self.phase == .tryDefaultHotKey else { return }
+            withAnimation(.spring(response: 0.34, dampingFraction: 0.84)) {
+                self.phase = .chooseGestureHabit
+            }
+            self.stopModifierTracking()
+        }
+        return true
+    }
+
+    func advanceFromTrialManually() {
+        TactileFeedbackEngine.shared.perform(.tabSwitch)
+        stopModifierTracking()
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.85)) {
+            phase = .chooseGestureHabit
+        }
+    }
+
+    func enterCustomizeAndImport() {
+        TactileFeedbackEngine.shared.perform(.tabSwitch)
+        stopModifierTracking()
+        lastImportFeedback = nil
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.84)) {
+            phase = .customizeAndImport
+        }
+    }
+
+    /// 供设置页或菜单栏右键主动唤出引导（提供重温快捷键体验与核心亮点入口）
+    func showHighlights() {
+        didHitTrialHotKey = false
+        lastImportFeedback = nil
+        let completed = UserDefaults.standard.bool(forKey: seenOnboardingKey)
+        phase = completed ? .featureHighlights : .tryDefaultHotKey
+        if phase == .tryDefaultHotKey {
+            startModifierTrackingIfNeeded()
+        }
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
             isActive = true
         }
     }
 
-    func showHighlights() {
-        withAnimation(.spring(response: 0.26, dampingFraction: 0.88)) {
+    func restartInteractiveSetup() {
+        didHitTrialHotKey = false
+        lastImportFeedback = nil
+        startModifierTrackingIfNeeded()
+        withAnimation(.spring(response: 0.30, dampingFraction: 0.85)) {
+            phase = .tryDefaultHotKey
             isActive = true
         }
     }
 
     func dismiss(in store: ClipboardStore? = nil) {
+        stopModifierTracking()
         if let store {
             cleanupLegacySamplesIfAny(in: store)
         }
-        UserDefaults.standard.set(true, forKey: seenHighlightsKey)
-        withAnimation(.easeOut(duration: 0.18)) {
+        UserDefaults.standard.set(true, forKey: seenOnboardingKey)
+        withAnimation(.spring(response: 0.22, dampingFraction: 0.90)) {
             isActive = false
         }
     }
 
-    /// 自动清理旧版本可能残留的游乐场示例卡片，保持用户剪贴板绝对纯净
     func cleanupLegacySamplesIfAny(in store: ClipboardStore) {
         let hashes = Set(UserDefaults.standard.stringArray(forKey: legacySampleHashesKey) ?? [])
         for item in store.items {
@@ -89,96 +168,589 @@ final class InteractivePlaygroundController: ObservableObject {
         }
         UserDefaults.standard.removeObject(forKey: legacySampleHashesKey)
     }
+
+    /// 接收来自本地监听器或非激活 CGEventTap 转发的修饰键状态，实时驱动键帽物理下沉动画
+    func updateModifierFlags(_ flags: NSEvent.ModifierFlags) {
+        guard isActive, phase == .tryDefaultHotKey else { return }
+        let opt = flags.contains(.option)
+        if isOptionModifierDown != opt {
+            withAnimation(.interpolatingSpring(mass: 0.55, stiffness: 420, damping: 24)) {
+                isOptionModifierDown = opt
+            }
+        }
+    }
+
+    private func startModifierTrackingIfNeeded() {
+        guard flagsMonitor == nil else { return }
+        flagsMonitor = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged, .keyDown]) { [weak self] event in
+            guard let self else { return event }
+            if event.type == .flagsChanged {
+                self.updateModifierFlags(event.modifierFlags)
+            } else if event.type == .keyDown,
+                      self.phase == .tryDefaultHotKey,
+                      event.modifierFlags.contains(.option),
+                      event.keyCode == 9 { // 'V'
+                _ = self.consumeHotKeyTrialIfNeeded()
+                return nil
+            }
+            return event
+        }
+    }
+
+    private func stopModifierTracking() {
+        isOptionModifierDown = false
+        if let m = flagsMonitor {
+            NSEvent.removeMonitor(m)
+            flagsMonitor = nil
+        }
+    }
 }
 
-/// 苹果官方「新功能亮点（What's New）」同款极简液态玻璃重点浮层
+/// 苹果原厂 Setup Assistant 级物理直觉引导与跨软件搬家浮层
 struct CoreHighlightsOverlay: View {
     @ObservedObject var controller: InteractivePlaygroundController
-    let store: ClipboardStore
+    @ObservedObject var store: ClipboardStore
+    var onStartHotKeyRecording: (() -> Void)? = nil
+    var onStopHotKeyRecording: (() -> Void)? = nil
+    var isRecordingHotKey: Bool = false
+    var hotKeyConflictWarning: String? = nil
+    var hotKeyRecordingHint: String? = nil
+    var onOpenFileImportPanel: (() -> Void)? = nil
     let glassPalette: LiquidGlassPalette
-    @Environment(\.colorScheme) private var colorScheme
 
-    private var shortDisplayVersion: String {
-        let raw = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "2.8.0"
-        let parts = raw.split(separator: ".")
-        return parts.count >= 2 ? "\(parts[0]).\(parts[1])" : raw
-    }
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var installedCompetitors: [UniversalCompetitorImporter.InstalledCompetitorApp] = []
+
+    private var brandCobalt: Color { Color(red: 0.118, green: 0.369, blue: 1.0) }
 
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 26, style: .continuous)
-                .fill(Color.black.opacity(colorScheme == .dark ? 0.54 : 0.24))
+                .fill(Color.black.opacity(colorScheme == .dark ? 0.58 : 0.26))
                 .onTapGesture {
-                    controller.dismiss(in: store)
+                    if controller.phase == .featureHighlights {
+                        controller.dismiss(in: store)
+                    }
                 }
 
             VStack(alignment: .leading, spacing: 16) {
-                HStack(alignment: .top) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("欢迎使用 iClip \(shortDisplayVersion)")
-                            .font(.system(size: 19.5, weight: .bold))
-                            .foregroundStyle(.primary)
-                        Text("轻如无物，一呼即贴 · 按 ↵ 立即开始")
-                            .font(.system(size: 12))
+                switch controller.phase {
+                case .tryDefaultHotKey:
+                    step1TryHotKeyView
+                        .transition(.asymmetric(
+                            insertion: .opacity.combined(with: .scale(scale: 0.96)),
+                            removal: .move(edge: .leading).combined(with: .opacity)
+                        ))
+
+                case .chooseGestureHabit:
+                    step2ChooseHabitView
+                        .transition(.asymmetric(
+                            insertion: .move(edge: .trailing).combined(with: .opacity),
+                            removal: .move(edge: .leading).combined(with: .opacity)
+                        ))
+
+                case .customizeAndImport:
+                    step3CustomizeAndImportView
+                        .transition(.asymmetric(
+                            insertion: .move(edge: .trailing).combined(with: .opacity),
+                            removal: .opacity.combined(with: .scale(scale: 0.96))
+                        ))
+
+                case .featureHighlights:
+                    featureHighlightsView
+                        .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                }
+            }
+            .padding(22)
+            .frame(width: 372)
+            .background(
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .fill(.regularMaterial)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 22, style: .continuous)
+                            .strokeBorder(Color.white.opacity(colorScheme == .dark ? 0.16 : 0.45), lineWidth: 0.8)
+                    )
+                    .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.42 : 0.20), radius: 26, y: 12)
+            )
+        }
+        .onAppear {
+            installedCompetitors = UniversalCompetitorImporter.detectInstalledCompetitorApps()
+        }
+        .onDisappear {
+            if isRecordingHotKey {
+                onStopHotKeyRecording?()
+            }
+        }
+    }
+
+    // MARK: - Step 1：先试按一次预设 ⌥V
+
+    private var step1TryHotKeyView: some View {
+        VStack(spacing: 16) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("先试试呼出它的手感")
+                        .font(.system(size: 19, weight: .bold))
+                        .foregroundStyle(.primary)
+                    Text("按下预设的 \(store.hotKeyShortcut.compactDisplayString)，随时在光标旁零失焦唤出")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                BrandAppIconBadge(size: 32)
+            }
+
+            // 物理行程双键帽舞台
+            HStack(spacing: 12) {
+                physicalKeycap(
+                    symbol: "⌥",
+                    label: "Option",
+                    isPressed: controller.isOptionModifierDown || controller.didHitTrialHotKey,
+                    isSuccess: controller.didHitTrialHotKey
+                )
+
+                Text("+")
+                    .font(.system(size: 16, weight: .bold, design: .rounded))
+                    .foregroundStyle(.secondary.opacity(0.65))
+
+                physicalKeycap(
+                    symbol: "V",
+                    label: "呼出面板",
+                    isPressed: controller.didHitTrialHotKey,
+                    isSuccess: controller.didHitTrialHotKey
+                )
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 16)
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(
+                        controller.didHitTrialHotKey
+                            ? Color.green.opacity(colorScheme == .dark ? 0.16 : 0.10)
+                            : Color.primary.opacity(colorScheme == .dark ? 0.08 : 0.045)
+                    )
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .strokeBorder(
+                        controller.didHitTrialHotKey
+                            ? Color.green.opacity(0.55)
+                            : (controller.isOptionModifierDown ? brandCobalt.opacity(0.45) : Color.primary.opacity(0.08)),
+                        lineWidth: 1.0
+                    )
+            )
+
+            HStack {
+                if controller.didHitTrialHotKey {
+                    Label("手感已激活，正在进入下一步...", systemImage: "checkmark.circle.fill")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Color.green)
+                } else {
+                    Text(controller.isOptionModifierDown ? "已按住修饰键，再按一下主键！" : "现在直接在键盘上按一次 \(store.hotKeyShortcut.compactDisplayString)")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(controller.isOptionModifierDown ? brandCobalt : .secondary)
+                }
+                Spacer()
+                Button("跳过试按 →") {
+                    controller.advanceFromTrialManually()
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func physicalKeycap(symbol: String, label: String, isPressed: Bool, isSuccess: Bool) -> some View {
+        VStack(spacing: 3) {
+            Text(symbol)
+                .font(.system(size: 22, weight: .bold, design: .rounded))
+                .foregroundStyle(isSuccess ? Color.green : (isPressed ? brandCobalt : .primary))
+            Text(label)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(isSuccess ? Color.green.opacity(0.9) : .secondary)
+        }
+        .frame(width: 82, height: 64)
+        .background(
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .fill(
+                    colorScheme == .dark
+                        ? Color(white: isPressed ? 0.20 : 0.24)
+                        : Color.white
+                )
+                .shadow(
+                    color: Color.black.opacity(isPressed ? 0.06 : 0.16),
+                    radius: isPressed ? 1.5 : 4,
+                    y: isPressed ? 1 : 4
+                )
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .strokeBorder(
+                    isSuccess
+                        ? Color.green.opacity(0.7)
+                        : (isPressed ? brandCobalt.opacity(0.65) : Color.primary.opacity(0.14)),
+                    lineWidth: isPressed ? 1.4 : 0.9
+                )
+        )
+        .offset(y: isPressed ? 2.5 : 0)
+        .scaleEffect(isPressed ? 0.96 : 1.0)
+        .animation(.interpolatingSpring(mass: 0.55, stiffness: 440, damping: 24), value: isPressed)
+    }
+
+    // MARK: - Step 2：选择继续用 ⌥V 还是设为自己的习惯手势
+
+    private var step2ChooseHabitView: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("喜欢 \(store.hotKeyShortcut.compactDisplayString) 这个呼出手势吗？")
+                    .font(.system(size: 18.5, weight: .bold))
+                    .foregroundStyle(.primary)
+                Text("呼出时不会打断你正在输入的文本框，按 ↵ 即可顺手贴入。")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+            }
+
+            VStack(spacing: 9) {
+                Button {
+                    TactileFeedbackEngine.shared.perform(.pasteCommit)
+                    controller.dismiss(in: store)
+                } label: {
+                    HStack(spacing: 11) {
+                        ZStack {
+                            Circle()
+                                .fill(Color.white.opacity(0.22))
+                                .frame(width: 34, height: 34)
+                            Image(systemName: "checkmark.seal.fill")
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundStyle(.white)
+                        }
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("很顺手，继续使用 \(store.hotKeyShortcut.compactDisplayString)")
+                                .font(.system(size: 13.5, weight: .semibold))
+                                .foregroundStyle(.white)
+                            Text("推荐 · 单手大拇指与食指自然落位，零冲突")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.white.opacity(0.84))
+                        }
+                        Spacer()
+                        Image(systemName: "arrow.right")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(.white.opacity(0.9))
+                    }
+                    .padding(.horizontal, 13)
+                    .padding(.vertical, 11)
+                    .background(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(brandCobalt)
+                            .shadow(color: brandCobalt.opacity(0.32), radius: 8, y: 3)
+                    )
+                    .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    controller.enterCustomizeAndImport()
+                    onStartHotKeyRecording?()
+                } label: {
+                    HStack(spacing: 11) {
+                        ZStack {
+                            Circle()
+                                .fill(brandCobalt.opacity(0.12))
+                                .frame(width: 34, height: 34)
+                            Image(systemName: "command.square.fill")
+                                .font(.system(size: 15.5, weight: .semibold))
+                                .foregroundStyle(brandCobalt)
+                        }
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("设为我习惯的呼出手势")
+                                .font(.system(size: 13.5, weight: .semibold))
+                                .foregroundStyle(.primary)
+                            Text("支持 ⇧⌘V 等组合键，或双击 ⌘ / ⌥ / ⌃ 单键，并可导入旧数据")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 11.5, weight: .semibold))
                             .foregroundStyle(.secondary)
                     }
-                    Spacer()
-                    BrandAppIconBadge(size: 32)
+                    .padding(.horizontal, 13)
+                    .padding(.vertical, 11)
+                    .background(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(Color.primary.opacity(colorScheme == .dark ? 0.08 : 0.045))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .strokeBorder(Color.primary.opacity(0.11), lineWidth: 0.8)
+                    )
+                    .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 }
+                .buttonStyle(.plain)
+            }
+        }
+    }
 
-                VStack(alignment: .leading, spacing: 12.5) {
-                    ForEach(InteractivePlaygroundController.coreHighlights) { item in
-                        highlightRow(item)
+    // MARK: - Step 3：录制习惯手势 + 顺势从常用剪贴板导入并匹配对应类目
+
+    private var step3CustomizeAndImportView: some View {
+        VStack(alignment: .leading, spacing: 13) {
+            HStack {
+                Text("定制手势与旧剪贴板搬家")
+                    .font(.system(size: 17.5, weight: .bold))
+                Spacer()
+                Button("上一步") {
+                    if isRecordingHotKey {
+                        onStopHotKeyRecording?()
+                    }
+                    withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
+                        controller.phase = .chooseGestureHabit
                     }
                 }
+                .buttonStyle(.plain)
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(.secondary)
+            }
+
+            // 1. 专属快捷键原位录制卡
+            VStack(alignment: .leading, spacing: 7) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("呼出手势")
+                            .font(.system(size: 12.5, weight: .semibold))
+                        if let conflict = hotKeyConflictWarning {
+                            Text(conflict)
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(.red)
+                                .lineLimit(1)
+                        } else if let hint = hotKeyRecordingHint {
+                            Text(hint)
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(brandCobalt)
+                        } else {
+                            Text(isRecordingHotKey ? "请直接按下组合键，或连按两次 ⌘/⌥/⌃/⇧" : "已就绪 · 点击右侧胶囊可重新录制")
+                                .font(.system(size: 11))
+                                .foregroundStyle(isRecordingHotKey ? brandCobalt : .secondary)
+                        }
+                    }
+                    Spacer()
+                    Button {
+                        if isRecordingHotKey {
+                            onStopHotKeyRecording?()
+                        } else {
+                            onStartHotKeyRecording?()
+                        }
+                    } label: {
+                        Text(isRecordingHotKey ? "等待按键..." : store.hotKeyShortcut.displayString)
+                            .font(.system(size: 12, weight: .bold, design: .rounded))
+                            .foregroundStyle(isRecordingHotKey ? .white : brandCobalt)
+                            .padding(.horizontal, 11)
+                            .padding(.vertical, 5.5)
+                            .background(
+                                Capsule()
+                                    .fill(isRecordingHotKey ? brandCobalt : brandCobalt.opacity(0.13))
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(11)
+            .background(
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .fill(Color.primary.opacity(colorScheme == .dark ? 0.08 : 0.045))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .strokeBorder(isRecordingHotKey ? brandCobalt.opacity(0.6) : Color.primary.opacity(0.09), lineWidth: 0.9)
+            )
+
+            // 2. 顺势提醒：从习惯的剪贴板应用导入数据并自动归入对应类目
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 6) {
+                    Image(systemName: "tray.and.arrow.down.fill")
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(brandCobalt)
+                    Text("有正在用的剪贴板？一键搬入并自动分类")
+                        .font(.system(size: 12.5, weight: .semibold))
+                }
+
+                let detectedNames = installedCompetitors.map(\.name)
+                Text(
+                    detectedNames.isEmpty
+                        ? "兼容 Paste、Maccy、Raycast、Alfred (.alfredsnippets)、Clipy、CopyQ、Ditto 及 CSV/JSON/Markdown，自动归入链接、待办、文件与收藏类目。"
+                        : "已识别本机 \(detectedNames.joined(separator: " / ")) · 导入内容将自动匹配至链接、待办、文件与收藏对应分组。"
+                )
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+                HStack(spacing: 8) {
+                    if installedCompetitors.contains(where: { $0.id == "maccy" && $0.supportsDirectLocalRead }) {
+                        Button {
+                            if isRecordingHotKey { onStopHotKeyRecording?() }
+                            importFromLocalMaccy()
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "bolt.fill")
+                                    .font(.system(size: 10))
+                                Text("一键直读 Maccy")
+                                    .font(.system(size: 11.5, weight: .semibold))
+                            }
+                            .foregroundStyle(brandCobalt)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(
+                                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                    .fill(brandCobalt.opacity(0.13))
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    Button {
+                        if isRecordingHotKey { onStopHotKeyRecording?() }
+                        onOpenFileImportPanel?()
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "folder.badge.plus")
+                                .font(.system(size: 10.5, weight: .semibold))
+                            Text("选择剪贴板导出文件导入...")
+                                .font(.system(size: 11.5, weight: .medium))
+                        }
+                        .foregroundStyle(.primary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(
+                            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                .fill(Color.primary.opacity(0.07))
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                if let feedback = controller.lastImportFeedback {
+                    Text(feedback)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Color.green)
+                        .lineLimit(2)
+                }
+            }
+            .padding(11)
+            .background(
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .fill(Color.primary.opacity(colorScheme == .dark ? 0.06 : 0.035))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.75)
+            )
+
+            Button {
+                if isRecordingHotKey {
+                    onStopHotKeyRecording?()
+                }
+                TactileFeedbackEngine.shared.perform(.pasteCommit)
+                controller.dismiss(in: store)
+            } label: {
+                Text("完成设置，开始使用")
+                    .font(.system(size: 13.5, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 9.5)
+                    .background(Capsule().fill(brandCobalt))
+                    .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 2)
+        }
+    }
+
+    private func importFromLocalMaccy() {
+        Task.detached(priority: .userInitiated) {
+            let parsed = UniversalCompetitorImporter.readLocalMaccyDatabaseCandidates()
+            await MainActor.run {
+                guard let parsed else {
+                    store.showToast("需完全磁盘访问权限或导出 Maccy 文件后导入", duration: 2.8)
+                    return
+                }
+                let summary = store.mergeExternalCompetitorEntries(parsed.entries, formatLabel: parsed.formatName)
+                let breakdown = summary.categoryBreakdown.map { "（\($0)）" } ?? ""
+                let msg = "✓ 已从 Maccy 导入 \(summary.importedNewCount) 条新记录\(breakdown)"
+                controller.lastImportFeedback = msg
+                TactileFeedbackEngine.shared.perform(.favoriteOn)
+            }
+        }
+    }
+
+    // MARK: - 核心亮点复盘视图（从设置页/菜单栏打开时呈现，附「重设快捷键与导入」入口）
+
+    private var featureHighlightsView: some View {
+        VStack(alignment: .leading, spacing: 15) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("iClip 核心体验亮点")
+                        .font(.system(size: 18.5, weight: .bold))
+                        .foregroundStyle(.primary)
+                    Text("轻如无物，物理直觉 · 按 ↵ 继续使用")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                BrandAppIconBadge(size: 30)
+            }
+
+            VStack(alignment: .leading, spacing: 11.5) {
+                ForEach(InteractivePlaygroundController.coreHighlights) { item in
+                    HStack(alignment: .top, spacing: 11) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                .fill(item.tint.opacity(colorScheme == .dark ? 0.22 : 0.13))
+                                .frame(width: 31, height: 31)
+                            Image(systemName: item.symbol)
+                                .font(.system(size: 13.5, weight: .semibold))
+                                .foregroundStyle(item.tint)
+                        }
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(item.title)
+                                .font(.system(size: 12.8, weight: .semibold))
+                                .foregroundStyle(.primary)
+                            Text(item.detail)
+                                .font(.system(size: 11.2))
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+            }
+
+            HStack(spacing: 8) {
+                Button {
+                    controller.restartInteractiveSetup()
+                } label: {
+                    Text("体验手势与数据导入")
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundStyle(.primary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8.5)
+                        .background(Capsule().fill(Color.primary.opacity(0.08)))
+                }
+                .buttonStyle(.plain)
 
                 Button {
                     controller.dismiss(in: store)
                 } label: {
-                    Text("开始使用")
-                        .font(.system(size: 13.5, weight: .semibold))
+                    Text("继续使用")
+                        .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(.white)
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 9)
-                        .background(
-                            Capsule()
-                                .fill(Color(red: 0.12, green: 0.37, blue: 1.0))
-                        )
-                        .contentShape(Capsule())
+                        .padding(.vertical, 8.5)
+                        .background(Capsule().fill(brandCobalt))
                 }
                 .buttonStyle(.plain)
-                .padding(.top, 2)
             }
-            .padding(22)
-            .frame(width: 364)
-            .background(
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .fill(.regularMaterial)
-                    .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.36 : 0.18), radius: 22, y: 10)
-            )
-        }
-    }
-
-    private func highlightRow(_ item: HighlightFeatureItem) -> some View {
-        HStack(alignment: .top, spacing: 11) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(item.tint.opacity(colorScheme == .dark ? 0.22 : 0.13))
-                    .frame(width: 32, height: 32)
-                Image(systemName: item.symbol)
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(item.tint)
-            }
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(item.title)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.primary)
-                Text(item.detail)
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            .padding(.top, 2)
         }
     }
 }

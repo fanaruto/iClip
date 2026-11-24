@@ -2675,5 +2675,45 @@ mod tests {
         assert_eq!(add_act.2, numbered_txt);
         let decimals_toggle = crate::security::analyze_list_numbering_toggle("3.14\n2.71\n1.41");
         assert!(decimals_toggle.iter().all(|a| a.0 != "list-strip-markers"));
+
+        // 微信/飞书图片文件智能判定与 Clipy/Ditto XML 自动类目路由验证
+        assert!(crate::security::should_promote_single_clipboard_file_to_image(
+            r"C:\Users\demo\Documents\WeChat Files\wxid_123\FileStorage\Temp\img1.jpg",
+            Some("WeChat.exe"),
+            false
+        ));
+        assert!(!crate::security::should_promote_single_clipboard_file_to_image(
+            r"C:\Users\demo\Desktop\photo.png",
+            Some("explorer.exe"),
+            true
+        ));
+
+        let ditto_xml = r#"<Ditto_Clips>
+            <Clip><Description>对公发票信息</Description><AsciiText>公司抬头与纳税人税号 91310000</AsciiText><ParentGroup>财务开票</ParentGroup></Clip>
+            <Clip><AsciiText>https://app.webfooo.com/iClip</AsciiText></Clip>
+            <Clip><AsciiText>- [ ] 跟进客户反馈</AsciiText></Clip>
+        </Ditto_Clips>"#;
+        let (ditto_entries, ditto_fmt) =
+            crate::security::parse_external_competitor_data(ditto_xml.as_bytes(), Some("xml"))
+                .unwrap();
+        assert_eq!(ditto_fmt, "Ditto 剪贴板记录");
+        assert_eq!(ditto_entries.len(), 3);
+        assert!(ditto_entries[0].is_pinned_hint);
+        assert!(!ditto_entries[1].is_pinned_hint);
+
+        // Opus 审计回归：C:\Users\clark 不误判飞书、XML 数字实体解码、普通 JSON 历史防淹没收藏夹
+        assert!(!crate::security::should_promote_single_clipboard_file_to_image(
+            r"C:\Users\clark\Documents\quarterly.txt",
+            Some("notepad.exe"),
+            false
+        ));
+        let xml_num = "<snippets><snippet><title>多行</title><content>A&#10;B</content></snippet></snippets>";
+        let (xml_ents, _) = crate::security::parse_external_competitor_data(xml_num.as_bytes(), Some("xml")).unwrap();
+        assert_eq!(xml_ents[0].text, "A\nB");
+
+        let copyq_json = r#"[{"value":"普通记录1","application":"Chrome"},{"value":"收藏税号","pinned":true}]"#;
+        let (cq_ents, _) = crate::security::parse_external_competitor_data(copyq_json.as_bytes(), Some("json")).unwrap();
+        assert!(!cq_ents[0].is_pinned_hint);
+        assert!(cq_ents[1].is_pinned_hint);
     }
 }

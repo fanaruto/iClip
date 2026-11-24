@@ -3,6 +3,8 @@ import CryptoKit
 import Security
 import IOKit
 import AppKit
+import Compression
+import SQLite3
 
 /// 高敏凭据离线分类（双角色共享，微秒级零正则回溯）
 enum SensitiveSecretKind: String, Equatable {
@@ -1235,29 +1237,167 @@ enum PasteboardPrivacyStandards {
     }
 }
 
-/// 4. 跨软件零成本搬家引擎（原生支持导入 Raycast Snippets / Alfred / TextExpander / Maccy / Paste / CopyQ JSON、Markdown 标题常用语库及 Excel CSV/TSV）
+/// 4. 跨软件零成本搬家引擎（原生支持 Maccy 本机直读 / Paste / PasteNow / CleanClip / Raycast / Alfred `.alfredsnippets` / Clipy XML / CopyQ / Ditto / TextExpander / Markdown / CSV）
 enum UniversalCompetitorImporter {
     struct ExternalCandidate: Equatable {
         let text: String
         let alias: String?
         let sourceLabel: String
         let createdAt: Date?
+        var isPinnedHint: Bool = false
+        var categoryHint: String? = nil
+    }
+
+    struct InstalledCompetitorApp: Identifiable, Equatable {
+        let id: String
+        let name: String
+        let supportsDirectLocalRead: Bool
+        let exportGuideHint: String
     }
 
     private static let maxImportPayloadBytes = 32 * 1_024 * 1_024
     private static let maxImportedCandidates = 5_000
 
+    /// 扫描当前这台 Mac 实际已安装的知名剪贴板/效率工具（纯 Bundle 级探测，绝不触碰沙盒容器路径引发首次启动 TCC 弹窗）
+    static func detectInstalledCompetitorApps() -> [InstalledCompetitorApp] {
+        var found: [InstalledCompetitorApp] = []
+        let ws = NSWorkspace.shared
+
+        if ws.urlForApplication(withBundleIdentifier: "org.p0deje.Maccy") != nil {
+            found.append(InstalledCompetitorApp(
+                id: "maccy",
+                name: "Maccy",
+                supportsDirectLocalRead: true,
+                exportGuideHint: "支持一键直读本机历史，或导入导出的文件"
+            ))
+        }
+
+        let catalog: [(id: String, bundles: [String], name: String, hint: String)] = [
+            ("paste", ["com.wiheads.paste", "com.wiheads.paste-setapp"], "Paste", "可导出收藏列表或拖入备份文件"),
+            ("raycast", ["com.raycast.macos"], "Raycast", "支持 Export Snippets (.json) 直接导入"),
+            ("alfred", ["com.runningwithcrayons.Alfred", "com.runningwithcrayons.Alfred-3"], "Alfred", "支持直接导入 .alfredsnippets 常用语包"),
+            ("pastenow", ["app.pastenow.PasteNow"], "PasteNow", "支持导入导出的常用语/历史文件"),
+            ("cleanclip", ["com.cleanclip.app"], "CleanClip", "支持导入导出的剪贴板列表"),
+            ("clipy", ["com.clipy-app.Clipy"], "Clipy", "支持直接导入 snippets.xml / .clipy"),
+            ("copyq", ["io.github.hluk.CopyQ"], "CopyQ", "支持导入 CopyQ 导出的 JSON / 列表")
+        ]
+        for entry in catalog {
+            if entry.bundles.contains(where: { ws.urlForApplication(withBundleIdentifier: $0) != nil }) {
+                found.append(InstalledCompetitorApp(
+                    id: entry.id,
+                    name: entry.name,
+                    supportsDirectLocalRead: false,
+                    exportGuideHint: entry.hint
+                ))
+            }
+        }
+        return found
+    }
+
+    /// 免导出直接只读解析本机 Maccy 数据库（`Storage.sqlite`），自动保留置顶收藏状态、来源应用与时间
+    static func readLocalMaccyDatabaseCandidates() -> (entries: [ExternalCandidate], formatName: String)? {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let dbPath = "\(home)/Library/Containers/org.p0deje.Maccy/Data/Library/Application Support/Maccy/Storage.sqlite"
+        guard FileManager.default.isReadableFile(atPath: dbPath) else { return nil }
+
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, nil) == SQLITE_OK,
+              let dbHandle = db else {
+            if let db { sqlite3_close(db) }
+            return nil
+        }
+        defer { sqlite3_close(dbHandle) }
+        sqlite3_busy_timeout(dbHandle, 500)
+
+        let queries = [
+            """
+            SELECT c.ZVALUE, i.ZTITLE, i.ZPIN, i.ZAPPLICATION, i.ZLASTCOPIEDAT
+            FROM ZHISTORYITEM i
+            JOIN ZHISTORYITEMCONTENT c ON c.ZITEM = i.Z_PK
+            WHERE c.ZTYPE IN ('public.utf8-plain-text', 'public.url', 'public.file-url')
+            ORDER BY i.ZLASTCOPIEDAT DESC
+            LIMIT 2500;
+            """,
+            """
+            SELECT title, title, pin, application, lastCopiedAt
+            FROM HistoryItem
+            ORDER BY lastCopiedAt DESC
+            LIMIT 2500;
+            """
+        ]
+
+        let appleEpochOffset: TimeInterval = 978_307_200
+        var collected: [ExternalCandidate] = []
+        var seenText = Set<String>()
+
+        for sql in queries {
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(dbHandle, sql, -1, &stmt, nil) == SQLITE_OK, let stmt else {
+                if let stmt { sqlite3_finalize(stmt) }
+                continue
+            }
+            defer { sqlite3_finalize(stmt) }
+
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let rawVal: String? = {
+                    if let cStr = sqlite3_column_text(stmt, 0) {
+                        return String(cString: cStr)
+                    }
+                    if let blobPtr = sqlite3_column_blob(stmt, 0) {
+                        let len = Int(sqlite3_column_bytes(stmt, 0))
+                        if len > 0 && len <= 262_144 {
+                            let d = Data(bytes: blobPtr, count: len)
+                            return String(data: d, encoding: .utf8)
+                        }
+                    }
+                    return nil
+                }()
+                guard let text = rawVal?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !text.isEmpty,
+                      seenText.insert(text).inserted else {
+                    continue
+                }
+                let titleStr = sqlite3_column_text(stmt, 1).map { String(cString: $0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                let pinStr = sqlite3_column_text(stmt, 2).map { String(cString: $0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                let appStr = sqlite3_column_text(stmt, 3).map { String(cString: $0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                let tsRaw = sqlite3_column_double(stmt, 4)
+
+                let isPinned = (pinStr != nil && !(pinStr?.isEmpty ?? true))
+                let alias: String? = {
+                    guard let t = titleStr, !t.isEmpty, t != text, t.count <= 80 else { return nil }
+                    return t
+                }()
+                let created: Date? = tsRaw > 100_000_000
+                    ? Date(timeIntervalSince1970: tsRaw > 1_200_000_000 ? tsRaw : (tsRaw + appleEpochOffset))
+                    : nil
+
+                collected.append(ExternalCandidate(
+                    text: text,
+                    alias: alias,
+                    sourceLabel: (appStr?.isEmpty == false) ? appStr! : "Maccy",
+                    createdAt: created,
+                    isPinnedHint: isPinned,
+                    categoryHint: nil
+                ))
+            }
+            if !collected.isEmpty { break }
+        }
+
+        let cleaned = sanitizeImportedCandidates(collected)
+        return cleaned.isEmpty ? nil : (cleaned, "Maccy 本机记录")
+    }
+
     private static func sanitizeImportedCandidates(_ rawList: [ExternalCandidate]) -> [ExternalCandidate] {
         var out: [ExternalCandidate] = []
         out.reserveCapacity(min(rawList.count, maxImportedCandidates))
         for item in rawList.prefix(maxImportedCandidates) {
-            var cleanText = item.text
+            var cleanText = item.text.replacingOccurrences(of: "\0", with: "")
             if case .pastejackingOrBidi = ClipboardPoisonGuard.inspect(cleanText) {
                 let sanitized = ClipboardPoisonGuard.sanitize(cleanText).trimmingCharacters(in: .whitespacesAndNewlines)
                 if !sanitized.isEmpty { cleanText = sanitized }
             }
             guard !cleanText.isEmpty else { continue }
-            var cleanAlias = item.alias
+            var cleanAlias = item.alias?.replacingOccurrences(of: "\0", with: "")
             if let a = cleanAlias, case .pastejackingOrBidi = ClipboardPoisonGuard.inspect(a) {
                 let sa = ClipboardPoisonGuard.sanitize(a).trimmingCharacters(in: .whitespacesAndNewlines)
                 cleanAlias = sa.isEmpty ? nil : sa
@@ -1266,13 +1406,15 @@ enum UniversalCompetitorImporter {
                 text: cleanText,
                 alias: cleanAlias,
                 sourceLabel: item.sourceLabel,
-                createdAt: item.createdAt
+                createdAt: item.createdAt,
+                isPinnedHint: item.isPinnedHint,
+                categoryHint: item.categoryHint
             ))
         }
         return out
     }
 
-    /// 尝试从常见竞品导出格式解析收藏/常用语条目（非 `.iclip` 时自动接管，内置 32MB/5000条门控与 Bidi 净化）
+    /// 尝试从主流剪贴板导出格式解析历史与收藏条目（支持 `.alfredsnippets` ZIP、JSON、Clipy/Ditto XML、Plist、Markdown、CSV/TSV）
     static func parseExternalData(
         _ data: Data,
         fileExtensionHint: String? = nil
@@ -1280,8 +1422,30 @@ enum UniversalCompetitorImporter {
         guard !data.isEmpty, data.count <= maxImportPayloadBytes else { return nil }
         let ext = (fileExtensionHint ?? "").lowercased()
 
-        // A. 优先尝试 JSON 结构（Raycast Snippets / Alfred / TextExpander / Maccy / Paste / CopyQ / 通用键值数组）
-        if ext != "csv" && ext != "tsv" && ext != "md" && ext != "markdown",
+        if data.count >= 4 {
+            let head = [UInt8](data.prefix(4))
+            if head == [0x50, 0x4B, 0x03, 0x04] {
+                if let zipParsed = parseAlfredSnippetsZipArchive(data) {
+                    let cleaned = sanitizeImportedCandidates(zipParsed.entries)
+                    if !cleaned.isEmpty {
+                        return (cleaned, zipParsed.formatName)
+                    }
+                }
+                return nil
+            }
+        }
+
+        if ext == "plist" || ext == "clipy" || data.starts(with: Data("bplist00".utf8)) {
+            if let plistObj = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
+               let parsed = parseJSONPayload(plistObj) {
+                let cleaned = sanitizeImportedCandidates(parsed.entries)
+                if !cleaned.isEmpty {
+                    return (cleaned, parsed.formatName == "外部 JSON 收藏" ? "Plist 剪贴板备份" : parsed.formatName)
+                }
+            }
+        }
+
+        if ext != "csv" && ext != "tsv" && ext != "md" && ext != "markdown" && ext != "xml" && ext != "dto",
            let jsonObj = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) {
             if let parsed = parseJSONPayload(jsonObj) {
                 let cleaned = sanitizeImportedCandidates(parsed.entries)
@@ -1291,10 +1455,17 @@ enum UniversalCompetitorImporter {
             }
         }
 
-        // B. 尝试 UTF-8 Markdown 常用语笔记（Obsidian / Notion 二级/三级标题分段）或 CSV / TSV 常用语表
         if let rawStr = String(data: data, encoding: .utf8) {
             let trimmed = rawStr.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty && !trimmed.hasPrefix("{") && !trimmed.hasPrefix("[") {
+                if ext == "xml" || ext == "clipy" || ext == "dto" || trimmed.hasPrefix("<?xml") || trimmed.hasPrefix("<folders") || trimmed.hasPrefix("<Ditto_Clips") {
+                    if let xmlParsed = parseXMLCompetitorSnippets(trimmed) {
+                        let cleaned = sanitizeImportedCandidates(xmlParsed.entries)
+                        if !cleaned.isEmpty {
+                            return (cleaned, xmlParsed.formatName)
+                        }
+                    }
+                }
                 if ext == "md" || ext == "markdown" || looksLikeMarkdownSnippetNote(trimmed) {
                     if let mdParsed = parseMarkdownSnippets(trimmed) {
                         let cleaned = sanitizeImportedCandidates(mdParsed.entries)
@@ -1312,6 +1483,255 @@ enum UniversalCompetitorImporter {
             }
         }
 
+        return nil
+    }
+
+    private static func parseAlfredSnippetsZipArchive(_ zipData: Data) -> (entries: [ExternalCandidate], formatName: String)? {
+        let bytes = [UInt8](zipData)
+        var offset = 0
+        var totalUncompressed = 0
+        let maxUncompressedTotal = 16 * 1024 * 1024
+        var rawPayloads: [(name: String, data: Data)] = []
+
+        func readU16(_ pos: Int) -> Int {
+            Int(bytes[pos]) | (Int(bytes[pos + 1]) << 8)
+        }
+        func readU32(_ pos: Int) -> Int {
+            Int(bytes[pos]) | (Int(bytes[pos + 1]) << 8) | (Int(bytes[pos + 2]) << 16) | (Int(bytes[pos + 3]) << 24)
+        }
+
+        // 优先从 ZIP 末尾 EOCD + Central Directory 解析精确大小与偏移（完美兼容 ditto / Archive Utility 带 flags & 0x08 Data Descriptor 的归档包）
+        var eocdPos: Int? = nil
+        let minEOCD = max(0, bytes.count - 65_557)
+        if bytes.count >= 22 {
+            var scan = bytes.count - 22
+            while scan >= minEOCD {
+                if bytes[scan] == 0x50 && bytes[scan + 1] == 0x4B && bytes[scan + 2] == 0x05 && bytes[scan + 3] == 0x06 {
+                    eocdPos = scan
+                    break
+                }
+                scan -= 1
+            }
+        }
+
+        func decodeSlice(dataStart: Int, compSize: Int, uncompSize: Int, method: Int) -> Data? {
+            guard compSize >= 0, uncompSize >= 0, uncompSize <= 2 * 1024 * 1024,
+                  dataStart >= 0, dataStart + compSize <= bytes.count else {
+                return nil
+            }
+            if method == 0 {
+                return Data(bytes[dataStart..<(dataStart + compSize)])
+            } else if method == 8 && uncompSize > 0 {
+                var dst = [UInt8](repeating: 0, count: uncompSize)
+                let decodedLen = bytes[dataStart..<(dataStart + compSize)].withUnsafeBytes { srcPtr -> Int in
+                    guard let base = srcPtr.baseAddress else { return 0 }
+                    return compression_decode_buffer(
+                        &dst,
+                        uncompSize,
+                        base.assumingMemoryBound(to: UInt8.self),
+                        compSize,
+                        nil,
+                        COMPRESSION_ZLIB
+                    )
+                }
+                return (decodedLen > 0) ? Data(dst.prefix(decodedLen)) : nil
+            }
+            return nil
+        }
+
+        if let eocd = eocdPos {
+            let totalEntries = readU16(eocd + 10)
+            let cdSize = readU32(eocd + 12)
+            let cdOffset = readU32(eocd + 16)
+            if cdOffset >= 0, cdSize >= 0, cdOffset + cdSize <= eocd {
+                var cdPos = cdOffset
+                var idx = 0
+                while idx < min(totalEntries, 2500) && cdPos + 46 <= cdOffset + cdSize {
+                    guard bytes[cdPos] == 0x50, bytes[cdPos + 1] == 0x4B,
+                          bytes[cdPos + 2] == 0x01, bytes[cdPos + 3] == 0x02 else { break }
+                    let flags = readU16(cdPos + 8)
+                    let method = readU16(cdPos + 10)
+                    let compSize = readU32(cdPos + 20)
+                    let uncompSize = readU32(cdPos + 24)
+                    let nameLen = readU16(cdPos + 28)
+                    let extraLen = readU16(cdPos + 30)
+                    let commentLen = readU16(cdPos + 32)
+                    let localOff = readU32(cdPos + 42)
+                    let cdHeaderEnd = cdPos + 46 + nameLen + extraLen + commentLen
+                    guard cdPos + 46 + nameLen <= bytes.count else { break }
+                    let entryName = String(bytes: bytes[(cdPos + 46)..<(cdPos + 46 + nameLen)], encoding: .utf8) ?? ""
+                    cdPos = cdHeaderEnd
+                    idx += 1
+
+                    guard (flags & 0x01) == 0,
+                          (entryName.lowercased().hasSuffix(".json") || entryName.lowercased().hasSuffix(".plist")),
+                          !entryName.contains("__MACOSX"),
+                          localOff >= 0, localOff + 30 <= bytes.count,
+                          bytes[localOff] == 0x50, bytes[localOff + 1] == 0x4B,
+                          bytes[localOff + 2] == 0x03, bytes[localOff + 3] == 0x04 else {
+                        continue
+                    }
+                    let lNameLen = readU16(localOff + 26)
+                    let lExtraLen = readU16(localOff + 28)
+                    let dataStart = localOff + 30 + lNameLen + lExtraLen
+                    guard totalUncompressed + uncompSize <= maxUncompressedTotal,
+                          let payload = decodeSlice(dataStart: dataStart, compSize: compSize, uncompSize: uncompSize, method: method) else {
+                        continue
+                    }
+                    totalUncompressed += payload.count
+                    rawPayloads.append((entryName, payload))
+                }
+            }
+        } else {
+            while offset + 30 <= bytes.count && rawPayloads.count < 2000 {
+                guard bytes[offset] == 0x50, bytes[offset + 1] == 0x4B,
+                      bytes[offset + 2] == 0x03, bytes[offset + 3] == 0x04 else { break }
+                let flags = readU16(offset + 6)
+                let method = readU16(offset + 8)
+                let compSize = readU32(offset + 18)
+                let uncompSize = readU32(offset + 22)
+                let nameLen = readU16(offset + 26)
+                let extraLen = readU16(offset + 28)
+                let dataStart = offset + 30 + nameLen + extraLen
+                guard (flags & 0x01) == 0, (flags & 0x08) == 0,
+                      compSize >= 0, dataStart + compSize <= bytes.count else { break }
+                let entryName = String(bytes: bytes[(offset + 30)..<(offset + 30 + nameLen)], encoding: .utf8) ?? ""
+                offset = dataStart + compSize
+                guard (entryName.lowercased().hasSuffix(".json") || entryName.lowercased().hasSuffix(".plist")),
+                      !entryName.contains("__MACOSX"),
+                      totalUncompressed + uncompSize <= maxUncompressedTotal,
+                      let payload = decodeSlice(dataStart: dataStart, compSize: compSize, uncompSize: uncompSize, method: method) else {
+                    continue
+                }
+                totalUncompressed += payload.count
+                rawPayloads.append((entryName, payload))
+            }
+        }
+
+        // 第一遍：先读取所有 info.plist 的真实集合名（忽略 snippetkeywordprefix，避免不管条目顺序导致分类丢失）
+        var collectionName: String? = nil
+        for item in rawPayloads where item.name.lowercased().hasSuffix("info.plist") {
+            if let plist = try? PropertyListSerialization.propertyList(from: item.data, options: [], format: nil) as? [String: Any],
+               let colTitle = plist["name"] as? String {
+                let ct = colTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !ct.isEmpty { collectionName = ct }
+            }
+        }
+
+        // 第二遍：提取全部常用语条目并绑定准确集合分类
+        var out: [ExternalCandidate] = []
+        for item in rawPayloads where item.name.lowercased().hasSuffix(".json") {
+            if let json = try? JSONSerialization.jsonObject(with: item.data, options: []) as? [String: Any],
+               let sub = (json["alfredsnippet"] as? [String: Any]) ?? json as [String: Any]?,
+               let text = (sub["snippet"] as? String) ?? (sub["text"] as? String),
+               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let rawName = (sub["name"] as? String) ?? (sub["keyword"] as? String)
+                let folderPrefix = item.name.contains("/") ? String(item.name.split(separator: "/").first ?? "") : nil
+                out.append(ExternalCandidate(
+                    text: text,
+                    alias: rawName?.trimmingCharacters(in: .whitespacesAndNewlines),
+                    sourceLabel: "Alfred 常用语",
+                    createdAt: nil,
+                    isPinnedHint: true,
+                    categoryHint: folderPrefix ?? collectionName
+                ))
+            }
+        }
+
+        return out.isEmpty ? nil : (out, "Alfred 常用语包")
+    }
+
+    private static func parseXMLCompetitorSnippets(_ xml: String) -> (entries: [ExternalCandidate], formatName: String)? {
+        func unescapeXML(_ s: String) -> String {
+            var work = s
+                .replacingOccurrences(of: "&#13;&#10;", with: "\n")
+                .replacingOccurrences(of: "&#10;", with: "\n")
+                .replacingOccurrences(of: "&#13;", with: "\r")
+                .replacingOccurrences(of: "&#9;", with: "\t")
+                .replacingOccurrences(of: "&#x0A;", with: "\n")
+                .replacingOccurrences(of: "&#x0a;", with: "\n")
+                .replacingOccurrences(of: "&#x0D;", with: "\r")
+                .replacingOccurrences(of: "&#x0d;", with: "\r")
+            if work.contains("&#"), let rx = try? NSRegularExpression(pattern: "&#(x?[0-9A-Fa-f]{1,6});") {
+                let ns = work as NSString
+                let matches = rx.matches(in: work, range: NSRange(location: 0, length: ns.length)).reversed()
+                for m in matches {
+                    let token = ns.substring(with: m.range(at: 1))
+                    let code: UInt32? = token.lowercased().hasPrefix("x")
+                        ? UInt32(token.dropFirst(), radix: 16)
+                        : UInt32(token, radix: 10)
+                    if let c = code, c > 0, let scalar = UnicodeScalar(c) {
+                        work = (work as NSString).replacingCharacters(in: m.range, with: String(scalar))
+                    }
+                }
+            }
+            return work
+                .replacingOccurrences(of: "&lt;", with: "<")
+                .replacingOccurrences(of: "&gt;", with: ">")
+                .replacingOccurrences(of: "&quot;", with: "\"")
+                .replacingOccurrences(of: "&apos;", with: "'")
+                .replacingOccurrences(of: "&amp;", with: "&")
+        }
+        func extractTag(_ tag: String, in block: Substring) -> String? {
+            guard let open = block.range(of: "<\(tag)>", options: [.caseInsensitive]),
+                  let close = block[open.upperBound...].range(of: "</\(tag)>", options: [.caseInsensitive]) else {
+                return nil
+            }
+            var inner = String(block[open.upperBound..<close.lowerBound])
+            if inner.hasPrefix("<![CDATA[") && inner.hasSuffix("]]>") && inner.count >= 12 {
+                inner = String(inner.dropFirst(9).dropLast(3))
+            } else {
+                inner = unescapeXML(inner)
+            }
+            return inner
+        }
+
+        var out: [ExternalCandidate] = []
+        if xml.range(of: "<snippet>", options: [.caseInsensitive]) != nil {
+            let folderBlocks = xml.components(separatedBy: "<folder>")
+            for fb in folderBlocks {
+                let sub = fb[...]
+                let folderTitle = extractTag("title", in: sub)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let snippetParts = fb.components(separatedBy: "<snippet>").dropFirst()
+                for sp in snippetParts {
+                    let sSub = sp[...]
+                    if let content = extractTag("content", in: sSub), !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        let title = extractTag("title", in: sSub)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                        out.append(ExternalCandidate(
+                            text: content,
+                            alias: (title?.isEmpty == false && title != content) ? title : nil,
+                            sourceLabel: "Clipy 常用语",
+                            createdAt: nil,
+                            isPinnedHint: true,
+                            categoryHint: folderTitle
+                        ))
+                    }
+                }
+            }
+            if !out.isEmpty { return (out, "Clipy 常用语库") }
+        }
+
+        if xml.range(of: "<Clip", options: [.caseInsensitive]) != nil {
+            let clips = xml.components(separatedBy: "<Clip")
+            for rawClip in clips.dropFirst() {
+                guard let gt = rawClip.firstIndex(of: ">") else { continue }
+                let body = rawClip[rawClip.index(after: gt)...]
+                if let text = extractTag("AsciiText", in: body) ?? extractTag("Text", in: body) ?? extractTag("m_strText", in: body),
+                   !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    let desc = extractTag("Description", in: body)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let group = extractTag("ParentGroup", in: body) ?? extractTag("Group", in: body)
+                    out.append(ExternalCandidate(
+                        text: text,
+                        alias: (desc?.isEmpty == false && desc != text) ? String(desc!.prefix(80)) : nil,
+                        sourceLabel: "Ditto 剪贴板",
+                        createdAt: nil,
+                        isPinnedHint: group != nil,
+                        categoryHint: group
+                    ))
+                }
+            }
+            if !out.isEmpty { return (out, "Ditto 剪贴板记录") }
+        }
         return nil
     }
 
@@ -1506,19 +1926,43 @@ enum UniversalCompetitorImporter {
                 return String(t.prefix(80))
             }()
 
-            let appSource = firstNonEmptyString(in: item, keys: ["application", "sourceAppName", "app", "source"]) ?? formatHint
+            let appSource = firstNonEmptyString(in: item, keys: ["application", "sourceAppName", "app", "source", "bundleId"]) ?? formatHint
+            let catHint = firstNonEmptyString(in: item, keys: ["folder", "collection", "category", "group", "tag", "pinboard", "list"])
+            let pinnedHint: Bool = {
+                if let b = item["pinned"] as? Bool ?? item["isPinned"] as? Bool ?? item["starred"] as? Bool ?? item["isFavorite"] as? Bool {
+                    return b
+                }
+                if let pinStr = item["pin"] as? String {
+                    return !pinStr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                }
+                if item.keys.contains("pin") && (item["pin"] is NSNull) {
+                    return false
+                }
+                // 仅当具备明确常用语片段特征（含 snippet/keyword/abbreviation 字段）或归属收藏目录时默认加入收藏，防止普通剪贴历史淹没收藏夹
+                if item["snippet"] != nil || item["keyword"] != nil || item["abbreviation"] != nil || catHint != nil {
+                    return true
+                }
+                return false
+            }()
             let created: Date? = {
-                if let tsStr = firstNonEmptyString(in: item, keys: ["createdAt", "firstCopiedAt", "lastCopiedAt", "timestamp"]),
+                if let tsStr = firstNonEmptyString(in: item, keys: ["createdAt", "firstCopiedAt", "lastCopiedAt", "timestamp", "date"]),
                    let d = iso.date(from: tsStr) {
                     return d
                 }
-                if let unix = item["timestamp"] as? TimeInterval ?? item["createdAt"] as? TimeInterval, unix > 1_000_000_000 {
+                if let unix = item["timestamp"] as? TimeInterval ?? item["createdAt"] as? TimeInterval ?? item["lastCopiedAt"] as? TimeInterval, unix > 1_000_000_000 {
                     return Date(timeIntervalSince1970: unix)
                 }
                 return nil
             }()
 
-            out.append(ExternalCandidate(text: cleanText, alias: alias, sourceLabel: appSource, createdAt: created))
+            out.append(ExternalCandidate(
+                text: cleanText,
+                alias: alias,
+                sourceLabel: appSource,
+                createdAt: created,
+                isPinnedHint: pinnedHint,
+                categoryHint: catHint
+            ))
         }
 
         return out.isEmpty ? nil : (out, formatHint)

@@ -3394,5 +3394,96 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertEqual(addNumAct.id, "list-add-numbers")
         XCTAssertEqual(addNumAct.resultText, numberedText)
         XCTAssertTrue(UniversalEscapeDecoder.analyzeListNumberingToggle("3.14\n2.71\n1.41").first?.id != "list-strip-markers")
+
+        // 18. 高级感细节与生态互通验证：飞书 HTML 内联单图提取、微信沙盒文件与 Finder 区分、Clipy/Ditto/Maccy 多格式导入与自动类目路由
+        let onePxPNGB64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+        let feishuHTML = "<meta charset='utf-8'><img src=\"data:image/png;base64,\(onePxPNGB64)\" />"
+        let htmlExtracted = ClipboardStore.extractSingleImageBytesFromHTML(feishuHTML)
+        XCTAssertNotNil(htmlExtracted)
+        XCTAssertNil(ClipboardStore.extractSingleImageBytesFromHTML("<img src=\"https://evil.example.com/pixel.png\" />"))
+
+        XCTAssertTrue(ClipboardStore.shouldAttemptImagePromotionForSingleFile(
+            path: "/Users/demo/Library/Containers/com.tencent.xinWeChat/Data/temp/abc.pic_hd",
+            sourceBundleID: "com.tencent.xinWeChat",
+            hasInMemoryImage: false
+        ))
+        XCTAssertFalse(ClipboardStore.shouldAttemptImagePromotionForSingleFile(
+            path: "/Users/demo/Desktop/diagram.png",
+            sourceBundleID: "com.apple.finder",
+            hasInMemoryImage: true
+        ))
+
+        let clipyXML = """
+        <?xml version="1.0" encoding="utf-8"?>
+        <folders>
+          <folder>
+            <title>客服回复话术</title>
+            <snippets>
+              <snippet><title>售后问候</title><content>您好，感谢您的反馈，我们马上为您处理！</content></snippet>
+              <snippet><title>官网地址</title><content>https://app.webfooo.com/iClip</content></snippet>
+              <snippet><title>今日清单</title><content>- [ ] 核对季度合同发票</content></snippet>
+            </snippets>
+          </folder>
+        </folders>
+        """
+        let xmlParsed = try XCTUnwrap(UniversalCompetitorImporter.parseExternalData(Data(clipyXML.utf8), fileExtensionHint: "xml"))
+        XCTAssertEqual(xmlParsed.formatName, "Clipy 常用语库")
+        let (mergedXML, xmlSummary) = ArchiveBackupService.mergeExternalCompetitorCandidates(
+            xmlParsed.entries,
+            formatLabel: xmlParsed.formatName,
+            into: []
+        )
+        XCTAssertEqual(xmlSummary.importedNewCount, 3)
+        XCTAssertEqual(mergedXML.first(where: { $0.customAlias == "售后问候" })?.pinCategory, .reply)
+        XCTAssertEqual(mergedXML.first(where: { $0.customAlias == "官网地址" })?.type, .link)
+        XCTAssertEqual(mergedXML.first(where: { $0.customAlias == "今日清单" })?.isTodo, true)
+
+        // 19. Opus 审计回归：/Users/clark 不误判为飞书、XML 数字实体解码、普通 JSON 历史防淹没收藏夹与 ditto Data-Descriptor Alfred 包解析
+        XCTAssertNil(ClipboardStore.detectProtectedChatContainerAppName(path: "/Users/clark/Documents/report.png", bundleID: nil))
+        XCTAssertEqual(ClipboardStore.detectProtectedChatContainerAppName(path: "/Users/clark/Library/Application Support/Lark/cache/a.webp", bundleID: "com.electron.lark"), "飞书")
+
+        let entityXML = "<snippets><snippet><title>多行回复</title><content>第一行&#10;第二行</content></snippet></snippets>"
+        let parsedEntityXML = try XCTUnwrap(UniversalCompetitorImporter.parseExternalData(Data(entityXML.utf8), fileExtensionHint: "xml"))
+        XCTAssertEqual(parsedEntityXML.entries.first?.text, "第一行\n第二行")
+
+        let historyJSON = """
+        [
+          {"value": "普通复制历史一", "application": "Safari"},
+          {"value": "重要固定发票号 91440300", "pinned": true, "title": "总公司开票税号"}
+        ]
+        """
+        let parsedHistory = try XCTUnwrap(UniversalCompetitorImporter.parseExternalData(Data(historyJSON.utf8), fileExtensionHint: "json"))
+        XCTAssertEqual(parsedHistory.entries.count, 2)
+        XCTAssertFalse(parsedHistory.entries[0].isPinnedHint)
+        XCTAssertTrue(parsedHistory.entries[1].isPinnedHint)
+
+        // 用真实 macOS `ditto -c -k` 生成带 flags & 0x08 Data Descriptor 且 info.plist 排在最后的 .alfredsnippets
+        let alfredStage = FileManager.default.temporaryDirectory.appendingPathComponent("iclip-alfred-ditto-\(UUID().uuidString)", isDirectory: true)
+        let alfredZip = FileManager.default.temporaryDirectory.appendingPathComponent("iclip-alfred-\(UUID().uuidString).alfredsnippets")
+        defer {
+            try? FileManager.default.removeItem(at: alfredStage)
+            try? FileManager.default.removeItem(at: alfredZip)
+        }
+        try FileManager.default.createDirectory(at: alfredStage, withIntermediateDirectories: true)
+        try """
+        {"alfredsnippet": {"snippet": "SELECT * FROM orders LIMIT 20;", "name": "查询订单", "keyword": "!ord"}}
+        """.write(to: alfredStage.appendingPathComponent("01_item.json"), atomically: true, encoding: .utf8)
+        let plistDict: [String: Any] = ["name": "SQL 常用脚本", "snippetkeywordprefix": "!"]
+        let plistData = try PropertyListSerialization.data(fromPropertyList: plistDict, format: .xml, options: 0)
+        try plistData.write(to: alfredStage.appendingPathComponent("z_info.plist"))
+
+        let dittoProc = Process()
+        dittoProc.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+        dittoProc.arguments = ["-c", "-k", alfredStage.path, alfredZip.path]
+        try dittoProc.run()
+        dittoProc.waitUntilExit()
+        XCTAssertEqual(dittoProc.terminationStatus, 0)
+
+        let alfredBytes = try Data(contentsOf: alfredZip)
+        let parsedAlfred = try XCTUnwrap(UniversalCompetitorImporter.parseExternalData(alfredBytes, fileExtensionHint: "alfredsnippets"))
+        XCTAssertEqual(parsedAlfred.entries.count, 1)
+        XCTAssertEqual(parsedAlfred.entries.first?.categoryHint, "SQL 常用脚本")
+        let (mergedAlfred, _) = ArchiveBackupService.mergeExternalCompetitorCandidates(parsedAlfred.entries, formatLabel: parsedAlfred.formatName, into: [])
+        XCTAssertEqual(mergedAlfred.first?.pinCategory, .template)
     }
 }

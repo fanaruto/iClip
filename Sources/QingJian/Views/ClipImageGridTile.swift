@@ -129,7 +129,7 @@ struct ClipImageGridTile: View {
         }
         .frame(height: 98)
         .overlay(alignment: .topLeading) {
-            if index < 9 {
+            if !isHovered && index < 9 {
                 Text("⌘\(index + 1)")
                     .font(.system(size: 9.5, weight: .bold, design: .rounded))
                     .foregroundStyle(.white)
@@ -141,6 +141,7 @@ struct ClipImageGridTile: View {
                     )
                     .padding(6)
                     .allowsHitTesting(false)
+                    .transition(.opacity)
             }
         }
         .overlay(alignment: .topTrailing) {
@@ -230,11 +231,37 @@ struct ClipImageGridTile: View {
         .shadow(
             color: isSelected
                 ? Color(nsColor: .controlAccentColor).opacity(0.42)
-                : Color.black.opacity(isHovered ? 0.18 : 0.05),
-            radius: isSelected ? 8 : (isHovered ? 9 : 4),
-            y: isHovered ? 4 : 2
+                : Color.black.opacity(isHovered ? 0.22 : 0.05),
+            radius: isSelected ? 8 : (isHovered ? 11 : 4),
+            y: isHovered ? 5 : 2
         )
-        .scaleEffect(isHovered ? 1.028 : 1.0)
+        .modifier(
+            AppleTVPhysicalCardModifier(
+                itemID: item.id,
+                surfaceKind: .imageTile,
+                isHovered: isHovered,
+                isSelected: isSelected,
+                trailingActionWidth: {
+                    var cnt = 2
+                    if !ClipboardStore.shared.minimalModeEnabled {
+                        if onExtractOCR != nil { cnt += 1 }
+                        if onToggleTodo != nil { cnt += 1 }
+                    }
+                    return CGFloat(cnt) * 25.0 + 10.0
+                }(),
+                bottomChipHeight: 0,
+                onResetHoverFromHide: {
+                    if isHovered {
+                        isHovered = false
+                        onHoverChange(false, frameBox.rect)
+                    }
+                },
+                onDeepPressPreview: {
+                    onSelect()
+                    onOpenQuickLook?()
+                }
+            )
+        )
         .animation(.spring(response: 0.22, dampingFraction: 0.9), value: isHovered)
         .animation(.spring(response: 0.2, dampingFraction: 0.88), value: isSelected)
         .contentShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
@@ -278,6 +305,9 @@ struct ClipImageGridTile: View {
             ClipboardStore.shared.makeDragItemProvider(for: item)
         }
         .onTapGesture {
+            if ForceTouchSuppressionRegistry.consumeSuppressionIfNeeded(for: item.id) {
+                return
+            }
             let now = ProcessInfo.processInfo.systemUptime
             let clickCount = (NSApp.currentEvent?.type == .leftMouseUp) ? (NSApp.currentEvent?.clickCount ?? 1) : 1
             let isDouble = clickCount >= 2 || (now - lastTapUptime) <= min(NSEvent.doubleClickInterval, 0.32)
@@ -302,8 +332,8 @@ struct ClipImageGridTile: View {
             Button("仅复制到剪贴板（⌘C）") {
                 onCopyOnly()
             }
-            if !ClipboardStore.shared.minimalModeEnabled, let onOpenQuickLook {
-                Button("速览高清原图（Space）") {
+            if let onOpenQuickLook {
+                Button("系统大屏预览原图（Space / 重按）") {
                     onOpenQuickLook()
                 }
             }

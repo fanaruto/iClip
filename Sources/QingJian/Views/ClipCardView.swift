@@ -57,6 +57,16 @@ struct ClipCardView: View {
         !ClipboardStore.shared.minimalModeEnabled && item.isTodo
     }
 
+    private var hoverActionBarEstimateWidth: CGFloat {
+        var count = 2
+        if item.type == .link || hasEmbeddedWebLink { count += 1 }
+        if !ClipboardStore.shared.minimalModeEnabled {
+            if item.isTodo && onEditAlias != nil { count += 1 }
+            if onToggleTodo != nil { count += 1 }
+        }
+        return CGFloat(count) * 26.5 + 14.0
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .center, spacing: 11) {
@@ -87,6 +97,7 @@ struct ClipCardView: View {
                         .multilineTextAlignment(.leading)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.trailing, 40)
+                        .hoverActionSafeTextMask(isHovered: isHovered, reservedActionWidth: hoverActionBarEstimateWidth)
 
                     HStack(spacing: 6) {
                         if item.isPinned {
@@ -200,8 +211,9 @@ struct ClipCardView: View {
                 .overlay(alignment: .topTrailing) {
                     if isHovered {
                         hoverActions
-                            .offset(y: -2)
-                            .transition(.opacity.combined(with: .scale(scale: 0.92)))
+                            .floatingActionIslandBackdrop(isSelected: isSelected, colorScheme: colorScheme)
+                            .offset(y: -4.5)
+                            .transition(.opacity.combined(with: .scale(scale: 0.92, anchor: .trailing)))
                     } else if index < 9 {
                         shortcutBadge
                     }
@@ -220,7 +232,23 @@ struct ClipCardView: View {
         .background(cardBackground)
         .overlay(cardBorder)
         .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .scaleEffect(isHovered ? 1.012 : 1.0)
+        .modifier(
+            AppleTVPhysicalCardModifier(
+                itemID: item.id,
+                surfaceKind: .standardRow,
+                isHovered: isHovered,
+                isSelected: isSelected,
+                trailingActionWidth: hoverActionBarEstimateWidth,
+                bottomChipHeight: !semantic.actions.isEmpty ? 28 : 0,
+                onResetHoverFromHide: {
+                    if isHovered { isHovered = false }
+                },
+                onDeepPressPreview: {
+                    onSelect()
+                    onOpenQuickLook?()
+                }
+            )
+        )
         .animation(.spring(response: 0.22, dampingFraction: 0.86), value: isHovered)
         .animation(.spring(response: 0.2, dampingFraction: 0.86), value: isSelected)
         .onContinuousHover { phase in
@@ -254,6 +282,9 @@ struct ClipCardView: View {
     }
 
     private func handleCardTap() {
+        if ForceTouchSuppressionRegistry.consumeSuppressionIfNeeded(for: item.id) {
+            return
+        }
         let now = ProcessInfo.processInfo.systemUptime
         let eventClickCount = (NSApp.currentEvent?.type == .leftMouseUp) ? (NSApp.currentEvent?.clickCount ?? 1) : 1
         let isDoubleTap = eventClickCount >= 2 || (now - lastTapUptime) <= min(NSEvent.doubleClickInterval, 0.32)

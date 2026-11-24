@@ -24,6 +24,9 @@ final class TactileFeedbackEngine {
         case deleteItem
         case portalEngage
         case portalDevour
+        case forceTouchPress
+        case forceTouchPop
+        case onboardingKeyHit
     }
 
     private enum SoundID: CaseIterable {
@@ -39,6 +42,8 @@ final class TactileFeedbackEngine {
         case deleteItem
         case portalEngage
         case portalDevour
+        case forceTouchPop
+        case onboardingKeyHit
     }
 
     private var soundBank: [SoundID: NSSound] = [:]
@@ -125,7 +130,29 @@ final class TactileFeedbackEngine {
             scheduleHaptic(.levelChange, after: 0.055)
             scheduleHaptic(.generic, after: 0.125)
             playSound(.portalDevour, volume: 0.32)
+
+        case .forceTouchPress:
+            // 3D Touch 一级轻按蓄力微触（不发声，仅线性马达微阻尼）
+            haptic(.alignment)
+
+        case .forceTouchPop:
+            // 3D Touch 二级突破临界清脆弹出（双段 Taptic 脉冲 + 晶透水滴绽放）
+            haptic(.levelChange)
+            scheduleHaptic(.generic, after: 0.028)
+            playSound(.forceTouchPop, volume: 0.24)
+
+        case .onboardingKeyHit:
+            // 新手引导实操按下 ⌥V 键帽触底回弹反馈
+            haptic(.alignment)
+            scheduleHaptic(.levelChange, after: 0.034)
+            playSound(.onboardingKeyHit, volume: 0.30)
         }
+    }
+
+    /// Force Touch 硬件压感板二段触发专用：硬件已自带物理咔哒震感，仅叠加晶透水滴泛音避免双重震感
+    func playPopChimeOnly() {
+        guard isSoundEnabled else { return }
+        playSound(.forceTouchPop, volume: 0.24)
     }
 
     /// 键盘方向键高频选行/选图专用：仅提供极轻的触控板微刻度阻尼，不发声打扰心流
@@ -266,6 +293,22 @@ final class TactileFeedbackEngine {
             let sweepPhase = 2.0 * .pi * (310.0 * t + 385.0 * p * p * t)
             let bellEnv = sin(min(1.0, p * 1.15) * .pi) * exp(-t * 24.0)
             return (sin(sweepPhase) * 0.75 + sin(sweepPhase * 1.5) * 0.25) * bellEnv * 0.68
+        }
+
+        // 12. 3D Touch 突破临界弹出：42ms 温润空心木鱼 + 高八度泛音绽放（640Hz -> 1280Hz）
+        soundBank[.forceTouchPop] = Self.makeSound(duration: 0.042) { t, _ in
+            let p = t / 0.042
+            let phase = 2.0 * .pi * (640.0 * t + 320.0 * p * t)
+            let env = min(1.0, t / 0.0018) * exp(-t * 88.0)
+            return (sin(phase) * 0.68 + sin(phase * 2.0) * 0.32) * env * 0.62
+        }
+
+        // 13. 新手引导键帽实操命中：64ms 清亮大三度双音（F6 -> A6）
+        soundBank[.onboardingKeyHit] = Self.makeSound(duration: 0.064) { t, _ in
+            let n1 = sin(2.0 * .pi * 1396.9 * t) * min(1.0, t / 0.0018) * exp(-t * 85.0)
+            let dt = max(0.0, t - 0.018)
+            let n2 = t >= 0.018 ? sin(2.0 * .pi * 1760.0 * dt) * min(1.0, dt / 0.0018) * exp(-dt * 75.0) : 0.0
+            return (n1 * 0.50 + n2 * 0.64) * 0.66
         }
     }
 

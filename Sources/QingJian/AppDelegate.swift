@@ -39,6 +39,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         HotKeyManager.shared.unregister()
         CursorDropPodController.shared.stopMonitoring()
+        SystemQuickLookController.shared.dismissAndPurge(appSupportURL: ClipboardStore.shared.appSupportURL)
         ClipboardStore.shared.stopMonitoring()
     }
 
@@ -262,7 +263,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func setupGlobalHotKey() {
         HotKeyManager.shared.registerToggleHotKey(shortcut: ClipboardStore.shared.hotKeyShortcut) { [weak self] in
             Task { @MainActor [weak self] in
-                self?.panelController.toggle(anchorRect: nil)
+                self?.panelController.toggle(anchorRect: nil, isFromGlobalHotKey: true)
             }
         }
         HotKeyManager.shared.registerCopyAppendHotKey { [weak self] in

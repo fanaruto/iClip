@@ -383,6 +383,9 @@ final class ClipboardStore: ObservableObject {
     @Published var activeTargetAppName: String? = nil
     /// 是否存在处于 8 秒保护窗口内可按 ⌘Z 恢复的最近一次删除/清空快照
     @Published private(set) var canUndoLastDeletion: Bool = false
+    /// 当复制微信/飞书等沙盒容器内图片因 macOS 权限未开启而被迫暂存为「文件」时记录对应应用名称（用于面板提醒与设置引导）
+    @Published var blockedChatImageAppName: String? = nil
+    private var isHealingChatImages: Bool = false
     /// 在外部浏览器直接打开链接后通知悬浮窗丝滑收起（不抢回原应用焦点）
     var onAfterOpenExternalURL: (() -> Void)? = nil
 
@@ -416,7 +419,7 @@ final class ClipboardStore: ObservableObject {
     private var adaptiveCancellable: AnyCancellable?
     private let diskQueue = DispatchQueue(label: "com.qingjian.clipboard.disk", qos: .utility)
 
-    private let appSupportURL: URL
+    let appSupportURL: URL
     private let historyFileURL: URL
     private let historyBackupFileURL: URL
     private let historyCorruptFileURL: URL
@@ -504,6 +507,7 @@ final class ClipboardStore: ObservableObject {
 
         // 启动时立即将历史可能残留的 0755 拖拽临时目录收紧为 0700 并擦除上次异常退出残留的明文文件
         DragFileExportHelper.wipeAllExports()
+        SystemQuickLookController.wipeAllStaleEphemeralFiles(appSupportURL: appSupportURL)
 
         adaptiveCancellable = AdaptiveIntelligenceEngine.shared.$revision
             .dropFirst()
@@ -520,6 +524,7 @@ final class ClipboardStore: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.refreshAccessibilityStatus()
+                self?.healPermissionBlockedChatImageFilesIfAuthorized()
                 self?.bumpPollingActivity()
             }
         }
@@ -544,6 +549,7 @@ final class ClipboardStore: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.bumpPollingActivity()
+                self.healPermissionBlockedChatImageFilesIfAuthorized()
                 self.checkPasteboard()
             }
         }
@@ -993,6 +999,7 @@ final class ClipboardStore: ObservableObject {
         archiveExpiredCompletedTodos()
         bumpPollingActivity()
         refreshAccessibilityStatus()
+        healPermissionBlockedChatImageFilesIfAuthorized()
         thumbnailCache.countLimit = 80
         thumbnailCache.totalCostLimit = 24 * 1024 * 1024
         prewarmThumbnails(for: visibleItems, limit: 18)
@@ -1073,52 +1080,60 @@ final class ClipboardStore: ObservableObject {
         let sourceApp = frontApp?.localizedName
         let effectiveBundleID = sourcePB ?? frontBundleID
 
-        // 1. 文件 URL
-        if types.contains(.fileURL),
-           let fileURLs = pasteboard.readObjects(forClasses: [NSURL.self], options: [
-               .urlReadingFileURLsOnly: true
-           ]) as? [URL], !fileURLs.isEmpty {
-            let paths = fileURLs.map { $0.path }
-            let hash = Self.sha256(paths.joined(separator: "\n"))
-            let contentHash = "file:\(hash)"
-            let item = ClipItem(
-                type: .file,
-                filePaths: paths,
-                contentHash: contentHash,
-                sourceAppName: sourceApp,
-                sourceAppBundleID: effectiveBundleID
-            )
-            let copyOutcome = ActionSparkController.shared.handleIncomingCopy(contentHash: contentHash, in: self)
-            if copyOutcome == .triggerCandidate { return }
-            insertOrPromote(item)
-            if copyOutcome == .restoreOriginal || copyOutcome == .suppressReoffer { return }
-            let reuseCount = AdaptiveIntelligenceEngine.shared.recordContentActivity(contentHash: contentHash)
-            if let latest = items.first(where: { $0.contentHash == contentHash }) {
-                ActionSparkController.shared.presentIfAppropriate(for: latest, reuseCount: reuseCount, in: self)
+        // 1. 优先提取内存图像流（PNG / JPEG / WebP / HEIC / GIF / TIFF，或飞书/富文本单图 HTML <img src="data:/file:">）
+        let rawTextProbe = pasteboard.string(forType: .string)
+        let inMemoryImageData = Self.extractBestInMemoryImageData(
+            from: pasteboard,
+            types: types,
+            plainText: rawTextProbe
+        )
+
+        // 2. 本地文件 URL（智能区分 Finder 复制普通文件/文件夹 vs 微信/飞书/企微/QQ/钉钉复制聊天图片，后台异步解码零卡顿且不污染系统剪贴板）
+        let copiedFileNSURLs = Self.extractDroppedFileNSURLs(from: pasteboard)
+        if !copiedFileNSURLs.isEmpty {
+            let paths = copiedFileNSURLs.compactMap { $0.path }.filter { !$0.isEmpty }
+            if paths.count == 1,
+               let singleNSURL = copiedFileNSURLs.first,
+               let singlePath = paths.first {
+                var isDir: ObjCBool = false
+                let existsOnDisk = FileManager.default.fileExists(atPath: singlePath, isDirectory: &isDir)
+                let isKnownDirectory = existsOnDisk && isDir.boolValue
+
+                if !isKnownDirectory,
+                   Self.shouldAttemptImagePromotionForSingleFile(
+                       path: singlePath,
+                       sourceBundleID: effectiveBundleID,
+                       hasInMemoryImage: inMemoryImageData != nil
+                   ) {
+                    handleAsyncSingleFileImageOrFallback(
+                        nsURL: singleNSURL,
+                        path: singlePath,
+                        inMemoryFallbackData: inMemoryImageData,
+                        sourceApp: sourceApp,
+                        effectiveBundleID: effectiveBundleID
+                    )
+                    return
+                }
             }
-            return
+
+            if !paths.isEmpty {
+                ingestFilePathsRecord(paths: paths, sourceApp: sourceApp, effectiveBundleID: effectiveBundleID)
+                return
+            }
         }
 
-        // 2. 图片
-        if types.contains(.png) || types.contains(.tiff) {
-            let rawPNG = pasteboard.data(forType: .png)
-            let rawTIFF = (rawPNG == nil) ? pasteboard.data(forType: .tiff) : nil
-            if rawPNG != nil || rawTIFF != nil {
-                let imagesDir = self.imagesDirectoryURL
-                let isMinimal = self.minimalModeEnabled
-                Task.detached(priority: .utility) { [weak self] in
-                    let finalPNG: Data?
-                    if let rawPNG, ImageStudioEngine.hasSafeImageDimensions(in: rawPNG) {
-                        finalPNG = rawPNG
-                    } else if rawPNG == nil,
-                              let rawTIFF,
-                              ImageStudioEngine.hasSafeImageDimensions(in: rawTIFF),
-                              let bitmap = NSBitmapImageRep(data: rawTIFF) {
-                        finalPNG = bitmap.representation(using: .png, properties: [:])
-                    } else {
-                        finalPNG = nil
+        // 3. 内存图片（截图 / 飞书 / 网页图片 / WebP / JPEG / GIF / HEIC / HTML 内联单图）
+        if let rawImageBytes = inMemoryImageData {
+            let imagesDir = self.imagesDirectoryURL
+            let isMinimal = self.minimalModeEnabled
+            Task.detached(priority: .utility) { [weak self] in
+                let finalPNG: Data? = {
+                    if Self.isPNGMagic(rawImageBytes), ImageStudioEngine.hasSafeImageDimensions(in: rawImageBytes) {
+                        return rawImageBytes
                     }
-                    guard let pngData = finalPNG else { return }
+                    return Self.normalizeImageForClipboard(from: rawImageBytes)?.pngData
+                }()
+                guard let pngData = finalPNG else { return }
 
                     let hash = Self.sha256(pngData)
                     let contentHash = "img:\(hash)"
@@ -1210,8 +1225,7 @@ final class ClipboardStore: ObservableObject {
                         }
                     }
                 }
-                return
-            }
+            return
         }
 
         // 3. 文本与链接（持久化副本 4 MB UTF-8 字符边界门控：不覆盖系统剪贴板完整原文，彻底阻断误复制百兆 Dump 引发的 AES 写放大）
@@ -1533,11 +1547,11 @@ final class ClipboardStore: ObservableObject {
         )
     }
 
-    private static let legacyFilenamesType = NSPasteboard.PasteboardType("NSFilenamesPboardType")
-    private static let jpegPasteboardType = NSPasteboard.PasteboardType("public.jpeg")
-    private static let webpPasteboardType = NSPasteboard.PasteboardType("org.webmproject.webp")
-    private static let heicPasteboardType = NSPasteboard.PasteboardType("public.heic")
-    private static let gifPasteboardType = NSPasteboard.PasteboardType("com.compuserve.gif")
+    nonisolated private static let legacyFilenamesType = NSPasteboard.PasteboardType("NSFilenamesPboardType")
+    nonisolated private static let jpegPasteboardType = NSPasteboard.PasteboardType("public.jpeg")
+    nonisolated private static let webpPasteboardType = NSPasteboard.PasteboardType("org.webmproject.webp")
+    nonisolated private static let heicPasteboardType = NSPasteboard.PasteboardType("public.heic")
+    nonisolated private static let gifPasteboardType = NSPasteboard.PasteboardType("com.compuserve.gif")
 
     /// 支持拖放到 iClip 面板或菜单栏图标的原生剪贴板类型（含微信 Qt / Electron 等跨平台格式）
     nonisolated static let supportedDragTypes: [NSPasteboard.PasteboardType] = [
@@ -1553,13 +1567,482 @@ final class ClipboardStore: ObservableObject {
         .string
     ]
 
-    private static let supportedImageExtensions: Set<String> = [
-        "png", "jpg", "jpeg", "webp", "heic", "heif", "tiff", "tif", "gif", "bmp"
+    nonisolated private static let supportedImageExtensions: Set<String> = [
+        "png", "jpg", "jpeg", "webp", "heic", "heif", "tiff", "tif", "gif", "bmp", "pic", "pic_hd", "image"
     ]
 
-    private static let nonImageDocumentExtensions: Set<String> = [
-        "pdf", "psd", "ai", "eps", "svg", "zip", "rar", "7z", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "mp4", "mov"
+    nonisolated private static let nonImageDocumentExtensions: Set<String> = [
+        "pdf", "psd", "ai", "eps", "svg", "zip", "rar", "7z", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "mp4", "mov", "dmg", "pkg", "app"
     ]
+
+    nonisolated private static let fileManagerBundleIDs: Set<String> = [
+        "com.apple.finder",
+        "com.cocoatech.PathFinder",
+        "org.yanex.marta",
+        "com.binarynights.ForkLift"
+    ]
+
+    nonisolated static func isPNGMagic(_ data: Data) -> Bool {
+        guard data.count >= 8 else { return false }
+        let b = [UInt8](data.prefix(8))
+        return b == [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
+    }
+
+    nonisolated static let installedChatImageAppsSummary: String? = {
+        var names: [String] = []
+        if isAppAvailableOnSystem(bundleIdentifier: "com.tencent.xinWeChat") {
+            names.append("微信")
+        }
+        if isAppAvailableOnSystem(bundleIdentifier: "com.electron.lark")
+            || isAppAvailableOnSystem(bundleIdentifier: "com.bytedance.lark")
+            || isAppAvailableOnSystem(bundleIdentifier: "com.bytedance.feishu") {
+            names.append("飞书")
+        }
+        if isAppAvailableOnSystem(bundleIdentifier: "com.tencent.WeWorkMac") {
+            names.append("企业微信")
+        }
+        return names.isEmpty ? nil : names.joined(separator: " / ")
+    }()
+
+    private func ingestFilePathsRecord(
+        paths: [String],
+        sourceApp: String?,
+        effectiveBundleID: String?
+    ) {
+        let hash = Self.sha256(paths.joined(separator: "\n"))
+        let contentHash = "file:\(hash)"
+        let item = ClipItem(
+            type: .file,
+            filePaths: paths,
+            contentHash: contentHash,
+            sourceAppName: sourceApp,
+            sourceAppBundleID: effectiveBundleID
+        )
+        let copyOutcome = ActionSparkController.shared.handleIncomingCopy(contentHash: contentHash, in: self)
+        if copyOutcome == .triggerCandidate { return }
+        insertOrPromote(item)
+        if copyOutcome == .restoreOriginal || copyOutcome == .suppressReoffer { return }
+        let reuseCount = AdaptiveIntelligenceEngine.shared.recordContentActivity(contentHash: contentHash)
+        if let latest = items.first(where: { $0.contentHash == contentHash }) {
+            ActionSparkController.shared.presentIfAppropriate(for: latest, reuseCount: reuseCount, in: self)
+        }
+    }
+
+    private func handleAsyncSingleFileImageOrFallback(
+        nsURL: NSURL,
+        path: String,
+        inMemoryFallbackData: Data?,
+        sourceApp: String?,
+        effectiveBundleID: String?
+    ) {
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let ext = (path as NSString).pathExtension.lowercased()
+            let chatApp = Self.detectProtectedChatContainerAppName(path: path, bundleID: effectiveBundleID)
+            switch Self.readScopedFileData(from: nsURL) {
+            case .success(let fileData):
+                if (Self.supportedImageExtensions.contains(ext) || Self.looksLikeRasterImage(fileData)),
+                   ImageStudioEngine.hasSafeImageDimensions(in: fileData),
+                   let normalized = Self.normalizeImageForClipboard(from: fileData) {
+                    await MainActor.run { [weak self] in
+                        guard let self else { return }
+                        if self.blockedChatImageAppName != nil {
+                            self.blockedChatImageAppName = nil
+                        }
+                        self.ingestCapturedImageData(
+                            pngData: normalized.pngData,
+                            sourceApp: sourceApp,
+                            effectiveBundleID: effectiveBundleID
+                        )
+                    }
+                    return
+                }
+
+            case .permissionDenied, .failed:
+                // 仅当明确来自受保护聊天容器或明确为图片扩展名（且非目录）时，才允许回退内存位图自救，杜绝把普通文件夹图标存成图片
+                if (chatApp != nil || Self.supportedImageExtensions.contains(ext)),
+                   let memData = inMemoryFallbackData,
+                   ImageStudioEngine.hasSafeImageDimensions(in: memData),
+                   let normalized = Self.normalizeImageForClipboard(from: memData) {
+                    await MainActor.run { [weak self] in
+                        self?.ingestCapturedImageData(
+                            pngData: normalized.pngData,
+                            sourceApp: sourceApp,
+                            effectiveBundleID: effectiveBundleID
+                        )
+                    }
+                    return
+                }
+            }
+
+            let isBlockedChat = (chatApp != nil) && !FileManager.default.isReadableFile(atPath: path)
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                if isBlockedChat, let chatApp {
+                    self.blockedChatImageAppName = chatApp
+                    self.showToast("\(chatApp)图片因系统隐私限制暂存为文件 · 点顶部提示去设置开启即可回显图片", duration: 4.2)
+                }
+                self.ingestFilePathsRecord(paths: [path], sourceApp: sourceApp, effectiveBundleID: effectiveBundleID)
+            }
+        }
+    }
+
+    nonisolated static func hasChatContainerReadAccess() -> Bool {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let probeDirs = [
+            "\(home)/Library/Containers/com.tencent.xinWeChat/Data",
+            "\(home)/Library/Containers/com.tencent.WeWorkMac/Data"
+        ]
+        let fm = FileManager.default
+        for dir in probeDirs where fm.fileExists(atPath: dir) {
+            if (try? fm.contentsOfDirectory(atPath: dir)) == nil {
+                return false
+            }
+            return true
+        }
+        return true
+    }
+
+    func openFullDiskAccessSettings() {
+        let candidates = [
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles",
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_AppBundles",
+            "x-apple.systempreferences:com.apple.preference.security"
+        ]
+        for raw in candidates {
+            if let url = URL(string: raw), NSWorkspace.shared.open(url) {
+                return
+            }
+        }
+    }
+
+    nonisolated static func shouldAttemptImagePromotionForSingleFile(
+        path: String,
+        sourceBundleID: String?,
+        hasInMemoryImage: Bool
+    ) -> Bool {
+        guard !path.isEmpty else { return false }
+        let ext = (path as NSString).pathExtension.lowercased()
+        if nonImageDocumentExtensions.contains(ext) {
+            return false
+        }
+        if let bid = sourceBundleID, fileManagerBundleIDs.contains(bid) {
+            return false
+        }
+        if detectProtectedChatContainerAppName(path: path, bundleID: sourceBundleID) != nil {
+            return true
+        }
+        if supportedImageExtensions.contains(ext) {
+            return true
+        }
+        if ext.isEmpty && (hasInMemoryImage || path.contains("/var/folders/") || path.contains("/Caches/") || path.contains("/Temp/")) {
+            return true
+        }
+        return false
+    }
+
+    nonisolated static func detectProtectedChatContainerAppName(path: String, bundleID: String?) -> String? {
+        let lowerPath = path.lowercased()
+        let lowerBid = (bundleID ?? "").lowercased()
+        if lowerPath.contains("com.tencent.xinwechat") || lowerPath.contains("xwechat_files") || lowerBid.contains("xinwechat") {
+            return "微信"
+        }
+        let isFeishuPath = lowerPath.contains("com.electron.lark")
+            || lowerPath.contains("com.bytedance.lark")
+            || lowerPath.contains("com.bytedance.feishu")
+            || lowerPath.contains("/lark/")
+            || lowerPath.contains("/feishu/")
+            || lowerPath.contains("lark helper")
+        let isFeishuBid = lowerBid == "com.electron.lark"
+            || lowerBid.hasPrefix("com.electron.lark.")
+            || lowerBid.contains("bytedance.lark")
+            || lowerBid.contains("bytedance.feishu")
+        if isFeishuPath || isFeishuBid {
+            return "飞书"
+        }
+        if lowerPath.contains("com.tencent.wework") || lowerPath.contains("/wxwork/") || lowerBid.contains("wework") {
+            return "企业微信"
+        }
+        if lowerPath.contains("com.tencent.qq") || lowerBid == "com.tencent.qq" {
+            return "QQ"
+        }
+        if lowerPath.contains("com.alibaba.dingtalk") || lowerPath.contains("/dingtalk/") || lowerBid.contains("dingtalk") {
+            return "钉钉"
+        }
+        return nil
+    }
+
+    nonisolated static func extractBestInMemoryImageData(
+        from pb: NSPasteboard,
+        types: [NSPasteboard.PasteboardType],
+        plainText: String?
+    ) -> Data? {
+        let directTypes: [NSPasteboard.PasteboardType] = [
+            .png,
+            jpegPasteboardType,
+            webpPasteboardType,
+            NSPasteboard.PasteboardType("public.webp"),
+            heicPasteboardType,
+            gifPasteboardType,
+            .tiff
+        ]
+        for t in directTypes where types.contains(t) {
+            if let data = pb.data(forType: t), !data.isEmpty, data.count <= 48 * 1024 * 1024 {
+                return data
+            }
+        }
+
+        let trimmedText = (plainText ?? "")
+            .replacingOccurrences(of: "\u{fffc}", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let isImagePlaceholderOnly = trimmedText.isEmpty
+            || trimmedText == "[图片]"
+            || trimmedText == "[Image]"
+            || trimmedText == "[图像]"
+        if isImagePlaceholderOnly, types.contains(.html),
+           let html = pb.string(forType: .html),
+           html.utf8.count <= 32 * 1024 * 1024,
+           let extracted = extractSingleImageBytesFromHTML(html) {
+            return extracted
+        }
+        return nil
+    }
+
+    nonisolated static func extractSingleImageBytesFromHTML(_ html: String) -> Data? {
+        var searchCursor = html.startIndex
+        var candidateSrcs: [String] = []
+        while let imgStart = html.range(of: "<img", options: [.caseInsensitive], range: searchCursor..<html.endIndex) {
+            let rest = html[imgStart.lowerBound...]
+            let tagEnd = rest.firstIndex(of: ">") ?? rest.endIndex
+            let tagText = String(rest[..<tagEnd])
+            searchCursor = tagEnd < html.endIndex ? html.index(after: tagEnd) : html.endIndex
+
+            let lowerTag = tagText.lowercased()
+            // 忽略富文本内附带的小表情或头像装饰图
+            if lowerTag.contains("emoji") || lowerTag.contains("avatar") {
+                continue
+            }
+            guard let srcAttr = tagText.range(of: "src=", options: [.caseInsensitive]) else { continue }
+            let afterSrc = tagText[srcAttr.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let quote = afterSrc.first, (quote == "\"" || quote == "'") else { continue }
+            let body = afterSrc.dropFirst()
+            guard let endQuote = body.firstIndex(of: quote) else { continue }
+            let srcVal = String(body[..<endQuote]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !srcVal.isEmpty {
+                candidateSrcs.append(srcVal)
+            }
+            if candidateSrcs.count > 1 { return nil }
+        }
+        guard candidateSrcs.count == 1, let srcValue = candidateSrcs.first else { return nil }
+
+        if srcValue.lowercased().hasPrefix("data:image/"),
+           let commaIdx = srcValue.firstIndex(of: ",") {
+            let meta = srcValue[..<commaIdx].lowercased()
+            guard meta.contains(";base64") else { return nil }
+            let b64 = String(srcValue[srcValue.index(after: commaIdx)...])
+                .replacingOccurrences(of: "\r", with: "")
+                .replacingOccurrences(of: "\n", with: "")
+                .replacingOccurrences(of: " ", with: "")
+            guard b64.utf8.count <= 32 * 1024 * 1024,
+                  let decoded = Data(base64Encoded: b64, options: [.ignoreUnknownCharacters]),
+                  looksLikeRasterImage(decoded),
+                  ImageStudioEngine.hasSafeImageDimensions(in: decoded) else {
+                return nil
+            }
+            return decoded
+        }
+
+        if srcValue.lowercased().hasPrefix("file://"),
+           let fileURL = URL(string: srcValue),
+           fileURL.isFileURL {
+            let filePath = fileURL.path
+            guard !filePath.isEmpty else { return nil }
+            let fm = FileManager.default
+            if let attrs = try? fm.attributesOfItem(atPath: filePath),
+               (attrs[.type] as? FileAttributeType) == .typeSymbolicLink {
+                return nil
+            }
+            if let data = try? Data(contentsOf: URL(fileURLWithPath: filePath), options: [.mappedIfSafe]),
+               looksLikeRasterImage(data),
+               ImageStudioEngine.hasSafeImageDimensions(in: data) {
+                return data
+            }
+        }
+        return nil
+    }
+
+    private func ingestCapturedImageData(
+        pngData: Data,
+        sourceApp: String?,
+        effectiveBundleID: String?
+    ) {
+        let imagesDir = self.imagesDirectoryURL
+        let isMinimal = self.minimalModeEnabled
+        Task.detached(priority: .utility) { [weak self] in
+            guard ImageStudioEngine.hasSafeImageDimensions(in: pngData) else { return }
+            let hash = Self.sha256(pngData)
+            let contentHash = "img:\(hash)"
+            let dims = Self.pixelDimensions(from: pngData)
+
+            let alreadyExists = await MainActor.run { [weak self] () -> Bool in
+                guard let self else { return true }
+                if let existingIndex = self.items.firstIndex(where: { $0.contentHash == contentHash }) {
+                    let copyOutcome = ActionSparkController.shared.handleIncomingCopy(contentHash: contentHash, in: self)
+                    if copyOutcome == .triggerCandidate { return true }
+                    var existing = self.items.remove(at: existingIndex)
+                    existing.createdAt = Date()
+                    existing.sourceAppName = sourceApp ?? existing.sourceAppName
+                    self.items.insert(existing, at: 0)
+                    self.items = self.sortItems(self.items)
+                    self.saveHistory()
+                    if copyOutcome == .restoreOriginal || copyOutcome == .suppressReoffer { return true }
+                    let reuseCount = AdaptiveIntelligenceEngine.shared.recordContentActivity(contentHash: contentHash)
+                    ActionSparkController.shared.presentIfAppropriate(for: existing, reuseCount: reuseCount, in: self)
+                    return true
+                }
+                return false
+            }
+            if alreadyExists { return }
+
+            let detectedQR = isMinimal ? nil : VisionOCRService.detectBarcodesFast(in: pngData)
+            let fileName = "\(UUID().uuidString).png"
+            let fileURL = imagesDir.appendingPathComponent(fileName)
+            do {
+                try LocalVaultCrypto.writeEncryptedImage(pngData, to: fileURL)
+            } catch {
+                return
+            }
+            let thumb = Self.decodeImage(at: fileURL, maxPixelSize: 360)
+
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                if let thumb {
+                    self.thumbnailCache.setObject(thumb, forKey: fileName as NSString, cost: Self.estimatedCost(of: thumb))
+                }
+                let item = ClipItem(
+                    type: .image,
+                    imageFileName: fileName,
+                    imageWidth: dims.width,
+                    imageHeight: dims.height,
+                    qrCodePayload: detectedQR,
+                    contentHash: contentHash,
+                    sourceAppName: sourceApp,
+                    sourceAppBundleID: effectiveBundleID
+                )
+                self.insertOrPromote(item)
+                let reuseCount = AdaptiveIntelligenceEngine.shared.recordContentActivity(contentHash: contentHash)
+                ActionSparkController.shared.presentIfAppropriate(for: item, reuseCount: reuseCount, in: self)
+                if !self.minimalModeEnabled {
+                    self.scheduleBackgroundOCR(forItemID: item.id, fileURL: fileURL)
+                }
+            }
+        }
+    }
+
+    @discardableResult
+    func healPermissionBlockedChatImageFilesIfAuthorized(manualTrigger: Bool = false) -> Bool {
+        guard !isHealingChatImages else { return true }
+        let candidates = items.filter { item in
+            guard item.type == .file, let paths = item.filePaths, paths.count == 1 else { return false }
+            let p = paths[0]
+            let ext = (p as NSString).pathExtension.lowercased()
+            guard ext.isEmpty || Self.supportedImageExtensions.contains(ext) else { return false }
+            guard Self.detectProtectedChatContainerAppName(path: p, bundleID: item.sourceAppBundleID) != nil else {
+                return false
+            }
+            return FileManager.default.isReadableFile(atPath: p)
+        }
+
+        if manualTrigger && candidates.isEmpty {
+            if Self.hasChatContainerReadAccess() {
+                blockedChatImageAppName = nil
+                return true
+            }
+            return false
+        }
+        guard !candidates.isEmpty else { return false }
+
+        isHealingChatImages = true
+        let imagesDir = self.imagesDirectoryURL
+        let isMinimal = self.minimalModeEnabled
+        Task.detached(priority: .utility) { [weak self] in
+            var upgraded: [(oldID: UUID, newItem: ClipItem, thumb: NSImage?, fileURL: URL)] = []
+            for oldItem in candidates {
+                guard let path = oldItem.filePaths?.first,
+                      let rawData = try? Data(contentsOf: URL(fileURLWithPath: path), options: [.mappedIfSafe]),
+                      Self.looksLikeRasterImage(rawData),
+                      let norm = Self.normalizeImageForClipboard(from: rawData) else {
+                    continue
+                }
+                let pngData = norm.pngData
+                let hash = Self.sha256(pngData)
+                let contentHash = "img:\(hash)"
+                let dims = Self.pixelDimensions(from: pngData)
+                let detectedQR = isMinimal ? nil : VisionOCRService.detectBarcodesFast(in: pngData)
+                let fileName = "\(UUID().uuidString).png"
+                let fileURL = imagesDir.appendingPathComponent(fileName)
+                guard (try? LocalVaultCrypto.writeEncryptedImage(pngData, to: fileURL)) != nil else { continue }
+                let thumb = Self.decodeImage(at: fileURL, maxPixelSize: 360)
+                let upgradedItem = ClipItem(
+                    id: oldItem.id,
+                    type: .image,
+                    imageFileName: fileName,
+                    imageWidth: dims.width,
+                    imageHeight: dims.height,
+                    qrCodePayload: detectedQR,
+                    contentHash: contentHash,
+                    sourceAppName: oldItem.sourceAppName,
+                    sourceAppBundleID: oldItem.sourceAppBundleID,
+                    createdAt: oldItem.createdAt,
+                    isPinned: oldItem.isPinned,
+                    pinCategory: oldItem.pinCategory,
+                    customAlias: oldItem.customAlias,
+                    isTodoItem: oldItem.isTodoItem,
+                    todoCompletedAt: oldItem.todoCompletedAt,
+                    burnAfterPaste: oldItem.burnAfterPaste
+                )
+                upgraded.append((oldItem.id, upgradedItem, thumb, fileURL))
+            }
+            let finalUpgraded = upgraded
+            await MainActor.run { [weak self] in
+                guard let self else {
+                    for entry in finalUpgraded { try? FileManager.default.removeItem(at: entry.fileURL) }
+                    return
+                }
+                self.isHealingChatImages = false
+                guard !finalUpgraded.isEmpty else { return }
+                var appliedCount = 0
+                for entry in finalUpgraded {
+                    guard let idx = self.items.firstIndex(where: { $0.id == entry.oldID }) else {
+                        // 条目在后台解码期间已被用户删除，立即清理刚生成的加密图片杜绝孤儿残留
+                        try? FileManager.default.removeItem(at: entry.fileURL)
+                        continue
+                    }
+                    if self.items.contains(where: { $0.id != entry.oldID && $0.contentHash == entry.newItem.contentHash }) {
+                        // 库中已存在相同图片记录，移除重复的文件占位并清理新写文件
+                        try? FileManager.default.removeItem(at: entry.fileURL)
+                        self.items.remove(at: idx)
+                        appliedCount += 1
+                        continue
+                    }
+                    if let thumb = entry.thumb, let fn = entry.newItem.imageFileName {
+                        self.thumbnailCache.setObject(thumb, forKey: fn as NSString, cost: Self.estimatedCost(of: thumb))
+                    }
+                    self.items[idx] = entry.newItem
+                    appliedCount += 1
+                    if !self.minimalModeEnabled {
+                        self.scheduleBackgroundOCR(forItemID: entry.newItem.id, fileURL: entry.fileURL)
+                    }
+                }
+                self.blockedChatImageAppName = nil
+                if appliedCount > 0 {
+                    self.items = self.sortItems(self.items)
+                    self.saveHistory()
+                    self.showToast("✓ 权限已生效，已自动恢复 \(appliedCount) 张聊天图片高清回显")
+                }
+            }
+        }
+        return true
+    }
 
     /// 判断拖放内容是否可被 iClip 接收并复制
     nonisolated static func canAcceptDrag(from draggingPasteboard: NSPasteboard) -> Bool {
@@ -1765,7 +2248,7 @@ final class ClipboardStore: ObservableObject {
     }
 
     /// 安全读取拖入文件字节（自动管理 Security-Scoped 访问，区分容器 TCC 权限拦截与普通错误）
-    private static func readScopedFileData(from nsURL: NSURL) -> ScopedFileReadResult {
+    nonisolated private static func readScopedFileData(from nsURL: NSURL) -> ScopedFileReadResult {
         let accessed = nsURL.startAccessingSecurityScopedResource()
         defer {
             if accessed {
@@ -1798,7 +2281,7 @@ final class ClipboardStore: ObservableObject {
         return .failed
     }
 
-    private static func isPermissionDeniedError(_ error: NSError) -> Bool {
+    nonisolated private static func isPermissionDeniedError(_ error: NSError) -> Bool {
         if error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoPermissionError {
             return true
         }
@@ -1812,7 +2295,7 @@ final class ClipboardStore: ObservableObject {
     }
 
     /// 通过文件头魔数嗅探无后缀缓存图片（如微信表情/缓存图 JPEG、PNG、GIF、WebP、BMP、HEIC）
-    private static func looksLikeRasterImage(_ data: Data) -> Bool {
+    nonisolated private static func looksLikeRasterImage(_ data: Data) -> Bool {
         guard data.count >= 12 else { return false }
         let b = [UInt8](data.prefix(12))
         // PNG: 89 50 4E 47
@@ -1832,7 +2315,7 @@ final class ClipboardStore: ObservableObject {
     }
 
     /// 将任意图片数据（JPG/WebP/HEIC/PNG/TIFF/GIF）标准化解码为通用 PNG + TIFF 双格式字节流
-    private static func normalizeImageForClipboard(from rawData: Data) -> NormalizedClipboardImage? {
+    nonisolated private static func normalizeImageForClipboard(from rawData: Data) -> NormalizedClipboardImage? {
         if let source = CGImageSourceCreateWithData(rawData as CFData, nil) {
             guard ImageStudioEngine.hasSafeImageDimensions(source),
                   let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
@@ -2720,6 +3203,22 @@ final class ClipboardStore: ObservableObject {
             fileExtensionHint: sourceURL.pathExtension
         )
         self.items = sortItems(merged)
+        saveHistory(immediate: true)
+        return summary
+    }
+
+    @discardableResult
+    func mergeExternalCompetitorEntries(
+        _ entries: [UniversalCompetitorImporter.ExternalCandidate],
+        formatLabel: String
+    ) -> ArchiveImportSummary {
+        let (merged, summary) = ArchiveBackupService.mergeExternalCompetitorCandidates(
+            entries,
+            formatLabel: formatLabel,
+            into: items
+        )
+        self.items = sortItems(merged)
+        trimHistoryIfNeeded()
         saveHistory(immediate: true)
         return summary
     }

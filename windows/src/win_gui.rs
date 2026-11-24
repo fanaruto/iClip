@@ -96,6 +96,7 @@ const WM_APP_PANEL_TYPE_CHAR: u32 = WM_USER + 104;
 const WM_APP_OUTSIDE_CLICK: u32 = WM_USER + 105;
 const WM_APP_OTA_STATE: u32 = WM_USER + 106;
 const WM_APP_OTA_RESTART: u32 = WM_USER + 107;
+const WM_APP_ASYNC_CHAT_IMAGE: u32 = WM_USER + 108;
 const WS_EX_NOACTIVATE_VAL: u32 = 0x0800_0000;
 const SWP_NOACTIVATE_VAL: u32 = 0x0010;
 const WM_MOUSEACTIVATE_MSG: u32 = 0x0021;
@@ -160,7 +161,14 @@ const DWMSBT_NONE_VAL: u32 = 1;
 const DWMSBT_MAINWINDOW_VAL: u32 = 2;
 const DWMSBT_TRANSIENTWINDOW_VAL: u32 = 3;
 
+enum AsyncChatClipResult {
+    Image(Vec<u8>, u32, u32, Option<String>),
+    FallbackFile(String, Option<String>),
+}
+
 static MAIN_HWND_RAW: AtomicIsize = AtomicIsize::new(0);
+static QL_STAGE_HWND_RAW: AtomicIsize = AtomicIsize::new(0);
+static PENDING_ASYNC_CHAT_IMAGES: Mutex<Vec<AsyncChatClipResult>> = Mutex::new(Vec::new());
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ActiveViewMode {
@@ -254,6 +262,7 @@ enum HitAction {
     TogglePauseCapture,
     ShowHighlightsOverlay,
     DismissHighlightsOverlay,
+    OnboardingSetStep(u8),
     CheckForUpdates,
     StartOtaDownload,
     CancelOtaDownload,
@@ -292,6 +301,13 @@ struct WinAppState {
     show_shortcut_ref: bool,
     dragging_slider_track: Option<(i32, i32)>,
     hovered_visible_pos: Option<usize>,
+    hover_card_nx: f32,
+    hover_card_ny: f32,
+    pressed_visible_pos: Option<usize>,
+    onboarding_step: u8,
+    onboarding_hit_trial: bool,
+    ql_stage_visible: bool,
+    ql_stage_rgba: Option<(u32, u32, Vec<u8>, String)>,
     hovered_link_badge_store_idx: Option<usize>,
     copied_flash_item_id: Option<String>,
     recording_slot: Option<WinHotKeySlot>,
@@ -447,11 +463,33 @@ pub fn run_windows_app() -> i32 {
 
         iclip_core::updater::win_runtime::cleanup_stale_old_binary();
         iclip_core::security::wipe_all_temp_previews();
+        let ql_hwnd = CreateWindowExW(
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE_VAL,
+            class_name.as_ptr(),
+            to_wide("iClip Preview").as_ptr(),
+            WS_POPUP,
+            120,
+            120,
+            720,
+            540,
+            null_mut(),
+            null_mut(),
+            hinstance,
+            null(),
+        );
+        QL_STAGE_HWND_RAW.store(ql_hwnd as isize, Ordering::SeqCst);
+
         let store = ClipboardStore::new(ClipboardStore::default_app_data_dir());
-        let init_highlights = !store.config.has_seen_highlights_v27;
+        let is_returning_user = store.config.has_seen_highlights_v27 || !store.items.is_empty();
+        let init_highlights = !is_returning_user;
+        let init_onboard_step: u8 = if is_returning_user { 3 } else { 0 };
         let sys_dark = query_windows_system_dark_mode();
         apply_dwm_glass_style(hwnd, sys_dark, store.config.blur_concentration_pct);
         apply_screen_capture_shield(hwnd, store.config.screen_share_privacy);
+        if !ql_hwnd.is_null() {
+            apply_dwm_glass_style(ql_hwnd, sys_dark, 78);
+            apply_screen_capture_shield(ql_hwnd, store.config.screen_share_privacy);
+        }
 
         let cf_html = RegisterClipboardFormatW(to_wide("HTML Format").as_ptr());
         let cf_excl = RegisterClipboardFormatW(
@@ -488,6 +526,13 @@ pub fn run_windows_app() -> i32 {
                 show_shortcut_ref: false,
                 dragging_slider_track: None,
                 hovered_visible_pos: None,
+                hover_card_nx: 0.0,
+                hover_card_ny: 0.0,
+                pressed_visible_pos: None,
+                onboarding_step: init_onboard_step,
+                onboarding_hit_trial: false,
+                ql_stage_visible: false,
+                ql_stage_rgba: None,
                 hovered_link_badge_store_idx: None,
                 copied_flash_item_id: None,
                 recording_slot: None,
@@ -542,6 +587,10 @@ pub fn run_windows_app() -> i32 {
         let _ = UnregisterHotKey(hwnd, HOTKEY_ID_COPY_APPEND);
         let _ = WTSUnRegisterSessionNotification(hwnd);
         let _ = RemoveClipboardFormatListener(hwnd);
+        let ql_h = QL_STAGE_HWND_RAW.swap(0, Ordering::SeqCst) as HWND;
+        if !ql_h.is_null() {
+            let _ = DestroyWindow(ql_h);
+        }
         MAIN_HWND_RAW.store(0, Ordering::SeqCst);
         0
     }
@@ -648,6 +697,13 @@ pub fn run_windows_self_test() -> Result<(), String> {
             show_shortcut_ref: false,
             dragging_slider_track: None,
             hovered_visible_pos: Some(1),
+            hover_card_nx: 0.0,
+            hover_card_ny: 0.0,
+            pressed_visible_pos: None,
+            onboarding_step: 0,
+            onboarding_hit_trial: false,
+            ql_stage_visible: false,
+            ql_stage_rgba: None,
             hovered_link_badge_store_idx: None,
             copied_flash_item_id: None,
             recording_slot: None,
@@ -986,6 +1042,10 @@ unsafe fn apply_screen_capture_shield(hwnd: HWND, enabled: bool) {
         WDA_NONE_AFFINITY
     };
     let _ = SetWindowDisplayAffinity(hwnd, affinity);
+    let ql_h = QL_STAGE_HWND_RAW.load(Ordering::SeqCst) as HWND;
+    if !ql_h.is_null() {
+        let _ = SetWindowDisplayAffinity(ql_h, affinity);
+    }
 }
 
 unsafe fn is_disallowed_by_clipboard_history_flag(hwnd: HWND, cf_can_include: u32) -> bool {
@@ -1391,8 +1451,22 @@ unsafe extern "system" fn ll_mouse_proc(code: i32, wparam: WPARAM, lparam: LPARA
                 });
                 if should_check {
                     let ms = &*(lparam as *const MSLLHOOKSTRUCT);
+                    let ql_h = QL_STAGE_HWND_RAW.load(Ordering::SeqCst) as HWND;
+                    let mut in_ql = false;
+                    if !ql_h.is_null() && IsWindowVisible(ql_h) != FALSE {
+                        let mut qrc: RECT = zeroed();
+                        if GetWindowRect(ql_h, &mut qrc) != FALSE
+                            && ms.pt.x >= qrc.left
+                            && ms.pt.x < qrc.right
+                            && ms.pt.y >= qrc.top
+                            && ms.pt.y < qrc.bottom
+                        {
+                            in_ql = true;
+                        }
+                    }
                     let mut rc: RECT = zeroed();
-                    if GetWindowRect(hwnd, &mut rc) != FALSE
+                    if !in_ql
+                        && GetWindowRect(hwnd, &mut rc) != FALSE
                         && (ms.pt.x < rc.left
                             || ms.pt.x >= rc.right
                             || ms.pt.y < rc.top
@@ -1626,9 +1700,12 @@ unsafe fn hide_panel(hwnd: HWND, restore_focus: bool) {
         if let Some(st) = cell.borrow_mut().as_mut() {
             st.visible = false;
             st.hovered_visible_pos = None;
+            st.pressed_visible_pos = None;
             st.hovered_link_badge_store_idx = None;
             st.dragging_slider_track = None;
             st.show_quick_look = false;
+            st.ql_stage_visible = false;
+            st.ql_stage_rgba = None;
             st.editing_alias_item_id = None;
             if st.recording_slot.is_some() {
                 st.recording_slot = None;
@@ -1642,6 +1719,7 @@ unsafe fn hide_panel(hwnd: HWND, restore_focus: bool) {
     });
     reload_global_hotkeys_and_hooks(hwnd);
     iclip_core::security::wipe_all_temp_previews();
+    dismiss_large_ql_stage();
     ShowWindow(hwnd, SW_HIDE);
     if restore_focus {
         restore_target_foreground_if_needed(target_fg);
@@ -1664,6 +1742,11 @@ unsafe extern "system" fn wnd_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    let ql_stage = QL_STAGE_HWND_RAW.load(Ordering::SeqCst) as HWND;
+    if !ql_stage.is_null() && hwnd == ql_stage {
+        return handle_ql_stage_wnd_proc(hwnd, msg, wparam, lparam);
+    }
+
     match msg {
         WM_CLIPBOARDUPDATE_MSG => {
             handle_clipboard_update(hwnd);
@@ -1672,11 +1755,14 @@ unsafe extern "system" fn wnd_proc(
         WM_WTSSESSION_CHANGE_MSG => {
             if wparam == WTS_SESSION_LOCK_VAL {
                 iclip_core::security::wipe_all_temp_previews();
+                dismiss_large_ql_stage();
                 APP_STATE.with(|c| {
                     if let Some(st) = c.borrow_mut().as_mut() {
                         st.store.lock_down_ephemeral_buffers();
                         st.search_query.clear();
                         st.show_quick_look = false;
+                        st.ql_stage_visible = false;
+                        st.ql_stage_rgba = None;
                         st.editing_alias_item_id = None;
                         st.alias_draft.clear();
                     }
@@ -1708,6 +1794,20 @@ unsafe extern "system" fn wnd_proc(
         WM_HOTKEY => {
             let id = wparam as i32;
             if id == HOTKEY_ID_TOGGLE {
+                let consumed_trial = APP_STATE.with(|c| {
+                    let mut b = c.borrow_mut();
+                    let Some(st) = b.as_mut() else { return false };
+                    if st.visible && st.show_highlights_overlay && st.onboarding_step == 0 {
+                        st.onboarding_hit_trial = true;
+                        st.onboarding_step = 1;
+                        return true;
+                    }
+                    false
+                });
+                if consumed_trial {
+                    let _ = InvalidateRect(hwnd, null(), FALSE);
+                    return 0;
+                }
                 let is_vis =
                     APP_STATE.with(|c| c.borrow().as_ref().map(|s| s.visible).unwrap_or(false));
                 if is_vis {
@@ -1807,6 +1907,40 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_APP_OTA_RESTART => {
             DestroyWindow(hwnd);
+            0
+        }
+        WM_APP_ASYNC_CHAT_IMAGE => {
+            let batch: Vec<AsyncChatClipResult> = PENDING_ASYNC_CHAT_IMAGES
+                .lock()
+                .map(|mut g| g.drain(..).collect())
+                .unwrap_or_default();
+            if !batch.is_empty() {
+                APP_STATE.with(|cell| {
+                    if let Some(st) = cell.borrow_mut().as_mut() {
+                        for entry in batch {
+                            st.pending_append_capture = false;
+                            match entry {
+                                AsyncChatClipResult::Image(png_bytes, w, h, src_app) => {
+                                    let hash = iclip_core::model::sha256_hex(&png_bytes);
+                                    let file_name = format!("{}.png", &hash[0..24]);
+                                    if st.store.write_image_bytes(&file_name, &png_bytes).is_ok() {
+                                        st.store.insert_or_promote(ClipItem::new_image(
+                                            file_name, w, h, &png_bytes, src_app,
+                                        ));
+                                    }
+                                }
+                                AsyncChatClipResult::FallbackFile(f_path, src_app) => {
+                                    st.store.insert_or_promote(ClipItem::new_files(
+                                        vec![f_path],
+                                        src_app.or_else(|| Some("Explorer".to_string())),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                });
+                let _ = InvalidateRect(hwnd, null(), FALSE);
+            }
             0
         }
         WM_TIMER => {
@@ -1982,16 +2116,35 @@ unsafe extern "system" fn wnd_proc(
             0
         }
         WM_LBUTTONUP => {
+            let mut need_redraw = false;
             APP_STATE.with(|c| {
                 if let Some(st) = c.borrow_mut().as_mut() {
                     st.dragging_slider_track = None;
+                    if st.pressed_visible_pos.take().is_some() {
+                        need_redraw = true;
+                    }
                 }
             });
+            if need_redraw {
+                let _ = InvalidateRect(hwnd, null(), FALSE);
+            }
             0
         }
         WM_LBUTTONDOWN => {
             let x = (lparam & 0xFFFF) as i16 as i32;
             let y = ((lparam >> 16) & 0xFFFF) as i16 as i32;
+            APP_STATE.with(|c| {
+                if let Some(st) = c.borrow_mut().as_mut() {
+                    for reg in &st.hit_regions {
+                        if let HitAction::SelectCard(pos) = reg.action {
+                            if point_in_rect(x, y, &reg.rect) {
+                                st.pressed_visible_pos = Some(pos);
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
             handle_left_click(hwnd, x, y, false);
             0
         }
@@ -2224,9 +2377,93 @@ unsafe fn handle_clipboard_update(hwnd: HWND) {
     // 用户正常复制了非密码新内容，立即取消此前挂起的残留清擦定时器，防止误清正常剪贴板
     KillTimer(hwnd, TIMER_ID_CONCEALED_SCRUB);
 
+    let has_dib = IsClipboardFormatAvailable(CF_DIB_ID) != FALSE;
     if IsClipboardFormatAvailable(CF_HDROP_ID) != FALSE {
         if let Some(paths) = read_files_from_clipboard(hwnd) {
             if !paths.is_empty() {
+                // 微信/飞书等聊天软件复制单张图片时会在 CF_HDROP 放入临时图片路径：后台线程异步解码提升为高清图片卡片，UI 线程 0 阻塞
+                if paths.len() == 1
+                    && !std::path::Path::new(&paths[0]).is_dir()
+                    && iclip_core::security::should_promote_single_clipboard_file_to_image(
+                        &paths[0],
+                        source_app.as_deref(),
+                        has_dib,
+                    )
+                {
+                    let single_path = paths[0].clone();
+                    let dib_fallback = if has_dib {
+                        read_dib_as_png_from_clipboard(hwnd)
+                    } else {
+                        None
+                    };
+                    if std::path::Path::new(&single_path).exists() {
+                        let target_hwnd = hwnd as isize;
+                        let src_clone = source_app.clone();
+                        std::thread::spawn(move || {
+                            let mut decoded_ok: Option<(Vec<u8>, u32, u32)> = None;
+                            if let Ok(meta) = std::fs::metadata(&single_path) {
+                                if meta.is_file() && meta.len() > 0 && meta.len() <= 32 * 1024 * 1024 {
+                                    if let Ok(raw_bytes) = std::fs::read(&single_path) {
+                                        if let Ok(dyn_img) = image::load_from_memory(&raw_bytes) {
+                                            let (pw, ph) = (dyn_img.width(), dyn_img.height());
+                                            if pw > 0
+                                                && ph > 0
+                                                && pw <= 12_000
+                                                && ph <= 12_000
+                                                && (pw as u64) * (ph as u64) <= 67_108_864
+                                            {
+                                                let rgba = dyn_img.to_rgba8();
+                                                let mut png_bytes = Vec::new();
+                                                if PngEncoder::new(&mut png_bytes)
+                                                    .write_image(&rgba, pw, ph, ColorType::Rgba8.into())
+                                                    .is_ok()
+                                                {
+                                                    decoded_ok = Some((png_bytes, pw, ph));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            let out_result = if let Some((png_bytes, w, h)) = decoded_ok.or(dib_fallback) {
+                                AsyncChatClipResult::Image(png_bytes, w, h, src_clone)
+                            } else {
+                                AsyncChatClipResult::FallbackFile(single_path, src_clone)
+                            };
+                            if let Ok(mut q) = PENDING_ASYNC_CHAT_IMAGES.lock() {
+                                q.push(out_result);
+                            }
+                            let h_ptr = target_hwnd as HWND;
+                            if !h_ptr.is_null() {
+                                unsafe {
+                                    let _ = PostMessageW(h_ptr, WM_APP_ASYNC_CHAT_IMAGE, 0, 0);
+                                }
+                            }
+                        });
+                        return;
+                    }
+                    if let Some((png_bytes, w, h)) = dib_fallback {
+                        APP_STATE.with(|cell| {
+                            if let Some(st) = cell.borrow_mut().as_mut() {
+                                st.pending_append_capture = false;
+                                let hash = iclip_core::model::sha256_hex(&png_bytes);
+                                let file_name = format!("{}.png", &hash[0..24]);
+                                if st.store.write_image_bytes(&file_name, &png_bytes).is_ok() {
+                                    st.store.insert_or_promote(ClipItem::new_image(
+                                        file_name,
+                                        w,
+                                        h,
+                                        &png_bytes,
+                                        source_app,
+                                    ));
+                                }
+                            }
+                        });
+                        let _ = InvalidateRect(hwnd, null(), FALSE);
+                        return;
+                    }
+                }
+
                 APP_STATE.with(|cell| {
                     if let Some(st) = cell.borrow_mut().as_mut() {
                         st.pending_append_capture = false;
@@ -6452,6 +6689,25 @@ fn layout_and_draw_main_view(
                             bd,
                         );
                     }
+                    let is_pressed = st.pressed_visible_pos == Some(vis_pos);
+                    if is_hovered {
+                        canvas.draw_apple_tv_glare_round_rect(
+                            pad + if is_pressed { s(1) } else { 0 },
+                            cur_y + if is_pressed { s(1) } else { 0 },
+                            track_w - if is_pressed { s(2) } else { 0 },
+                            card_h - if is_pressed { s(2) } else { 0 },
+                            sf(14.0),
+                            st.hover_card_nx,
+                            st.hover_card_ny,
+                            if is_pressed {
+                                12
+                            } else if st.is_dark_mode {
+                                28
+                            } else {
+                                36
+                            },
+                        );
+                    }
 
                     let mut left_cursor = pad + s(13);
                     let content_center_y = if has_chips {
@@ -6566,17 +6822,25 @@ fn layout_and_draw_main_view(
                         left_cursor += b_sz + s(11);
                     }
 
-                    // 右上角悬停圆形微按钮组或极淡快捷键胶囊 `^1`
-                    let right_reserved = if is_hovered {
-                        if can_jump {
-                            s(118)
-                        } else {
-                            s(90)
+                    // 恒定标题预留基准宽度防止非悬停/选中态切换跳动；悬停浮现胶囊时精确退让胶囊宽度 + 8px 呼吸间距
+                    let mut hover_pill_total_w = 0;
+                    if is_hovered {
+                        let b_sz = s(23);
+                        let mut btn_cnt = 2;
+                        if !minimal {
+                            btn_cnt += 1;
                         }
-                    } else if is_selected {
-                        s(68)
+                        if can_jump {
+                            btn_cnt += 1;
+                        }
+                        hover_pill_total_w = btn_cnt * b_sz + (btn_cnt - 1) * s(4) + s(8);
+                    }
+                    let right_reserved = if is_hovered {
+                        hover_pill_total_w + s(13)
+                    } else if is_selected && vis_pos < 9 {
+                        s(64)
                     } else {
-                        s(44)
+                        s(46)
                     };
 
                     if is_hovered {
@@ -6584,6 +6848,28 @@ fn layout_and_draw_main_view(
                         let by = cur_y + s(8);
                         let mut rx = w - pad - s(9) - b_sz;
                         let circle_bg = palette.chip_hover_bg;
+                        let mut btn_cnt = 2;
+                        if !minimal {
+                            btn_cnt += 1;
+                        }
+                        if can_jump {
+                            btn_cnt += 1;
+                        }
+                        let pill_w = btn_cnt * b_sz + (btn_cnt - 1) * s(4) + s(8);
+                        let pill_x = w - pad - s(5) - pill_w;
+                        let pill_bg = if st.is_dark_mode {
+                            Color4::rgba(28, 32, 42, 232)
+                        } else {
+                            Color4::rgba(255, 255, 255, 238)
+                        };
+                        canvas.fill_round_rect(
+                            pill_x,
+                            by - s(2),
+                            pill_w,
+                            b_sz + s(4),
+                            sf(13.5),
+                            pill_bg,
+                        );
 
                         // 删除圆钮
                         canvas.fill_circle(
@@ -9256,14 +9542,14 @@ fn layout_and_draw_highlights_overlay(
         h,
         sf(18.0),
         if st.is_dark_mode {
-            Color4::rgba(8, 10, 14, 152)
+            Color4::rgba(8, 10, 14, 162)
         } else {
-            Color4::rgba(15, 23, 42, 72)
+            Color4::rgba(15, 23, 42, 78)
         },
     );
 
-    let mw = s(364).min(w - s(24));
-    let mh = s(386).min(h - s(36));
+    let mw = s(368).min(w - s(24));
+    let mh = s(396).min(h - s(32));
     let mx = (w - mw) / 2;
     let my = (h - mh) / 2;
 
@@ -9283,6 +9569,407 @@ fn layout_and_draw_highlights_overlay(
         Color4::rgba(250, 252, 255, 252)
     };
     canvas.fill_round_rect(mx, my, mw, mh, sf(20.0), modal_bg);
+    canvas.stroke_round_rect(mx, my, mw, mh, sf(20.0), sf(0.85), palette.group_stroke);
+
+    let hk_label = st.store.config.hotkey_toggle.display_string();
+
+    if st.onboarding_step == 0 {
+        // Step 0：先试按预设快捷键感受手感
+        texts.push(TextDrawCmd {
+            text: "先试试呼出它的手感".to_string(),
+            rect: RECT {
+                left: mx + s(22),
+                top: my + s(22),
+                right: mx + mw - s(22),
+                bottom: my + s(48),
+            },
+            color: palette.text_primary,
+            font_kind: FontKind::Display,
+            flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        });
+        texts.push(TextDrawCmd {
+            text: format!("按下预设的 {hk_label}，随时在光标旁零失焦唤出"),
+            rect: RECT {
+                left: mx + s(22),
+                top: my + s(48),
+                right: mx + mw - s(22),
+                bottom: my + s(68),
+            },
+            color: palette.text_secondary,
+            font_kind: FontKind::Meta,
+            flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        });
+
+        let stage_x = mx + s(22);
+        let stage_y = my + s(86);
+        let stage_w = mw - s(44);
+        let stage_h = s(132);
+        canvas.fill_round_rect(stage_x, stage_y, stage_w, stage_h, sf(16.0), palette.chip_bg);
+        canvas.stroke_round_rect(
+            stage_x,
+            stage_y,
+            stage_w,
+            stage_h,
+            sf(16.0),
+            sf(1.0),
+            if st.onboarding_hit_trial {
+                palette.emerald
+            } else {
+                palette.cobalt.with_alpha(110)
+            },
+        );
+
+        let kw = s(92);
+        let kh = s(64);
+        let ky = stage_y + (stage_h - kh) / 2;
+        let k1x = stage_x + stage_w / 2 - kw - s(14);
+        let k2x = stage_x + stage_w / 2 + s(14);
+        let key_bg = if st.is_dark_mode {
+            Color4::rgb(46, 51, 64)
+        } else {
+            Color4::rgb(255, 255, 255)
+        };
+        for (kx, sym) in [(k1x, "Alt"), (k2x, "V")] {
+            canvas.fill_round_rect(kx, ky, kw, kh, sf(13.0), key_bg);
+            canvas.stroke_round_rect(kx, ky, kw, kh, sf(13.0), sf(1.1), palette.cobalt.with_alpha(150));
+            texts.push(TextDrawCmd {
+                text: sym.to_string(),
+                rect: RECT {
+                    left: kx,
+                    top: ky,
+                    right: kx + kw,
+                    bottom: ky + kh,
+                },
+                color: palette.cobalt,
+                font_kind: FontKind::Display,
+                flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            });
+        }
+        texts.push(TextDrawCmd {
+            text: "+".to_string(),
+            rect: RECT {
+                left: k1x + kw,
+                top: ky,
+                right: k2x,
+                bottom: ky + kh,
+            },
+            color: palette.text_muted,
+            font_kind: FontKind::Display,
+            flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+        });
+
+        texts.push(TextDrawCmd {
+            text: format!("现在直接在键盘上按一次 {hk_label} 体验手感"),
+            rect: RECT {
+                left: mx + s(22),
+                top: stage_y + stage_h + s(18),
+                right: mx + mw - s(22),
+                bottom: stage_y + stage_h + s(40),
+            },
+            color: palette.text_secondary,
+            font_kind: FontKind::Body,
+            flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+        });
+
+        let btn_x = mx + s(22);
+        let btn_w = mw - s(44);
+        let btn_h = s(36);
+        let btn_y = my + mh - btn_h - s(18);
+        canvas.fill_round_rect(btn_x, btn_y, btn_w, btn_h, sf(18.0), palette.chip_bg);
+        let skip_rc = RECT {
+            left: btn_x,
+            top: btn_y,
+            right: btn_x + btn_w,
+            bottom: btn_y + btn_h,
+        };
+        texts.push(TextDrawCmd {
+            text: "跳过试按，下一步 →".to_string(),
+            rect: skip_rc,
+            color: palette.text_primary,
+            font_kind: FontKind::CardTitle,
+            flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+        });
+        st.hit_regions.push(HitRegion {
+            rect: skip_rc,
+            interactive_cursor: true,
+            action: HitAction::OnboardingSetStep(1),
+        });
+        return;
+    }
+
+    if st.onboarding_step == 1 {
+        // Step 1：选择沿用当前快捷键还是设为自己的习惯手势
+        texts.push(TextDrawCmd {
+            text: format!("喜欢 {hk_label} 这个呼出手势吗？"),
+            rect: RECT {
+                left: mx + s(22),
+                top: my + s(24),
+                right: mx + mw - s(22),
+                bottom: my + s(50),
+            },
+            color: palette.text_primary,
+            font_kind: FontKind::Display,
+            flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        });
+        texts.push(TextDrawCmd {
+            text: "呼出时不打断你正在输入的窗口，按 Enter 即可顺手贴入。".to_string(),
+            rect: RECT {
+                left: mx + s(22),
+                top: my + s(52),
+                right: mx + mw - s(22),
+                bottom: my + s(76),
+            },
+            color: palette.text_secondary,
+            font_kind: FontKind::Meta,
+            flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        });
+
+        let bx = mx + s(22);
+        let bw = mw - s(44);
+        let b1y = my + s(100);
+        let bh = s(64);
+        canvas.fill_round_rect(bx, b1y, bw, bh, sf(14.0), palette.cobalt);
+        let r1 = RECT {
+            left: bx,
+            top: b1y,
+            right: bx + bw,
+            bottom: b1y + bh,
+        };
+        texts.push(TextDrawCmd {
+            text: format!("很顺手，继续使用 {hk_label}"),
+            rect: RECT {
+                left: bx + s(16),
+                top: b1y + s(10),
+                right: bx + bw - s(16),
+                bottom: b1y + s(34),
+            },
+            color: Color4::rgb(255, 255, 255),
+            font_kind: FontKind::CardTitle,
+            flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        });
+        texts.push(TextDrawCmd {
+            text: "推荐 · 单手自然落位，不与 Ctrl+V 系统粘贴冲突".to_string(),
+            rect: RECT {
+                left: bx + s(16),
+                top: b1y + s(34),
+                right: bx + bw - s(16),
+                bottom: b1y + s(54),
+            },
+            color: Color4::rgba(255, 255, 255, 215),
+            font_kind: FontKind::Meta,
+            flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        });
+        st.hit_regions.push(HitRegion {
+            rect: r1,
+            interactive_cursor: true,
+            action: HitAction::DismissHighlightsOverlay,
+        });
+
+        let b2y = b1y + bh + s(14);
+        canvas.fill_round_rect(bx, b2y, bw, bh, sf(14.0), palette.chip_bg);
+        canvas.stroke_round_rect(bx, b2y, bw, bh, sf(14.0), sf(0.9), palette.group_stroke);
+        let r2 = RECT {
+            left: bx,
+            top: b2y,
+            right: bx + bw,
+            bottom: b2y + bh,
+        };
+        texts.push(TextDrawCmd {
+            text: "设为我习惯的呼出手势".to_string(),
+            rect: RECT {
+                left: bx + s(16),
+                top: b2y + s(10),
+                right: bx + bw - s(16),
+                bottom: b2y + s(34),
+            },
+            color: palette.text_primary,
+            font_kind: FontKind::CardTitle,
+            flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        });
+        texts.push(TextDrawCmd {
+            text: "支持组合键或双击 Ctrl/Alt/Shift，并可导入旧剪贴板数据".to_string(),
+            rect: RECT {
+                left: bx + s(16),
+                top: b2y + s(34),
+                right: bx + bw - s(16),
+                bottom: b2y + s(54),
+            },
+            color: palette.text_secondary,
+            font_kind: FontKind::Meta,
+            flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        });
+        st.hit_regions.push(HitRegion {
+            rect: r2,
+            interactive_cursor: true,
+            action: HitAction::OnboardingSetStep(2),
+        });
+        return;
+    }
+
+    if st.onboarding_step == 2 {
+        // Step 2：录制习惯手势 + 顺势提醒导入知名剪贴板应用数据并自动分类
+        let is_rec = st.recording_slot == Some(WinHotKeySlot::MainToggle);
+        texts.push(TextDrawCmd {
+            text: "定制手势与一键搬家".to_string(),
+            rect: RECT {
+                left: mx + s(22),
+                top: my + s(20),
+                right: mx + mw - s(22),
+                bottom: my + s(46),
+            },
+            color: palette.text_primary,
+            font_kind: FontKind::Display,
+            flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        });
+        texts.push(TextDrawCmd {
+            text: "录下你肌肉记忆的手势，并从常用剪贴板无缝导入".to_string(),
+            rect: RECT {
+                left: mx + s(22),
+                top: my + s(46),
+                right: mx + mw - s(22),
+                bottom: my + s(66),
+            },
+            color: palette.text_secondary,
+            font_kind: FontKind::Meta,
+            flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        });
+
+        let bx = mx + s(22);
+        let bw = mw - s(44);
+        let rec_y = my + s(80);
+        let rec_h = s(76);
+        canvas.fill_round_rect(bx, rec_y, bw, rec_h, sf(14.0), palette.chip_bg);
+        canvas.stroke_round_rect(
+            bx,
+            rec_y,
+            bw,
+            rec_h,
+            sf(14.0),
+            sf(1.1),
+            if is_rec { palette.cobalt } else { palette.group_stroke },
+        );
+        let rec_rc = RECT {
+            left: bx,
+            top: rec_y,
+            right: bx + bw,
+            bottom: rec_y + rec_h,
+        };
+        texts.push(TextDrawCmd {
+            text: if is_rec {
+                "正在录制：请直接按下组合键或连按两次单键...".to_string()
+            } else {
+                format!("当前呼出快捷键：{hk_label}（点击此处重新录制）")
+            },
+            rect: RECT {
+                left: bx + s(14),
+                top: rec_y + s(12),
+                right: bx + bw - s(14),
+                bottom: rec_y + s(40),
+            },
+            color: if is_rec { palette.cobalt } else { palette.text_primary },
+            font_kind: FontKind::CardTitle,
+            flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        });
+        let err_or_hint = st
+            .hotkey_conflict_error
+            .clone()
+            .or_else(|| st.hotkey_recording_hint.clone())
+            .unwrap_or_else(|| "支持 Ctrl+Shift+V 等组合键，或双击 Ctrl / Alt 单键".to_string());
+        texts.push(TextDrawCmd {
+            text: err_or_hint,
+            rect: RECT {
+                left: bx + s(14),
+                top: rec_y + s(42),
+                right: bx + bw - s(14),
+                bottom: rec_y + s(66),
+            },
+            color: if st.hotkey_conflict_error.is_some() {
+                palette.danger
+            } else {
+                palette.text_secondary
+            },
+            font_kind: FontKind::Meta,
+            flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        });
+        st.hit_regions.push(HitRegion {
+            rect: rec_rc,
+            interactive_cursor: true,
+            action: HitAction::StartRecordHotkey(WinHotKeySlot::MainToggle),
+        });
+
+        let imp_y = rec_y + rec_h + s(14);
+        let imp_h = s(128);
+        canvas.fill_round_rect(bx, imp_y, bw, imp_h, sf(14.0), palette.group_fill);
+        canvas.stroke_round_rect(bx, imp_y, bw, imp_h, sf(14.0), sf(0.85), palette.group_stroke);
+        texts.push(TextDrawCmd {
+            text: "从习惯的剪贴板导入数据（自动匹配类目）".to_string(),
+            rect: RECT {
+                left: bx + s(14),
+                top: imp_y + s(10),
+                right: bx + bw - s(14),
+                bottom: imp_y + s(34),
+            },
+            color: palette.text_primary,
+            font_kind: FontKind::CardTitle,
+            flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        });
+        texts.push(TextDrawCmd {
+            text: "兼容 Ditto、CopyQ、Paste、Raycast、Clipy、Alfred 及 CSV/JSON/MD，自动归入链接、待办、文件与收藏分组。".to_string(),
+            rect: RECT {
+                left: bx + s(14),
+                top: imp_y + s(36),
+                right: bx + bw - s(14),
+                bottom: imp_y + s(78),
+            },
+            color: palette.text_secondary,
+            font_kind: FontKind::Meta,
+            flags: DT_LEFT | DT_WORDBREAK,
+        });
+        let ib_y = imp_y + s(84);
+        let ib_h = s(32);
+        canvas.fill_round_rect(bx + s(14), ib_y, bw - s(28), ib_h, sf(10.0), palette.cobalt.with_alpha(32));
+        let imp_btn_rc = RECT {
+            left: bx + s(14),
+            top: ib_y,
+            right: bx + bw - s(14),
+            bottom: ib_y + ib_h,
+        };
+        texts.push(TextDrawCmd {
+            text: "选择剪贴板导出文件一键导入...".to_string(),
+            rect: imp_btn_rc,
+            color: palette.cobalt_text,
+            font_kind: FontKind::CardTitle,
+            flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+        });
+        st.hit_regions.push(HitRegion {
+            rect: imp_btn_rc,
+            interactive_cursor: true,
+            action: HitAction::ImportArchive,
+        });
+
+        let done_h = s(36);
+        let done_y = my + mh - done_h - s(16);
+        canvas.fill_round_rect(bx, done_y, bw, done_h, sf(18.0), palette.cobalt);
+        let done_rc = RECT {
+            left: bx,
+            top: done_y,
+            right: bx + bw,
+            bottom: done_y + done_h,
+        };
+        texts.push(TextDrawCmd {
+            text: "完成设置，开始使用".to_string(),
+            rect: done_rc,
+            color: Color4::rgb(255, 255, 255),
+            font_kind: FontKind::CardTitle,
+            flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+        });
+        st.hit_regions.push(HitRegion {
+            rect: done_rc,
+            interactive_cursor: true,
+            action: HitAction::DismissHighlightsOverlay,
+        });
+        return;
+    }
 
     let ver_short = {
         let parts: Vec<&str> = env!("CARGO_PKG_VERSION").split('.').collect();
@@ -9386,34 +10073,44 @@ fn layout_and_draw_highlights_overlay(
     let btn_w = mw - s(44);
     let btn_h = s(36);
     let btn_y = my + mh - btn_h - s(18);
-    canvas.fill_round_rect(
-        btn_x,
-        btn_y,
-        btn_w,
-        btn_h,
-        sf(18.0),
-        Color4::rgb(30, 94, 255),
-    );
+    let half_w = (btn_w - s(8)) / 2;
+    canvas.fill_round_rect(btn_x, btn_y, half_w, btn_h, sf(18.0), palette.chip_bg);
+    let setup_rc = RECT {
+        left: btn_x,
+        top: btn_y,
+        right: btn_x + half_w,
+        bottom: btn_y + btn_h,
+    };
     texts.push(TextDrawCmd {
-        text: "开始使用".to_string(),
-        rect: RECT {
-            left: btn_x,
-            top: btn_y,
-            right: btn_x + btn_w,
-            bottom: btn_y + btn_h,
-        },
+        text: "体验手势与导入".to_string(),
+        rect: setup_rc,
+        color: palette.text_primary,
+        font_kind: FontKind::CardTitle,
+        flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+    });
+    st.hit_regions.push(HitRegion {
+        rect: setup_rc,
+        interactive_cursor: true,
+        action: HitAction::OnboardingSetStep(0),
+    });
+
+    let go_x = btn_x + half_w + s(8);
+    canvas.fill_round_rect(go_x, btn_y, half_w, btn_h, sf(18.0), Color4::rgb(30, 94, 255));
+    let go_rc = RECT {
+        left: go_x,
+        top: btn_y,
+        right: go_x + half_w,
+        bottom: btn_y + btn_h,
+    };
+    texts.push(TextDrawCmd {
+        text: "继续使用".to_string(),
+        rect: go_rc,
         color: Color4::rgb(255, 255, 255),
         font_kind: FontKind::CardTitle,
         flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
     });
-
     st.hit_regions.push(HitRegion {
-        rect: RECT {
-            left: 0,
-            top: 0,
-            right: w,
-            bottom: h,
-        },
+        rect: go_rc,
         interactive_cursor: true,
         action: HitAction::DismissHighlightsOverlay,
     });
@@ -9480,6 +10177,7 @@ unsafe fn handle_mouse_move(hwnd: HWND, x: i32, y: i32, left_held: bool) {
     }
 
     let mut changed = false;
+    let mut dirty_union: Option<RECT> = None;
     let mut use_hand = false;
 
     APP_STATE.with(|cell| {
@@ -9499,18 +10197,69 @@ unsafe fn handle_mouse_move(hwnd: HWND, x: i32, y: i32, left_held: bool) {
                 changed = true;
             }
 
+            let prev_card_rect = st.hovered_visible_pos.and_then(|old_pos| {
+                st.hit_regions.iter().find_map(|r| match r.action {
+                    HitAction::SelectCard(p) if p == old_pos => Some(r.rect),
+                    _ => None,
+                })
+            });
+
             let mut found_card = None;
+            let mut new_card_rect: Option<RECT> = None;
+            let mut norm_nx = 0.0f32;
+            let mut norm_ny = 0.0f32;
             for reg in &st.hit_regions {
                 if let HitAction::SelectCard(pos) = reg.action {
                     if point_in_rect(x, y, &reg.rect) {
                         found_card = Some(pos);
+                        new_card_rect = Some(reg.rect);
+                        let rw = (reg.rect.right - reg.rect.left).max(1) as f32;
+                        let rh = (reg.rect.bottom - reg.rect.top).max(1) as f32;
+                        norm_nx = (((x - reg.rect.left) as f32 / rw) - 0.5) * 2.0;
+                        norm_ny = (((y - reg.rect.top) as f32 / rh) - 0.5) * 2.0;
                         break;
                     }
                 }
             }
             if st.hovered_visible_pos != found_card {
                 st.hovered_visible_pos = found_card;
+                st.hover_card_nx = norm_nx;
+                st.hover_card_ny = norm_ny;
                 changed = true;
+                dirty_union = match (prev_card_rect, new_card_rect) {
+                    (Some(a), Some(b)) => Some(RECT {
+                        left: a.left.min(b.left) - 6,
+                        top: a.top.min(b.top) - 6,
+                        right: a.right.max(b.right) + 6,
+                        bottom: a.bottom.max(b.bottom) + 6,
+                    }),
+                    (Some(a), None) => Some(RECT {
+                        left: a.left - 6,
+                        top: a.top - 6,
+                        right: a.right + 6,
+                        bottom: a.bottom + 6,
+                    }),
+                    (None, Some(b)) => Some(RECT {
+                        left: b.left - 6,
+                        top: b.top - 6,
+                        right: b.right + 6,
+                        bottom: b.bottom + 6,
+                    }),
+                    _ => None,
+                };
+            } else if found_card.is_some()
+                && ((st.hover_card_nx - norm_nx).abs() > 0.08
+                    || (st.hover_card_ny - norm_ny).abs() > 0.08)
+            {
+                st.hover_card_nx = norm_nx;
+                st.hover_card_ny = norm_ny;
+                changed = true;
+                dirty_union = new_card_rect.map(|b| RECT {
+                    left: b.left - 4,
+                    top: b.top - 4,
+                    right: b.right + 4,
+                    bottom: b.bottom + 4,
+                });
             }
         }
     });
@@ -9519,7 +10268,11 @@ unsafe fn handle_mouse_move(hwnd: HWND, x: i32, y: i32, left_held: bool) {
     SetCursor(LoadCursorW(null_mut(), cursor_id));
 
     if changed {
-        let _ = InvalidateRect(hwnd, null(), FALSE);
+        if let Some(rc) = dirty_union {
+            let _ = InvalidateRect(hwnd, &rc, FALSE);
+        } else {
+            let _ = InvalidateRect(hwnd, null(), FALSE);
+        }
     }
 }
 
@@ -10024,6 +10777,7 @@ unsafe fn handle_left_click(hwnd: HWND, x: i32, y: i32, is_double: bool) {
             APP_STATE.with(|c| {
                 if let Some(st) = c.borrow_mut().as_mut() {
                     st.view_mode = ActiveViewMode::MainList;
+                    st.onboarding_step = if st.store.config.has_seen_highlights_v27 { 3 } else { 0 };
                     st.show_highlights_overlay = true;
                 }
             });
@@ -10033,12 +10787,35 @@ unsafe fn handle_left_click(hwnd: HWND, x: i32, y: i32, is_double: bool) {
             APP_STATE.with(|c| {
                 if let Some(st) = c.borrow_mut().as_mut() {
                     st.show_highlights_overlay = false;
+                    st.recording_slot = None;
                     if !st.store.config.has_seen_highlights_v27 {
                         st.store.config.has_seen_highlights_v27 = true;
                         st.store.save_config();
                     }
                 }
             });
+            reload_global_hotkeys_and_hooks(hwnd);
+            let _ = InvalidateRect(hwnd, null(), FALSE);
+        }
+        HitAction::OnboardingSetStep(step) => {
+            let start_rec = step == 2;
+            APP_STATE.with(|c| {
+                if let Some(st) = c.borrow_mut().as_mut() {
+                    st.onboarding_step = step;
+                    if step == 0 {
+                        st.onboarding_hit_trial = false;
+                    }
+                    if start_rec {
+                        st.recording_slot = Some(WinHotKeySlot::MainToggle);
+                        st.hotkey_conflict_error = None;
+                        st.hotkey_recording_hint = None;
+                        st.double_tap_machine.reset();
+                    }
+                }
+            });
+            if start_rec {
+                let _ = UnregisterHotKey(hwnd, HOTKEY_ID_TOGGLE);
+            }
             let _ = InvalidateRect(hwnd, null(), FALSE);
         }
         HitAction::CheckForUpdates => {
@@ -10337,9 +11114,16 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32) {
     }
 
     if vk == VK_ESCAPE as u32 || (ctrl_down && !alt_down && !shift_down && vk == 0x57) {
+        let mut closed_ql_stage = false;
         let handled_inner = APP_STATE.with(|c| {
             let mut b = c.borrow_mut();
             let Some(st) = b.as_mut() else { return false };
+            if st.ql_stage_visible {
+                st.ql_stage_visible = false;
+                st.ql_stage_rgba = None;
+                closed_ql_stage = true;
+                return true;
+            }
             if st.show_quick_look {
                 st.show_quick_look = false;
                 return true;
@@ -10356,6 +11140,10 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32) {
             }
             false
         });
+        if closed_ql_stage {
+            dismiss_large_ql_stage();
+            return;
+        }
         if handled_inner {
             let _ = InvalidateRect(hwnd, null(), FALSE);
         } else {
@@ -10670,7 +11458,28 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32) {
                 }
                 return true;
             }
-            if st.search_query.is_empty() || st.show_quick_look {
+            if st.search_query.is_empty() || st.show_quick_look || st.ql_stage_visible {
+                if st.ql_stage_visible {
+                    st.ql_stage_visible = false;
+                    st.ql_stage_rgba = None;
+                    dismiss_large_ql_stage();
+                    return false;
+                }
+                if !st.show_quick_look {
+                    let filtered = st.store.filtered_indices_ext(
+                        st.selected_tab,
+                        st.selected_pin_category,
+                        &st.search_query,
+                        st.active_target_app_name.as_deref(),
+                    );
+                    if let Some(&s_idx) = filtered.get(st.selected_visible_pos) {
+                        if st.store.items[s_idx].kind == ClipContentType::Image {
+                            if present_or_update_large_ql_stage(hwnd, st, s_idx) {
+                                return false;
+                            }
+                        }
+                    }
+                }
                 st.show_quick_look = !st.show_quick_look;
                 st.quick_look_diff_mode = false;
                 st.quick_look_scroll = 0;
@@ -10718,6 +11527,17 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32) {
                         st.scroll_row_offset = r_idx - 4;
                     }
                 }
+                if st.ql_stage_visible {
+                    if let Some(&next_idx) = filtered.get(st.selected_visible_pos) {
+                        if st.store.items[next_idx].kind == ClipContentType::Image {
+                            let _ = present_or_update_large_ql_stage(hwnd, st, next_idx);
+                        } else {
+                            st.ql_stage_visible = false;
+                            st.ql_stage_rgba = None;
+                            dismiss_large_ql_stage();
+                        }
+                    }
+                }
             }
         });
         let _ = InvalidateRect(hwnd, null(), FALSE);
@@ -10747,6 +11567,19 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32) {
     }
 
     if vk == VK_RETURN as u32 {
+        let mut had_ql_stage = false;
+        APP_STATE.with(|c| {
+            if let Some(st) = c.borrow_mut().as_mut() {
+                if st.ql_stage_visible {
+                    st.ql_stage_visible = false;
+                    st.ql_stage_rgba = None;
+                    had_ql_stage = true;
+                }
+            }
+        });
+        if had_ql_stage {
+            dismiss_large_ql_stage();
+        }
         let query_snapshot = APP_STATE.with(|c| {
             c.borrow()
                 .as_ref()
@@ -11461,7 +12294,7 @@ unsafe fn import_archive_via_dialog(hwnd: HWND) {
 
     let mut file_buf = vec![0u16; 260];
     let filter: Vec<u16> =
-        "支持导入的收藏与常用语 (*.iclip;*.json;*.md;*.markdown;*.csv;*.tsv)\0*.iclip;*.json;*.md;*.markdown;*.alfredsnippets;*.csv;*.tsv\0所有文件 (*.*)\0*.*\0\0"
+        "支持导入的剪贴板备份 (*.iclip;*.json;*.xml;*.dto;*.clipy;*.alfredsnippets;*.md;*.csv;*.tsv)\0*.iclip;*.json;*.xml;*.dto;*.clipy;*.alfredsnippets;*.md;*.markdown;*.csv;*.tsv\0所有文件 (*.*)\0*.*\0\0"
             .encode_utf16()
             .collect();
 
@@ -11840,4 +12673,267 @@ unsafe fn cancel_ota_download(hwnd: HWND) {
         }
     });
     set_toast(hwnd, "已取消更新下载".to_string());
+}
+
+unsafe fn dismiss_large_ql_stage() {
+    let ql_h = QL_STAGE_HWND_RAW.load(Ordering::SeqCst) as HWND;
+    if !ql_h.is_null() && IsWindowVisible(ql_h) != FALSE {
+        let _ = ShowWindow(ql_h, SW_HIDE);
+    }
+}
+
+unsafe fn present_or_update_large_ql_stage(
+    main_hwnd: HWND,
+    st: &mut WinAppState,
+    store_idx: usize,
+) -> bool {
+    let ql_h = QL_STAGE_HWND_RAW.load(Ordering::SeqCst) as HWND;
+    if ql_h.is_null() {
+        return false;
+    }
+    let Some(item) = st.store.items.get(store_idx) else {
+        return false;
+    };
+    let Some(fname) = &item.image_file_name else {
+        return false;
+    };
+    let Some(dec_bytes) = st.store.read_image_bytes(fname) else {
+        return false;
+    };
+    let Ok(dyn_img) = image::load_from_memory(&dec_bytes) else {
+        return false;
+    };
+    let orig_w = dyn_img.width().max(1);
+    let orig_h = dyn_img.height().max(1);
+
+    let mut main_rc: RECT = zeroed();
+    let _ = GetWindowRect(main_hwnd, &mut main_rc);
+    let mon = MonitorFromPoint(
+        POINT {
+            x: (main_rc.left + main_rc.right) / 2,
+            y: (main_rc.top + main_rc.bottom) / 2,
+        },
+        MONITOR_DEFAULTTONEAREST,
+    );
+    let mut mi: MONITORINFO = zeroed();
+    mi.cbSize = size_of::<MONITORINFO>() as u32;
+    let work = if GetMonitorInfoW(mon, &mut mi) != FALSE {
+        mi.rcWork
+    } else {
+        RECT {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        }
+    };
+    let scale = get_dpi_scale(main_hwnd);
+    let s = |v: i32| ((v as f32) * scale).round() as i32;
+    let work_w = (work.right - work.left).max(640);
+    let work_h = (work.bottom - work.top).max(480);
+    let max_img_w = ((work_w as f32) * 0.68).round() as i32;
+    let max_img_h = ((work_h as f32) * 0.68).round() as i32;
+
+    let ratio = ((max_img_w as f32) / (orig_w as f32))
+        .min((max_img_h as f32) / (orig_h as f32))
+        .min(1.6)
+        .max(0.01);
+    let disp_w = ((orig_w as f32 * ratio).round() as u32).max(1);
+    let disp_h = ((orig_h as f32 * ratio).round() as u32).max(1);
+    let scaled_rgba = if disp_w != orig_w || disp_h != orig_h {
+        dyn_img
+            .resize_exact(disp_w, disp_h, FilterType::Triangle)
+            .to_rgba8()
+            .into_raw()
+    } else {
+        dyn_img.to_rgba8().into_raw()
+    };
+
+    let title = format!(
+        "{} · {} × {}",
+        item.custom_alias
+            .as_deref()
+            .filter(|t| !t.trim().is_empty())
+            .or(item.source_app_name.as_deref())
+            .unwrap_or("iClip 高清原图"),
+        orig_w,
+        orig_h
+    );
+
+    let min_w = s(360);
+    let max_w = (work_w - s(40)).max(min_w);
+    let min_h = s(260);
+    let max_h = (work_h - s(40)).max(min_h);
+    let win_w = (disp_w as i32 + s(36)).clamp(min_w, max_w);
+    let win_h = (disp_h as i32 + s(82)).clamp(min_h, max_h);
+    let win_x = work.left + (work_w - win_w) / 2;
+    let win_y = work.top + (work_h - win_h) / 2;
+
+    st.ql_stage_rgba = Some((disp_w, disp_h, scaled_rgba, title));
+    st.ql_stage_visible = true;
+
+    apply_dwm_glass_style(ql_h, st.is_dark_mode, 78);
+    apply_screen_capture_shield(main_hwnd, st.store.config.screen_share_privacy);
+    let _ = SetWindowPos(
+        ql_h,
+        HWND_TOPMOST,
+        win_x,
+        win_y,
+        win_w,
+        win_h,
+        SWP_NOACTIVATE_VAL | SWP_SHOWWINDOW,
+    );
+    let _ = InvalidateRect(ql_h, null(), FALSE);
+    true
+}
+
+unsafe fn handle_ql_stage_wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_MOUSEACTIVATE_MSG => MA_NOACTIVATE_RES,
+        WM_ERASEBKGND => 1,
+        WM_LBUTTONDOWN => {
+            APP_STATE.with(|c| {
+                if let Some(st) = c.borrow_mut().as_mut() {
+                    st.ql_stage_visible = false;
+                    st.ql_stage_rgba = None;
+                }
+            });
+            dismiss_large_ql_stage();
+            0
+        }
+        WM_PAINT => {
+            let mut ps: PAINTSTRUCT = zeroed();
+            let hdc = BeginPaint(hwnd, &mut ps);
+            let mut rc: RECT = zeroed();
+            GetClientRect(hwnd, &mut rc);
+            let w = (rc.right - rc.left).max(1);
+            let h = (rc.bottom - rc.top).max(1);
+            let scale = get_dpi_scale(hwnd);
+
+            let mem_dc = CreateCompatibleDC(hdc);
+            let mut bmi: BITMAPINFO = zeroed();
+            bmi.bmiHeader.biSize = size_of::<BITMAPINFOHEADER>() as u32;
+            bmi.bmiHeader.biWidth = w;
+            bmi.bmiHeader.biHeight = -h;
+            bmi.bmiHeader.biPlanes = 1;
+            bmi.bmiHeader.biBitCount = 32;
+            bmi.bmiHeader.biCompression = BI_RGB;
+
+            let mut bits_ptr: *mut core::ffi::c_void = null_mut();
+            let hbmp = CreateDIBSection(mem_dc, &bmi, DIB_RGB_COLORS, &mut bits_ptr, null_mut(), 0);
+            if !hbmp.is_null() && !bits_ptr.is_null() {
+                let old_bmp = SelectObject(mem_dc, hbmp);
+                let dib_slice =
+                    std::slice::from_raw_parts_mut(bits_ptr as *mut u32, (w * h) as usize);
+                APP_STATE.with(|cell| {
+                    if let Some(st) = cell.borrow_mut().as_mut() {
+                        let s = |v: i32| ((v as f32) * scale).round() as i32;
+                        let sf = |v: f32| v * scale;
+                        let palette = GlassPalette::for_macos_liquid_glass(st.is_dark_mode, 78);
+                        let mut canvas = PixelCanvas::new(dib_slice, w, h);
+                        canvas.clear(Color4::rgba(0, 0, 0, 0));
+                        canvas.fill_round_rect(
+                            0,
+                            0,
+                            w,
+                            h,
+                            sf(18.0),
+                            if st.is_dark_mode {
+                                Color4::rgba(18, 20, 27, 244)
+                            } else {
+                                Color4::rgba(250, 252, 255, 246)
+                            },
+                        );
+                        canvas.stroke_glass_bevel_round_rect(
+                            0,
+                            0,
+                            w,
+                            h,
+                            sf(18.0),
+                            sf(1.0),
+                            palette.glass_top_highlight,
+                            palette.group_stroke,
+                        );
+
+                        let mut texts = Vec::new();
+                        if let Some((iw, ih, ref rgba, ref title)) = st.ql_stage_rgba {
+                            texts.push(TextDrawCmd {
+                                text: title.clone(),
+                                rect: RECT {
+                                    left: s(18),
+                                    top: s(10),
+                                    right: w - s(48),
+                                    bottom: s(36),
+                                },
+                                color: palette.text_primary,
+                                font_kind: FontKind::CardTitle,
+                                flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                            });
+                            let c_sz = s(24);
+                            let cx = w - s(14) - c_sz;
+                            let cy = s(11);
+                            canvas.fill_circle(
+                                (cx + c_sz / 2) as f32,
+                                (cy + c_sz / 2) as f32,
+                                sf(12.0),
+                                palette.chip_bg,
+                            );
+                            canvas.draw_icon_close(
+                                (cx + c_sz / 2) as f32,
+                                (cy + c_sz / 2) as f32,
+                                sf(9.5),
+                                sf(1.5),
+                                palette.text_primary,
+                            );
+                            let avail_w = (w - s(36)).max(1);
+                            let avail_h = (h - s(76)).max(1);
+                            let fit_r = ((avail_w as f32) / (iw.max(1) as f32))
+                                .min((avail_h as f32) / (ih.max(1) as f32))
+                                .min(1.0);
+                            let draw_w = ((iw as f32 * fit_r).round() as i32).max(1);
+                            let draw_h = ((ih as f32 * fit_r).round() as i32).max(1);
+                            let draw_x = s(18) + (avail_w - draw_w) / 2;
+                            let draw_y = s(42) + (avail_h - draw_h) / 2;
+                            canvas.blit_rgba_round_rect(
+                                draw_x,
+                                draw_y,
+                                draw_w,
+                                draw_h,
+                                sf(12.0),
+                                rgba,
+                                iw,
+                                ih,
+                            );
+                            texts.push(TextDrawCmd {
+                                text: "Space / Esc / 单击关闭 · 方向键连续切图 · Enter 直接粘贴至原窗口".to_string(),
+                                rect: RECT {
+                                    left: s(16),
+                                    top: h - s(30),
+                                    right: w - s(16),
+                                    bottom: h - s(6),
+                                },
+                                color: palette.text_muted,
+                                font_kind: FontKind::Meta,
+                                flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                            });
+                        }
+                        composite_texts_premultiplied_alpha(mem_dc, &mut canvas, &texts, scale, None);
+                        let _ = GdiFlush();
+                    }
+                });
+                let _ = BitBlt(hdc, 0, 0, w, h, mem_dc, 0, 0, SRCCOPY);
+                SelectObject(mem_dc, old_bmp);
+                DeleteObject(hbmp);
+            }
+            DeleteDC(mem_dc);
+            EndPaint(hwnd, &ps);
+            0
+        }
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
 }

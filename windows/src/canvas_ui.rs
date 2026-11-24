@@ -669,6 +669,70 @@ impl<'a> PixelCanvas<'a> {
         }
     }
 
+    /// Apple TV 级反向流动视差镜面高光（根据鼠标在卡片内的归一化坐标 nx, ny ∈ [-1, 1] 绘制柔焦光泽）
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_apple_tv_glare_round_rect(
+        &mut self,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        radius: f32,
+        nx: f32,
+        ny: f32,
+        peak_alpha: u8,
+    ) {
+        if w <= 0 || h <= 0 || peak_alpha == 0 {
+            return;
+        }
+        let r = radius.clamp(0.0, (w.min(h) as f32) * 0.5);
+        let x0 = x.max(0);
+        let y0 = y.max(0);
+        let x1 = (x + w).min(self.width);
+        let y1 = (y + h).min(self.height);
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+        let cx = (x as f32) + (w as f32) * 0.5;
+        let cy = (y as f32) + (h as f32) * 0.5;
+        let hx = (w as f32) * 0.5 - r;
+        let hy = (h as f32) * 0.5 - r;
+        let gx = (x as f32) + (w as f32) * (0.5 - nx.clamp(-1.0, 1.0) * 0.34);
+        let gy = (y as f32) + (h as f32) * (0.5 - ny.clamp(-1.0, 1.0) * 0.34);
+        let glare_rad = ((w.max(h) as f32) * 0.78).max(1.0);
+        let inv_rad_sq = 1.0 / (glare_rad * glare_rad);
+        let bx0 = x0.max((gx - glare_rad).floor() as i32);
+        let by0 = y0.max((gy - glare_rad).floor() as i32);
+        let bx1 = x1.min((gx + glare_rad).ceil() as i32);
+        let by1 = y1.min((gy + glare_rad).ceil() as i32);
+        if bx0 >= bx1 || by0 >= by1 {
+            return;
+        }
+
+        for py in by0..by1 {
+            let pyf = py as f32 + 0.5;
+            let dy = (pyf - cy).abs() - hy;
+            let gdy_sq = (pyf - gy) * (pyf - gy);
+            for px in bx0..bx1 {
+                let pxf = px as f32 + 0.5;
+                let dx = (pxf - cx).abs() - hx;
+                let dist = squircle_corner_dist(dx, dy, r);
+                let cov = (0.5 - dist).clamp(0.0, 1.0);
+                if cov > 0.0 {
+                    let gdx = pxf - gx;
+                    let norm_d2 = (gdx * gdx + gdy_sq) * inv_rad_sq;
+                    if norm_d2 < 1.0 {
+                        let falloff = (1.0 - norm_d2) * (1.0 - norm_d2);
+                        let a = ((peak_alpha as f32) * falloff).round() as u8;
+                        if a > 0 {
+                            self.blend_pixel(px, py, Color4::rgba(255, 255, 255, a), cov);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// 顶亮底暗 1px 液态玻璃折射镜面高光描边（避免死板四面等亮灰线框，塑造真实玻璃厚度）
     #[allow(clippy::too_many_arguments)]
     pub fn stroke_glass_bevel_round_rect(

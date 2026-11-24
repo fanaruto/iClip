@@ -1754,6 +1754,8 @@ pub struct ExternalImportCandidate {
     pub text: String,
     pub alias: Option<String>,
     pub source_label: String,
+    pub is_pinned_hint: bool,
+    pub category_hint: Option<String>,
 }
 
 const MAX_EXTERNAL_IMPORT_BYTES: usize = 32 * 1024 * 1024;
@@ -1819,6 +1821,20 @@ pub fn parse_external_competitor_data(
     if let Ok(raw_str) = std::str::from_utf8(data) {
         let trimmed = raw_str.trim();
         if !trimmed.is_empty() && !trimmed.starts_with('{') && !trimmed.starts_with('[') {
+            if ext == "xml"
+                || ext == "clipy"
+                || ext == "dto"
+                || trimmed.starts_with("<?xml")
+                || trimmed.starts_with("<folders")
+                || trimmed.starts_with("<Ditto_Clips")
+            {
+                if let Some((entries, fmt)) = parse_xml_competitor_snippets(trimmed) {
+                    let cleaned = sanitize_external_candidates(entries);
+                    if !cleaned.is_empty() {
+                        return Some((cleaned, fmt));
+                    }
+                }
+            }
             if ext == "md" || ext == "markdown" || looks_like_markdown_snippet_note(trimmed) {
                 if let Some((entries, fmt)) = parse_markdown_snippets(trimmed) {
                     let cleaned = sanitize_external_candidates(entries);
@@ -1960,6 +1976,8 @@ fn parse_markdown_snippets(input: &str) -> Option<(Vec<ExternalImportCandidate>,
             text: final_body.to_string(),
             alias,
             source_label: "Markdown 常用语笔记".to_string(),
+            is_pinned_hint: true,
+            category_hint: None,
         });
     }
     if out.is_empty() {
@@ -2071,6 +2089,8 @@ fn parse_json_competitor_payload(root: &Value) -> Option<(Vec<ExternalImportCand
                     text: t.to_string(),
                     alias: None,
                     source_label: "JSON 列表导入".to_string(),
+                    is_pinned_hint: true,
+                    category_hint: None,
                 });
             }
             continue;
@@ -2116,10 +2136,47 @@ fn parse_json_competitor_payload(root: &Value) -> Option<(Vec<ExternalImportCand
             .unwrap_or(&format_name)
             .to_string();
 
+        let category_hint = [
+            "folder",
+            "collection",
+            "category",
+            "group",
+            "tag",
+            "pinboard",
+            "list",
+        ]
+        .iter()
+        .find_map(|k| obj.get(*k).and_then(|v| v.as_str()))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+        let is_pinned_hint = if let Some(b) = ["pinned", "isPinned", "starred", "isFavorite"]
+            .iter()
+            .find_map(|k| obj.get(*k).and_then(|v| v.as_bool()))
+        {
+            b
+        } else if let Some(pin_val) = obj.get("pin") {
+            if pin_val.is_null() {
+                false
+            } else if let Some(ps) = pin_val.as_str() {
+                !ps.trim().is_empty()
+            } else {
+                false
+            }
+        } else {
+            obj.get("snippet").is_some()
+                || obj.get("keyword").is_some()
+                || obj.get("abbreviation").is_some()
+                || category_hint.is_some()
+        };
+
         out.push(ExternalImportCandidate {
             text: clean_text.to_string(),
             alias: raw_alias,
             source_label,
+            is_pinned_hint,
+            category_hint,
         });
     }
 
@@ -2128,6 +2185,165 @@ fn parse_json_competitor_payload(root: &Value) -> Option<(Vec<ExternalImportCand
     } else {
         Some((out, format_name))
     }
+}
+
+fn parse_xml_competitor_snippets(xml: &str) -> Option<(Vec<ExternalImportCandidate>, String)> {
+    fn unescape_xml(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let bytes = s.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'&' && i + 3 < bytes.len() && bytes[i + 1] == b'#' {
+                if let Some(semi_rel) = s[i + 2..].find(';') {
+                    let token = &s[i + 2..i + 2 + semi_rel];
+                    let code = if let Some(hex_s) = token.strip_prefix('x').or_else(|| token.strip_prefix('X')) {
+                        u32::from_str_radix(hex_s, 16).ok()
+                    } else {
+                        token.parse::<u32>().ok()
+                    };
+                    if let Some(c) = code.filter(|&v| v > 0).and_then(char::from_u32) {
+                        out.push(c);
+                        i += 2 + semi_rel + 1;
+                        continue;
+                    }
+                }
+            }
+            let ch = s[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+        out.replace("\r\n", "\n")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&apos;", "'")
+            .replace("&amp;", "&")
+    }
+    fn extract_tag(block: &str, tag: &str) -> Option<String> {
+        let open_pat = format!("<{tag}>");
+        let close_pat = format!("</{tag}>");
+        let lower = block.to_ascii_lowercase();
+        let open_pos = lower.find(&open_pat.to_ascii_lowercase())?;
+        let start = open_pos + open_pat.len();
+        let close_rel = lower[start..].find(&close_pat.to_ascii_lowercase())?;
+        let inner = &block[start..start + close_rel];
+        if inner.starts_with("<![CDATA[") && inner.ends_with("]]>") && inner.len() >= 12 {
+            Some(inner[9..inner.len() - 3].to_string())
+        } else {
+            Some(unescape_xml(inner))
+        }
+    }
+
+    let mut out = Vec::new();
+    let lower_xml = xml.to_ascii_lowercase();
+    if lower_xml.contains("<snippet>") {
+        for fb in xml.split("<folder>") {
+            let folder_title = extract_tag(fb, "title")
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            for sp in fb.split("<snippet>").skip(1) {
+                if let Some(content) = extract_tag(sp, "content") {
+                    if !content.trim().is_empty() {
+                        let title = extract_tag(sp, "title")
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty() && s != content.trim());
+                        out.push(ExternalImportCandidate {
+                            text: content,
+                            alias: title,
+                            source_label: "Clipy 常用语".to_string(),
+                            is_pinned_hint: true,
+                            category_hint: folder_title.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        if !out.is_empty() {
+            return Some((out, "Clipy 常用语库".to_string()));
+        }
+    }
+
+    if lower_xml.contains("<clip") {
+        for raw_clip in xml.split("<Clip").skip(1) {
+            let Some(gt) = raw_clip.find('>') else {
+                continue;
+            };
+            let body = &raw_clip[gt + 1..];
+            let text = extract_tag(body, "AsciiText")
+                .or_else(|| extract_tag(body, "Text"))
+                .or_else(|| extract_tag(body, "m_strText"));
+            if let Some(t) = text.filter(|s| !s.trim().is_empty()) {
+                let desc = extract_tag(body, "Description")
+                    .map(|s| s.trim().chars().take(80).collect::<String>())
+                    .filter(|s| !s.is_empty() && s != t.trim());
+                let group = extract_tag(body, "ParentGroup")
+                    .or_else(|| extract_tag(body, "Group"))
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+                let is_pin = group.is_some();
+                out.push(ExternalImportCandidate {
+                    text: t,
+                    alias: desc,
+                    source_label: "Ditto 剪贴板".to_string(),
+                    is_pinned_hint: is_pin,
+                    category_hint: group,
+                });
+            }
+        }
+        if !out.is_empty() {
+            return Some((out, "Ditto 剪贴板记录".to_string()));
+        }
+    }
+
+    None
+}
+
+/// 判断剪贴板中的单文件路径是否来自聊天/协作软件（微信/飞书/企微/QQ/钉钉）或非资源管理器复制的图片文件
+pub fn should_promote_single_clipboard_file_to_image(
+    path: &str,
+    source_app: Option<&str>,
+    has_bitmap_on_clipboard: bool,
+) -> bool {
+    if path.trim().is_empty() {
+        return false;
+    }
+    let lower_app = source_app.unwrap_or("").to_ascii_lowercase();
+    if lower_app == "explorer" || lower_app == "explorer.exe" || lower_app.contains("文件资源管理器") {
+        return false;
+    }
+    let lower_path = path.to_ascii_lowercase();
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if matches!(
+        ext.as_str(),
+        "pdf" | "zip" | "rar" | "7z" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "mp4" | "mov" | "exe" | "msi"
+    ) {
+        return false;
+    }
+    let is_feishu_path = lower_path.contains("\\lark\\")
+        || lower_path.contains("/lark/")
+        || lower_path.contains("feishu")
+        || lower_path.contains("bytedance");
+    if lower_path.contains("wechat files")
+        || lower_path.contains("xwechat_files")
+        || is_feishu_path
+        || lower_path.contains("wxwork")
+        || lower_path.contains("tencent files")
+        || lower_path.contains("dingtalk")
+        || lower_path.contains("imagetemp")
+    {
+        return true;
+    }
+    if matches!(
+        ext.as_str(),
+        "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "tif" | "tiff" | "pic" | "image"
+    ) {
+        return true;
+    }
+    ext.is_empty() && has_bitmap_on_clipboard
 }
 
 fn parse_delimited_rows(input: &str, delimiter: char) -> Vec<Vec<String>> {
@@ -2234,12 +2450,16 @@ fn candidates_from_table_rows(rows: &[Vec<String>]) -> Vec<ExternalImportCandida
                     text: c1.to_string(),
                     alias,
                     source_label: "表格迁入".to_string(),
+                    is_pinned_hint: true,
+                    category_hint: None,
                 });
             } else if !c0.is_empty() {
                 out.push(ExternalImportCandidate {
                     text: c0.to_string(),
                     alias: None,
                     source_label: "表格迁入".to_string(),
+                    is_pinned_hint: true,
+                    category_hint: None,
                 });
             }
         } else if let Some(only) = row.first().map(|s| s.trim()).filter(|s| !s.is_empty()) {
@@ -2247,6 +2467,8 @@ fn candidates_from_table_rows(rows: &[Vec<String>]) -> Vec<ExternalImportCandida
                 text: only.to_string(),
                 alias: None,
                 source_label: "列表迁入".to_string(),
+                is_pinned_hint: true,
+                category_hint: None,
             });
         }
     }

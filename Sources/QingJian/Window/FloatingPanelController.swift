@@ -2,6 +2,7 @@ import AppKit
 import Carbon.HIToolbox
 import SwiftUI
 import Combine
+import Quartz
 
 /// iClip 合成键盘事件专属标记魔数（"ICLP"），确保面板悬停时合成 ⌘V / ⌘C / Tab 零阻断穿透至宿主输入框
 let iClipSyntheticEventMagic: Int64 = 0x4943_4C50
@@ -13,6 +14,18 @@ final class KeyableFloatingPanel: NSPanel {
     override var becomesKeyOnlyIfNeeded: Bool {
         get { true }
         set {}
+    }
+
+    override func acceptsPreviewPanelControl(_ panel: QLPreviewPanel!) -> Bool {
+        true
+    }
+
+    override func beginPreviewPanelControl(_ panel: QLPreviewPanel!) {
+        SystemQuickLookController.shared.attachControl(to: panel)
+    }
+
+    override func endPreviewPanelControl(_ panel: QLPreviewPanel!) {
+        SystemQuickLookController.shared.detachControl(from: panel)
     }
 }
 
@@ -403,7 +416,9 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             .receive(on: RunLoop.main)
             .sink { [weak self] shielded in
                 guard let self, !ProcessInfo.processInfo.arguments.contains("--demo") else { return }
-                self.panel?.sharingType = shielded ? .none : .readOnly
+                let targetSharing: NSWindow.SharingType = shielded ? .none : .readOnly
+                self.panel?.sharingType = targetSharing
+                SystemQuickLookController.shared.syncSharingType(targetSharing)
             }
             .store(in: &cancellables)
 
@@ -447,6 +462,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         nav.isQuickLookEditing = false
         nav.quickLookDraftText = ""
         nav.selectedIndex = 0
+        SystemQuickLookController.shared.dismiss()
         if panel?.isVisible == true {
             nav.isPresented = false
             panel?.makeFirstResponder(nil)
@@ -476,12 +492,18 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         surfaceHost.updateLiquidGlass(appearance: appearance, maskOpacity: maskOpacity)
     }
 
-    /// 切换显隐状态
-    func toggle(anchorRect: NSRect? = nil) {
+    /// 切换显隐状态（仅当真正按下全局快捷键时才触发新手引导试按推进，点击菜单栏图标不误触发）
+    func toggle(anchorRect: NSRect? = nil, isFromGlobalHotKey: Bool = false) {
         if isVisible {
+            if isFromGlobalHotKey && InteractivePlaygroundController.shared.consumeHotKeyTrialIfNeeded() {
+                return
+            }
             hide(restoreFocus: true)
         } else {
             show(anchorRect: anchorRect)
+            if isFromGlobalHotKey {
+                _ = InteractivePlaygroundController.shared.consumeHotKeyTrialIfNeeded()
+            }
         }
     }
 
@@ -588,6 +610,8 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         hideWorkItem?.cancel()
 
         nav.isPresented = false
+        SystemQuickLookController.shared.dismiss()
+        NotificationCenter.default.post(name: .iClipPanelDidHide, object: nil)
         store.onPanelHidden()
         panel.makeFirstResponder(nil)
 
@@ -677,6 +701,9 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     }
 
     func windowDidResignKey(_ notification: Notification) {
+        if SystemQuickLookController.shared.isVisible {
+            return
+        }
         if store.alwaysOnTop || nav.suppressAutoHide || nav.isRecordingHotKey {
             return
         }
@@ -706,6 +733,10 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
                 if self.store.alwaysOnTop || self.nav.suppressAutoHide || self.nav.isRecordingHotKey {
                     return
                 }
+                if let qlFrame = SystemQuickLookController.shared.visiblePanelScreenFrame,
+                   qlFrame.insetBy(dx: -10, dy: -10).contains(mouseLoc) {
+                    return
+                }
                 if let statusRect = self.statusItemScreenRectProvider?(),
                    statusRect.insetBy(dx: -4, dy: -4).contains(mouseLoc) {
                     return
@@ -725,6 +756,10 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         if nav.isRecordingHotKey {
             _ = handleHotKeyRecording(event)
             return true
+        }
+        if event.type == .flagsChanged {
+            InteractivePlaygroundController.shared.updateModifierFlags(event.modifierFlags)
+            return false
         }
         guard event.type == .keyDown else { return false }
         if handleKeyDown(event) == nil {
@@ -840,6 +875,63 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             return nil
         }
 
+        // 系统官方大屏 QLPreviewPanel 激活态：优先接管 Space/ESC/⌘Y 关闭、方向键切图与 ↵ 原位直贴
+        if SystemQuickLookController.shared.isVisible {
+            if event.keyCode == 53
+                || (flags.isEmpty && event.keyCode == 49)
+                || (flags == .command && (event.keyCode == 16 || event.keyCode == 13)) {
+                SystemQuickLookController.shared.dismiss()
+                return nil
+            }
+            if flags == .command, event.keyCode == 8, !editorHasSelectedText {
+                _ = rootView.copySelectedOnly(plainPathOrText: false)
+                return nil
+            }
+            if flags == .command, event.keyCode == 31 {
+                _ = rootView.openSelectedExternally()
+                return nil
+            }
+            if flags.isEmpty, [123, 124, 125, 126].contains(event.keyCode) {
+                let dir: PanelNavigationDirection
+                switch event.keyCode {
+                case 126: dir = .up
+                case 125: dir = .down
+                case 123: dir = .left
+                default:  dir = .right
+                }
+                rootView.moveSelection(direction: dir)
+                let visible = nav.cachedFilteredItems
+                if nav.selectedIndex >= 0, nav.selectedIndex < visible.count {
+                    let nextItem = visible[nav.selectedIndex]
+                    if SystemQuickLookController.supportsNativeLargePreview(nextItem) {
+                        _ = SystemQuickLookController.shared.presentOrUpdate(for: nextItem, in: store, hostWindow: panel)
+                    } else {
+                        SystemQuickLookController.shared.dismiss()
+                        if !store.minimalModeEnabled {
+                            nav.quickLookPreferDiff = false
+                            withAnimation(.spring(response: 0.24, dampingFraction: 0.88)) {
+                                nav.showQuickLook = true
+                            }
+                        }
+                    }
+                }
+                return nil
+            }
+            if event.keyCode == 36 || event.keyCode == 76 {
+                SystemQuickLookController.shared.dismiss()
+                if flags.contains(.option) {
+                    rootView.pasteSelected(forceRawSecret: true)
+                } else {
+                    rootView.pasteSelected()
+                }
+                return nil
+            }
+            if flags.contains(.command) || flags.contains(.control) {
+                return event
+            }
+            return nil
+        }
+
         // QuickLook 原位微调编辑态：放行全部原生文本编辑键，支持 ESC 退出、⌘↵ 直贴、⌘S 存回原条目
         if nav.showQuickLook && nav.isQuickLookEditing {
             if event.keyCode == 53 {
@@ -930,17 +1022,42 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             return nil
         }
 
-        // ⌘Y (keyCode 16) 随时切换 QuickLook 对照速览；搜索框为空时按 Space (keyCode 49) 同样触发 QuickLook
-        if !store.minimalModeEnabled && ((flags == .command && event.keyCode == 16) ||
-           (flags.isEmpty && event.keyCode == 49 && nav.searchText.isEmpty)) {
+        // ⌘Y (keyCode 16) 或搜索框为空时按 Space (keyCode 49)：图片/文件唤起系统官方大屏 QLPreviewPanel，文本/链接唤起语义速览与编辑舱
+        if (flags == .command && event.keyCode == 16) ||
+           (flags.isEmpty && event.keyCode == 49 && nav.searchText.isEmpty) {
             if let fieldEditor = panel.firstResponder as? NSTextView, fieldEditor.hasMarkedText() {
                 return event
             }
-            nav.quickLookPreferDiff = false
-            withAnimation(.spring(response: 0.24, dampingFraction: 0.88)) {
-                nav.showQuickLook = true
+            if SystemQuickLookController.shared.isVisible {
+                SystemQuickLookController.shared.dismiss()
+                return nil
             }
-            return nil
+            let visible = nav.cachedFilteredItems
+            if nav.selectedIndex >= 0, nav.selectedIndex < visible.count {
+                let target = visible[nav.selectedIndex]
+                if SystemQuickLookController.supportsNativeLargePreview(target) {
+                    SystemQuickLookController.shared.onStepSelection = { [weak self] dir in
+                        guard let self else { return nil }
+                        self.rootView.moveSelection(direction: dir)
+                        let items = self.nav.cachedFilteredItems
+                        guard self.nav.selectedIndex >= 0, self.nav.selectedIndex < items.count else { return nil }
+                        return items[self.nav.selectedIndex]
+                    }
+                    SystemQuickLookController.shared.onCommitPasteFromPreview = { [weak self] in
+                        self?.rootView.pasteSelected()
+                    }
+                    if SystemQuickLookController.shared.presentOrToggle(for: target, in: store, hostWindow: panel) {
+                        return nil
+                    }
+                }
+            }
+            if !store.minimalModeEnabled {
+                nav.quickLookPreferDiff = false
+                withAnimation(.spring(response: 0.24, dampingFraction: 0.88)) {
+                    nav.showQuickLook = true
+                }
+                return nil
+            }
         }
 
         // ⌘R (keyCode 15)：对当前选中条目设置/修改记忆备注标题
