@@ -317,11 +317,6 @@ struct ClipboardPopoverView: View {
             appearance: store.liquidGlassAppearance
         )
     }
-    @State private var previewItem: ClipItem? = nil
-    @State private var previewTileRect: CGRect = .zero
-    @State private var isPreviewVisible: Bool = false
-    @State private var hoveredTileItemID: UUID? = nil
-    @State private var previewHideWorkItem: DispatchWorkItem? = nil
     @State private var templateDraftText: String = "请帮我审查以下代码并指出潜在问题：\n\n{{clip_redacted}}"
     @State private var aliasEditingItem: ClipItem? = nil
     @State private var aliasDraftText: String = ""
@@ -442,15 +437,6 @@ struct ClipboardPopoverView: View {
                     .allowsHitTesting(false)
             }
         }
-        // 纯净原图放大预览浮层
-        .overlay {
-            ImageHoverPreviewLayer(
-                item: previewItem,
-                tileRect: previewTileRect,
-                isVisible: isPreviewVisible,
-                panelSize: CGSize(width: 420, height: 560)
-            )
-        }
         // 外部内容拖放复制高亮反馈浮层
         .overlay {
             if nav.isDragTargeted {
@@ -544,7 +530,6 @@ struct ClipboardPopoverView: View {
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
-        .coordinateSpace(name: "panelRoot")
         .animation(.spring(response: 0.28, dampingFraction: 0.86), value: nav.showSettings)
         .animation(.spring(response: 0.25, dampingFraction: 0.85), value: store.toastMessage)
         .onChange(of: nav.isPresented) { _, presented in
@@ -553,12 +538,10 @@ struct ClipboardPopoverView: View {
                 store.onPanelShown(visibleItems: filteredItems)
             } else {
                 aliasEditingItem = nil
-                dismissImagePreview(clearItem: true)
                 store.onPanelHidden()
             }
         }
         .onChange(of: nav.focusTrigger) { _, _ in
-            dismissImagePreview(clearItem: true)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                 isSearchFocused = true
             }
@@ -569,28 +552,22 @@ struct ClipboardPopoverView: View {
         .onChange(of: nav.searchText) { _, _ in
             nav.selectedIndex = 0
             nav.lockPointerAtCurrentMouse()
-            dismissImagePreview(clearItem: true)
         }
         .onChange(of: nav.selectedTab) { _, _ in
             TactileFeedbackEngine.shared.perform(.tabSwitch)
             nav.selectedIndex = 0
             nav.lockPointerAtCurrentMouse()
-            dismissImagePreview(clearItem: true)
         }
         .onChange(of: nav.demoPreviewIndex) { _, targetIdx in
             if let idx = targetIdx, idx >= 0, idx < filteredItems.count {
                 let item = filteredItems[idx]
                 nav.selectedIndex = idx
-                // 估算第 1 行 3 列图片格在面板内的真实位置触发原生纯净原图放大浮层
-                let col = max(0, min(2, idx - 1))
-                let tileRect = CGRect(x: 14 + CGFloat(col) * 134, y: 196, width: 124, height: 98)
-                handleImageHover(item: item, hovering: true, tileRect: tileRect)
+                triggerSmartQuickLook(for: item)
             } else {
-                dismissImagePreview(clearItem: true)
+                SystemQuickLookController.shared.dismiss()
             }
         }
         .onChange(of: nav.showSettings) { _, showing in
-            dismissImagePreview(clearItem: true)
             if showing {
                 store.refreshAccessibilityStatus()
                 store.pruneUnavailableIgnoredApps()
@@ -1480,9 +1457,6 @@ struct ClipboardPopoverView: View {
                                             nav.selectedIndex = index
                                             triggerSmartQuickLook(for: item)
                                         },
-                                        onImageThumbnailHover: { hovering, rect in
-                                            handleImageHover(item: item, hovering: hovering, tileRect: rect)
-                                        },
                                         onDelete: {
                                             withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
                                                 store.delete(item)
@@ -1510,7 +1484,6 @@ struct ClipboardPopoverView: View {
                                                     nav.selectByHover(entry.index)
                                                 },
                                                 onPaste: {
-                                                    dismissImagePreview(clearItem: true)
                                                     store.copyAndOptionallyPaste(
                                                         entry.item,
                                                         plainTextOnly: false,
@@ -1527,7 +1500,6 @@ struct ClipboardPopoverView: View {
                                                     )
                                                 },
                                                 onExtractOCR: { autoPaste in
-                                                    dismissImagePreview(clearItem: true)
                                                     store.pasteExtractedOCRText(
                                                         for: entry.item,
                                                         shouldAutoPaste: autoPaste,
@@ -1554,21 +1526,14 @@ struct ClipboardPopoverView: View {
                                                     beginAliasEdit(for: entry.item)
                                                 },
                                                 onOpenQuickLook: {
-                                                    dismissImagePreview(clearItem: true)
                                                     nav.selectedIndex = entry.index
                                                     triggerSmartQuickLook(for: entry.item)
                                                 },
                                                 onDelete: {
-                                                    if previewItem?.id == entry.item.id {
-                                                        dismissImagePreview(clearItem: true)
-                                                    }
                                                     withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
                                                         store.delete(entry.item)
                                                         clampSelection()
                                                     }
-                                                },
-                                                onHoverChange: { hovering, tileRect in
-                                                    handleImageHover(item: entry.item, hovering: hovering, tileRect: tileRect)
                                                 }
                                             )
                                             .cascadeAppear(
@@ -1579,6 +1544,7 @@ struct ClipboardPopoverView: View {
                                         }
                                     }
                                     .padding(.vertical, 2)
+                                    .zIndex(entries.contains { $0.index == nav.selectedIndex } ? 30 : 0)
 
                                 case .todoCompletedHeader(let count):
                                     todoCompletedSectionHeader(count: count)
@@ -2343,77 +2309,6 @@ struct ClipboardPopoverView: View {
         )
     }
 
-    // MARK: - 图片悬停纯净原图预览控制
-
-    private func handleImageHover(item: ClipItem, hovering: Bool, tileRect: CGRect) {
-        if hovering {
-            previewHideWorkItem?.cancel()
-            previewHideWorkItem = nil
-            hoveredTileItemID = item.id
-
-            let wasVisible = isPreviewVisible
-            let isSameItem = previewItem?.id == item.id
-
-            if !wasVisible {
-                var transaction = Transaction()
-                transaction.disablesAnimations = true
-                withTransaction(transaction) {
-                    previewItem = item
-                    previewTileRect = tileRect
-                }
-                let targetID = item.id
-                // 下一帧再触发绽放动画，确保首次悬停也能完整演绎从缩略图边缘生长的弹簧动效
-                DispatchQueue.main.async {
-                    guard hoveredTileItemID == targetID else { return }
-                    withAnimation(.spring(response: 0.28, dampingFraction: 0.86, blendDuration: 0.08)) {
-                        isPreviewVisible = true
-                    }
-                }
-            } else if isSameItem {
-                // 列表滚动时实时贴合当前缩略图位置，不滞后
-                previewTileRect = tileRect
-            } else {
-                // 跨图片网格滑动时连续平移与形变，无闪退重绘
-                withAnimation(.spring(response: 0.28, dampingFraction: 0.88, blendDuration: 0.1)) {
-                    previewItem = item
-                    previewTileRect = tileRect
-                }
-            }
-        } else if hoveredTileItemID == item.id || previewItem?.id == item.id {
-            if hoveredTileItemID == item.id {
-                hoveredTileItemID = nil
-            }
-            previewHideWorkItem?.cancel()
-            let itemID = item.id
-            let work = DispatchWorkItem {
-                guard hoveredTileItemID == nil, previewItem?.id == itemID else { return }
-                withAnimation(.spring(response: 0.2, dampingFraction: 0.94)) {
-                    isPreviewVisible = false
-                }
-            }
-            previewHideWorkItem = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.07, execute: work)
-        }
-    }
-
-    private func dismissImagePreview(clearItem: Bool) {
-        previewHideWorkItem?.cancel()
-        previewHideWorkItem = nil
-        hoveredTileItemID = nil
-        if clearItem {
-            var transaction = Transaction()
-            transaction.disablesAnimations = true
-            withTransaction(transaction) {
-                isPreviewVisible = false
-                previewItem = nil
-            }
-        } else {
-            withAnimation(.spring(response: 0.18, dampingFraction: 0.94)) {
-                isPreviewVisible = false
-            }
-        }
-    }
-
     // MARK: - 键盘控制辅助
 
     var canMoveHorizontallyInGrid: Bool {
@@ -2438,7 +2333,6 @@ struct ClipboardPopoverView: View {
             nav.scrollRequestEpoch &+= 1
             return
         }
-        dismissImagePreview(clearItem: true)
         if nav.showQuickLook {
             nav.isQuickLookEditing = false
             nav.showQuickLook = false
@@ -2452,7 +2346,6 @@ struct ClipboardPopoverView: View {
     func moveSelection(direction: PanelNavigationDirection) {
         let count = filteredItems.count
         guard count > 0 else { return }
-        dismissImagePreview(clearItem: false)
         let result = GridNavigationHelper.nextIndex(
             from: nav.selectedIndex,
             direction: direction,
@@ -2710,7 +2603,6 @@ struct ClipboardPopoverView: View {
         guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return }
         let item = filteredItems[nav.selectedIndex]
         if !store.minimalModeEnabled && item.type == .image {
-            dismissImagePreview(clearItem: true)
             store.pasteExtractedOCRText(for: item, shouldAutoPaste: true, onBeforePaste: onDismiss)
             return
         }
@@ -2909,7 +2801,7 @@ struct ClipboardPopoverView: View {
             SystemQuickLookController.shared.onCommitPasteFromPreview = {
                 self.pasteSelected()
             }
-            if SystemQuickLookController.shared.presentOrToggle(for: item, in: store, hostWindow: host) {
+            if SystemQuickLookController.shared.presentOrUpdate(for: item, in: store, hostWindow: host) {
                 return
             }
         }

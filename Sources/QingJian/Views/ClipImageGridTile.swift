@@ -1,12 +1,7 @@
 import SwiftUI
 import AppKit
 
-/// 非状态矩形容器：记录当前图片格坐标，滚动时绝不触发 SwiftUI @State 重绘
-private final class TileFrameBox {
-    var rect: CGRect = .zero
-}
-
-/// iOS 相册风格的图片网格卡片（3 列一行排列，悬停克制微抬并弹出纯净原图预览）
+/// iOS 相册风格的图片网格卡片（3 列一行排列，Apple TV 3D 视差卡片质感；空格或二段 Force Touch 触发系统官方大屏预览）
 struct ClipImageGridTile: View {
     let item: ClipItem
     let index: Int
@@ -22,17 +17,20 @@ struct ClipImageGridTile: View {
     var onEditAlias: (() -> Void)? = nil
     var onOpenQuickLook: (() -> Void)? = nil
     let onDelete: () -> Void
-    let onHoverChange: (Bool, CGRect) -> Void
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isHovered: Bool = false
+    @State private var hoverNorm: CGPoint = .zero
+    @State private var tileSize: CGSize = CGSize(width: 124, height: 98)
     @State private var asyncThumbnail: NSImage? = nil
-    @State private var frameBox = TileFrameBox()
     @State private var lastTapUptime: TimeInterval = 0
     @State private var showCopiedInlineFlash: Bool = false
 
     var body: some View {
+        let pnx = (isHovered && !reduceMotion) ? hoverNorm.x : 0
+        let pny = (isHovered && !reduceMotion) ? hoverNorm.y : 0
         ZStack(alignment: .bottom) {
-            // 缩略图主体（纯内存零 I/O 读取 + 后台异步解码，滚动满帧不卡顿）
+            // 缩略图主体（Apple TV 底层视差微放大 + 光标反向纵深位移，零 I/O 缓存读取）
             Color.clear
                 .overlay {
                     if let nsImage = ClipboardStore.shared.cachedThumbnail(for: item) ?? asyncThumbnail {
@@ -41,6 +39,8 @@ struct ClipImageGridTile: View {
                             .resizable()
                             .interpolation(.high)
                             .scaledToFill()
+                            .scaleEffect(isHovered && !reduceMotion ? 1.07 : 1.0)
+                            .offset(x: -pnx * 3.0, y: -pny * 2.8)
                             .blur(radius: veilImg ? 11 : 0)
                             .overlay {
                                 if veilImg {
@@ -125,6 +125,7 @@ struct ClipImageGridTile: View {
             .foregroundStyle(Color.white.opacity(0.92))
             .padding(.horizontal, 7)
             .padding(.bottom, 5)
+            .offset(x: pnx * 2.2, y: pny * 2.2)
             .allowsHitTesting(false)
         }
         .frame(height: 98)
@@ -228,19 +229,13 @@ struct ClipImageGridTile: View {
                     )
             }
         }
-        .shadow(
-            color: isSelected
-                ? Color(nsColor: .controlAccentColor).opacity(0.42)
-                : Color.black.opacity(isHovered ? 0.22 : 0.05),
-            radius: isSelected ? 8 : (isHovered ? 11 : 4),
-            y: isHovered ? 5 : 2
-        )
         .modifier(
             AppleTVPhysicalCardModifier(
                 itemID: item.id,
                 surfaceKind: .imageTile,
                 isHovered: isHovered,
                 isSelected: isSelected,
+                pointerNorm: hoverNorm,
                 trailingActionWidth: {
                     var cnt = 2
                     if !ClipboardStore.shared.minimalModeEnabled {
@@ -253,7 +248,7 @@ struct ClipImageGridTile: View {
                 onResetHoverFromHide: {
                     if isHovered {
                         isHovered = false
-                        onHoverChange(false, frameBox.rect)
+                        hoverNorm = .zero
                     }
                 },
                 onDeepPressPreview: {
@@ -267,22 +262,18 @@ struct ClipImageGridTile: View {
         .contentShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
         .background {
             GeometryReader { geo in
-                let frame = geo.frame(in: .named("panelRoot"))
                 Color.clear
                     .onAppear {
-                        frameBox.rect = frame
+                        tileSize = geo.size
                     }
-                    .onChange(of: frame) { _, newFrame in
-                        frameBox.rect = newFrame
-                        if isHovered {
-                            onHoverChange(true, newFrame)
-                        }
+                    .onChange(of: geo.size) { _, newSize in
+                        tileSize = newSize
                     }
             }
         }
-        .onContinuousHover { phase in
+        .onContinuousHover(coordinateSpace: .local) { phase in
             switch phase {
-            case .active:
+            case .active(let loc):
                 let allowed: Bool
                 if let onHoverSelect {
                     allowed = onHoverSelect()
@@ -290,14 +281,24 @@ struct ClipImageGridTile: View {
                     onSelect()
                     allowed = true
                 }
-                if allowed && !isHovered {
-                    isHovered = true
-                    onHoverChange(true, frameBox.rect)
+                if allowed {
+                    if !isHovered {
+                        isHovered = true
+                    }
+                    let w = max(1, tileSize.width)
+                    let h = max(1, tileSize.height)
+                    let nx = max(-1, min(1, ((loc.x / w) - 0.5) * 2.0))
+                    let ny = max(-1, min(1, ((loc.y / h) - 0.5) * 2.0))
+                    if abs(nx - hoverNorm.x) >= 0.03 || abs(ny - hoverNorm.y) >= 0.03 {
+                        hoverNorm = CGPoint(x: nx, y: ny)
+                    }
                 }
             case .ended:
                 if isHovered {
                     isHovered = false
-                    onHoverChange(false, frameBox.rect)
+                }
+                if hoverNorm != .zero {
+                    hoverNorm = .zero
                 }
             }
         }
@@ -401,151 +402,6 @@ struct ClipImageGridTile: View {
                 onDelete()
             }
         }
-        .zIndex(isHovered ? 20 : (isSelected ? 5 : 0))
-    }
-}
-
-/// 苹果风纯净原图放大预览浮层：无灰底卡片、无冗余底部栏，紧贴原图自然宽高比从缩略图方向顺滑绽放
-struct ImageHoverPreviewLayer: View {
-    let item: ClipItem?
-    let tileRect: CGRect
-    let isVisible: Bool
-    let panelSize: CGSize
-
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var asyncLoadedImage: NSImage? = nil
-    @State private var asyncLoadedItemID: UUID? = nil
-
-    private struct PreviewLayout {
-        let size: CGSize
-        let center: CGPoint
-        let anchor: UnitPoint
-        let placeBelow: Bool
-    }
-
-    var body: some View {
-        ZStack {
-            if let item, let img = resolvedImage(for: item) {
-                let layout = computeLayout(for: item, image: img)
-
-                Image(nsImage: img)
-                    .resizable()
-                    .interpolation(.high)
-                    .aspectRatio(contentMode: .fill)
-                    .frame(width: layout.size.width, height: layout.size.height)
-                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .strokeBorder(
-                                LinearGradient(
-                                    colors: [
-                                        Color.white.opacity(0.48),
-                                        Color.white.opacity(0.14),
-                                        Color.black.opacity(0.08)
-                                    ],
-                                    startPoint: .top,
-                                    endPoint: .bottom
-                                ),
-                                lineWidth: 0.75
-                            )
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .stroke(Color.black.opacity(0.10), lineWidth: 0.5)
-                    )
-                    .compositingGroup()
-                    .shadow(color: Color.black.opacity(isVisible ? 0.14 : 0.0), radius: 6, y: 3)
-                    .shadow(color: Color.black.opacity(isVisible ? 0.28 : 0.0), radius: 26, y: 14)
-                    .scaleEffect(isVisible || reduceMotion ? 1.0 : 0.88, anchor: layout.anchor)
-                    .offset(y: isVisible || reduceMotion ? 0 : (layout.placeBelow ? -8 : 8))
-                    .opacity(isVisible ? 1.0 : 0.0)
-                    .position(layout.center)
-                    .id("pure-image-preview")
-            }
-        }
-        .frame(width: panelSize.width, height: panelSize.height)
-        .allowsHitTesting(false)
-        .task(id: item?.id) {
-            guard let item else { return }
-            if ClipboardStore.shared.cachedPreviewImage(for: item) != nil {
-                return
-            }
-            if let loaded = await ClipboardStore.shared.loadPreviewImage(for: item), !Task.isCancelled {
-                asyncLoadedItemID = item.id
-                asyncLoadedImage = loaded
-            }
-        }
-    }
-
-    private func resolvedImage(for item: ClipItem) -> NSImage? {
-        if let cached = ClipboardStore.shared.cachedPreviewImage(for: item) {
-            return cached
-        }
-        if asyncLoadedItemID == item.id, let loaded = asyncLoadedImage {
-            return loaded
-        }
-        return ClipboardStore.shared.cachedThumbnail(for: item)
-    }
-
-    private func computeLayout(for item: ClipItem, image: NSImage) -> PreviewLayout {
-        let rawW: CGFloat = {
-            if image.size.width > 0, image.size.height > 0 { return image.size.width }
-            if let w = item.imageWidth, w > 0 { return CGFloat(w) }
-            return 1
-        }()
-        let rawH: CGFloat = {
-            if image.size.width > 0, image.size.height > 0 { return image.size.height }
-            if let h = item.imageHeight, h > 0 { return CGFloat(h) }
-            return 1
-        }()
-
-        let edgeInset: CGFloat = 14
-        let horizontalInset: CGFloat = 20
-        let tileGap: CGFloat = 10
-
-        let validTileRect = tileRect.width > 0 && tileRect.height > 0
-            ? tileRect
-            : CGRect(x: panelSize.width / 2 - 60, y: 120, width: 120, height: 98)
-
-        let clampedTileMinY = min(max(validTileRect.minY, edgeInset), panelSize.height - edgeInset)
-        let clampedTileMaxY = min(max(validTileRect.maxY, edgeInset), panelSize.height - edgeInset)
-
-        let spaceBelow = max(0, panelSize.height - edgeInset - (clampedTileMaxY + tileGap))
-        let spaceAbove = max(0, (clampedTileMinY - tileGap) - edgeInset)
-        let placeBelow = spaceBelow >= 230 || spaceBelow >= spaceAbove
-
-        let availableH = max(120, min(placeBelow ? spaceBelow : spaceAbove, 344))
-        let maxW = max(120, panelSize.width - horizontalInset * 2)
-
-        // 严格保持原图自然比例，防止极小图标过度放大失真
-        let fitScale = min(maxW / rawW, availableH / rawH, 1.5)
-        let width = max(1, round(rawW * fitScale))
-        let height = max(1, round(rawH * fitScale))
-
-        let minCenterX = horizontalInset + width / 2
-        let maxCenterX = panelSize.width - horizontalInset - width / 2
-        let centerX = minCenterX <= maxCenterX
-            ? min(max(validTileRect.midX, minCenterX), maxCenterX)
-            : panelSize.width / 2
-
-        let rawCenterY = placeBelow
-            ? (clampedTileMaxY + tileGap + height / 2)
-            : (clampedTileMinY - tileGap - height / 2)
-        let minCenterY = edgeInset + height / 2
-        let maxCenterY = panelSize.height - edgeInset - height / 2
-        let centerY = minCenterY <= maxCenterY
-            ? min(max(rawCenterY, minCenterY), maxCenterY)
-            : panelSize.height / 2
-
-        let leftEdge = centerX - width / 2
-        let anchorX = min(max((validTileRect.midX - leftEdge) / max(width, 1), 0.15), 0.85)
-        let anchor = UnitPoint(x: anchorX, y: placeBelow ? 0.0 : 1.0)
-
-        return PreviewLayout(
-            size: CGSize(width: width, height: height),
-            center: CGPoint(x: centerX, y: centerY),
-            anchor: anchor,
-            placeBelow: placeBelow
-        )
+        .zIndex(isHovered ? 30 : (isSelected ? 5 : 0))
     }
 }

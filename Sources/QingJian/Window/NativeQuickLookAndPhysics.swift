@@ -446,32 +446,46 @@ final class SystemQuickLookController: NSObject, QLPreviewPanelDataSource, QLPre
     }
 }
 
-// MARK: - 2. Apple TV 3D 视差高光 + 官方 Force Touch 二段压感弹簧引擎
+// MARK: - 2. Apple TV 3D 视差卡片 + 触控板原厂一段/二段式 Force Touch 物理弹簧引擎
 
 enum PhysicalCardSurfaceKind {
-    /// 标准文本/链接/文件行卡片（克制 1.15° 倾角 + 1.0 原尺寸锐利文字渲染，杜绝字体光栅化发虚）
+    /// 标准文本/链接/文件行卡片（显性 3D 浮起 1.018 + 俯仰 4.8° / 偏航 3.2°，一段加压至满蓄力膨起至 1.042）
     case standardRow
-    /// 3 列正方形图片宫格砖块（Apple TV 海报级立体倾角 ±3.6°）
+    /// 3 列正方形图片海报砖块（Apple TV 原厂级立体浮起 1.045 + 俯仰/偏航 8.5°，一段加压蓄力至 1.078）
     case imageTile
 
-    var maxTiltDegrees: Double {
+    var maxPitchDegrees: Double {
         switch self {
-        case .standardRow: return 1.15
-        case .imageTile:   return 3.6
+        case .standardRow: return 4.8
+        case .imageTile:   return 8.5
+        }
+    }
+
+    var maxYawDegrees: Double {
+        switch self {
+        case .standardRow: return 3.2
+        case .imageTile:   return 8.5
         }
     }
 
     var hoverLiftScale: CGFloat {
         switch self {
-        case .standardRow: return 1.0
-        case .imageTile:   return 1.026
+        case .standardRow: return 1.018
+        case .imageTile:   return 1.045
         }
     }
 
     var pressSinkScale: CGFloat {
         switch self {
-        case .standardRow: return 0.984
-        case .imageTile:   return 0.962
+        case .standardRow: return 0.976
+        case .imageTile:   return 0.952
+        }
+    }
+
+    var peekChargeScale: CGFloat {
+        switch self {
+        case .standardRow: return 1.042
+        case .imageTile:   return 1.078
         }
     }
 
@@ -484,16 +498,16 @@ enum PhysicalCardSurfaceKind {
 }
 
 /// 完全穿透命中测试（`hitTest -> nil`，绝不拦截 SwiftUI 点击、右键菜单、`.onDrag` 拖拽或列表滚动）的原生探针：
-/// - 实时向 `SystemQuickLookController` 注册弱引用视图以供滚动后精确屏幕坐标换算；
-/// - 捕获左键阻尼下沉与 MacBook Force Touch 压感触控板 `stage >= 2` 原厂二段重按 Peek-Pop（普通长按不误弹，100% 兼容按住拖拽）。
+/// - 向 `SystemQuickLookController` 注册弱引用视图供滚动后精确屏幕坐标换算；
+/// - 配置 `NSPressureConfiguration(.primaryDeepClick)` 解锁触控板一段轻按 + `stageTransition` 连续蓄力 + 二段深按（Stage 2）弹出！
 private struct ForceTouchWindowProbe: NSViewRepresentable {
     let itemID: UUID
     let surfaceKind: PhysicalCardSurfaceKind
     let isHovered: Bool
     let trailingExclusionWidth: CGFloat
     let bottomExclusionHeight: CGFloat
-    let onPointerNormUpdate: (CGPoint) -> Void
-    let onPressStageChange: (Int) -> Void
+    let onPressStateChange: (Int, CGFloat) -> Void
+    let onScrollReset: () -> Void
     let onDeepPressTrigger: () -> Void
     let onPanelDidHideReset: () -> Void
 
@@ -509,8 +523,8 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
         context.coordinator.surfaceKind = surfaceKind
         context.coordinator.trailingExclusionWidth = trailingExclusionWidth
         context.coordinator.bottomExclusionHeight = bottomExclusionHeight
-        context.coordinator.onPointerNormUpdate = onPointerNormUpdate
-        context.coordinator.onPressStageChange = onPressStageChange
+        context.coordinator.onPressStateChange = onPressStateChange
+        context.coordinator.onScrollReset = onScrollReset
         context.coordinator.onDeepPressTrigger = onDeepPressTrigger
         context.coordinator.onPanelDidHideReset = onPanelDidHideReset
         if oldID != itemID {
@@ -528,8 +542,8 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
             surfaceKind: surfaceKind,
             trailingExclusionWidth: trailingExclusionWidth,
             bottomExclusionHeight: bottomExclusionHeight,
-            onPointerNormUpdate: onPointerNormUpdate,
-            onPressStageChange: onPressStageChange,
+            onPressStateChange: onPressStateChange,
+            onScrollReset: onScrollReset,
             onDeepPressTrigger: onDeepPressTrigger,
             onPanelDidHideReset: onPanelDidHideReset
         )
@@ -540,8 +554,8 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
         var surfaceKind: PhysicalCardSurfaceKind
         var trailingExclusionWidth: CGFloat
         var bottomExclusionHeight: CGFloat
-        var onPointerNormUpdate: (CGPoint) -> Void
-        var onPressStageChange: (Int) -> Void
+        var onPressStateChange: (Int, CGFloat) -> Void
+        var onScrollReset: () -> Void
         var onDeepPressTrigger: () -> Void
         var onPanelDidHideReset: () -> Void
 
@@ -550,8 +564,8 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
             surfaceKind: PhysicalCardSurfaceKind,
             trailingExclusionWidth: CGFloat,
             bottomExclusionHeight: CGFloat,
-            onPointerNormUpdate: @escaping (CGPoint) -> Void,
-            onPressStageChange: @escaping (Int) -> Void,
+            onPressStateChange: @escaping (Int, CGFloat) -> Void,
+            onScrollReset: @escaping () -> Void,
             onDeepPressTrigger: @escaping () -> Void,
             onPanelDidHideReset: @escaping () -> Void
         ) {
@@ -559,8 +573,8 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
             self.surfaceKind = surfaceKind
             self.trailingExclusionWidth = trailingExclusionWidth
             self.bottomExclusionHeight = bottomExclusionHeight
-            self.onPointerNormUpdate = onPointerNormUpdate
-            self.onPressStageChange = onPressStageChange
+            self.onPressStateChange = onPressStateChange
+            self.onScrollReset = onScrollReset
             self.onDeepPressTrigger = onDeepPressTrigger
             self.onPanelDidHideReset = onPanelDidHideReset
         }
@@ -573,6 +587,7 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
         private var isMouseDownInside = false
         private var didFireDeepPress = false
         private var downPointInWindow: NSPoint = .zero
+        private var lastReportedProgress: CGFloat = 0
 
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
@@ -625,7 +640,7 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
 
         private func installMonitorIfNeeded() {
             guard localMonitor == nil else { return }
-            let mask: NSEvent.EventTypeMask = [.mouseMoved, .leftMouseDown, .leftMouseDragged, .leftMouseUp, .pressure, .scrollWheel]
+            let mask: NSEvent.EventTypeMask = [.leftMouseDown, .leftMouseDragged, .leftMouseUp, .pressure, .scrollWheel]
             localMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
                 self?.handleEvent(event)
                 return event
@@ -640,10 +655,11 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
         }
 
         private func resetPressState() {
-            if isMouseDownInside {
+            if isMouseDownInside || lastReportedProgress != 0 {
                 isMouseDownInside = false
                 didFireDeepPress = false
-                coordinator?.onPressStageChange(0)
+                lastReportedProgress = 0
+                coordinator?.onPressStateChange(0, 0)
             }
         }
 
@@ -652,7 +668,7 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
 
             if event.type == .scrollWheel {
                 resetPressState()
-                coordinator?.onPointerNormUpdate(.zero)
+                coordinator?.onScrollReset()
                 return
             }
 
@@ -660,14 +676,6 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
             let inside = bounds.contains(localPt)
 
             switch event.type {
-            case .mouseMoved:
-                if inside {
-                    let nx = max(-1, min(1, ((localPt.x / bounds.width) - 0.5) * 2.0))
-                    let visualY = isFlipped ? localPt.y : (bounds.height - localPt.y)
-                    let ny = max(-1, min(1, ((visualY / bounds.height) - 0.5) * 2.0))
-                    coordinator?.onPointerNormUpdate(CGPoint(x: nx, y: ny))
-                }
-
             case .leftMouseDown:
                 // 排除 Control+左键唤起上下文菜单场景
                 guard inside, !event.modifierFlags.contains(.control) else { return }
@@ -687,13 +695,24 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
 
                 isMouseDownInside = true
                 didFireDeepPress = false
+                lastReportedProgress = 0
                 downPointInWindow = event.locationInWindow
-                coordinator?.onPressStageChange(1)
+                coordinator?.onPressStateChange(1, 0)
 
             case .pressure:
-                // 原生 MacBook Force Touch 压感板二级深按（stage >= 2）清脆触发 Peek-Pop（硬件自带二段物理震感，不重复叠加 Taptic）
-                if isMouseDownInside && !didFireDeepPress && event.stage >= 2 {
+                guard isMouseDownInside, !didFireDeepPress else { return }
+                if event.stage >= 2 {
                     triggerDeepPop()
+                } else if event.stage == 1 {
+                    // 优先融合连续 pressure 与 stageTransition，让一段轻按后持续加压的每克力度都实时驱动卡片蓄力胀大
+                    let progress = max(0, min(1, max(CGFloat(event.pressure), CGFloat(event.stageTransition))))
+                    if abs(progress - lastReportedProgress) >= 0.025 || progress == 0 || progress >= 0.95 {
+                        lastReportedProgress = progress
+                        coordinator?.onPressStateChange(1, progress)
+                    }
+                } else if event.stage == 0 {
+                    lastReportedProgress = 0
+                    coordinator?.onPressStateChange(1, 0)
                 }
 
             case .leftMouseDragged:
@@ -713,6 +732,7 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
 
         private func triggerDeepPop() {
             didFireDeepPress = true
+            lastReportedProgress = 1.0
             let currentID = coordinator?.itemID
             Task { @MainActor in
                 if let currentID {
@@ -720,9 +740,10 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
                 }
                 TactileFeedbackEngine.shared.playPopChimeOnly()
             }
-            coordinator?.onPressStageChange(2)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.14) { [weak self] in
-                self?.coordinator?.onPressStageChange(0)
+            coordinator?.onPressStateChange(2, 1.0)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) { [weak self] in
+                self?.lastReportedProgress = 0
+                self?.coordinator?.onPressStateChange(0, 0)
             }
             coordinator?.onDeepPressTrigger()
         }
@@ -734,28 +755,46 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
     }
 }
 
-/// Apple TV 级 3D 视差光泽 + Force Touch 阻尼弹簧按压修饰器（单轴合成透视、支持 Reduce Motion、零 Layout 抖动）
+/// Apple TV 原厂级 3D 视差卡片 + 触控板一段连续蓄力 / 二段 Force Touch 弹出修饰器（纯 GPU 复合层渲染，零外框抖动）
 struct AppleTVPhysicalCardModifier: ViewModifier {
     let itemID: UUID
     let surfaceKind: PhysicalCardSurfaceKind
     let isHovered: Bool
     let isSelected: Bool
+    /// 若调用方需共享外部归一化偏移（如图片 Tile 的 Z 轴视差），可传入外部 `pointerNorm`；为 `nil` 时由修饰器内部接管 120Hz 指针追踪，避免卡片宿主视图逐帧重算 `body`
+    var pointerNorm: CGPoint? = nil
     var trailingActionWidth: CGFloat = 0
     var bottomChipHeight: CGFloat = 0
+    var onHoverEnterSelect: (() -> Bool)? = nil
+    var onHoverEnded: (() -> Void)? = nil
     var onResetHoverFromHide: (() -> Void)? = nil
     var onDeepPressPreview: (() -> Void)? = nil
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var normPointer: CGPoint = .zero
+    @Environment(\.colorScheme) private var colorScheme
+    /// 滚动防抖递增代数，避免连续滚动中旧延迟任务误复位 scrollDamped
+    @State private var scrollDebounceEpoch: Int = 0
+    @State private var internalPointerNorm: CGPoint = .zero
+    @State private var surfaceSize: CGSize = CGSize(width: 392, height: 68)
     @State private var pressStage: Int = 0
-    @State private var lastQuantizedNorm: CGPoint = .zero
+    @State private var pressureProgress: CGFloat = 0
+    @State private var scrollDamped: Bool = false
+
+    private var activeNorm: CGPoint {
+        (isHovered && !scrollDamped) ? (pointerNorm ?? internalPointerNorm) : .zero
+    }
 
     private var effectiveScale: CGFloat {
         if pressStage == 1 {
-            return reduceMotion ? 0.99 : surfaceKind.pressSinkScale
+            if reduceMotion {
+                return 0.99
+            }
+            // 一段轻按先阻尼下沉；持续重压读取触控板连续压力蓄力膨起至 `peekChargeScale`
+            let chargeCurve = pow(pressureProgress, 1.25)
+            return surfaceKind.pressSinkScale + (surfaceKind.peekChargeScale - surfaceKind.pressSinkScale) * chargeCurve
         }
         if pressStage == 2 {
-            return reduceMotion ? 1.0 : (surfaceKind.hoverLiftScale + 0.012)
+            return reduceMotion ? 1.0 : (surfaceKind.peekChargeScale + 0.014)
         }
         if reduceMotion {
             return 1.0
@@ -763,67 +802,151 @@ struct AppleTVPhysicalCardModifier: ViewModifier {
         return isHovered ? surfaceKind.hoverLiftScale : 1.0
     }
 
-    /// 合并俯仰与偏航为单次合成旋转轴与角度，避免双次透视矩阵叠加导致文字发虚
+    /// 合并俯仰与偏航为单次合成旋转轴与角度（光标所在角落微沉下按，对角微微翘起迎向光源）
     private var combinedTilt: (angle: Double, axisX: CGFloat, axisY: CGFloat) {
-        guard !reduceMotion, isHovered, pressStage == 0 else {
+        guard !reduceMotion, isHovered, !scrollDamped, (pressStage == 0 || pressStage == 1) else {
             return (0, 1, 0)
         }
-        let pitch = Double(-normPointer.y) * surfaceKind.maxTiltDegrees
-        let yaw = Double(normPointer.x) * surfaceKind.maxTiltDegrees
+        let damp = pressStage == 1 ? max(0.35, 1.0 - Double(pressureProgress) * 0.65) : 1.0
+        let pitch = Double(-activeNorm.y) * surfaceKind.maxPitchDegrees * damp
+        let yaw = Double(activeNorm.x) * surfaceKind.maxYawDegrees * damp
         let mag = hypot(pitch, yaw)
-        guard mag > 0.02 else { return (0, 1, 0) }
-        return (min(mag, surfaceKind.maxTiltDegrees), CGFloat(pitch / mag), CGFloat(yaw / mag))
+        guard mag > 0.03 else { return (0, 1, 0) }
+        return (mag, CGFloat(pitch / mag), CGFloat(yaw / mag))
+    }
+
+    private var dynamicShadowColor: Color {
+        if isHovered {
+            if isSelected && surfaceKind == .imageTile {
+                return Color(nsColor: .controlAccentColor).opacity(pressStage == 1 ? 0.56 : 0.44)
+            }
+            let extra = (pressStage == 1) ? Double(pressureProgress) * 0.14 : 0
+            return Color.black.opacity((colorScheme == .dark ? 0.36 : 0.18) + extra)
+        }
+        if surfaceKind == .imageTile {
+            return isSelected
+                ? Color(nsColor: .controlAccentColor).opacity(0.32)
+                : Color.black.opacity(0.05)
+        }
+        return Color.clear
+    }
+
+    private var dynamicShadowRadius: CGFloat {
+        if isHovered {
+            if pressStage == 1 && pressureProgress > 0.05 {
+                return 14 + pressureProgress * 10
+            }
+            return surfaceKind == .imageTile ? 14 : 11
+        }
+        if surfaceKind == .imageTile {
+            return isSelected ? 6 : 4
+        }
+        return 0
+    }
+
+    private var dynamicShadowOffset: CGSize {
+        if !isHovered {
+            return surfaceKind == .imageTile ? CGSize(width: 0, height: 2) : .zero
+        }
+        guard !reduceMotion else {
+            return CGSize(width: 0, height: surfaceKind == .imageTile ? 4 : 2)
+        }
+        let magX: CGFloat = (surfaceKind == .imageTile ? -10 : -7) * activeNorm.x
+        let baseY: CGFloat = (pressStage == 1) ? (5 + pressureProgress * 8) : (surfaceKind == .imageTile ? 7 : 5.5)
+        let magY: CGFloat = baseY - (surfaceKind == .imageTile ? 5 : 3.5) * activeNorm.y
+        return CGSize(width: magX, height: magY)
     }
 
     func body(content: Content) -> some View {
         let tilt = combinedTilt
-        content
+        let transformed = content
             .overlay {
-                if isHovered {
+                if isHovered || (pressStage == 1 && pressureProgress > 0.04) {
                     GeometryReader { geo in
                         let w = max(1, geo.size.width)
                         let h = max(1, geo.size.height)
-                        let glareX = w * (0.5 - (reduceMotion ? 0 : normPointer.x * 0.34))
-                        let glareY = h * (0.5 - (reduceMotion ? 0 : normPointer.y * 0.34))
-                        let radius = max(w, h) * 0.78
-                        let baseAlpha: Double = pressStage == 1
-                            ? 0.05
-                            : (isSelected ? 0.15 : 0.11)
-                        let peakAlpha = reduceMotion ? (baseAlpha * 0.5) : baseAlpha
+                        let nx = reduceMotion ? 0 : activeNorm.x
+                        let ny = reduceMotion ? 0 : activeNorm.y
+                        // 统一物理光源：光斑与折射亮缘同位于斜倾翘起的对侧高坡，背光阴面随按压下沉侧自然落影，绝不自相矛盾
+                        let glareX = w * (0.5 - nx * 0.36)
+                        let glareY = h * (0.5 - ny * 0.36)
+                        let radius = max(w, h) * 0.85
 
-                        RoundedRectangle(cornerRadius: surfaceKind.cornerRadius, style: .continuous)
-                            .fill(
-                                RadialGradient(
-                                    colors: [
-                                        Color.white.opacity(peakAlpha),
-                                        Color.white.opacity(peakAlpha * 0.28),
-                                        Color.clear
-                                    ],
-                                    center: UnitPoint(x: glareX / w, y: glareY / h),
-                                    startRadius: 2,
-                                    endRadius: radius
-                                )
-                            )
-                            .overlay(
+                        let darkPeak = isSelected ? 0.28 : 0.22
+                        let lightPeak = isSelected ? 0.32 : 0.42
+                        let rawPeak = (colorScheme == .dark ? darkPeak : lightPeak)
+                        let finalPeak = (reduceMotion ? rawPeak * 0.5 : rawPeak) * (pressStage == 1 ? Double(1.0 + pressureProgress * 0.3) : 1.0)
+
+                        ZStack {
+                            // 1) 浅色模式下于迎光翘起侧提亮、按压下沉侧微铺冷灰蓝，确保曲面立体感一眼可辨
+                            if colorScheme == .light {
                                 RoundedRectangle(cornerRadius: surfaceKind.cornerRadius, style: .continuous)
-                                    .strokeBorder(
+                                    .fill(
                                         LinearGradient(
                                             colors: [
-                                                Color.white.opacity(isSelected ? 0.40 : 0.32),
-                                                Color.white.opacity(0.04)
+                                                Color.white.opacity(0.16),
+                                                Color.clear,
+                                                Color(red: 0.14, green: 0.22, blue: 0.38).opacity(0.07)
                                             ],
-                                            startPoint: UnitPoint(
-                                                x: 0.5 - (reduceMotion ? 0 : normPointer.x * 0.42),
-                                                y: 0.0
-                                            ),
-                                            endPoint: UnitPoint(
-                                                x: 0.5 + (reduceMotion ? 0 : normPointer.x * 0.42),
-                                                y: 1.0
-                                            )
-                                        ),
-                                        lineWidth: 0.75
+                                            startPoint: UnitPoint(x: 0.5 - nx * 0.45, y: 0.5 - ny * 0.45),
+                                            endPoint: UnitPoint(x: 0.5 + nx * 0.45, y: 0.5 + ny * 0.45)
+                                        )
                                     )
-                            )
+                            }
+
+                            // 2) Apple TV 流动宽幅径向镜面光斑
+                            RoundedRectangle(cornerRadius: surfaceKind.cornerRadius, style: .continuous)
+                                .fill(
+                                    RadialGradient(
+                                        colors: [
+                                            Color.white.opacity(finalPeak),
+                                            Color.white.opacity(finalPeak * 0.32),
+                                            Color.clear
+                                        ],
+                                        center: UnitPoint(x: glareX / w, y: glareY / h),
+                                        startRadius: 2,
+                                        endRadius: radius
+                                    )
+                                )
+
+                            // 3) 斜 45° 细柔玻璃扫光带
+                            if !reduceMotion {
+                                RoundedRectangle(cornerRadius: surfaceKind.cornerRadius, style: .continuous)
+                                    .fill(
+                                        LinearGradient(
+                                            stops: [
+                                                .init(color: .clear, location: max(0.0, 0.26 - nx * 0.18)),
+                                                .init(color: Color.white.opacity(colorScheme == .dark ? 0.12 : 0.22), location: 0.50 - nx * 0.18),
+                                                .init(color: .clear, location: min(1.0, 0.74 - nx * 0.18))
+                                            ],
+                                            startPoint: .topLeading,
+                                            endPoint: .bottomTrailing
+                                        )
+                                    )
+                            }
+
+                            // 4) 统一光源方向折射高光棱边（迎光翘起侧晶透高亮，按压下沉侧柔和收暗）
+                            RoundedRectangle(cornerRadius: surfaceKind.cornerRadius, style: .continuous)
+                                .strokeBorder(
+                                    LinearGradient(
+                                        colors: [
+                                            Color.white.opacity(colorScheme == .dark ? 0.58 : 0.88),
+                                            Color.white.opacity(colorScheme == .dark ? 0.06 : 0.12)
+                                        ],
+                                        startPoint: UnitPoint(x: 0.5 - nx * 0.46, y: 0.5 - ny * 0.46),
+                                        endPoint: UnitPoint(x: 0.5 + nx * 0.46, y: 0.5 + ny * 0.46)
+                                    ),
+                                    lineWidth: 1.0
+                                )
+
+                            if pressStage == 1 && pressureProgress > 0.04 {
+                                RoundedRectangle(cornerRadius: surfaceKind.cornerRadius, style: .continuous)
+                                    .strokeBorder(
+                                        Color(nsColor: .controlAccentColor).opacity(0.28 + Double(pressureProgress) * 0.68),
+                                        lineWidth: 1.1 + pressureProgress * 1.5
+                                    )
+                            }
+                        }
                     }
                     .allowsHitTesting(false)
                 }
@@ -835,43 +958,102 @@ struct AppleTVPhysicalCardModifier: ViewModifier {
                     isHovered: isHovered,
                     trailingExclusionWidth: trailingActionWidth,
                     bottomExclusionHeight: bottomChipHeight,
-                    onPointerNormUpdate: { pt in
-                        if abs(pt.x - lastQuantizedNorm.x) >= 0.05 || abs(pt.y - lastQuantizedNorm.y) >= 0.05 || pt == .zero {
-                            lastQuantizedNorm = pt
-                            normPointer = pt
-                        }
-                    },
-                    onPressStageChange: { stage in
+                    onPressStateChange: { stage, progress in
                         if pressStage != stage {
                             pressStage = stage
+                        }
+                        if abs(pressureProgress - progress) >= 0.02 || progress == 0 || progress == 1 {
+                            pressureProgress = progress
+                        }
+                    },
+                    onScrollReset: {
+                        scrollDebounceEpoch &+= 1
+                        let token = scrollDebounceEpoch
+                        scrollDamped = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
+                            if scrollDebounceEpoch == token {
+                                scrollDamped = false
+                            }
                         }
                     },
                     onDeepPressTrigger: {
                         onDeepPressPreview?()
                     },
                     onPanelDidHideReset: {
-                        lastQuantizedNorm = .zero
-                        normPointer = .zero
                         pressStage = 0
+                        pressureProgress = 0
+                        scrollDamped = false
+                        internalPointerNorm = .zero
+                        onHoverEnded?()
                         onResetHoverFromHide?()
                     }
                 )
+            )
+            .shadow(
+                color: dynamicShadowColor,
+                radius: dynamicShadowRadius,
+                x: dynamicShadowOffset.width,
+                y: dynamicShadowOffset.height
             )
             .scaleEffect(effectiveScale)
             .rotation3DEffect(
                 .degrees(tilt.angle),
                 axis: (x: tilt.axisX, y: tilt.axisY, z: 0),
-                perspective: surfaceKind == .imageTile ? 0.36 : 0.25
+                perspective: 0.44
             )
-            .animation(.interpolatingSpring(mass: 0.66, stiffness: 380, damping: 26), value: effectiveScale)
-            .animation(.interpolatingSpring(mass: 0.62, stiffness: 280, damping: 25), value: normPointer)
+            .animation(.interpolatingSpring(mass: 0.58, stiffness: 360, damping: 24), value: effectiveScale)
+            .animation(.interactiveSpring(response: 0.18, dampingFraction: 0.84), value: activeNorm)
             .onChange(of: isHovered) { _, hovering in
                 if !hovering {
-                    lastQuantizedNorm = .zero
-                    normPointer = .zero
                     pressStage = 0
+                    pressureProgress = 0
+                    scrollDamped = false
+                    internalPointerNorm = .zero
                 }
             }
+
+        attachInternalHoverIfNeeded(transformed)
+    }
+
+    @ViewBuilder
+    private func attachInternalHoverIfNeeded<V: View>(_ view: V) -> some View {
+        if pointerNorm == nil {
+            view
+                .background {
+                    GeometryReader { geo in
+                        Color.clear
+                            .onAppear { surfaceSize = geo.size }
+                            .onChange(of: geo.size) { _, newSize in surfaceSize = newSize }
+                    }
+                }
+                .onContinuousHover(coordinateSpace: .local) { phase in
+                    switch phase {
+                    case .active(let loc):
+                        let allowed: Bool
+                        if !isHovered || !isSelected {
+                            allowed = onHoverEnterSelect?() ?? true
+                        } else {
+                            allowed = true
+                        }
+                        if allowed {
+                            let w = max(1, surfaceSize.width)
+                            let h = max(1, surfaceSize.height)
+                            let nx = max(-1, min(1, ((loc.x / w) - 0.5) * 2.0))
+                            let ny = max(-1, min(1, ((loc.y / h) - 0.5) * 2.0))
+                            if abs(nx - internalPointerNorm.x) >= 0.03 || abs(ny - internalPointerNorm.y) >= 0.03 {
+                                internalPointerNorm = CGPoint(x: nx, y: ny)
+                            }
+                        }
+                    case .ended:
+                        if internalPointerNorm != .zero {
+                            internalPointerNorm = .zero
+                        }
+                        onHoverEnded?()
+                    }
+                }
+        } else {
+            view
+        }
     }
 }
 

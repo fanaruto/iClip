@@ -2534,15 +2534,17 @@ final class CoreFeatureTests: XCTestCase {
         // 2. 验证截取 2FA 绑定二维码时，微星标 `ActionSpark` 直接产出 6 位纯数字动态码而非暴露 `otpauth://` 根密钥
         let qr2FA = "otpauth://totp/GitHub:alice?secret=JBSWY3DPEHPK3PXP&issuer=GitHub"
         let qrItem = ClipItem(type: .image, imageFileName: "2fa.png", qrCodePayload: qr2FA, contentHash: "img:2fa")
-        if let spark = AdaptiveIntelligenceEngine.shared.evaluateSparkCandidate(for: qrItem, reuseCount: 1, minimalMode: false) {
-            XCTAssertEqual(spark.actionID, "img-totp-code")
-            if case .replaceClipboardText(let outText, _, _) = spark.payload {
-                XCTAssertEqual(outText.count, 6)
-                XCTAssertTrue(outText.allSatisfy(\.isNumber))
-                XCTAssertFalse(outText.contains("JBSWY3DPEHPK3PXP"))
-            } else {
-                XCTFail("Expected replaceClipboardText with 6-digit TOTP code")
-            }
+        let sparkTmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("iclip-spark-2fa-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: sparkTmpDir) }
+        let engine = AdaptiveIntelligenceEngine(customDirectoryURL: sparkTmpDir)
+        let spark = try XCTUnwrap(engine.evaluateSparkCandidate(for: qrItem, reuseCount: 1, minimalMode: false))
+        XCTAssertEqual(spark.actionID, "img-totp-code")
+        if case .replaceClipboardText(let outText, _, _) = spark.payload {
+            XCTAssertEqual(outText.count, 6)
+            XCTAssertTrue(outText.allSatisfy(\.isNumber))
+            XCTAssertFalse(outText.contains("JBSWY3DPEHPK3PXP"))
+        } else {
+            XCTFail("Expected replaceClipboardText with 6-digit TOTP code")
         }
 
         // 3. 验证群聊混排文本内嵌同形异义西里尔钓鱼域名（`aрple.com` 及无空格粘连中文与 Punycode）被精准识别拦截
@@ -2581,7 +2583,10 @@ final class CoreFeatureTests: XCTestCase {
         // 模拟复制 AI 返回的修复脚本：微星标与还原引擎一键无损回填全部真值
         let aiReply = "curl -H 'Authorization: Bearer [ICLIP_KEY_1]' http://[ICLIP_IP_1]:8080/failover?standby=[ICLIP_IP_2]&notify=[ICLIP_PHONE_1]"
         let replyItem = ClipItem(type: .text, text: aiReply, contentHash: "text:aireply")
-        let spark = try XCTUnwrap(AdaptiveIntelligenceEngine.shared.evaluateSparkCandidate(for: replyItem, reuseCount: 1, minimalMode: false))
+        let sparkTmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("iclip-spark-twin-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: sparkTmpDir) }
+        let engine = AdaptiveIntelligenceEngine(customDirectoryURL: sparkTmpDir)
+        let spark = try XCTUnwrap(engine.evaluateSparkCandidate(for: replyItem, reuseCount: 1, minimalMode: false))
         XCTAssertEqual(spark.actionID, "restore-privacy-twin")
         let restored = try XCTUnwrap(ReversiblePrivacyTwin.inspectRestorableTwins(in: aiReply))
         XCTAssertEqual(restored.restoredCount, 4)
@@ -2682,9 +2687,11 @@ final class CoreFeatureTests: XCTestCase {
 
         // 3. 验证含敏截图光标微星标优先弹出 `img-privacy-mosaic`（截图隐私打码）而非样机
         let sensShot = ClipItem(type: .image, imageFileName: "id.png", ocrText: "联系人手机 13812345678", ocrChecked: true, contentHash: "img:idshot")
-        if let spark = AdaptiveIntelligenceEngine.shared.evaluateSparkCandidate(for: sensShot, reuseCount: 1, minimalMode: false) {
-            XCTAssertEqual(spark.actionID, "img-privacy-mosaic")
-        }
+        let sparkTmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("iclip-spark-sens-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: sparkTmpDir) }
+        let engine = AdaptiveIntelligenceEngine(customDirectoryURL: sparkTmpDir)
+        let spark = try XCTUnwrap(engine.evaluateSparkCandidate(for: sensShot, reuseCount: 1, minimalMode: false))
+        XCTAssertEqual(spark.actionID, "img-privacy-mosaic")
 
         // 4. 验证 PuTTY 私钥、Kubernetes `client-key-data` 与 JDBC 密码连接串识别脱敏
         let kubeYaml = "  client-key-data: LS0tLS1CRUdJTiBSU0EgUFJJVkFURSBLRVktLS0tLQ=="

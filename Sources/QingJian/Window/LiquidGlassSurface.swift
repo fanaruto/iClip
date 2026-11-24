@@ -406,6 +406,7 @@ final class LiquidGlassBleedRootView: NSView {
         wantsLayer = true
         layer?.backgroundColor = NSColor.clear.cgColor
         layer?.masksToBounds = false
+        self.pressureConfiguration = NSPressureConfiguration(pressureBehavior: .primaryDeepClick)
     }
 
     required init?(coder: NSCoder) {

@@ -503,7 +503,7 @@ impl<'a> PixelCanvas<'a> {
         self.pixels[idx] = (out_a << 24) | (out_r << 16) | (out_g << 8) | out_b;
     }
 
-    /// 解析式柔和偏移扩散阴影（对标 SwiftUI `.shadow(color:radius:y:)`）
+    /// 解析式柔和偏移扩散阴影（支持 x/y 双轴视差偏移，对标 SwiftUI `.shadow(color:radius:x:y:)`）
     pub fn draw_soft_shadow_round_rect(
         &mut self,
         x: i32,
@@ -515,12 +515,38 @@ impl<'a> PixelCanvas<'a> {
         blur_radius: f32,
         shadow_color: Color4,
     ) {
+        self.draw_soft_shadow_round_rect_xy(
+            x,
+            y,
+            w,
+            h,
+            radius,
+            0.0,
+            offset_y,
+            blur_radius,
+            shadow_color,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_soft_shadow_round_rect_xy(
+        &mut self,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        radius: f32,
+        offset_x: f32,
+        offset_y: f32,
+        blur_radius: f32,
+        shadow_color: Color4,
+    ) {
         if w <= 0 || h <= 0 || blur_radius <= 0.2 || shadow_color.a == 0 {
             return;
         }
         let r = radius.clamp(0.0, (w.min(h) as f32) * 0.5);
         let spread = (blur_radius * 1.85).ceil() as i32;
-        let sx = x;
+        let sx = (x as f32 + offset_x).round() as i32;
         let sy = (y as f32 + offset_y).round() as i32;
         let x0 = (sx - spread).max(0);
         let y0 = (sy - spread).max(0);
@@ -530,7 +556,7 @@ impl<'a> PixelCanvas<'a> {
             return;
         }
 
-        let cx = (sx as f32) + (w as f32) * 0.5;
+        let cx = (x as f32) + offset_x + (w as f32) * 0.5;
         let cy = (y as f32) + offset_y + (h as f32) * 0.5;
         let hx = (w as f32) * 0.5 - r;
         let hy = (h as f32) * 0.5 - r;
@@ -669,7 +695,7 @@ impl<'a> PixelCanvas<'a> {
         }
     }
 
-    /// Apple TV 级反向流动视差镜面高光（根据鼠标在卡片内的归一化坐标 nx, ny ∈ [-1, 1] 绘制柔焦光泽）
+    /// Apple TV 级反向流动视差镜面高光 + 45° 斜向玻璃扫光带（根据鼠标在卡片内的归一化坐标 nx, ny ∈ [-1, 1] 绘制柔焦光泽）
     #[allow(clippy::too_many_arguments)]
     pub fn draw_apple_tv_glare_round_rect(
         &mut self,
@@ -685,6 +711,8 @@ impl<'a> PixelCanvas<'a> {
         if w <= 0 || h <= 0 || peak_alpha == 0 {
             return;
         }
+        let nxc = nx.clamp(-1.0, 1.0);
+        let nyc = ny.clamp(-1.0, 1.0);
         let r = radius.clamp(0.0, (w.min(h) as f32) * 0.5);
         let x0 = x.max(0);
         let y0 = y.max(0);
@@ -697,23 +725,21 @@ impl<'a> PixelCanvas<'a> {
         let cy = (y as f32) + (h as f32) * 0.5;
         let hx = (w as f32) * 0.5 - r;
         let hy = (h as f32) * 0.5 - r;
-        let gx = (x as f32) + (w as f32) * (0.5 - nx.clamp(-1.0, 1.0) * 0.34);
-        let gy = (y as f32) + (h as f32) * (0.5 - ny.clamp(-1.0, 1.0) * 0.34);
-        let glare_rad = ((w.max(h) as f32) * 0.78).max(1.0);
+        let gx = (x as f32) + (w as f32) * (0.5 - nxc * 0.38);
+        let gy = (y as f32) + (h as f32) * (0.5 - nyc * 0.38);
+        let wf = w as f32;
+        let hf = h as f32;
+        let inv_diag = 1.0 / (wf + hf).max(1.0);
+        let band_center = 0.50 - nxc * 0.18;
+        let glare_rad = (wf.max(hf) * 0.85).max(1.0);
         let inv_rad_sq = 1.0 / (glare_rad * glare_rad);
-        let bx0 = x0.max((gx - glare_rad).floor() as i32);
-        let by0 = y0.max((gy - glare_rad).floor() as i32);
-        let bx1 = x1.min((gx + glare_rad).ceil() as i32);
-        let by1 = y1.min((gy + glare_rad).ceil() as i32);
-        if bx0 >= bx1 || by0 >= by1 {
-            return;
-        }
 
-        for py in by0..by1 {
+        for py in y0..y1 {
             let pyf = py as f32 + 0.5;
             let dy = (pyf - cy).abs() - hy;
             let gdy_sq = (pyf - gy) * (pyf - gy);
-            for px in bx0..bx1 {
+            let rel_y = pyf - (y as f32);
+            for px in x0..x1 {
                 let pxf = px as f32 + 0.5;
                 let dx = (pxf - cx).abs() - hx;
                 let dist = squircle_corner_dist(dx, dy, r);
@@ -721,12 +747,23 @@ impl<'a> PixelCanvas<'a> {
                 if cov > 0.0 {
                     let gdx = pxf - gx;
                     let norm_d2 = (gdx * gdx + gdy_sq) * inv_rad_sq;
-                    if norm_d2 < 1.0 {
+                    let radial = if norm_d2 < 1.0 {
                         let falloff = (1.0 - norm_d2) * (1.0 - norm_d2);
-                        let a = ((peak_alpha as f32) * falloff).round() as u8;
-                        if a > 0 {
-                            self.blend_pixel(px, py, Color4::rgba(255, 255, 255, a), cov);
-                        }
+                        (peak_alpha as f32) * falloff
+                    } else {
+                        0.0
+                    };
+                    let diag_t = ((pxf - (x as f32)) + rel_y) * inv_diag;
+                    let diag_dist = ((diag_t - band_center) / 0.22).abs();
+                    let sheen = if diag_dist < 1.0 {
+                        let s_f = 1.0 - diag_dist * diag_dist;
+                        (peak_alpha as f32) * 0.48 * s_f * s_f
+                    } else {
+                        0.0
+                    };
+                    let a = (radial + sheen).min(115.0).round() as u8;
+                    if a > 0 {
+                        self.blend_pixel(px, py, Color4::rgba(255, 255, 255, a), cov);
                     }
                 }
             }

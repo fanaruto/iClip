@@ -99,11 +99,11 @@ final class DemoShowcaseRunner {
             self.panelController?.showForDemo(origin: panelOrigin, entryDelta: NSPoint(x: -14, y: 6))
         }
 
-        // === 镜头 2（2.2s ~ 5.5s）：光标顺滑扫过 3 列图片相册网格，展示纯净原图放大 ===
+        // === 镜头 2（2.2s ~ 5.5s）：光标顺滑扫过 3 列图片相册网格，触发原厂大屏速览 ===
         let imgRowY = panelTopInStage + 225
         schedule(at: 2.1) { [weak self] in
             guard let self else { return }
-            self.stageModel.caption = "3 列相册网格 · 悬停纯净原图放大"
+            self.stageModel.caption = "3 列相册网格 · Space / 重按系统大屏预览"
             self.moveCursor(to: CGPoint(x: panelLeftInStage + 78, y: imgRowY), duration: 0.42)
         }
         schedule(at: 2.45) { [weak self] in

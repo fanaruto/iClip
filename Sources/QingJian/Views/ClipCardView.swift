@@ -21,7 +21,6 @@ struct ClipCardView: View {
     var onToggleTodoCompletion: (() -> Void)? = nil
     var onRemoveTodo: (() -> Void)? = nil
     var onOpenQuickLook: (() -> Void)? = nil
-    var onImageThumbnailHover: ((Bool, CGRect) -> Void)? = nil
     let onDelete: () -> Void
 
     @Environment(\.colorScheme) private var colorScheme
@@ -29,7 +28,6 @@ struct ClipCardView: View {
     @State private var asyncThumbnail: NSImage? = nil
     @State private var lastTapUptime: TimeInterval = 0
     @State private var showCopiedInlineFlash: Bool = false
-    @State private var thumbFrameInPanel: CGRect = .zero
 
     private var glassPalette: LiquidGlassPalette {
         LiquidGlassPalette(colorScheme: colorScheme, surfaceStyle: surfaceStyle, appearance: liquidGlassAppearance)
@@ -240,8 +238,20 @@ struct ClipCardView: View {
                 isSelected: isSelected,
                 trailingActionWidth: hoverActionBarEstimateWidth,
                 bottomChipHeight: !semantic.actions.isEmpty ? 28 : 0,
-                onResetHoverFromHide: {
-                    if isHovered { isHovered = false }
+                onHoverEnterSelect: {
+                    let allowed = onHoverSelect?() ?? {
+                        onSelect()
+                        return true
+                    }()
+                    if allowed && !isHovered {
+                        isHovered = true
+                    }
+                    return allowed
+                },
+                onHoverEnded: {
+                    if isHovered {
+                        isHovered = false
+                    }
                 },
                 onDeepPressPreview: {
                     onSelect()
@@ -251,25 +261,7 @@ struct ClipCardView: View {
         )
         .animation(.spring(response: 0.22, dampingFraction: 0.86), value: isHovered)
         .animation(.spring(response: 0.2, dampingFraction: 0.86), value: isSelected)
-        .onContinuousHover { phase in
-            switch phase {
-            case .active:
-                let allowed: Bool
-                if let onHoverSelect {
-                    allowed = onHoverSelect()
-                } else {
-                    onSelect()
-                    allowed = true
-                }
-                if allowed && !isHovered {
-                    isHovered = true
-                }
-            case .ended:
-                if isHovered {
-                    isHovered = false
-                }
-            }
-        }
+        .zIndex(isHovered ? 30 : (isSelected ? 5 : 0))
         .onDrag {
             ClipboardStore.shared.makeDragItemProvider(for: item)
         }
@@ -392,19 +384,6 @@ struct ClipCardView: View {
                             .strokeBorder(Color.white.opacity(0.25), lineWidth: 0.8)
                     )
                     .shadow(color: Color.black.opacity(0.08), radius: 3, y: 1)
-                    .background(
-                        GeometryReader { proxy in
-                            Color.clear.onAppear {
-                                thumbFrameInPanel = proxy.frame(in: .named("panelRoot"))
-                            }
-                            .onChange(of: proxy.frame(in: .named("panelRoot"))) { _, rect in
-                                thumbFrameInPanel = rect
-                            }
-                        }
-                    )
-                    .onHover { hovering in
-                        onImageThumbnailHover?(hovering, thumbFrameInPanel)
-                    }
             } else {
                 iconBadge(symbol: "photo", tint: .purple)
                     .task(id: item.id) {

@@ -6280,13 +6280,32 @@ fn layout_and_draw_main_view(
                     }
                     let gap = s(9);
                     let tile_w = (track_w - gap * 2) / 3;
-                    for (col_idx, &(vis_pos, store_idx)) in cells.iter().enumerate() {
+                    let mut draw_order: Vec<(usize, (usize, usize))> =
+                        cells.iter().copied().enumerate().collect();
+                    draw_order.sort_by_key(|&(_, (vp, _))| {
+                        if st.hovered_visible_pos == Some(vp) { 1u8 } else { 0u8 }
+                    });
+                    for (col_idx, (vis_pos, store_idx)) in draw_order {
                         let tx = pad + (col_idx as i32) * (tile_w + gap);
                         let tw = if col_idx == 2 { w - pad - tx } else { tile_w };
                         let item = st.store.items[store_idx].clone();
                         let is_sel = vis_pos == st.selected_visible_pos;
                         let is_hov = st.hovered_visible_pos == Some(vis_pos);
+                        let is_tile_pressed = st.pressed_visible_pos == Some(vis_pos);
 
+                        if is_hov {
+                            canvas.draw_soft_shadow_round_rect_xy(
+                                tx,
+                                cur_y,
+                                tw,
+                                row_h,
+                                sf(13.0),
+                                (sf(-7.0) * st.hover_card_nx).round(),
+                                sf(5.5) - (sf(4.0) * st.hover_card_ny).round(),
+                                sf(11.0),
+                                Color4::rgba(0, 0, 0, if st.is_dark_mode { 84 } else { 42 }),
+                            );
+                        }
                         canvas.fill_round_rect(tx, cur_y, tw, row_h, sf(13.0), palette.card_bg);
                         if let Some(fname) = &item.image_file_name {
                             if let Some((iw, ih, rgba)) =
@@ -6489,6 +6508,25 @@ fn layout_and_draw_main_view(
                             );
                         }
 
+                        if is_hov {
+                            canvas.draw_apple_tv_glare_round_rect(
+                                tx,
+                                cur_y,
+                                tw,
+                                row_h,
+                                sf(13.0),
+                                st.hover_card_nx,
+                                st.hover_card_ny,
+                                if is_tile_pressed {
+                                    16
+                                } else if st.is_dark_mode {
+                                    44
+                                } else {
+                                    62
+                                },
+                            );
+                        }
+
                         // 外白内蓝双环选中框（复刻 ClipImageGridTile.swift:204）
                         if is_sel {
                             canvas.stroke_round_rect(
@@ -6599,7 +6637,20 @@ fn layout_and_draw_main_view(
                         break;
                     }
 
-                    // 现代液态玻璃卡片材质：选中态采用轻透冰蓝玻璃层 + 左侧 3px 圆头精选指示条（彻底消除塑料大蓝块与溢出阴影）
+                    // 现代液态玻璃卡片材质：悬停动态视差投影 + 选中态冰蓝玻璃层 + 左侧 3px 圆头精选指示条
+                    if is_hovered {
+                        canvas.draw_soft_shadow_round_rect_xy(
+                            pad,
+                            cur_y,
+                            track_w,
+                            card_h,
+                            sf(14.0),
+                            (sf(-6.0) * st.hover_card_nx).round(),
+                            sf(5.0) - (sf(3.5) * st.hover_card_ny).round(),
+                            sf(10.0),
+                            Color4::rgba(0, 0, 0, if st.is_dark_mode { 76 } else { 36 }),
+                        );
+                    }
                     if is_selected {
                         canvas.fill_round_rect(
                             pad,
@@ -6700,11 +6751,11 @@ fn layout_and_draw_main_view(
                             st.hover_card_nx,
                             st.hover_card_ny,
                             if is_pressed {
-                                12
+                                18
                             } else if st.is_dark_mode {
-                                28
+                                42
                             } else {
-                                36
+                                68
                             },
                         );
                     }
@@ -10179,6 +10230,8 @@ unsafe fn handle_mouse_move(hwnd: HWND, x: i32, y: i32, left_held: bool) {
     let mut changed = false;
     let mut dirty_union: Option<RECT> = None;
     let mut use_hand = false;
+    let dpi_scale = get_dpi_scale(hwnd);
+    let shadow_margin = (34.0 * dpi_scale).ceil() as i32;
 
     APP_STATE.with(|cell| {
         if let Some(st) = cell.borrow_mut().as_mut() {
@@ -10226,24 +10279,25 @@ unsafe fn handle_mouse_move(hwnd: HWND, x: i32, y: i32, left_held: bool) {
                 st.hover_card_nx = norm_nx;
                 st.hover_card_ny = norm_ny;
                 changed = true;
+                let m = shadow_margin;
                 dirty_union = match (prev_card_rect, new_card_rect) {
                     (Some(a), Some(b)) => Some(RECT {
-                        left: a.left.min(b.left) - 6,
-                        top: a.top.min(b.top) - 6,
-                        right: a.right.max(b.right) + 6,
-                        bottom: a.bottom.max(b.bottom) + 6,
+                        left: a.left.min(b.left) - m,
+                        top: a.top.min(b.top) - m,
+                        right: a.right.max(b.right) + m,
+                        bottom: a.bottom.max(b.bottom) + m,
                     }),
                     (Some(a), None) => Some(RECT {
-                        left: a.left - 6,
-                        top: a.top - 6,
-                        right: a.right + 6,
-                        bottom: a.bottom + 6,
+                        left: a.left - m,
+                        top: a.top - m,
+                        right: a.right + m,
+                        bottom: a.bottom + m,
                     }),
                     (None, Some(b)) => Some(RECT {
-                        left: b.left - 6,
-                        top: b.top - 6,
-                        right: b.right + 6,
-                        bottom: b.bottom + 6,
+                        left: b.left - m,
+                        top: b.top - m,
+                        right: b.right + m,
+                        bottom: b.bottom + m,
                     }),
                     _ => None,
                 };
@@ -10254,11 +10308,12 @@ unsafe fn handle_mouse_move(hwnd: HWND, x: i32, y: i32, left_held: bool) {
                 st.hover_card_nx = norm_nx;
                 st.hover_card_ny = norm_ny;
                 changed = true;
+                let m = shadow_margin;
                 dirty_union = new_card_rect.map(|b| RECT {
-                    left: b.left - 4,
-                    top: b.top - 4,
-                    right: b.right + 4,
-                    bottom: b.bottom + 4,
+                    left: b.left - m,
+                    top: b.top - m,
+                    right: b.right + m,
+                    bottom: b.bottom + m,
                 });
             }
         }

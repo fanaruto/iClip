@@ -29,9 +29,14 @@ final class KeyableFloatingPanel: NSPanel {
     }
 }
 
-/// 允许悬浮面板在非激活态首次鼠标点击直接触发内部卡片粘贴、胶囊转换与按钮操作，无需抢夺外部输入框焦点
+/// 允许悬浮面板在非激活态首次鼠标点击直接触发内部卡片粘贴、胶囊转换与按钮操作，并解锁触控板二段 Force Touch 压感
 final class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        self.pressureConfiguration = NSPressureConfiguration(pressureBehavior: .primaryDeepClick)
+    }
 }
 
 /// 唤醒零失焦与顺手粘贴焦点保持策略
@@ -282,6 +287,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         // 配合透明出血根容器渲染苹果原生 WindowServer 连续圆角 360° 柔和阴影，零四角毛边
         p.hasShadow = true
         p.isMovableByWindowBackground = true
+        p.acceptsMouseMovedEvents = true
         p.hidesOnDeactivate = false
         p.minSize = windowSize
         p.maxSize = windowSize
