@@ -1038,6 +1038,207 @@ impl<'a> PixelCanvas<'a> {
         }
     }
 
+    /// 双线性插值 + 视口夹紧的大图缩放与平移渲染，杜绝拖出黑边或溢出操作栏
+    #[allow(clippy::too_many_arguments)]
+    pub fn blit_rgba_round_rect_zoomed(
+        &mut self,
+        vp_x: i32,
+        vp_y: i32,
+        vp_w: i32,
+        vp_h: i32,
+        radius: f32,
+        src_rgba: &[u8],
+        src_w: u32,
+        src_h: u32,
+        zoom_scale: f32,
+        pan_x: f32,
+        pan_y: f32,
+    ) {
+        let need_bytes = (src_w as usize)
+            .saturating_mul(src_h as usize)
+            .saturating_mul(4);
+        if vp_w <= 0 || vp_h <= 0 || src_w == 0 || src_h == 0 || src_rgba.len() < need_bytes {
+            return;
+        }
+        let zoom = zoom_scale.clamp(1.0, 3.0);
+        let (base_w, base_h) = fit_image_in_viewport(src_w, src_h, vp_w, vp_h);
+        let scaled_w = base_w * zoom;
+        let scaled_h = base_h * zoom;
+        let (c_pan_x, c_pan_y) = clamp_image_pan_offset(
+            pan_x,
+            pan_y,
+            base_w,
+            base_h,
+            zoom,
+            vp_w as f32,
+            vp_h as f32,
+        );
+        let dst_w = (scaled_w.round() as i32).clamp(1, vp_w);
+        let dst_h = (scaled_h.round() as i32).clamp(1, vp_h);
+        let dst_x = vp_x + (vp_w - dst_w) / 2;
+        let dst_y = vp_y + (vp_h - dst_h) / 2;
+
+        let img_left = (vp_x as f32) + ((vp_w as f32) - scaled_w) * 0.5 + c_pan_x;
+        let img_top = (vp_y as f32) + ((vp_h as f32) - scaled_h) * 0.5 + c_pan_y;
+
+        if zoom <= 1.001
+            && c_pan_x.abs() < 0.01
+            && c_pan_y.abs() < 0.01
+            && (dst_w as u32) == src_w
+            && (dst_h as u32) == src_h
+        {
+            self.blit_rgba_round_rect(dst_x, dst_y, dst_w, dst_h, radius, src_rgba, src_w, src_h);
+            return;
+        }
+
+        let r = radius.clamp(0.0, (dst_w.min(dst_h) as f32) * 0.5);
+        let x0 = dst_x.max(0);
+        let y0 = dst_y.max(0);
+        let x1 = (dst_x + dst_w).min(self.width);
+        let y1 = (dst_y + dst_h).min(self.height);
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+
+        let cx = (dst_x as f32) + (dst_w as f32) * 0.5;
+        let cy = (dst_y as f32) + (dst_h as f32) * 0.5;
+        let hx = (dst_w as f32) * 0.5 - r;
+        let hy = (dst_h as f32) * 0.5 - r;
+        let max_sx = (src_w - 1) as usize;
+        let max_sy = (src_h - 1) as usize;
+        let sw_f = (src_w - 1) as f32;
+        let sh_f = (src_h - 1) as f32;
+        let stride = src_w as usize;
+
+        if (scaled_w + 0.5) < (src_w as f32) || (scaled_h + 0.5) < (src_h as f32) {
+            // 缩小比率（< 1.0x）时采用基于像素覆盖面积的盒式预滤波，避免 1px 细线断裂与锯齿混叠
+            let src_wf = src_w as f32;
+            let src_hf = src_h as f32;
+            let step_x = ((src_wf / scaled_w.max(1e-4)) / 12.0).ceil().max(1.0) as usize;
+            let step_y = ((src_hf / scaled_h.max(1e-4)) / 12.0).ceil().max(1.0) as usize;
+            for py in y0..y1 {
+                let dy = ((py as f32 + 0.5) - cy).abs() - hy;
+                let fy0 = ((((py as f32) - img_top) / scaled_h) * src_hf).clamp(0.0, src_hf);
+                let fy1 = ((((py as f32 + 1.0) - img_top) / scaled_h) * src_hf)
+                    .clamp(0.0, src_hf)
+                    .max(fy0);
+                let sy0 = (fy0.floor() as usize).min(max_sy);
+                let sy1 = if fy1 > fy0 {
+                    ((fy1 - 1e-4).floor().max(0.0) as usize).clamp(sy0, max_sy)
+                } else {
+                    sy0
+                };
+
+                for px in x0..x1 {
+                    let dx = ((px as f32 + 0.5) - cx).abs() - hx;
+                    let dist = squircle_corner_dist(dx, dy, r);
+                    let cov = (0.5 - dist).clamp(0.0, 1.0);
+                    if cov <= 0.0 {
+                        continue;
+                    }
+                    let fx0 =
+                        ((((px as f32) - img_left) / scaled_w) * src_wf).clamp(0.0, src_wf);
+                    let fx1 = ((((px as f32 + 1.0) - img_left) / scaled_w) * src_wf)
+                        .clamp(0.0, src_wf)
+                        .max(fx0);
+                    let sx0 = (fx0.floor() as usize).min(max_sx);
+                    let sx1 = if fx1 > fx0 {
+                        ((fx1 - 1e-4).floor().max(0.0) as usize).clamp(sx0, max_sx)
+                    } else {
+                        sx0
+                    };
+
+                    let mut acc_r = 0.0f32;
+                    let mut acc_g = 0.0f32;
+                    let mut acc_b = 0.0f32;
+                    let mut acc_a = 0.0f32;
+                    let mut w_sum = 0.0f32;
+                    let mut sy = sy0;
+                    while sy <= sy1 {
+                        let wy = (fy1.min((sy + 1) as f32) - fy0.max(sy as f32)).max(0.0);
+                        let row_off = sy * stride;
+                        let mut sx = sx0;
+                        while sx <= sx1 {
+                            let wx = (fx1.min((sx + 1) as f32) - fx0.max(sx as f32)).max(0.0);
+                            let w = wx * wy;
+                            let idx = (row_off + sx) * 4;
+                            acc_r += src_rgba[idx] as f32 * w;
+                            acc_g += src_rgba[idx + 1] as f32 * w;
+                            acc_b += src_rgba[idx + 2] as f32 * w;
+                            acc_a += src_rgba[idx + 3] as f32 * w;
+                            w_sum += w;
+                            sx += step_x;
+                        }
+                        sy += step_y;
+                    }
+                    let sc = if w_sum > 1e-6 {
+                        let inv_w = 1.0 / w_sum;
+                        Color4::rgba(
+                            (acc_r * inv_w).round().clamp(0.0, 255.0) as u8,
+                            (acc_g * inv_w).round().clamp(0.0, 255.0) as u8,
+                            (acc_b * inv_w).round().clamp(0.0, 255.0) as u8,
+                            (acc_a * inv_w).round().clamp(0.0, 255.0) as u8,
+                        )
+                    } else {
+                        let idx = (sy0 * stride + sx0) * 4;
+                        Color4::rgba(
+                            src_rgba[idx],
+                            src_rgba[idx + 1],
+                            src_rgba[idx + 2],
+                            src_rgba[idx + 3],
+                        )
+                    };
+                    self.blend_pixel(px, py, sc, cov);
+                }
+            }
+            return;
+        }
+
+        for py in y0..y1 {
+            let dy = ((py as f32 + 0.5) - cy).abs() - hy;
+            let v = (((py as f32 + 0.5) - img_top) / scaled_h).clamp(0.0, 1.0);
+            let fy = (v * (src_h as f32) - 0.5).clamp(0.0, sh_f);
+            let y0i = fy.floor() as usize;
+            let y1i = (y0i + 1).min(max_sy);
+            let ty = fy - (y0i as f32);
+
+            for px in x0..x1 {
+                let dx = ((px as f32 + 0.5) - cx).abs() - hx;
+                let dist = squircle_corner_dist(dx, dy, r);
+                let cov = (0.5 - dist).clamp(0.0, 1.0);
+                if cov <= 0.0 {
+                    continue;
+                }
+                let u = (((px as f32 + 0.5) - img_left) / scaled_w).clamp(0.0, 1.0);
+                let fx = (u * (src_w as f32) - 0.5).clamp(0.0, sw_f);
+                let x0i = fx.floor() as usize;
+                let x1i = (x0i + 1).min(max_sx);
+                let tx = fx - (x0i as f32);
+
+                let i00 = (y0i * stride + x0i) * 4;
+                let i10 = (y0i * stride + x1i) * 4;
+                let i01 = (y1i * stride + x0i) * 4;
+                let i11 = (y1i * stride + x1i) * 4;
+
+                let w00 = (1.0 - tx) * (1.0 - ty);
+                let w10 = tx * (1.0 - ty);
+                let w01 = (1.0 - tx) * ty;
+                let w11 = tx * ty;
+
+                let ch = |c: usize| -> u8 {
+                    (src_rgba[i00 + c] as f32 * w00
+                        + src_rgba[i10 + c] as f32 * w10
+                        + src_rgba[i01 + c] as f32 * w01
+                        + src_rgba[i11 + c] as f32 * w11)
+                        .round()
+                        .clamp(0.0, 255.0) as u8
+                };
+                let sc = Color4::rgba(ch(0), ch(1), ch(2), ch(3));
+                self.blend_pixel(px, py, sc, cov);
+            }
+        }
+    }
+
     /// 1:1 移植 macOS `LiquidGlassScenicBackdrop` 实景流光色带与实时背景模糊折射预览舞台
     pub fn draw_scenic_liquid_glass_preview(
         &mut self,
@@ -2078,4 +2279,38 @@ fn point_in_polygon(px: f32, py: f32, poly: &[(f32, f32)]) -> bool {
         j = i;
     }
     inside
+}
+
+/// 在给定视口内按原图比例且不超 1.0x 适配后的基础显示尺寸（与大屏渲染保持同源几何）
+pub fn fit_image_in_viewport(src_w: u32, src_h: u32, vp_w: i32, vp_h: i32) -> (f32, f32) {
+    if src_w == 0 || src_h == 0 || vp_w <= 0 || vp_h <= 0 {
+        return (1.0, 1.0);
+    }
+    let fit_r = ((vp_w as f32) / (src_w as f32))
+        .min((vp_h as f32) / (src_h as f32))
+        .min(1.0);
+    ((src_w as f32 * fit_r).max(1.0), (src_h as f32 * fit_r).max(1.0))
+}
+
+/// 限制大图预览缩放后的二维平移偏移，确保边缘不脱离视口产生黑边
+pub fn clamp_image_pan_offset(
+    offset_x: f32,
+    offset_y: f32,
+    image_w: f32,
+    image_h: f32,
+    zoom_scale: f32,
+    viewport_w: f32,
+    viewport_h: f32,
+) -> (f32, f32) {
+    if zoom_scale <= 1.001
+        || image_w <= 0.0
+        || image_h <= 0.0
+        || viewport_w <= 0.0
+        || viewport_h <= 0.0
+    {
+        return (0.0, 0.0);
+    }
+    let max_x = ((image_w * zoom_scale - viewport_w) * 0.5).max(0.0);
+    let max_y = ((image_h * zoom_scale - viewport_h) * 0.5).max(0.0);
+    (offset_x.clamp(-max_x, max_x), offset_y.clamp(-max_y, max_y))
 }

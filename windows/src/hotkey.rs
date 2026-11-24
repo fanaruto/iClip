@@ -507,6 +507,17 @@ pub fn classify_non_active_panel_key(
     show_quick_look: bool,
     is_recording: bool,
 ) -> NonActiveKeyRoute {
+    classify_non_active_panel_key_ext(vk, mods, in_main_list, show_quick_look, false, is_recording)
+}
+
+pub fn classify_non_active_panel_key_ext(
+    vk: u32,
+    mods: u32,
+    in_main_list: bool,
+    show_quick_look: bool,
+    in_ql_image_stage: bool,
+    is_recording: bool,
+) -> NonActiveKeyRoute {
     if WinSingleModifier::from_vk(vk).is_some() {
         return NonActiveKeyRoute::PassThrough;
     }
@@ -570,6 +581,16 @@ pub fn classify_non_active_panel_key(
     }
     if clean_mods == (MOD_CONTROL_BITS | MOD_SHIFT_BITS) && vk == 0x43 {
         return NonActiveKeyRoute::DispatchPanelCommand;
+    }
+
+    // 独立大图纯粹预览态拦截 Ctrl++/-/0 缩放热键；文本/内联 QuickLook 保持透传不劫持前台浏览器缩放
+    if in_main_list && in_ql_image_stage {
+        if (clean_mods == MOD_CONTROL_BITS
+            || clean_mods == (MOD_CONTROL_BITS | MOD_SHIFT_BITS))
+            && matches!(vk, 0xBB | 0x6B | 0xBD | 0x6D | 0x30 | 0x60)
+        {
+            return NonActiveKeyRoute::DispatchPanelCommand;
+        }
     }
 
     // 预览/大爆炸态（QuickLook 或独立大图舞台）下拦截无修饰及 Shift 可打印键（含 B/G/O 与 Ctrl+A），禁止透传误打进前台宿主窗口

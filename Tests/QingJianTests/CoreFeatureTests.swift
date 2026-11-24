@@ -4212,4 +4212,39 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertFalse(doubleCmd.matchesTrialModifierPressed(in: .option))
         XCTAssertFalse(doubleCmd.matchesLocalKeyDown(keyCode: UInt16(kVK_ANSI_V), flags: .command))
     }
+
+    func testSystemQuickLookClickModeParityAndShrinkPanClamp() {
+        // 1. 单击 / 双击模式与配套手势文案严格对齐
+        XCTAssertEqual(CardClickPasteMode.singleClick.title, "单击直接粘贴")
+        XCTAssertTrue(CardClickPasteMode.singleClick.companionGestureSummary.contains("⌥ 单击仅复制"))
+        XCTAssertEqual(CardClickPasteMode.doubleClick.title, "双击直接粘贴")
+        XCTAssertTrue(CardClickPasteMode.doubleClick.companionGestureSummary.contains("单击静默复制"))
+
+        // 2. 纯图从 2.5x 边缘平移缩小到 1.4x 再退回 1.0x 时，平移向量逐级收敛绝不残留旧角落偏移
+        let zoomed25 = BigBangTokenizer.clampedImagePanOffset(
+            offset: CGSize(width: 900, height: 600),
+            imageSize: CGSize(width: 500, height: 400),
+            zoomScale: 2.5,
+            viewportSize: CGSize(width: 600, height: 400)
+        )
+        XCTAssertEqual(zoomed25.width, 325, accuracy: 0.01)
+        XCTAssertEqual(zoomed25.height, 300, accuracy: 0.01)
+
+        let shrunk14 = BigBangTokenizer.clampedImagePanOffset(
+            offset: zoomed25,
+            imageSize: CGSize(width: 500, height: 400),
+            zoomScale: 1.4,
+            viewportSize: CGSize(width: 600, height: 400)
+        )
+        XCTAssertEqual(shrunk14.width, 50, accuracy: 0.01)
+        XCTAssertEqual(shrunk14.height, 80, accuracy: 0.01)
+
+        let restored10 = BigBangTokenizer.clampedImagePanOffset(
+            offset: shrunk14,
+            imageSize: CGSize(width: 500, height: 400),
+            zoomScale: 1.0,
+            viewportSize: CGSize(width: 600, height: 400)
+        )
+        XCTAssertEqual(restored10, .zero)
+    }
 }

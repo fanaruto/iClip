@@ -2825,6 +2825,34 @@ mod tests {
             classify_non_active_panel_key(0x4F, MOD_CONTROL_BITS | MOD_SHIFT_BITS, true, true, false),
             NonActiveKeyRoute::PassThrough
         );
+        use crate::hotkey::classify_non_active_panel_key_ext;
+        assert_eq!(
+            classify_non_active_panel_key(0xBB, MOD_CONTROL_BITS, true, true, false),
+            NonActiveKeyRoute::PassThrough
+        );
+        assert_eq!(
+            classify_non_active_panel_key_ext(0xBB, MOD_CONTROL_BITS, true, true, true, false),
+            NonActiveKeyRoute::DispatchPanelCommand
+        );
+        assert_eq!(
+            classify_non_active_panel_key_ext(
+                0xBB,
+                MOD_CONTROL_BITS | MOD_SHIFT_BITS,
+                true,
+                true,
+                true,
+                false
+            ),
+            NonActiveKeyRoute::DispatchPanelCommand
+        );
+        assert_eq!(
+            classify_non_active_panel_key_ext(0xBD, MOD_CONTROL_BITS, true, true, true, false),
+            NonActiveKeyRoute::DispatchPanelCommand
+        );
+        assert_eq!(
+            classify_non_active_panel_key_ext(0x30, MOD_CONTROL_BITS, true, true, true, false),
+            NonActiveKeyRoute::DispatchPanelCommand
+        );
     }
 
     #[test]
@@ -2887,6 +2915,120 @@ mod tests {
         assert_eq!(
             bare_f8.onboarding_keycaps(),
             (String::new(), "F8".to_string(), false)
+        );
+    }
+
+    #[test]
+    fn test_win_canvas_zoom_pan_clamp_and_bilinear_blit() {
+        use crate::canvas_ui::{clamp_image_pan_offset, PixelCanvas};
+
+        // 1. 平移夹紧：1.0x 强制归零；2.5x 窄边未超视口轴归零，超视口轴对齐半差；1x1 极小图缩放零越界
+        assert_eq!(
+            clamp_image_pan_offset(120.0, -80.0, 400.0, 300.0, 1.0, 600.0, 400.0),
+            (0.0, 0.0)
+        );
+        let (px, py) = clamp_image_pan_offset(500.0, -500.0, 300.0, 400.0, 2.0, 600.0, 400.0);
+        assert!((px - 0.0).abs() < 0.01);
+        assert!((py - (-200.0)).abs() < 0.01);
+
+        let (sx, sy) = clamp_image_pan_offset(500.0, 500.0, 500.0, 400.0, 2.5, 600.0, 400.0);
+        assert!((sx - 325.0).abs() < 0.01);
+        assert!((sy - 300.0).abs() < 0.01);
+
+        // 2. 双线性缩放贴图：2x2 小图、80x60 大图 2.0x 满视口裁剪与 1x1 边缘图均不越界且无黑边溢漏
+        let mut dib_small = vec![0u32; 120 * 90];
+        let mut c_small = PixelCanvas::new(&mut dib_small, 120, 90);
+        let src_2x2 = vec![
+            255, 0, 0, 255, 0, 255, 0, 255, //
+            0, 0, 255, 255, 255, 255, 255, 255,
+        ];
+        c_small.blit_rgba_round_rect_zoomed(10, 10, 80, 60, 4.0, &src_2x2, 2, 2, 2.2, 18.0, -12.0);
+        let lit_small = dib_small.iter().filter(|&&px| px != 0).count();
+        assert!(lit_small >= 12);
+
+        let mut dib = vec![0u32; 120 * 90];
+        let mut canvas = PixelCanvas::new(&mut dib, 120, 90);
+        let src_80x60 = [40u8, 120, 220, 255].repeat(80 * 60);
+        canvas.blit_rgba_round_rect_zoomed(10, 10, 80, 60, 6.0, &src_80x60, 80, 60, 2.2, 99.0, -99.0);
+        let lit_count = dib.iter().filter(|&&px| px != 0).count();
+        assert!(lit_count > 4000);
+        assert_eq!(dib[0], 0);
+        assert_eq!(dib[89 * 120 + 119], 0);
+
+        // 3. 1.0x 原位贴图保持逐像素 1:1 锐利映射（无半像素模糊采样偏移）
+        let mut dib_sharp = vec![0u32; 8 * 8];
+        let mut c_sharp = PixelCanvas::new(&mut dib_sharp, 8, 8);
+        let src_4x4 = vec![
+            10, 20, 30, 255, 200, 10, 20, 255, 30, 220, 40, 255, 250, 250, 10, 255, //
+            40, 50, 60, 255, 111, 222, 123, 255, 80, 90, 100, 255, 120, 130, 140, 255, //
+            150, 160, 170, 255, 180, 190, 200, 255, 210, 220, 230, 255, 240, 250, 255, 255, //
+            15, 25, 35, 255, 45, 55, 65, 255, 75, 85, 95, 255, 105, 115, 125, 255,
+        ];
+        c_sharp.blit_rgba_round_rect_zoomed(2, 2, 4, 4, 0.0, &src_4x4, 4, 4, 1.0, 0.0, 0.0);
+        // 第 (1, 1) 源像素 RGB = (111, 222, 123) 映射至画布 (3, 3) 必须完全精确不混淆
+        let px_3_3 = dib_sharp[3 * 8 + 3];
+        assert_eq!((px_3_3 >> 16) & 0xFF, 111);
+        assert_eq!((px_3_3 >> 8) & 0xFF, 222);
+        assert_eq!(px_3_3 & 0xFF, 123);
+
+        // 4. 源图大于视口在 1.0x（及 1.25x 仍处于缩小区间）下必须走面积预滤波，禁止 1px 细线丢失
+        let mut src_stripes_8x8 = Vec::with_capacity(8 * 8 * 4);
+        for y in 0..8 {
+            let v = if y % 2 == 0 { 255u8 } else { 0u8 };
+            for _x in 0..8 {
+                src_stripes_8x8.extend_from_slice(&[v, v, v, 255]);
+            }
+        }
+        let mut dib_down = vec![0u32; 8 * 8];
+        let mut c_down = PixelCanvas::new(&mut dib_down, 8, 8);
+        c_down.blit_rgba_round_rect_zoomed(2, 2, 4, 4, 0.0, &src_stripes_8x8, 8, 8, 1.0, 0.0, 0.0);
+        for py in 2..6 {
+            for px in 2..6 {
+                let r_ch = (dib_down[py * 8 + px] >> 16) & 0xFF;
+                assert!(
+                    (118..=138).contains(&r_ch),
+                    "expected anti-aliased ~128 gray at 2:1 downscale ({px},{py}), got {r_ch}"
+                );
+            }
+        }
+
+        // 5. 10x10 条纹图在 6x6 视口 1.25x 缩小区间 + 贴边平移下零越界且保留抗锯齿中间灰阶
+        let mut src_stripes_10x10 = Vec::with_capacity(10 * 10 * 4);
+        for y in 0..10 {
+            let v = if y % 2 == 0 { 255u8 } else { 0u8 };
+            for _x in 0..10 {
+                src_stripes_10x10.extend_from_slice(&[v, v, v, 255]);
+            }
+        }
+        let mut dib_pan_down = vec![0u32; 12 * 12];
+        let mut c_pan_down = PixelCanvas::new(&mut dib_pan_down, 12, 12);
+        c_pan_down.blit_rgba_round_rect_zoomed(
+            2,
+            2,
+            6,
+            6,
+            0.0,
+            &src_stripes_10x10,
+            10,
+            10,
+            1.25,
+            4.0,
+            -4.0,
+        );
+        let mut mid_gray_hits = 0usize;
+        for py in 2..8 {
+            for px in 2..8 {
+                let p = dib_pan_down[py * 12 + px];
+                assert_ne!((p >> 24) & 0xFF, 0, "edge pixel ({px},{py}) must stay opaque");
+                let r_ch = (p >> 16) & 0xFF;
+                if r_ch > 0 && r_ch < 255 {
+                    mid_gray_hits += 1;
+                }
+            }
+        }
+        assert!(
+            mid_gray_hits >= 12,
+            "expected anti-aliased intermediate gray pixels under 1.25x downscale, got {mid_gray_hits}"
         );
     }
 }

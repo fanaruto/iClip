@@ -1,18 +1,19 @@
 #![cfg(target_os = "windows")]
 
 use iclip_core::canvas_ui::{
-    build_display_rows_ext, estimate_text_px, grid_move_selection, image_grid_row_height,
-    standard_card_height, Color4, DisplayRow, GlassPalette, GridMoveDir, PixelCanvas,
+    build_display_rows_ext, clamp_image_pan_offset, estimate_text_px, fit_image_in_viewport,
+    grid_move_selection, image_grid_row_height, standard_card_height, Color4, DisplayRow,
+    GlassPalette, GridMoveDir, PixelCanvas,
 };
 use iclip_core::engines::{
     analyze_file_actions, analyze_text_actions, clean_tracking_url, compress_png_to_white_bg_jpeg,
     render_dynamic_template, render_mockup_frame_png, strip_file_metadata_to_clean_png,
 };
 use iclip_core::hotkey::{
-    classify_non_active_panel_key, should_restore_foreground_window, static_hotkey_conflict_reason,
-    DoubleTapOutcome, NonActiveKeyRoute, WinHotKeyShortcut, WinHotKeySlot,
-    WinModifierDoubleTapMachine, WinSingleModifier, MOD_ALT_BITS, MOD_CONTROL_BITS, MOD_SHIFT_BITS,
-    MOD_WIN_BITS,
+    classify_non_active_panel_key_ext, should_restore_foreground_window,
+    static_hotkey_conflict_reason, DoubleTapOutcome, NonActiveKeyRoute, WinHotKeyShortcut,
+    WinHotKeySlot, WinModifierDoubleTapMachine, WinSingleModifier, MOD_ALT_BITS, MOD_CONTROL_BITS,
+    MOD_SHIFT_BITS, MOD_WIN_BITS,
 };
 use iclip_core::intelligence::{
     assemble_big_bang_selection, compute_clipboard_diff, evaluate_instant_math,
@@ -99,6 +100,7 @@ const WM_APP_OUTSIDE_CLICK: u32 = WM_USER + 105;
 const WM_APP_OTA_STATE: u32 = WM_USER + 106;
 const WM_APP_OTA_RESTART: u32 = WM_USER + 107;
 const WM_APP_ASYNC_CHAT_IMAGE: u32 = WM_USER + 108;
+const WM_APP_QL_HI_READY: u32 = WM_USER + 109;
 const WS_EX_NOACTIVATE_VAL: u32 = 0x0800_0000;
 const SWP_NOACTIVATE_VAL: u32 = 0x0010;
 const WM_MOUSEACTIVATE_MSG: u32 = 0x0021;
@@ -174,6 +176,7 @@ enum AsyncChatClipResult {
 static MAIN_HWND_RAW: AtomicIsize = AtomicIsize::new(0);
 static QL_STAGE_HWND_RAW: AtomicIsize = AtomicIsize::new(0);
 static PENDING_ASYNC_CHAT_IMAGES: Mutex<Vec<AsyncChatClipResult>> = Mutex::new(Vec::new());
+static PENDING_QL_HI_RGBA: Mutex<Vec<(String, Option<(u32, u32, Vec<u8>)>)>> = Mutex::new(Vec::new());
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ActiveViewMode {
@@ -324,6 +327,9 @@ struct WinAppState {
     onboarding_import_feedback: Option<String>,
     ql_stage_visible: bool,
     ql_stage_rgba: Option<(u32, u32, Vec<u8>, String)>,
+    ql_stage_hi_rgba: Option<(String, u32, u32, Vec<u8>)>,
+    ql_stage_orig_dims: Option<(String, u32, u32)>,
+    ql_stage_hi_loading_key: Option<String>,
     ql_stage_cached_key: Option<(String, u32, u32)>,
     ql_stage_big_bang: bool,
     ql_stage_ocr_text: Option<String>,
@@ -331,6 +337,10 @@ struct WinAppState {
     ql_stage_sweep_target: Option<bool>,
     ql_stage_tracking_mouse_leave: bool,
     ql_stage_hit_regions: Vec<HitRegion>,
+    ql_stage_zoom: f32,
+    ql_stage_pan_x: f32,
+    ql_stage_pan_y: f32,
+    ql_stage_pan_drag: Option<(i32, i32, f32, f32)>,
     tracking_mouse_leave: bool,
     hovered_link_badge_store_idx: Option<usize>,
     copied_flash_item_id: Option<String>,
@@ -566,6 +576,9 @@ pub fn run_windows_app() -> i32 {
                 onboarding_import_feedback: None,
                 ql_stage_visible: false,
                 ql_stage_rgba: None,
+                ql_stage_hi_rgba: None,
+                ql_stage_orig_dims: None,
+                ql_stage_hi_loading_key: None,
                 ql_stage_cached_key: None,
                 ql_stage_big_bang: false,
                 ql_stage_ocr_text: None,
@@ -573,6 +586,10 @@ pub fn run_windows_app() -> i32 {
                 ql_stage_sweep_target: None,
                 ql_stage_tracking_mouse_leave: false,
                 ql_stage_hit_regions: Vec::new(),
+                ql_stage_zoom: 1.0,
+                ql_stage_pan_x: 0.0,
+                ql_stage_pan_y: 0.0,
+                ql_stage_pan_drag: None,
                 tracking_mouse_leave: false,
                 hovered_link_badge_store_idx: None,
                 copied_flash_item_id: None,
@@ -750,6 +767,9 @@ pub fn run_windows_self_test() -> Result<(), String> {
             onboarding_import_feedback: None,
             ql_stage_visible: false,
             ql_stage_rgba: None,
+            ql_stage_hi_rgba: None,
+            ql_stage_orig_dims: None,
+            ql_stage_hi_loading_key: None,
             ql_stage_cached_key: None,
             ql_stage_big_bang: false,
             ql_stage_ocr_text: None,
@@ -757,6 +777,10 @@ pub fn run_windows_self_test() -> Result<(), String> {
             ql_stage_sweep_target: None,
             ql_stage_tracking_mouse_leave: false,
             ql_stage_hit_regions: Vec::new(),
+            ql_stage_zoom: 1.0,
+            ql_stage_pan_x: 0.0,
+            ql_stage_pan_y: 0.0,
+            ql_stage_pan_drag: None,
             tracking_mouse_leave: false,
             hovered_link_badge_store_idx: None,
             copied_flash_item_id: None,
@@ -1458,11 +1482,12 @@ unsafe extern "system" fn ll_kbd_proc(code: i32, wparam: WPARAM, lparam: LPARAM)
                             {
                                 return NonActiveKeyRoute::PassThrough;
                             }
-                            classify_non_active_panel_key(
+                            classify_non_active_panel_key_ext(
                                 vk,
                                 mod_bits,
                                 st.view_mode == ActiveViewMode::MainList,
                                 st.show_quick_look || st.ql_stage_visible,
+                                st.ql_stage_visible && !st.ql_stage_big_bang,
                                 st.recording_slot.is_some(),
                             )
                         });
@@ -1788,11 +1813,15 @@ unsafe fn hide_panel(hwnd: HWND, restore_focus: bool) {
             st.show_quick_look = false;
             st.ql_stage_visible = false;
             st.ql_stage_rgba = None;
+            st.ql_stage_hi_rgba = None;
+            st.ql_stage_orig_dims = None;
+            st.ql_stage_hi_loading_key = None;
             st.ql_stage_cached_key = None;
             st.ql_stage_big_bang = false;
             st.ql_stage_ocr_text = None;
             st.ql_stage_ocr_selected.clear();
             st.ql_stage_hit_regions.clear();
+            reset_ql_stage_zoom_and_pan(st);
             st.big_bang_selected_ids.clear();
             st.big_bang_sweep_target = None;
             st.editing_alias_item_id = None;
@@ -1855,6 +1884,9 @@ unsafe extern "system" fn wnd_proc(
                         st.show_quick_look = false;
                         st.ql_stage_visible = false;
                         st.ql_stage_rgba = None;
+                        st.ql_stage_hi_rgba = None;
+                        st.ql_stage_orig_dims = None;
+                        st.ql_stage_hi_loading_key = None;
                         st.ql_stage_cached_key = None;
                         st.ql_stage_big_bang = false;
                         st.ql_stage_ocr_text = None;
@@ -2047,6 +2079,53 @@ unsafe extern "system" fn wnd_proc(
                     }
                 });
                 let _ = InvalidateRect(hwnd, null(), FALSE);
+            }
+            0
+        }
+        WM_APP_QL_HI_READY => {
+            let batch: Vec<(String, Option<(u32, u32, Vec<u8>)>)> = PENDING_QL_HI_RGBA
+                .lock()
+                .map(|mut g| g.drain(..).collect())
+                .unwrap_or_default();
+            let mut need_repaint = false;
+            if !batch.is_empty() {
+                APP_STATE.with(|cell| {
+                    if let Some(st) = cell.borrow_mut().as_mut() {
+                        for (fname, data_opt) in batch {
+                            let matches_active = st
+                                .ql_stage_cached_key
+                                .as_ref()
+                                .is_some_and(|(cur, _, _)| cur == &fname);
+                            if st.ql_stage_hi_loading_key.as_deref() == Some(fname.as_str()) {
+                                st.ql_stage_hi_loading_key = None;
+                            }
+                            if let Some((bw, bh, hi_rgba)) = data_opt {
+                                if matches_active && st.ql_stage_visible && !st.ql_stage_big_bang {
+                                    st.ql_stage_hi_rgba = Some((fname, bw, bh, hi_rgba));
+                                    if st.ql_stage_zoom > 1.01 {
+                                        need_repaint = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+            if need_repaint {
+                let ql_h = QL_STAGE_HWND_RAW.load(Ordering::SeqCst) as HWND;
+                if !ql_h.is_null() {
+                    let mut rc: RECT = zeroed();
+                    GetClientRect(ql_h, &mut rc);
+                    let sc = get_dpi_scale(ql_h);
+                    let sv = |v: i32| ((v as f32) * sc).round() as i32;
+                    let vp_rc = RECT {
+                        left: sv(18),
+                        top: sv(42),
+                        right: (rc.right - sv(18)).max(sv(18) + 1),
+                        bottom: (rc.bottom - sv(40)).max(sv(42) + 1),
+                    };
+                    let _ = InvalidateRect(ql_h, &vp_rc, FALSE);
+                }
             }
             0
         }
@@ -2383,8 +2462,11 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_MOUSEWHEEL => {
             let delta = ((wparam >> 16) & 0xFFFF) as i16;
-            APP_STATE.with(|cell| {
+            let blocked_by_onboarding = APP_STATE.with(|cell| {
                 if let Some(st) = cell.borrow_mut().as_mut() {
+                    if st.show_highlights_overlay {
+                        return true;
+                    }
                     if st.show_quick_look {
                         if delta < 0 {
                             st.quick_look_scroll = st.quick_look_scroll.saturating_add(3);
@@ -2418,8 +2500,11 @@ unsafe extern "system" fn wnd_proc(
                         }
                     }
                 }
+                false
             });
-            let _ = InvalidateRect(hwnd, null(), FALSE);
+            if !blocked_by_onboarding {
+                let _ = InvalidateRect(hwnd, null(), FALSE);
+            }
             0
         }
         WM_KEYDOWN | WM_SYSKEYDOWN => {
@@ -2609,9 +2694,8 @@ unsafe fn handle_clipboard_update(hwnd: HWND) {
     if IsClipboardFormatAvailable(CF_HDROP_ID) != FALSE {
         if let Some(paths) = read_files_from_clipboard(hwnd) {
             if !paths.is_empty() {
-                // 微信/飞书等聊天软件复制单张图片时会在 CF_HDROP 放入临时图片路径：后台线程异步解码提升为高清图片卡片，UI 线程 0 阻塞
+                // 微信/飞书等聊天软件复制单张图片时会在 CF_HDROP 放入临时图片路径：全部磁盘校验与解码放入后台线程，UI 线程 0 阻塞且拒绝符号链接
                 if paths.len() == 1
-                    && !std::path::Path::new(&paths[0]).is_dir()
                     && iclip_core::security::should_promote_single_clipboard_file_to_image(
                         &paths[0],
                         source_app.as_deref(),
@@ -2624,40 +2708,44 @@ unsafe fn handle_clipboard_update(hwnd: HWND) {
                     } else {
                         None
                     };
-                    if std::path::Path::new(&single_path).exists() {
-                        let target_hwnd = hwnd as isize;
-                        let src_clone = source_app.clone();
-                        std::thread::spawn(move || {
-                            let mut decoded_ok: Option<(Vec<u8>, u32, u32)> = None;
-                            if let Ok(meta) = std::fs::metadata(&single_path) {
-                                if meta.is_file() && meta.len() > 0 && meta.len() <= 32 * 1024 * 1024 {
-                                    if let Ok(raw_bytes) = std::fs::read(&single_path) {
-                                        if let Ok(dyn_img) = image::load_from_memory(&raw_bytes) {
-                                            let (pw, ph) = (dyn_img.width(), dyn_img.height());
-                                            if pw > 0
-                                                && ph > 0
-                                                && pw <= 12_000
-                                                && ph <= 12_000
-                                                && (pw as u64) * (ph as u64) <= 67_108_864
+                    let target_hwnd = hwnd as isize;
+                    let src_clone = source_app.clone();
+                    std::thread::spawn(move || {
+                        let mut decoded_ok: Option<(Vec<u8>, u32, u32)> = None;
+                        if let Ok(meta) = std::fs::symlink_metadata(&single_path) {
+                            if !meta.file_type().is_symlink()
+                                && meta.is_file()
+                                && meta.len() > 0
+                                && meta.len() <= 32 * 1024 * 1024
+                            {
+                                if let Ok(raw_bytes) = std::fs::read(&single_path) {
+                                    if let Ok(dyn_img) = image::load_from_memory(&raw_bytes) {
+                                        let (pw, ph) = (dyn_img.width(), dyn_img.height());
+                                        if pw > 0
+                                            && ph > 0
+                                            && pw <= 12_000
+                                            && ph <= 12_000
+                                            && (pw as u64) * (ph as u64) <= 67_108_864
+                                        {
+                                            let rgba = dyn_img.to_rgba8();
+                                            let mut png_bytes = Vec::new();
+                                            if PngEncoder::new(&mut png_bytes)
+                                                .write_image(&rgba, pw, ph, ColorType::Rgba8.into())
+                                                .is_ok()
                                             {
-                                                let rgba = dyn_img.to_rgba8();
-                                                let mut png_bytes = Vec::new();
-                                                if PngEncoder::new(&mut png_bytes)
-                                                    .write_image(&rgba, pw, ph, ColorType::Rgba8.into())
-                                                    .is_ok()
-                                                {
-                                                    decoded_ok = Some((png_bytes, pw, ph));
-                                                }
+                                                decoded_ok = Some((png_bytes, pw, ph));
                                             }
                                         }
                                     }
                                 }
                             }
-                            let out_result = if let Some((png_bytes, w, h)) = decoded_ok.or(dib_fallback) {
-                                AsyncChatClipResult::Image(png_bytes, w, h, src_clone)
-                            } else {
-                                AsyncChatClipResult::FallbackFile(single_path, src_clone)
-                            };
+                        }
+                        let out_result = if let Some((png_bytes, w, h)) = decoded_ok.or(dib_fallback) {
+                            AsyncChatClipResult::Image(png_bytes, w, h, src_clone)
+                        } else {
+                            AsyncChatClipResult::FallbackFile(single_path, src_clone)
+                        };
+                        {
                             if let Ok(mut q) = PENDING_ASYNC_CHAT_IMAGES.lock() {
                                 q.push(out_result);
                             }
@@ -2667,29 +2755,9 @@ unsafe fn handle_clipboard_update(hwnd: HWND) {
                                     let _ = PostMessageW(h_ptr, WM_APP_ASYNC_CHAT_IMAGE, 0, 0);
                                 }
                             }
-                        });
-                        return;
-                    }
-                    if let Some((png_bytes, w, h)) = dib_fallback {
-                        APP_STATE.with(|cell| {
-                            if let Some(st) = cell.borrow_mut().as_mut() {
-                                st.pending_append_capture = false;
-                                let hash = iclip_core::model::sha256_hex(&png_bytes);
-                                let file_name = format!("{}.png", &hash[0..24]);
-                                if st.store.write_image_bytes(&file_name, &png_bytes).is_ok() {
-                                    st.store.insert_or_promote(ClipItem::new_image(
-                                        file_name,
-                                        w,
-                                        h,
-                                        &png_bytes,
-                                        source_app,
-                                    ));
-                                }
-                            }
-                        });
-                        let _ = InvalidateRect(hwnd, null(), FALSE);
-                        return;
-                    }
+                        }
+                    });
+                    return;
                 }
 
                 APP_STATE.with(|cell| {
@@ -7273,12 +7341,16 @@ fn layout_and_draw_main_view(
                         }
                         hover_pill_total_w = btn_cnt * b_sz + (btn_cnt - 1) * s(4) + s(8);
                     }
+                    let has_right_badge =
+                        st.store.queue_rank(&item.id).is_some() || vis_pos < 9;
                     let right_reserved = if is_hovered {
                         hover_pill_total_w + s(13)
-                    } else if is_selected && vis_pos < 9 {
-                        s(64)
-                    } else {
+                    } else if is_selected && has_right_badge {
+                        s(72)
+                    } else if has_right_badge {
                         s(46)
+                    } else {
+                        s(14)
                     };
 
                     if is_hovered {
@@ -9154,7 +9226,24 @@ fn layout_and_draw_settings_view(
             "呼出 / 隐藏面板",
             st.store.config.hotkey_toggle.display_string(),
         ),
-        ("直接键入光标处", "双击 / Enter".to_string()),
+        (
+            "直接键入光标处",
+            if st.store.config.single_click_paste {
+                "单击 / Enter"
+            } else {
+                "双击 / Enter"
+            }
+            .to_string(),
+        ),
+        (
+            "仅复制到剪贴板",
+            if st.store.config.single_click_paste {
+                "Alt+单击 / Ctrl+C"
+            } else {
+                "单击 / Ctrl+C"
+            }
+            .to_string(),
+        ),
         ("左 / 右切换类目", "Shift+Tab / Tab".to_string()),
         ("标记 / 完成待办事项", "Ctrl + T".to_string()),
         ("设为粘贴一次后无痕自毁", "Ctrl + B".to_string()),
@@ -11800,6 +11889,7 @@ unsafe fn handle_left_click(hwnd: HWND, x: i32, y: i32, is_double: bool) {
                 if let Some(st) = c.borrow_mut().as_mut() {
                     st.ql_stage_big_bang = !st.ql_stage_big_bang;
                     st.ql_stage_ocr_selected.clear();
+                    reset_ql_stage_zoom_and_pan(st);
                 }
             });
             let ql_h = QL_STAGE_HWND_RAW.load(Ordering::SeqCst) as HWND;
@@ -12365,6 +12455,10 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
             if st.ql_stage_visible {
                 st.ql_stage_visible = false;
                 st.ql_stage_rgba = None;
+                st.ql_stage_hi_rgba = None;
+                st.ql_stage_orig_dims = None;
+                st.ql_stage_hi_loading_key = None;
+                st.ql_stage_cached_key = None;
                 closed_ql_stage = true;
                 return true;
             }
@@ -12757,12 +12851,49 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
             if st.ql_stage_visible {
                 st.ql_stage_big_bang = !st.ql_stage_big_bang;
                 st.ql_stage_ocr_selected.clear();
+                reset_ql_stage_zoom_and_pan(st);
                 return true;
             }
             false
         });
         if ql_toggled {
             let ql_h = QL_STAGE_HWND_RAW.load(Ordering::SeqCst) as HWND;
+            if !ql_h.is_null() {
+                let _ = InvalidateRect(ql_h, null(), FALSE);
+            }
+            return;
+        }
+    }
+
+    if !alt_down && matches!(vk, 0xBB | 0x6B | 0xBD | 0x6D | 0x30 | 0x60) {
+        let ql_h = QL_STAGE_HWND_RAW.load(Ordering::SeqCst) as HWND;
+        let (avail_w, avail_h) = if !ql_h.is_null() {
+            let mut qrc: RECT = zeroed();
+            GetClientRect(ql_h, &mut qrc);
+            let sc = get_dpi_scale(ql_h);
+            let sv = |v: i32| ((v as f32) * sc).round() as i32;
+            (
+                ((qrc.right - qrc.left) - sv(36)).max(1),
+                ((qrc.bottom - qrc.top) - sv(82)).max(1),
+            )
+        } else {
+            (640, 440)
+        };
+        let zoomed = APP_STATE.with(|c| {
+            let mut b = c.borrow_mut();
+            let Some(st) = b.as_mut() else { return false };
+            if !(st.ql_stage_visible && !st.ql_stage_big_bang && st.ql_stage_rgba.is_some()) {
+                return false;
+            }
+            let next_zoom = match vk {
+                0xBB | 0x6B => st.ql_stage_zoom + 0.5,
+                0xBD | 0x6D => st.ql_stage_zoom - 0.5,
+                _ => 1.0,
+            };
+            step_ql_stage_zoom(st, next_zoom, avail_w, avail_h);
+            true
+        });
+        if zoomed {
             if !ql_h.is_null() {
                 let _ = InvalidateRect(ql_h, null(), FALSE);
             }
@@ -13038,6 +13169,9 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
                         } else {
                             st.ql_stage_visible = false;
                             st.ql_stage_rgba = None;
+                            st.ql_stage_hi_rgba = None;
+                            st.ql_stage_orig_dims = None;
+                            st.ql_stage_hi_loading_key = None;
                             st.ql_stage_cached_key = None;
                             st.ql_stage_big_bang = false;
                             st.ql_stage_sweep_target = None;
@@ -14298,6 +14432,132 @@ fn set_shared_big_bang_granularity(st: &mut WinAppState, granularity: BigBangGra
     st.ql_stage_sweep_target = None;
 }
 
+fn reset_ql_stage_zoom_and_pan(st: &mut WinAppState) {
+    st.ql_stage_zoom = 1.0;
+    st.ql_stage_pan_x = 0.0;
+    st.ql_stage_pan_y = 0.0;
+    st.ql_stage_pan_drag = None;
+}
+
+/// 当用户放大浏览且原图分辨率高于 1.0x 显示缓冲时，在后台线程异步解码并缩放高分缓冲（上限 2560px），主线程零阻塞。
+fn ensure_ql_stage_hi_rgba_if_needed(st: &mut WinAppState) {
+    if st.ql_stage_zoom <= 1.01 {
+        return;
+    }
+    let Some((ref fname, dw, dh)) = st.ql_stage_cached_key else {
+        return;
+    };
+    if let Some((ref hi_name, _, _, _)) = st.ql_stage_hi_rgba {
+        if hi_name == fname {
+            return;
+        }
+    }
+    if st.ql_stage_hi_loading_key.as_deref() == Some(fname.as_str()) {
+        return;
+    }
+    if let Some((ref orig_name, ow, oh)) = st.ql_stage_orig_dims {
+        if orig_name == fname && ow <= dw && oh <= dh {
+            return;
+        }
+    }
+    let fname_clone = fname.clone();
+    let images_dir = st.store.images_dir.clone();
+    st.ql_stage_hi_loading_key = Some(fname_clone.clone());
+    let main_h = MAIN_HWND_RAW.load(Ordering::SeqCst);
+    std::thread::spawn(move || {
+        let mut res_opt: Option<(u32, u32, Vec<u8>)> = None;
+        if let Some(dec_bytes) =
+            iclip_core::security::read_decrypted_image_from_dir(&images_dir, &fname_clone)
+        {
+            if let Ok(dyn_img) = image::load_from_memory(&dec_bytes) {
+                let ow = dyn_img.width().max(1);
+                let oh = dyn_img.height().max(1);
+                if ow > dw || oh > dh {
+                    let buf_scale = (2560.0 / (ow.max(oh) as f32)).min(1.0);
+                    let bw = ((ow as f32 * buf_scale).round() as u32).max(1);
+                    let bh = ((oh as f32 * buf_scale).round() as u32).max(1);
+                    let hi_rgba = if bw != ow || bh != oh {
+                        dyn_img
+                            .resize_exact(bw, bh, FilterType::Triangle)
+                            .to_rgba8()
+                            .into_raw()
+                    } else {
+                        dyn_img.to_rgba8().into_raw()
+                    };
+                    res_opt = Some((bw, bh, hi_rgba));
+                }
+            }
+        }
+        if let Ok(mut q) = PENDING_QL_HI_RGBA.lock() {
+            q.push((fname_clone, res_opt));
+        }
+        let h_ptr = main_h as HWND;
+        if !h_ptr.is_null() {
+            unsafe {
+                let _ = PostMessageW(h_ptr, WM_APP_QL_HI_READY, 0, 0);
+            }
+        }
+    });
+}
+
+fn active_ql_stage_dims(st: &WinAppState) -> Option<(u32, u32)> {
+    let (dw, dh, _, _) = st.ql_stage_rgba.as_ref()?;
+    if !st.ql_stage_big_bang && st.ql_stage_zoom > 1.01 {
+        if let (Some((ref cache_name, _, _)), Some((ref hi_name, hw, hh, _))) =
+            (&st.ql_stage_cached_key, &st.ql_stage_hi_rgba)
+        {
+            if cache_name == hi_name && (*hw > *dw || *hh > *dh) {
+                return Some((*hw, *hh));
+            }
+        }
+    }
+    Some((*dw, *dh))
+}
+
+fn active_ql_stage_rgba_parts<'a>(
+    disp: &'a Option<(u32, u32, Vec<u8>, String)>,
+    hi: &'a Option<(String, u32, u32, Vec<u8>)>,
+    cached_key: &Option<(String, u32, u32)>,
+    big_bang: bool,
+    zoom: f32,
+) -> Option<(u32, u32, &'a [u8], &'a str)> {
+    let (dw, dh, ref disp_rgba, ref title) = disp.as_ref()?;
+    if !big_bang && zoom > 1.01 {
+        if let (Some((ref cache_name, _, _)), Some((ref hi_name, hw, hh, ref hi_rgba))) =
+            (cached_key, hi)
+        {
+            if cache_name == hi_name && (*hw > *dw || *hh > *dh) {
+                return Some((*hw, *hh, hi_rgba.as_slice(), title.as_str()));
+            }
+        }
+    }
+    Some((*dw, *dh, disp_rgba.as_slice(), title.as_str()))
+}
+
+fn step_ql_stage_zoom(st: &mut WinAppState, next_zoom: f32, avail_w: i32, avail_h: i32) {
+    let clamped = next_zoom.clamp(1.0, 3.0);
+    if clamped <= 1.01 {
+        reset_ql_stage_zoom_and_pan(st);
+        return;
+    }
+    st.ql_stage_zoom = clamped;
+    ensure_ql_stage_hi_rgba_if_needed(st);
+    if let Some((iw, ih)) = active_ql_stage_dims(st) {
+        let (base_w, base_h) = fit_image_in_viewport(iw, ih, avail_w, avail_h);
+        let (px, py) = clamp_image_pan_offset(
+            st.ql_stage_pan_x,
+            st.ql_stage_pan_y,
+            base_w,
+            base_h,
+            clamped,
+            avail_w as f32,
+            avail_h as f32,
+        );
+        st.ql_stage_pan_x = px;
+        st.ql_stage_pan_y = py;
+    }
+}
+
 unsafe fn dismiss_large_ql_stage() {
     let ql_h = QL_STAGE_HWND_RAW.load(Ordering::SeqCst) as HWND;
     if !ql_h.is_null() && GetCapture() == ql_h {
@@ -14311,9 +14571,70 @@ unsafe fn dismiss_large_ql_stage() {
             if let Some(st) = b.as_mut() {
                 st.ql_stage_tracking_mouse_leave = false;
                 st.ql_stage_sweep_target = None;
+                reset_ql_stage_zoom_and_pan(st);
             }
         }
     });
+}
+
+/// 计算悬浮大图窗口的 1.0x 显示缓冲尺寸（Triangle 抗锯齿直显，小图最高顺滑放大 1.6x）。
+fn compute_ql_stage_display_dims(
+    ow: u32,
+    oh: u32,
+    max_img_w: i32,
+    max_img_h: i32,
+) -> (u32, u32) {
+    let ratio = ((max_img_w as f32) / (ow as f32))
+        .min((max_img_h as f32) / (oh as f32))
+        .min(1.6)
+        .max(0.01);
+    let dw = ((ow as f32 * ratio).round() as u32).max(1);
+    let dh = ((oh as f32 * ratio).round() as u32).max(1);
+    (dw, dh)
+}
+
+/// 精确判定光标是否落在实际渲染图像边界内（排除 letterbox 留白区域）。
+fn point_in_ql_stage_image(
+    x: i32,
+    y: i32,
+    client_w: i32,
+    client_h: i32,
+    scale: f32,
+    st: &WinAppState,
+) -> bool {
+    let Some((iw, ih)) = active_ql_stage_dims(st) else {
+        return false;
+    };
+    let sv = |v: i32| ((v as f32) * scale).round() as i32;
+    let vp_x = sv(18);
+    let vp_y = sv(42);
+    let avail_w = (client_w - sv(36)).max(1);
+    let avail_h = (client_h - sv(82)).max(1);
+    if x < vp_x || x > vp_x + avail_w || y < vp_y || y > vp_y + avail_h {
+        return false;
+    }
+    let zoom = st.ql_stage_zoom.clamp(1.0, 3.0);
+    let (base_w, base_h) = fit_image_in_viewport(iw, ih, avail_w, avail_h);
+    let scaled_w = base_w * zoom;
+    let scaled_h = base_h * zoom;
+    let (c_pan_x, c_pan_y) = clamp_image_pan_offset(
+        st.ql_stage_pan_x,
+        st.ql_stage_pan_y,
+        base_w,
+        base_h,
+        zoom,
+        avail_w as f32,
+        avail_h as f32,
+    );
+    let raw_left = vp_x as f32 + ((avail_w as f32) - scaled_w) * 0.5 + c_pan_x;
+    let raw_top = vp_y as f32 + ((avail_h as f32) - scaled_h) * 0.5 + c_pan_y;
+    let left = raw_left.max(vp_x as f32);
+    let top = raw_top.max(vp_y as f32);
+    let right = (raw_left + scaled_w).min((vp_x + avail_w) as f32);
+    let bottom = (raw_top + scaled_h).min((vp_y + avail_h) as f32);
+    let px = x as f32;
+    let py = y as f32;
+    px >= left && px <= right && py >= top && py <= bottom
 }
 
 unsafe fn present_or_update_large_ql_stage(
@@ -14338,10 +14659,12 @@ unsafe fn present_or_update_large_ql_stage(
         .or(item.source_app_name.as_deref())
         .unwrap_or("iClip 高清原图")
         .to_string();
+    let (item_w, item_h) = (item.image_width, item.image_height);
     st.ql_stage_ocr_text = item.ocr_text.clone();
     st.ql_stage_ocr_selected.clear();
     st.ql_stage_sweep_target = None;
     st.ql_stage_big_bang = false;
+    reset_ql_stage_zoom_and_pan(st);
 
     let mut main_rc: RECT = zeroed();
     let _ = GetWindowRect(main_hwnd, &mut main_rc);
@@ -14371,26 +14694,20 @@ unsafe fn present_or_update_large_ql_stage(
     let max_img_w = ((work_w as f32) * 0.68).round() as i32;
     let max_img_h = ((work_h as f32) * 0.68).round() as i32;
 
-    // 若尺寸已知且缓存键匹配，跳过磁盘读取与重采样，直接 0ms 瞬开
-    let (orig_w, orig_h, disp_w, disp_h, cache_hit) =
-        if let (Some(iw), Some(ih)) = (item.image_width, item.image_height) {
-            let ow = iw.max(1);
-            let oh = ih.max(1);
-            let ratio = ((max_img_w as f32) / (ow as f32))
-                .min((max_img_h as f32) / (oh as f32))
-                .min(1.6)
-                .max(0.01);
-            let dw = ((ow as f32 * ratio).round() as u32).max(1);
-            let dh = ((oh as f32 * ratio).round() as u32).max(1);
-            let hit = st.ql_stage_cached_key.as_ref() == Some(&(fname.clone(), dw, dh))
-                && st.ql_stage_rgba.is_some();
-            (ow, oh, dw, dh, hit)
-        } else {
-            (0, 0, 0, 0, false)
-        };
+    // 若尺寸已知且 1.0x 显示缓存键匹配，跳过磁盘读取与重采样，直接 0ms 瞬开
+    let (disp_w, disp_h, cache_hit) = if let (Some(iw), Some(ih)) = (item_w, item_h) {
+        let ow = iw.max(1);
+        let oh = ih.max(1);
+        let (dw, dh) = compute_ql_stage_display_dims(ow, oh, max_img_w, max_img_h);
+        let hit = st.ql_stage_cached_key.as_ref() == Some(&(fname.clone(), dw, dh))
+            && st.ql_stage_rgba.is_some();
+        (dw, dh, hit)
+    } else {
+        (0, 0, false)
+    };
 
-    let (final_ow, final_oh, final_dw, final_dh) = if cache_hit {
-        (orig_w, orig_h, disp_w, disp_h)
+    let (final_dw, final_dh) = if cache_hit {
+        (disp_w, disp_h)
     } else {
         let Some(dec_bytes) = st.store.read_image_bytes(&fname) else {
             return false;
@@ -14400,13 +14717,8 @@ unsafe fn present_or_update_large_ql_stage(
         };
         let ow = dyn_img.width().max(1);
         let oh = dyn_img.height().max(1);
-        let ratio = ((max_img_w as f32) / (ow as f32))
-            .min((max_img_h as f32) / (oh as f32))
-            .min(1.6)
-            .max(0.01);
-        let dw = ((ow as f32 * ratio).round() as u32).max(1);
-        let dh = ((oh as f32 * ratio).round() as u32).max(1);
-        let scaled_rgba = if dw != ow || dh != oh {
+        let (dw, dh) = compute_ql_stage_display_dims(ow, oh, max_img_w, max_img_h);
+        let disp_rgba = if dw != ow || dh != oh {
             dyn_img
                 .resize_exact(dw, dh, FilterType::Triangle)
                 .to_rgba8()
@@ -14415,11 +14727,21 @@ unsafe fn present_or_update_large_ql_stage(
             dyn_img.to_rgba8().into_raw()
         };
         let title = format!("{title_base} · {ow} × {oh}");
-        st.ql_stage_rgba = Some((dw, dh, scaled_rgba, title));
+        st.ql_stage_rgba = Some((dw, dh, disp_rgba, title));
+        st.ql_stage_orig_dims = Some((fname.clone(), ow, oh));
+        if st.ql_stage_hi_loading_key.as_deref() != Some(fname.as_str()) {
+            st.ql_stage_hi_loading_key = None;
+        }
+        if st
+            .ql_stage_hi_rgba
+            .as_ref()
+            .is_some_and(|(hi_name, _, _, _)| hi_name != &fname)
+        {
+            st.ql_stage_hi_rgba = None;
+        }
         st.ql_stage_cached_key = Some((fname, dw, dh));
-        (ow, oh, dw, dh)
+        (dw, dh)
     };
-    let _ = (final_ow, final_oh);
 
     let min_w = s(360);
     let max_w = (work_w - s(40)).max(min_w);
@@ -14491,6 +14813,7 @@ unsafe fn handle_ql_stage_wnd_proc(
                             st.ql_stage_big_bang = !st.ql_stage_big_bang;
                             st.ql_stage_ocr_selected.clear();
                             st.ql_stage_sweep_target = None;
+                            reset_ql_stage_zoom_and_pan(st);
                         }
                     });
                     let _ = InvalidateRect(hwnd, null(), FALSE);
@@ -14586,13 +14909,26 @@ unsafe fn handle_ql_stage_wnd_proc(
                     }
                 }
                 _ => {
+                    let mut rc: RECT = zeroed();
+                    GetClientRect(hwnd, &mut rc);
+                    let sc = get_dpi_scale(hwnd);
+                    let cw = (rc.right - rc.left).max(1);
+                    let ch = (rc.bottom - rc.top).max(1);
                     let mut should_dismiss = true;
+                    let mut need_capture = false;
                     APP_STATE.with(|c| {
                         if let Some(st) = c.borrow_mut().as_mut() {
                             if st.ql_stage_big_bang {
                                 st.ql_stage_ocr_selected.clear();
                                 st.ql_stage_sweep_target = None;
                                 should_dismiss = false;
+                            } else if point_in_ql_stage_image(x, y, cw, ch, sc, st) {
+                                should_dismiss = false;
+                                if st.ql_stage_zoom > 1.01 {
+                                    st.ql_stage_pan_drag =
+                                        Some((x, y, st.ql_stage_pan_x, st.ql_stage_pan_y));
+                                    need_capture = true;
+                                }
                             } else {
                                 st.ql_stage_visible = false;
                                 st.ql_stage_big_bang = false;
@@ -14600,12 +14936,79 @@ unsafe fn handle_ql_stage_wnd_proc(
                             }
                         }
                     });
+                    if need_capture {
+                        let _ = SetCapture(hwnd);
+                    }
                     if should_dismiss {
                         dismiss_large_ql_stage();
-                    } else {
+                    } else if !need_capture {
                         let _ = InvalidateRect(hwnd, null(), FALSE);
                     }
                 }
+            }
+            0
+        }
+        WM_LBUTTONDBLCLK => {
+            let x = (lparam & 0xFFFF) as i16 as i32;
+            let y = ((lparam >> 16) & 0xFFFF) as i16 as i32;
+            let mut rc: RECT = zeroed();
+            GetClientRect(hwnd, &mut rc);
+            let sc = get_dpi_scale(hwnd);
+            let sv = |v: i32| ((v as f32) * sc).round() as i32;
+            let cw = (rc.right - rc.left).max(1);
+            let ch = (rc.bottom - rc.top).max(1);
+            let avail_w = (cw - sv(36)).max(1);
+            let avail_h = (ch - sv(82)).max(1);
+            let toggled = APP_STATE.with(|c| {
+                let mut b = c.borrow_mut();
+                let Some(st) = b.as_mut() else { return false };
+                let hit_any = st
+                    .ql_stage_hit_regions
+                    .iter()
+                    .any(|r| point_in_rect(x, y, &r.rect));
+                if !hit_any
+                    && !st.ql_stage_big_bang
+                    && point_in_ql_stage_image(x, y, cw, ch, sc, st)
+                {
+                    let target = if st.ql_stage_zoom > 1.05 { 1.0 } else { 2.0 };
+                    step_ql_stage_zoom(st, target, avail_w, avail_h);
+                    return true;
+                }
+                false
+            });
+            if toggled {
+                let _ = InvalidateRect(hwnd, null(), FALSE);
+            }
+            0
+        }
+        WM_MOUSEWHEEL => {
+            let delta = ((wparam >> 16) & 0xFFFF) as i16;
+            if delta == 0 {
+                return 0;
+            }
+            let mut rc: RECT = zeroed();
+            GetClientRect(hwnd, &mut rc);
+            let sc = get_dpi_scale(hwnd);
+            let sv = |v: i32| ((v as f32) * sc).round() as i32;
+            let avail_w = ((rc.right - rc.left) - sv(36)).max(1);
+            let avail_h = ((rc.bottom - rc.top) - sv(82)).max(1);
+            let updated = APP_STATE.with(|c| {
+                let mut b = c.borrow_mut();
+                let Some(st) = b.as_mut() else { return false };
+                if !st.ql_stage_big_bang && st.ql_stage_rgba.is_some() {
+                    let step = (delta as f32 / 120.0) * 0.25;
+                    let next = if st.ql_stage_zoom <= 1.001 && step > 0.0 {
+                        (1.0 + step).max(1.02)
+                    } else {
+                        st.ql_stage_zoom + step
+                    };
+                    step_ql_stage_zoom(st, next, avail_w, avail_h);
+                    return true;
+                }
+                false
+            });
+            if updated {
+                let _ = InvalidateRect(hwnd, null(), FALSE);
             }
             0
         }
@@ -14642,13 +15045,47 @@ unsafe fn handle_ql_stage_wnd_proc(
             if !left_held && GetCapture() == hwnd {
                 let _ = ReleaseCapture();
             }
-            let (changed, use_hand) = APP_STATE.with(|c| {
+            let mut rc: RECT = zeroed();
+            GetClientRect(hwnd, &mut rc);
+            let sc = get_dpi_scale(hwnd);
+            let sv = |v: i32| ((v as f32) * sc).round() as i32;
+            let avail_w = ((rc.right - rc.left) - sv(36)).max(1);
+            let avail_h = ((rc.bottom - rc.top) - sv(82)).max(1);
+
+            let (pan_changed, sweep_changed, use_hand, is_panning) = APP_STATE.with(|c| {
                 let mut b = c.borrow_mut();
                 let Some(st) = b.as_mut() else {
-                    return (false, false);
+                    return (false, false, false, false);
                 };
                 if !left_held {
                     st.ql_stage_sweep_target = None;
+                    st.ql_stage_pan_drag = None;
+                }
+                let mut pan_changed = false;
+                let mut panning = false;
+                if left_held && !st.ql_stage_big_bang && st.ql_stage_zoom > 1.01 {
+                    if let Some((sx, sy, spx, spy)) = st.ql_stage_pan_drag {
+                        panning = true;
+                        if let Some((iw, ih)) = active_ql_stage_dims(st) {
+                            let (base_w, base_h) = fit_image_in_viewport(iw, ih, avail_w, avail_h);
+                            let (nx, ny) = clamp_image_pan_offset(
+                                spx + (x - sx) as f32,
+                                spy + (y - sy) as f32,
+                                base_w,
+                                base_h,
+                                st.ql_stage_zoom,
+                                avail_w as f32,
+                                avail_h as f32,
+                            );
+                            if (nx - st.ql_stage_pan_x).abs() >= 0.5
+                                || (ny - st.ql_stage_pan_y).abs() >= 0.5
+                            {
+                                st.ql_stage_pan_x = nx;
+                                st.ql_stage_pan_y = ny;
+                                pan_changed = true;
+                            }
+                        }
+                    }
                 }
                 let mut hand = false;
                 let mut hit_token_id = None;
@@ -14671,13 +15108,27 @@ unsafe fn handle_ql_stage_wnd_proc(
                         };
                     }
                 }
-                (sweep_changed, hand)
+                (pan_changed, sweep_changed, hand, panning)
             });
             SetCursor(LoadCursorW(
                 null_mut(),
-                if use_hand { IDC_HAND } else { IDC_ARROW },
+                if is_panning {
+                    IDC_SIZEALL
+                } else if use_hand {
+                    IDC_HAND
+                } else {
+                    IDC_ARROW
+                },
             ));
-            if changed {
+            if pan_changed && !sweep_changed {
+                let vp_rc = RECT {
+                    left: sv(18),
+                    top: sv(42),
+                    right: (rc.right - sv(18)).max(sv(18) + 1),
+                    bottom: (rc.bottom - sv(40)).max(sv(42) + 1),
+                };
+                let _ = InvalidateRect(hwnd, &vp_rc, FALSE);
+            } else if pan_changed || sweep_changed {
                 let _ = InvalidateRect(hwnd, null(), FALSE);
             }
             0
@@ -14689,6 +15140,7 @@ unsafe fn handle_ql_stage_wnd_proc(
                     st.ql_stage_tracking_mouse_leave = false;
                     if !holding_capture {
                         st.ql_stage_sweep_target = None;
+                        st.ql_stage_pan_drag = None;
                     }
                 }
             });
@@ -14700,6 +15152,7 @@ unsafe fn handle_ql_stage_wnd_proc(
                     if let Some(st) = b.as_mut() {
                         st.ql_stage_tracking_mouse_leave = false;
                         st.ql_stage_sweep_target = None;
+                        st.ql_stage_pan_drag = None;
                     }
                 }
             });
@@ -14712,6 +15165,7 @@ unsafe fn handle_ql_stage_wnd_proc(
             APP_STATE.with(|c| {
                 if let Some(st) = c.borrow_mut().as_mut() {
                     st.ql_stage_sweep_target = None;
+                    st.ql_stage_pan_drag = None;
                 }
             });
             0
@@ -14724,12 +15178,43 @@ unsafe fn handle_ql_stage_wnd_proc(
             let w = (rc.right - rc.left).max(1);
             let h = (rc.bottom - rc.top).max(1);
             let scale = get_dpi_scale(hwnd);
+            let s = |v: i32| ((v as f32) * scale).round() as i32;
+            let sf = |v: f32| v * scale;
+            let vp_x = s(18);
+            let vp_y = s(42);
+            let avail_w = (w - s(36)).max(1);
+            let avail_h = (h - s(82)).max(1);
+            let paint_l = ps.rcPaint.left.clamp(0, w);
+            let paint_t = ps.rcPaint.top.clamp(0, h);
+            let paint_r = ps.rcPaint.right.clamp(paint_l, w);
+            let paint_b = ps.rcPaint.bottom.clamp(paint_t, h);
+            let pan_only_dirty = paint_r > paint_l
+                && paint_b > paint_t
+                && paint_l >= vp_x
+                && paint_t >= vp_y
+                && paint_r <= (vp_x + avail_w)
+                && paint_b <= (vp_y + avail_h)
+                && APP_STATE.with(|c| {
+                    c.borrow()
+                        .as_ref()
+                        .is_some_and(|st| !st.ql_stage_big_bang && st.ql_stage_rgba.is_some())
+                });
+            let (ox, oy, dib_w, dib_h) = if pan_only_dirty {
+                (
+                    paint_l,
+                    paint_t,
+                    (paint_r - paint_l).max(1),
+                    (paint_b - paint_t).max(1),
+                )
+            } else {
+                (0, 0, w, h)
+            };
 
             let mem_dc = CreateCompatibleDC(hdc);
             let mut bmi: BITMAPINFO = zeroed();
             bmi.bmiHeader.biSize = size_of::<BITMAPINFOHEADER>() as u32;
-            bmi.bmiHeader.biWidth = w;
-            bmi.bmiHeader.biHeight = -h;
+            bmi.bmiHeader.biWidth = dib_w;
+            bmi.bmiHeader.biHeight = -dib_h;
             bmi.bmiHeader.biPlanes = 1;
             bmi.bmiHeader.biBitCount = 32;
             bmi.bmiHeader.biCompression = BI_RGB;
@@ -14738,31 +15223,51 @@ unsafe fn handle_ql_stage_wnd_proc(
             let hbmp = CreateDIBSection(mem_dc, &bmi, DIB_RGB_COLORS, &mut bits_ptr, null_mut(), 0);
             if !hbmp.is_null() && !bits_ptr.is_null() {
                 let old_bmp = SelectObject(mem_dc, hbmp);
-                let dib_slice =
-                    std::slice::from_raw_parts_mut(bits_ptr as *mut u32, (w * h) as usize);
+                let dib_slice = std::slice::from_raw_parts_mut(
+                    bits_ptr as *mut u32,
+                    (dib_w * dib_h) as usize,
+                );
                 APP_STATE.with(|cell| {
                     if let Some(st) = cell.borrow_mut().as_mut() {
+                        let card_bg = if st.is_dark_mode {
+                            Color4::rgba(18, 20, 27, 244)
+                        } else {
+                            Color4::rgba(250, 252, 255, 246)
+                        };
+                        let mut canvas = PixelCanvas::new(dib_slice, dib_w, dib_h);
+                        if pan_only_dirty {
+                            canvas.clear(card_bg);
+                            if let Some((iw, ih, rgba, _title)) = active_ql_stage_rgba_parts(
+                                &st.ql_stage_rgba,
+                                &st.ql_stage_hi_rgba,
+                                &st.ql_stage_cached_key,
+                                st.ql_stage_big_bang,
+                                st.ql_stage_zoom,
+                            ) {
+                                canvas.blit_rgba_round_rect_zoomed(
+                                    vp_x - ox,
+                                    vp_y - oy,
+                                    avail_w,
+                                    avail_h,
+                                    sf(12.0),
+                                    rgba,
+                                    iw,
+                                    ih,
+                                    st.ql_stage_zoom,
+                                    st.ql_stage_pan_x,
+                                    st.ql_stage_pan_y,
+                                );
+                            }
+                            let _ = GdiFlush();
+                            return;
+                        }
                         st.ql_stage_hit_regions.clear();
-                        let s = |v: i32| ((v as f32) * scale).round() as i32;
-                        let sf = |v: f32| v * scale;
                         let palette = GlassPalette::for_macos_liquid_glass(
                             st.is_dark_mode,
                             st.store.config.blur_concentration_pct.max(58),
                         );
-                        let mut canvas = PixelCanvas::new(dib_slice, w, h);
                         canvas.clear(Color4::rgba(0, 0, 0, 0));
-                        canvas.fill_round_rect(
-                            0,
-                            0,
-                            w,
-                            h,
-                            sf(18.0),
-                            if st.is_dark_mode {
-                                Color4::rgba(18, 20, 27, 244)
-                            } else {
-                                Color4::rgba(250, 252, 255, 246)
-                            },
-                        );
+                        canvas.fill_round_rect(0, 0, w, h, sf(18.0), card_bg);
                         canvas.stroke_glass_bevel_round_rect(
                             0,
                             0,
@@ -14775,7 +15280,14 @@ unsafe fn handle_ql_stage_wnd_proc(
                         );
 
                         let mut texts = Vec::new();
-                        if let Some((iw, ih, ref rgba, ref title)) = st.ql_stage_rgba {
+                        if let Some((iw, ih, rgba, title)) = active_ql_stage_rgba_parts(
+                            &st.ql_stage_rgba,
+                            &st.ql_stage_hi_rgba,
+                            &st.ql_stage_cached_key,
+                            st.ql_stage_big_bang,
+                            st.ql_stage_zoom,
+                        ) {
+                            let title = title.to_string();
                             texts.push(TextDrawCmd {
                                 text: title.clone(),
                                 rect: RECT {
@@ -14895,22 +15407,18 @@ unsafe fn handle_ql_stage_wnd_proc(
 
                             let avail_w = (w - s(36)).max(1);
                             let avail_h = (h - s(82)).max(1);
-                            let fit_r = ((avail_w as f32) / (iw.max(1) as f32))
-                                .min((avail_h as f32) / (ih.max(1) as f32))
-                                .min(1.0);
-                            let draw_w = ((iw as f32 * fit_r).round() as i32).max(1);
-                            let draw_h = ((ih as f32 * fit_r).round() as i32).max(1);
-                            let draw_x = s(18) + (avail_w - draw_w) / 2;
-                            let draw_y = s(42) + (avail_h - draw_h) / 2;
-                            canvas.blit_rgba_round_rect(
-                                draw_x,
-                                draw_y,
-                                draw_w,
-                                draw_h,
+                            canvas.blit_rgba_round_rect_zoomed(
+                                s(18),
+                                s(42),
+                                avail_w,
+                                avail_h,
                                 sf(12.0),
                                 rgba,
                                 iw,
                                 ih,
+                                if st.ql_stage_big_bang { 1.0 } else { st.ql_stage_zoom },
+                                if st.ql_stage_big_bang { 0.0 } else { st.ql_stage_pan_x },
+                                if st.ql_stage_big_bang { 0.0 } else { st.ql_stage_pan_y },
                             );
 
                             if st.ql_stage_big_bang {
@@ -14938,7 +15446,6 @@ unsafe fn handle_ql_stage_wnd_proc(
                                     let is_line_mode =
                                         st.big_bang_granularity == BigBangGranularity::Line;
                                     let full_line_w = (stage_w - s(28)).max(s(24));
-                                    let mut shown = 0usize;
                                     for tok in tokens.iter() {
                                         if tok.is_line_break {
                                             if tx > stage_x + s(14) {
@@ -14947,10 +15454,6 @@ unsafe fn handle_ql_stage_wnd_proc(
                                             }
                                             continue;
                                         }
-                                        if shown >= 140 {
-                                            break;
-                                        }
-                                        shown += 1;
                                         let cw = if is_line_mode {
                                             full_line_w
                                         } else {
@@ -15140,9 +15643,16 @@ unsafe fn handle_ql_stage_wnd_proc(
                             texts.push(TextDrawCmd {
                                 text: if st.ql_stage_big_bang {
                                     "点选或横扫词块 · G 切粒度 · Ctrl+A 全选 · Ctrl+C 复制 · Enter 贴入 · O 返回纯图"
+                                        .to_string()
+                                } else if st.ql_stage_zoom > 1.01 {
+                                    format!(
+                                        "{}% · 拖拽平移 · 滚轮/双击/+/- 缩放 · 0 还原 · Enter 直贴原图",
+                                        (st.ql_stage_zoom * 100.0).round() as i32
+                                    )
                                 } else {
-                                    "Space / Esc / 点空白处关闭 · O 大爆炸选字 · Ctrl+C 复制 · 方向键切图 · Enter 直贴原图"
-                                }.to_string(),
+                                    "Space / Esc / 点空白处或 × 关闭 · 双击/滚轮/+/- 缩放 · O 大爆炸选字 · Enter 直贴原图"
+                                        .to_string()
+                                },
                                 rect: RECT {
                                     left: s(16),
                                     top: h - s(30),
@@ -15158,7 +15668,7 @@ unsafe fn handle_ql_stage_wnd_proc(
                         let _ = GdiFlush();
                     }
                 });
-                let _ = BitBlt(hdc, 0, 0, w, h, mem_dc, 0, 0, SRCCOPY);
+                let _ = BitBlt(hdc, ox, oy, dib_w, dib_h, mem_dc, 0, 0, SRCCOPY);
                 SelectObject(mem_dc, old_bmp);
                 DeleteObject(hbmp);
             }

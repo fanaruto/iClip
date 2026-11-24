@@ -219,6 +219,7 @@ final class BigBangStageController: ObservableObject {
     var onCopyFullItem: ((ClipItem) -> Void)?
     var onSaveToItem: ((String, ClipItem) -> Void)?
     var onHandoffToSystemQuickLook: ((ClipItem) -> Void)?
+    var onPrepareSystemQuickLookCallbacks: (() -> Void)?
     var onDismissHostPanel: (() -> Void)?
 
     private var panel: BigBangStagePanel?
@@ -745,6 +746,7 @@ final class BigBangStageController: ObservableObject {
         guard let store = storeRef else { return }
         if nextItem.type == .file {
             dismiss()
+            onPrepareSystemQuickLookCallbacks?()
             if SystemQuickLookController.supportsNativeLargePreview(nextItem) {
                 _ = SystemQuickLookController.shared.presentOrUpdate(for: nextItem, in: store, hostWindow: hostWindow)
             }
@@ -1137,12 +1139,6 @@ struct BigBangStageRootView: View {
             pinchStartZoom = nil
             pinchStartEpoch = -1
         }
-        .onChange(of: controller.imageZoomScale) { _, newScale in
-            if newScale <= 1.01 {
-                imagePanOffset = .zero
-                lastImagePanTranslation = nil
-            }
-        }
         .onChange(of: controller.granularity) { _, _ in
             tokenDragTargetSelect = nil
             tokenSweepVisited = []
@@ -1415,6 +1411,19 @@ struct BigBangStageRootView: View {
             }
             .contentShape(Rectangle())
             .clipped()
+            .onChange(of: controller.imageZoomScale) { _, newScale in
+                if newScale <= 1.01 {
+                    imagePanOffset = .zero
+                    lastImagePanTranslation = nil
+                } else {
+                    imagePanOffset = BigBangTokenizer.clampedImagePanOffset(
+                        offset: imagePanOffset,
+                        imageSize: absImageRect.size,
+                        zoomScale: newScale,
+                        viewportSize: containerSize
+                    )
+                }
+            }
             .onContinuousHover(coordinateSpace: .local) { phase in
                 guard controller.isImageBigBangActive, !controller.imageWordBoxes.isEmpty else {
                     if hoveredBoxID != nil { hoveredBoxID = nil }

@@ -59,9 +59,11 @@ final class SystemQuickLookController: NSObject, QLPreviewPanelDataSource, QLPre
     private var probeViews: [UUID: WeakViewBox] = [:]
     private var ephemeralFilesToScrub: Set<URL> = []
 
-    /// 键盘联动回调：方向键切换条目、回车直接上屏粘贴
+    /// 键盘联动回调：方向键切换条目、复制选中与回车直接上屏粘贴
     var onStepSelection: ((PanelNavigationDirection) -> ClipItem?)?
     var onCommitPasteFromPreview: (() -> Void)?
+    var onCopySelectedFromPreview: (() -> Void)?
+    var onFallbackPreviewItem: ((ClipItem) -> Void)?
 
     private override init() {
         super.init()
@@ -332,12 +334,21 @@ final class SystemQuickLookController: NSObject, QLPreviewPanelDataSource, QLPre
 
     func previewPanel(_ panel: QLPreviewPanel!, handle event: NSEvent!) -> Bool {
         guard event.type == .keyDown else { return false }
-        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let flags = event.modifierFlags
+            .intersection(.deviceIndependentFlagsMask)
+            .intersection([.command, .option, .control, .shift])
 
         if event.keyCode == 53
             || (flags.isEmpty && event.keyCode == 49)
             || (flags == .command && (event.keyCode == 16 || event.keyCode == 13)) {
             dismiss()
+            return true
+        }
+
+        if flags == .command, event.keyCode == 8 {
+            Task { @MainActor in
+                self.onCopySelectedFromPreview?()
+            }
             return true
         }
 
@@ -363,6 +374,7 @@ final class SystemQuickLookController: NSObject, QLPreviewPanelDataSource, QLPre
                     _ = self.presentOrUpdate(for: nextItem, in: ClipboardStore.shared)
                 } else {
                     self.dismiss()
+                    self.onFallbackPreviewItem?(nextItem)
                 }
             }
             return true

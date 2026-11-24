@@ -2124,7 +2124,15 @@ struct ClipboardPopoverView: View {
                         Divider().opacity(0.35)
                         shortcutRow("鼠标旁呼出 / 隐藏", store.hotKeyShortcut.displayString)
                         Divider().opacity(0.35)
-                        shortcutRow("直接键入光标所在区域", "双击 / ↵")
+                        shortcutRow(
+                            "直接键入光标所在区域",
+                            store.cardClickPasteMode == .singleClick ? "单击 / ↵" : "双击 / ↵"
+                        )
+                        Divider().opacity(0.35)
+                        shortcutRow(
+                            "仅复制到系统剪贴板",
+                            store.cardClickPasteMode == .singleClick ? "⌥ 单击 / ⌘ C" : "单击 / ⌘ C"
+                        )
                         Divider().opacity(0.35)
                         shortcutRow("左 / 右切换内容类目", "⇧⇥ / ⇥")
                         Divider().opacity(0.35)
@@ -2845,19 +2853,33 @@ struct ClipboardPopoverView: View {
         }
         controller.onHandoffToSystemQuickLook = { target in
             let host = NSApp.windows.first(where: { $0 is KeyableFloatingPanel })
-            SystemQuickLookController.shared.onStepSelection = { dir in
-                self.moveSelection(direction: dir)
-                let visible = self.filteredItems
-                guard self.nav.selectedIndex >= 0, self.nav.selectedIndex < visible.count else { return nil }
-                return visible[self.nav.selectedIndex]
-            }
-            SystemQuickLookController.shared.onCommitPasteFromPreview = {
-                self.pasteSelected()
-            }
+            self.configureSystemQuickLookCallbacks()
             _ = SystemQuickLookController.shared.presentOrUpdate(for: target, in: self.store, hostWindow: host)
+        }
+        controller.onPrepareSystemQuickLookCallbacks = {
+            self.configureSystemQuickLookCallbacks()
         }
         controller.onDismissHostPanel = {
             self.onDismiss()
+        }
+    }
+
+    private func configureSystemQuickLookCallbacks() {
+        let ql = SystemQuickLookController.shared
+        ql.onStepSelection = { dir in
+            self.moveSelection(direction: dir)
+            let visible = self.filteredItems
+            guard self.nav.selectedIndex >= 0, self.nav.selectedIndex < visible.count else { return nil }
+            return visible[self.nav.selectedIndex]
+        }
+        ql.onCommitPasteFromPreview = {
+            self.pasteSelected()
+        }
+        ql.onCopySelectedFromPreview = {
+            _ = self.copySelectedOnly(plainPathOrText: false)
+        }
+        ql.onFallbackPreviewItem = { nextItem in
+            self.triggerSmartQuickLook(for: nextItem, initialMode: .autoDefault)
         }
     }
 
@@ -2871,14 +2893,7 @@ struct ClipboardPopoverView: View {
             }
         }
         if SystemQuickLookController.supportsNativeLargePreview(item) {
-            SystemQuickLookController.shared.onStepSelection = { dir in
-                self.moveSelection(direction: dir)
-                guard self.nav.selectedIndex >= 0, self.nav.selectedIndex < self.filteredItems.count else { return nil }
-                return self.filteredItems[self.nav.selectedIndex]
-            }
-            SystemQuickLookController.shared.onCommitPasteFromPreview = {
-                self.pasteSelected()
-            }
+            configureSystemQuickLookCallbacks()
             if SystemQuickLookController.shared.presentOrUpdate(for: item, in: store, hostWindow: host) {
                 return
             }
