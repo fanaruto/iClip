@@ -4,6 +4,7 @@ use crate::model::{
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::Path;
 
@@ -226,10 +227,93 @@ pub fn merge_archive_data_full(
     let mut updated_existing = 0usize;
 
     for entry in bundle.entries.iter().take(MAX_ARCHIVE_ENTRIES) {
-        if let Some(existing) = working
-            .iter_mut()
-            .find(|it| it.content_hash == entry.content_hash)
+        let sanitized_text = entry.text.as_ref().map(|raw_t| {
+            if matches!(
+                crate::security::inspect_clipboard_poison(raw_t),
+                Some(crate::security::PoisonThreatKind::PastejackingOrBidi(_))
+            ) {
+                let clean = crate::security::sanitize_clipboard_poison(raw_t);
+                if clean.is_empty() {
+                    raw_t.clone()
+                } else {
+                    clean
+                }
+            } else {
+                raw_t.clone()
+            }
+        });
+        let sanitized_alias = entry.custom_alias.as_ref().map(|raw_a| {
+            if matches!(
+                crate::security::inspect_clipboard_poison(raw_a),
+                Some(crate::security::PoisonThreatKind::PastejackingOrBidi(_))
+            ) {
+                crate::security::sanitize_clipboard_poison(raw_a)
+            } else {
+                raw_a.clone()
+            }
+        });
+        let sanitized_ocr = entry.ocr_text.as_ref().map(|raw_o| {
+            if matches!(
+                crate::security::inspect_clipboard_poison(raw_o),
+                Some(crate::security::PoisonThreatKind::PastejackingOrBidi(_))
+            ) {
+                let clean = crate::security::sanitize_clipboard_poison(raw_o);
+                if clean.is_empty() {
+                    raw_o.clone()
+                } else {
+                    clean
+                }
+            } else {
+                raw_o.clone()
+            }
+        });
+        // 防 Hash Spoofing 碰撞：若声称的 64 位 SHA-256 与实际文本不符、或与本地同哈希记录正文不同、或经 Bidi 清洗改写，强制重算真实 SHA-256
+        let canonical_hash = if matches!(entry.kind, ClipContentType::Text | ClipContentType::Link)
         {
+            if let Some(clean_t) = &sanitized_text {
+                let mut h = Sha256::new();
+                h.update(clean_t.as_bytes());
+                let actual_hex = format!("{:x}", h.finalize());
+                let (pfx_opt, hex_opt) = entry
+                    .content_hash
+                    .split_once(':')
+                    .map(|(a, b)| (Some(a), Some(b)))
+                    .unwrap_or((None, None));
+                let is_spoofed_sha = hex_opt
+                    .map(|hx| hx.len() == 64 && !hx.eq_ignore_ascii_case(&actual_hex))
+                    .unwrap_or(false);
+                let collides_diff = working.iter().any(|it| {
+                    it.content_hash == entry.content_hash
+                        && it.text.as_deref() != Some(clean_t.as_str())
+                });
+                if sanitized_text.as_deref() != entry.text.as_deref()
+                    || is_spoofed_sha
+                    || collides_diff
+                    || entry.content_hash.is_empty()
+                {
+                    let pfx = if pfx_opt == Some("tpl") {
+                        "tpl"
+                    } else if entry.kind == ClipContentType::Link {
+                        "link"
+                    } else {
+                        "text"
+                    };
+                    format!("{pfx}:{actual_hex}")
+                } else {
+                    entry.content_hash.clone()
+                }
+            } else {
+                entry.content_hash.clone()
+            }
+        } else {
+            entry.content_hash.clone()
+        };
+
+        if let Some(existing) = working.iter_mut().find(|it| {
+            it.content_hash == canonical_hash
+                && (!matches!(it.kind, ClipContentType::Text | ClipContentType::Link)
+                    || it.text == sanitized_text)
+        }) {
             let mut changed = false;
             if !existing.is_pinned {
                 existing.is_pinned = true;
@@ -249,7 +333,7 @@ pub fn merge_archive_data_full(
                 .map(|s| s.trim().is_empty())
                 .unwrap_or(true);
             if local_alias_empty {
-                if let Some(alias) = &entry.custom_alias {
+                if let Some(alias) = &sanitized_alias {
                     if !alias.trim().is_empty() {
                         existing.custom_alias = Some(alias.clone());
                         changed = true;
@@ -257,7 +341,7 @@ pub fn merge_archive_data_full(
                 }
             }
             if existing.ocr_text.as_deref().unwrap_or("").is_empty() {
-                if let Some(ocr) = &entry.ocr_text {
+                if let Some(ocr) = &sanitized_ocr {
                     if !ocr.is_empty() {
                         existing.ocr_text = Some(ocr.clone());
                         existing.ocr_checked = Some(true);
@@ -275,13 +359,12 @@ pub fn merge_archive_data_full(
                                 let missing = existing
                                     .image_file_name
                                     .as_ref()
-                                    .map(|n| !images_dir.join(n).exists())
+                                    .and_then(|n| Path::new(n).file_name())
+                                    .map(|clean_n| !images_dir.join(clean_n).exists())
                                     .unwrap_or(true);
                                 if missing {
-                                    let file_name = format!(
-                                        "{}.png",
-                                        generate_pseudo_uuid(&entry.content_hash)
-                                    );
+                                    let file_name =
+                                        format!("{}.png", generate_pseudo_uuid(&canonical_hash));
                                     if crate::security::write_encrypted_image_to_dir(
                                         images_dir, &file_name, &png_bytes,
                                     )
@@ -316,7 +399,7 @@ pub fn merge_archive_data_full(
                 {
                     continue;
                 }
-                let file_name = format!("{}.png", generate_pseudo_uuid(&entry.content_hash));
+                let file_name = format!("{}.png", generate_pseudo_uuid(&canonical_hash));
                 if crate::security::write_encrypted_image_to_dir(images_dir, &file_name, &png_bytes)
                     .is_err()
                 {
@@ -336,58 +419,8 @@ pub fn merge_archive_data_full(
                 }
             }
 
-            let sanitized_text = entry.text.as_ref().map(|raw_t| {
-                if matches!(
-                    crate::security::inspect_clipboard_poison(raw_t),
-                    Some(crate::security::PoisonThreatKind::PastejackingOrBidi(_))
-                ) {
-                    let clean = crate::security::sanitize_clipboard_poison(raw_t);
-                    if clean.is_empty() {
-                        raw_t.clone()
-                    } else {
-                        clean
-                    }
-                } else {
-                    raw_t.clone()
-                }
-            });
-            let sanitized_alias = entry.custom_alias.as_ref().map(|raw_a| {
-                if matches!(
-                    crate::security::inspect_clipboard_poison(raw_a),
-                    Some(crate::security::PoisonThreatKind::PastejackingOrBidi(_))
-                ) {
-                    crate::security::sanitize_clipboard_poison(raw_a)
-                } else {
-                    raw_a.clone()
-                }
-            });
-            let sanitized_ocr = entry.ocr_text.as_ref().map(|raw_o| {
-                if matches!(
-                    crate::security::inspect_clipboard_poison(raw_o),
-                    Some(crate::security::PoisonThreatKind::PastejackingOrBidi(_))
-                ) {
-                    let clean = crate::security::sanitize_clipboard_poison(raw_o);
-                    if clean.is_empty() {
-                        raw_o.clone()
-                    } else {
-                        clean
-                    }
-                } else {
-                    raw_o.clone()
-                }
-            });
-            let effective_hash = if sanitized_text.as_deref() != entry.text.as_deref() {
-                if let Some(clean_t) = &sanitized_text {
-                    ClipItem::new_text(clean_t.clone(), None).content_hash
-                } else {
-                    entry.content_hash.clone()
-                }
-            } else {
-                entry.content_hash.clone()
-            };
-
             let restored = ClipItem {
-                id: generate_pseudo_uuid(&effective_hash),
+                id: generate_pseudo_uuid(&canonical_hash),
                 kind: entry.kind,
                 text: sanitized_text,
                 image_file_name: saved_image_name,
@@ -396,7 +429,7 @@ pub fn merge_archive_data_full(
                 ocr_text: sanitized_ocr.clone(),
                 ocr_checked: sanitized_ocr.as_ref().map(|_| true),
                 file_paths: entry.file_paths.clone(),
-                content_hash: effective_hash,
+                content_hash: canonical_hash,
                 source_app_name: entry.source_app_name.clone(),
                 created_unix_secs: iso8601_to_unix_secs(&entry.created_at),
                 is_pinned: true,

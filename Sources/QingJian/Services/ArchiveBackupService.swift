@@ -249,7 +249,44 @@ enum ArchiveBackupService {
         var updatedExisting = 0
 
         for entry in bundle.entries.prefix(maxArchiveEntryCount) {
-            if let existingIdx = working.firstIndex(where: { $0.contentHash == entry.contentHash }) {
+            let sanitizedEntryText: String? = entry.text.map { rawText in
+                if case .pastejackingOrBidi = ClipboardPoisonGuard.inspect(rawText) {
+                    let clean = ClipboardPoisonGuard.sanitize(rawText)
+                    return clean.isEmpty ? rawText : clean
+                }
+                return rawText
+            }
+            let sanitizedEntryAlias: String? = entry.customAlias.map { rawAlias in
+                if case .pastejackingOrBidi = ClipboardPoisonGuard.inspect(rawAlias) {
+                    return ClipboardPoisonGuard.sanitize(rawAlias)
+                }
+                return rawAlias
+            }
+            let sanitizedEntryOCR: String? = entry.ocrText.map { rawOCR in
+                if case .pastejackingOrBidi = ClipboardPoisonGuard.inspect(rawOCR) {
+                    let clean = ClipboardPoisonGuard.sanitize(rawOCR)
+                    return clean.isEmpty ? rawOCR : clean
+                }
+                return rawOCR
+            }
+            // 防 Hash Spoofing 碰撞：若归档声称的 64 位 SHA-256 与实际文本不符、或与本地同哈希记录正文不同、或经 Bidi 清洗改写，强制重算真实 SHA-256
+            let canonicalHash: String = {
+                if (entry.type == .text || entry.type == .link), let cleanText = sanitizedEntryText {
+                    let actualHex = SHA256.hash(data: Data(cleanText.utf8)).map { String(format: "%02x", $0) }.joined()
+                    let claimedParts = entry.contentHash.split(separator: ":", maxSplits: 1)
+                    let isSpoofedSHA = claimedParts.count == 2 && claimedParts[1].count == 64 && claimedParts[1].lowercased() != actualHex
+                    let collidesWithDifferentLocal = working.contains(where: { $0.contentHash == entry.contentHash && $0.text != cleanText })
+                    if cleanText != entry.text || isSpoofedSHA || collidesWithDifferentLocal || entry.contentHash.isEmpty {
+                        let pfx = (claimedParts.first == "tpl") ? "tpl" : (entry.type == .link ? "link" : "text")
+                        return "\(pfx):\(actualHex)"
+                    }
+                }
+                return entry.contentHash
+            }()
+
+            if let existingIdx = working.firstIndex(where: {
+                $0.contentHash == canonicalHash && (($0.type != .text && $0.type != .link) || $0.text == sanitizedEntryText)
+            }) {
                 var current = working[existingIdx]
                 var didChange = false
 
@@ -266,11 +303,11 @@ enum ArchiveBackupService {
                     didChange = true
                 }
                 if (current.customAlias?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true),
-                   let alias = entry.customAlias, !alias.isEmpty {
+                   let alias = sanitizedEntryAlias, !alias.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     current.customAlias = alias
                     didChange = true
                 }
-                if (current.ocrText?.isEmpty ?? true), let ocr = entry.ocrText, !ocr.isEmpty {
+                if (current.ocrText?.isEmpty ?? true), let ocr = sanitizedEntryOCR, !ocr.isEmpty {
                     current.ocrText = ocr
                     current.ocrChecked = true
                     didChange = true
@@ -284,7 +321,9 @@ enum ArchiveBackupService {
                    isValidRasterImageHeader(pngData) {
                     let missingLocalFile: Bool = {
                         guard let name = current.imageFileName else { return true }
-                        return !FileManager.default.fileExists(atPath: imagesDirectoryURL.appendingPathComponent(name).path)
+                        let cleanName = (name as NSString).lastPathComponent
+                        guard !cleanName.isEmpty, cleanName != ".", cleanName != ".." else { return true }
+                        return !FileManager.default.fileExists(atPath: imagesDirectoryURL.appendingPathComponent(cleanName).path)
                     }()
                     if missingLocalFile {
                         let restoredName = "\(UUID().uuidString).png"
@@ -331,34 +370,6 @@ enum ArchiveBackupService {
                     }
                 }
 
-                let sanitizedEntryText: String? = entry.text.map { rawText in
-                    if case .pastejackingOrBidi = ClipboardPoisonGuard.inspect(rawText) {
-                        let clean = ClipboardPoisonGuard.sanitize(rawText)
-                        return clean.isEmpty ? rawText : clean
-                    }
-                    return rawText
-                }
-                let sanitizedEntryAlias: String? = entry.customAlias.map { rawAlias in
-                    if case .pastejackingOrBidi = ClipboardPoisonGuard.inspect(rawAlias) {
-                        return ClipboardPoisonGuard.sanitize(rawAlias)
-                    }
-                    return rawAlias
-                }
-                let sanitizedEntryOCR: String? = entry.ocrText.map { rawOCR in
-                    if case .pastejackingOrBidi = ClipboardPoisonGuard.inspect(rawOCR) {
-                        let clean = ClipboardPoisonGuard.sanitize(rawOCR)
-                        return clean.isEmpty ? rawOCR : clean
-                    }
-                    return rawOCR
-                }
-                let effectiveHash: String = {
-                    if let cleanText = sanitizedEntryText, cleanText != entry.text {
-                        let digest = SHA256.hash(data: Data(cleanText.utf8)).map { String(format: "%02x", $0) }.joined()
-                        return "\(entry.type == .link ? "link" : "text"):\(digest)"
-                    }
-                    return entry.contentHash
-                }()
-
                 let restored = ClipItem(
                     type: entry.type,
                     text: sanitizedEntryText,
@@ -368,7 +379,7 @@ enum ArchiveBackupService {
                     ocrText: sanitizedEntryOCR,
                     ocrChecked: (sanitizedEntryOCR != nil) ? true : nil,
                     filePaths: entry.filePaths,
-                    contentHash: effectiveHash,
+                    contentHash: canonicalHash,
                     sourceAppName: entry.sourceAppName,
                     createdAt: entry.createdAt,
                     isPinned: true,

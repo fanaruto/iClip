@@ -331,6 +331,12 @@ enum SnippetTemplateEngine {
     private static let fallbackPhoneRegex = try! NSRegularExpression(
         pattern: #"(?<!\d)(1[3-9]\d)\d{4}(\d{4})(?!\d)"#
     )
+    private static let fallbackEmailRegex = try! NSRegularExpression(
+        pattern: #"\b([A-Za-z0-9])[A-Za-z0-9._%+-]*(@[A-Za-z0-9.-]+\.[A-Za-z]{2,18})\b"#
+    )
+    private static let fallbackPrivateIPRegex = try! NSRegularExpression(
+        pattern: #"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3})\b"#
+    )
 
     /// 判断文本是否包含受支持的动态模板占位符
     static func containsPlaceholders(_ text: String) -> Bool {
@@ -348,9 +354,22 @@ enum SnippetTemplateEngine {
             let step1 = SemanticEngine.redactSecrets(in: contextRaw)
             return SemanticEngine.redactPIIAndPrivateIP(in: SensitiveCredentialVeil.redactForExternalSharing(step1))
             #else
-            let veiled = SensitiveCredentialVeil.redactForExternalSharing(contextRaw)
-            let full = NSRange(veiled.startIndex..<veiled.endIndex, in: veiled)
-            return fallbackPhoneRegex.stringByReplacingMatches(in: veiled, range: full, withTemplate: "$1****$2")
+            var veiled = SensitiveCredentialVeil.redactForExternalSharing(contextRaw)
+            veiled = fallbackPhoneRegex.stringByReplacingMatches(
+                in: veiled,
+                range: NSRange(veiled.startIndex..<veiled.endIndex, in: veiled),
+                withTemplate: "$1****$2"
+            )
+            veiled = fallbackEmailRegex.stringByReplacingMatches(
+                in: veiled,
+                range: NSRange(veiled.startIndex..<veiled.endIndex, in: veiled),
+                withTemplate: "$1***$2"
+            )
+            return fallbackPrivateIPRegex.stringByReplacingMatches(
+                in: veiled,
+                range: NSRange(veiled.startIndex..<veiled.endIndex, in: veiled),
+                withTemplate: "[INTERNAL_IP]"
+            )
             #endif
         }()
 

@@ -3028,10 +3028,12 @@ unsafe fn commit_paste_item_by_index(hwnd: HWND, item_idx: usize, force_plain: b
                                     .iter()
                                     .find(|c| {
                                         c.id != item.id
+                                            && !c.is_burn_after_paste()
                                             && c.text
                                                 .as_deref()
                                                 .map(|t| {
                                                     !iclip_core::engines::contains_dynamic_template_placeholders(t)
+                                                        && !t.trim().starts_with("ICLPMSG1:")
                                                 })
                                                 .unwrap_or(false)
                                     })

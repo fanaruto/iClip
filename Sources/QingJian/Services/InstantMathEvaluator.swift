@@ -29,6 +29,11 @@ enum InstantMathEvaluator {
         }
         guard !input.isEmpty else { return nil }
 
+        // 优先检测离线全能单位换算（存储 B/KB/MB/GB/TB、时长 ms/s/min/h/d、温度 C/F、重量长度 kg/lb、cm/in、km/mi）
+        if let unitRes = evaluateUnitConversion(input, hasLeadingEquals: hasLeadingEquals) {
+            return unitRes
+        }
+
         // 检测「免重敲剪贴板续算」：如刚复制 ¥12,800 后直接输入 `* 13%`、`/ 1.06`、`+ 350` 或 `= - 200`
         let firstChar = input.first!
         let wantsContextContinuation: Bool = {
@@ -141,6 +146,169 @@ enum InstantMathEvaluator {
             formattedThousands: thousands,
             rmbUppercase: rmb,
             isExplicitOrContextual: hasLeadingEquals || usedClipboardContext
+        )
+    }
+
+    private static let unitConversionRegex = try! NSRegularExpression(
+        pattern: #"^(-?\d+(?:\.\d+)?)\s*(°?[a-zA-Z\u4e00-\u9fa5]+)(?:\s*(?:to|in|->|=>|转)\s*(°?[a-zA-Z\u4e00-\u9fa5]+))?$"#,
+        options: [.caseInsensitive]
+    )
+
+    private enum UnitFamily {
+        case dataBytes(Double, String)
+        case durationSec(Double, String)
+        case tempC
+        case tempF
+        case massKg(Double, String)
+        case lengthCm(Double, String)
+    }
+
+    private static func classifyUnitToken(_ rawTok: String, explicitSyntax: Bool) -> UnitFamily? {
+        let hadDegree = rawTok.hasPrefix("°")
+        let u = rawTok.replacingOccurrences(of: "°", with: "").lowercased()
+        switch u {
+        case "kb", "kib": return .dataBytes(1024.0, "KB")
+        case "mb", "mib": return .dataBytes(1048576.0, "MB")
+        case "gb", "gib": return .dataBytes(1073741824.0, "GB")
+        case "tb", "tib": return .dataBytes(1099511627776.0, "TB")
+        case "byte", "bytes": return .dataBytes(1.0, "B")
+        case "b" where explicitSyntax: return .dataBytes(1.0, "B")
+
+        case "ms", "msec": return .durationSec(0.001, "ms")
+        case "sec", "secs", "second", "seconds", "秒": return .durationSec(1.0, "s")
+        case "s" where explicitSyntax: return .durationSec(1.0, "s")
+        case "min", "mins", "minute", "minutes", "分钟": return .durationSec(60.0, "min")
+        case "hr", "hrs", "hour", "hours", "小时": return .durationSec(3600.0, "h")
+        case "h" where explicitSyntax: return .durationSec(3600.0, "h")
+        case "day", "days", "天": return .durationSec(86400.0, "d")
+        case "d" where explicitSyntax: return .durationSec(86400.0, "d")
+
+        case "celsius", "摄氏度": return .tempC
+        case "c" where hadDegree || explicitSyntax: return .tempC
+        case "fahrenheit", "华氏度": return .tempF
+        case "f" where hadDegree || explicitSyntax: return .tempF
+
+        case "kg", "kgs", "千克", "公斤": return .massKg(1.0, "kg")
+        case "lb", "lbs", "pound", "pounds", "磅": return .massKg(0.45359237, "lb")
+
+        case "cm", "厘米": return .lengthCm(1.0, "cm")
+        case "inch", "inches", "英寸": return .lengthCm(2.54, "in")
+        case "in" where explicitSyntax: return .lengthCm(2.54, "in")
+        case "km", "公里", "千米": return .lengthCm(100000.0, "km")
+        case "mi", "mile", "miles", "英里": return .lengthCm(160934.4, "mi")
+        default: return nil
+        }
+    }
+
+    private static func evaluateUnitConversion(_ input: String, hasLeadingEquals: Bool) -> InstantMathResult? {
+        let cleaned = input.replacingOccurrences(of: ",", with: "")
+        let nsRange = NSRange(cleaned.startIndex..<cleaned.endIndex, in: cleaned)
+        guard let m = unitConversionRegex.firstMatch(in: cleaned, range: nsRange),
+              let numR = Range(m.range(at: 1), in: cleaned),
+              let srcR = Range(m.range(at: 2), in: cleaned),
+              let val = Double(cleaned[numR]), val.isFinite else {
+            return nil
+        }
+        let dstTok: String? = (m.range(at: 3).location != NSNotFound) ? Range(m.range(at: 3), in: cleaned).map { String(cleaned[$0]) } : nil
+        let explicit = hasLeadingEquals || dstTok != nil || cleaned.contains(" ")
+        guard let srcUnit = classifyUnitToken(String(cleaned[srcR]), explicitSyntax: explicit) else {
+            return nil
+        }
+        let dstUnit = dstTok.flatMap { classifyUnitToken($0, explicitSyntax: true) }
+        if dstTok != nil && dstUnit == nil { return nil }
+
+        let outVal: Double
+        let outUnitLabel: String
+
+        switch (srcUnit, dstUnit) {
+        case (.tempC, nil), (.tempC, .some(.tempF)):
+            if val < -273.15 { return nil }
+            outVal = val * 9.0 / 5.0 + 32.0
+            outUnitLabel = "°F"
+        case (.tempF, nil), (.tempF, .some(.tempC)):
+            if val < -459.67 { return nil }
+            outVal = (val - 32.0) * 5.0 / 9.0
+            outUnitLabel = "°C"
+
+        case let (.dataBytes(srcFactor, srcLbl), .some(.dataBytes(dstFactor, dstLbl))):
+            if val < 0 { return nil }
+            if srcLbl == dstLbl { return nil }
+            outVal = (val * srcFactor) / dstFactor
+            outUnitLabel = dstLbl
+        case let (.dataBytes(srcFactor, srcLbl), nil):
+            if val < 0 { return nil }
+            let bytes = val * srcFactor
+            if srcLbl == "B" {
+                (outVal, outUnitLabel) = bytes >= 1073741824.0 ? (bytes / 1073741824.0, "GB") : (bytes >= 1048576.0 ? (bytes / 1048576.0, "MB") : (bytes / 1024.0, "KB"))
+            } else if srcLbl == "KB" {
+                (outVal, outUnitLabel) = bytes >= 1073741824.0 ? (bytes / 1073741824.0, "GB") : (val / 1024.0, "MB")
+            } else if srcLbl == "MB" {
+                (outVal, outUnitLabel) = val >= 1024.0 ? (val / 1024.0, "GB") : (val * 1024.0, "KB")
+            } else if srcLbl == "GB" {
+                (outVal, outUnitLabel) = val >= 1024.0 ? (val / 1024.0, "TB") : (val * 1024.0, "MB")
+            } else {
+                (outVal, outUnitLabel) = (val * 1024.0, "GB")
+            }
+
+        case let (.durationSec(srcFactor, srcLbl), .some(.durationSec(dstFactor, dstLbl))):
+            if val < 0 || srcLbl == dstLbl { return nil }
+            outVal = (val * srcFactor) / dstFactor
+            outUnitLabel = dstLbl
+        case let (.durationSec(srcFactor, srcLbl), nil):
+            if val < 0 { return nil }
+            let secs = val * srcFactor
+            if srcLbl == "ms" {
+                (outVal, outUnitLabel) = secs >= 60.0 ? (secs / 60.0, "min") : (secs, "s")
+            } else if srcLbl == "s" {
+                (outVal, outUnitLabel) = secs >= 86400.0 ? (secs / 86400.0, "d") : (secs >= 3600.0 ? (secs / 3600.0, "h") : (secs / 60.0, "min"))
+            } else if srcLbl == "min" {
+                (outVal, outUnitLabel) = secs >= 3600.0 ? (secs / 3600.0, "h") : (secs, "s")
+            } else if srcLbl == "h" {
+                (outVal, outUnitLabel) = val >= 24.0 ? (val / 24.0, "d") : (val * 60.0, "min")
+            } else {
+                (outVal, outUnitLabel) = (val * 24.0, "h")
+            }
+
+        case let (.massKg(srcFactor, srcLbl), .some(.massKg(dstFactor, dstLbl))):
+            if val < 0 || srcLbl == dstLbl { return nil }
+            outVal = (val * srcFactor) / dstFactor
+            outUnitLabel = dstLbl
+        case let (.massKg(srcFactor, srcLbl), nil):
+            if val < 0 { return nil }
+            if srcLbl == "kg" {
+                (outVal, outUnitLabel) = (val / 0.45359237, "lb")
+            } else {
+                (outVal, outUnitLabel) = ((val * srcFactor), "kg")
+            }
+
+        case let (.lengthCm(srcFactor, srcLbl), .some(.lengthCm(dstFactor, dstLbl))):
+            if val < 0 || srcLbl == dstLbl { return nil }
+            outVal = (val * srcFactor) / dstFactor
+            outUnitLabel = dstLbl
+        case let (.lengthCm(srcFactor, srcLbl), nil):
+            if val < 0 { return nil }
+            if srcLbl == "in" {
+                (outVal, outUnitLabel) = (val * srcFactor, "cm")
+            } else if srcLbl == "cm" {
+                (outVal, outUnitLabel) = (val / 2.54, "in")
+            } else if srcLbl == "mi" {
+                (outVal, outUnitLabel) = ((val * srcFactor) / 100000.0, "km")
+            } else {
+                (outVal, outUnitLabel) = ((val * srcFactor) / 160934.4, "mi")
+            }
+        default:
+            return nil
+        }
+
+        let rounded = (outVal * 10000.0).rounded() / 10000.0
+        let numPlain = formatCleanDouble(rounded)
+        let plainWithUnit = "\(numPlain) \(outUnitLabel)"
+        return InstantMathResult(
+            expressionDisplay: input,
+            plainValue: plainWithUnit,
+            formattedThousands: plainWithUnit,
+            rmbUppercase: nil,
+            isExplicitOrContextual: true
         )
     }
 

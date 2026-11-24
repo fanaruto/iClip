@@ -1,6 +1,7 @@
 import XCTest
 import CoreImage
 import Carbon
+import CryptoKit
 @testable import QingJian
 
 final class CoreFeatureTests: XCTestCase {
@@ -3048,5 +3049,55 @@ final class CoreFeatureTests: XCTestCase {
             "https://app.webfooo.com/iClip",
             "https://github.com/fanaruto/iClip"
         ])
+
+        // 7. 第 24 轮自省：验证 `.iclip` 导入防伪造 contentHash 碰撞与已有条目 Bidi 清洗、Flow/Dev `{{clip_redacted}}` 邮箱/IP 一致性及离线全能单位直算
+        let expectedLocalHash = "text:" + SHA256.hash(data: Data("生产跳板机守则".utf8)).map { String(format: "%02x", $0) }.joined()
+        let localItem = ClipItem(type: .text, text: "生产跳板机守则", contentHash: expectedLocalHash, isPinned: true)
+        let spoofJSON = """
+        {
+          "format": "com.qingjian.iclip.archive",
+          "schemaVersion": 1,
+          "appVersion": "2.7.0",
+          "exportedEdition": "dev",
+          "exportedAt": "2026-11-24T08:00:00Z",
+          "entries": [
+            {
+              "type": "text",
+              "text": "攻击者伪造的其他文本",
+              "contentHash": "\(localItem.contentHash)",
+              "createdAt": "2026-11-24T08:00:00Z",
+              "customAlias": "正常备注\\u202eevil"
+            },
+            {
+              "type": "text",
+              "text": "生产跳板机守则",
+              "contentHash": "\(localItem.contentHash)",
+              "createdAt": "2026-11-24T08:00:00Z",
+              "customAlias": "跳板机备注\\u202eevil"
+            }
+          ]
+        }
+        """
+        let tmpImgDir = FileManager.default.temporaryDirectory.appendingPathComponent("iclip-arch24-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tmpImgDir) }
+        let (merged24, _) = try ArchiveBackupService.mergeArchiveData(Data(spoofJSON.utf8), into: [localItem], imagesDirectoryURL: tmpImgDir)
+        XCTAssertEqual(merged24.count, 2)
+        XCTAssertFalse(merged24[0].customAlias?.contains("\u{202E}") ?? true)
+        XCTAssertNotEqual(merged24[1].contentHash, localItem.contentHash)
+
+        let tplRendered = SnippetTemplateEngine.render(
+            template: "排障上下文：{{clip_redacted}}",
+            latestContextText: "节点 192.168.10.25 告警，值班 alice@corp.com 手机 13812345678"
+        )
+        XCTAssertFalse(tplRendered.contains("192.168.10.25"))
+        XCTAssertFalse(tplRendered.contains("alice@corp.com"))
+        XCTAssertFalse(tplRendered.contains("13812345678"))
+
+        XCTAssertEqual(InstantMathEvaluator.evaluate("2048 mb")?.plainValue, "2 GB")
+        XCTAssertEqual(InstantMathEvaluator.evaluate("1.5 tb to gb")?.plainValue, "1536 GB")
+        XCTAssertEqual(InstantMathEvaluator.evaluate("98.6 °F")?.plainValue, "37 °C")
+        XCTAssertEqual(InstantMathEvaluator.evaluate("180 min")?.plainValue, "3 h")
+        XCTAssertNil(InstantMathEvaluator.evaluate("3f"))
+        XCTAssertNil(InstantMathEvaluator.evaluate("100c"))
     }
 }

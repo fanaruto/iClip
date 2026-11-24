@@ -2115,5 +2115,80 @@ mod tests {
         );
         let note_acts = analyze_text_actions(note_links, false);
         assert!(note_acts.iter().any(|a| a.id == "extract-clean-urls"));
+
+        // 8. 第 24 轮自省：验证 `.iclip` 导入防伪造 contentHash 碰撞与已有记录 Bidi 清洗，以及离线全能单位直算
+        let local_it = ClipItem::new_text("生产跳板机守则".to_string(), None);
+        let spoof_json = format!(
+            r#"{{
+              "format": "com.qingjian.iclip.archive",
+              "schemaVersion": 1,
+              "appVersion": "2.7.0",
+              "exportedEdition": "dev",
+              "exportedAt": "2026-11-24T08:00:00Z",
+              "entries": [
+                {{
+                  "type": "text",
+                  "text": "攻击者伪造的其他文本",
+                  "contentHash": "{}",
+                  "createdAt": "2026-11-24T08:00:00Z",
+                  "customAlias": "正常备注\u202eevil"
+                }},
+                {{
+                  "type": "text",
+                  "text": "生产跳板机守则",
+                  "contentHash": "{}",
+                  "createdAt": "2026-11-24T08:00:00Z",
+                  "customAlias": "跳板机备注\u202eevil"
+                }}
+              ]
+            }}"#,
+            local_it.content_hash, local_it.content_hash
+        );
+        let arch_img_dir = std::env::temp_dir().join(format!(
+            "iclip-arch24-{}-{}",
+            std::process::id(),
+            crate::security::random_hex_16()
+        ));
+        let (merged24, _) = crate::archive::merge_archive_data(
+            spoof_json.as_bytes(),
+            std::slice::from_ref(&local_it),
+            &arch_img_dir,
+        )
+        .unwrap();
+        let _ = fs::remove_dir_all(&arch_img_dir);
+        assert_eq!(merged24.len(), 2);
+        assert!(!merged24[0]
+            .custom_alias
+            .as_deref()
+            .unwrap_or("")
+            .contains('\u{202e}'));
+        assert_ne!(merged24[1].content_hash, local_it.content_hash);
+
+        assert_eq!(
+            crate::intelligence::evaluate_instant_math("2048 mb", None)
+                .unwrap()
+                .plain_value,
+            "2 GB"
+        );
+        assert_eq!(
+            crate::intelligence::evaluate_instant_math("1.5 tb to gb", None)
+                .unwrap()
+                .plain_value,
+            "1536 GB"
+        );
+        assert_eq!(
+            crate::intelligence::evaluate_instant_math("98.6 °F", None)
+                .unwrap()
+                .plain_value,
+            "37 °C"
+        );
+        assert_eq!(
+            crate::intelligence::evaluate_instant_math("180 min", None)
+                .unwrap()
+                .plain_value,
+            "3 h"
+        );
+        assert!(crate::intelligence::evaluate_instant_math("3f", None).is_none());
+        assert!(crate::intelligence::evaluate_instant_math("100c", None).is_none());
     }
 }

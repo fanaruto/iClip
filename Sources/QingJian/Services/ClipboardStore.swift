@@ -3010,7 +3010,11 @@ final class ClipboardStore: ObservableObject {
 
     func latestNonTemplateText(excluding itemID: UUID) -> String? {
         for candidate in items where candidate.id != itemID {
-            if let t = candidate.text, !SnippetTemplateEngine.containsPlaceholders(t) {
+            // 跳过开启「粘贴即焚」的一次性机密与未解锁的零知识密文信封，严防通过 {{clip}} 模板旁路外泄或残留
+            if candidate.isBurnAfterPaste { continue }
+            if let t = candidate.text,
+               !SnippetTemplateEngine.containsPlaceholders(t),
+               !t.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix(SecretCapsuleMessenger.tokenPrefix) {
                 return t
             }
             if let paths = candidate.filePaths, !paths.isEmpty {

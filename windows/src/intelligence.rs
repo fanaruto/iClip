@@ -402,9 +402,19 @@ pub fn evaluate_instant_math(
         return None;
     }
 
-    let clean_expr = trimmed.strip_prefix('=').map(str::trim).unwrap_or(trimmed);
+    let has_leading_eq = trimmed.starts_with('=') || trimmed.starts_with('＝');
+    let clean_expr = trimmed
+        .strip_prefix('=')
+        .or_else(|| trimmed.strip_prefix('＝'))
+        .map(str::trim)
+        .unwrap_or(trimmed);
     if clean_expr.is_empty() {
         return None;
+    }
+
+    // 优先检测离线全能单位换算（存储 B/KB/MB/GB/TB、时长 ms/s/min/h/d、温度 C/F、重量长度 kg/lb、cm/in、km/mi）
+    if let Some(unit_res) = evaluate_unit_conversion(clean_expr, has_leading_eq) {
+        return Some(unit_res);
     }
 
     // 检测首字符是否为二元续算运算符（如 `* 13%`、`/ (1 + 6%)`、`+ 350`）
@@ -466,6 +476,230 @@ pub fn evaluate_instant_math(
         plain_value: plain,
         rmb_uppercase: rmb,
         used_clipboard_context: used_ctx,
+    })
+}
+
+#[derive(Clone, Copy)]
+enum WinUnitFamily {
+    DataBytes(f64, &'static str),
+    DurationSec(f64, &'static str),
+    TempC,
+    TempF,
+    MassKg(f64, &'static str),
+    LengthCm(f64, &'static str),
+}
+
+fn classify_unit_token(raw_tok: &str, explicit_syntax: bool) -> Option<WinUnitFamily> {
+    let had_deg = raw_tok.starts_with('°');
+    let u = raw_tok.trim_start_matches('°').to_lowercase();
+    match u.as_str() {
+        "kb" | "kib" => Some(WinUnitFamily::DataBytes(1024.0, "KB")),
+        "mb" | "mib" => Some(WinUnitFamily::DataBytes(1_048_576.0, "MB")),
+        "gb" | "gib" => Some(WinUnitFamily::DataBytes(1_073_741_824.0, "GB")),
+        "tb" | "tib" => Some(WinUnitFamily::DataBytes(1_099_511_627_776.0, "TB")),
+        "byte" | "bytes" => Some(WinUnitFamily::DataBytes(1.0, "B")),
+        "b" if explicit_syntax => Some(WinUnitFamily::DataBytes(1.0, "B")),
+
+        "ms" | "msec" => Some(WinUnitFamily::DurationSec(0.001, "ms")),
+        "sec" | "secs" | "second" | "seconds" | "秒" => Some(WinUnitFamily::DurationSec(1.0, "s")),
+        "s" if explicit_syntax => Some(WinUnitFamily::DurationSec(1.0, "s")),
+        "min" | "mins" | "minute" | "minutes" | "分钟" => {
+            Some(WinUnitFamily::DurationSec(60.0, "min"))
+        }
+        "hr" | "hrs" | "hour" | "hours" | "小时" => Some(WinUnitFamily::DurationSec(3600.0, "h")),
+        "h" if explicit_syntax => Some(WinUnitFamily::DurationSec(3600.0, "h")),
+        "day" | "days" | "天" => Some(WinUnitFamily::DurationSec(86_400.0, "d")),
+        "d" if explicit_syntax => Some(WinUnitFamily::DurationSec(86_400.0, "d")),
+
+        "celsius" | "摄氏度" => Some(WinUnitFamily::TempC),
+        "c" if had_deg || explicit_syntax => Some(WinUnitFamily::TempC),
+        "fahrenheit" | "华氏度" => Some(WinUnitFamily::TempF),
+        "f" if had_deg || explicit_syntax => Some(WinUnitFamily::TempF),
+
+        "kg" | "kgs" | "千克" | "公斤" => Some(WinUnitFamily::MassKg(1.0, "kg")),
+        "lb" | "lbs" | "pound" | "pounds" | "磅" => {
+            Some(WinUnitFamily::MassKg(0.453_592_37, "lb"))
+        }
+
+        "cm" | "厘米" => Some(WinUnitFamily::LengthCm(1.0, "cm")),
+        "inch" | "inches" | "英寸" => Some(WinUnitFamily::LengthCm(2.54, "in")),
+        "in" if explicit_syntax => Some(WinUnitFamily::LengthCm(2.54, "in")),
+        "km" | "公里" | "千米" => Some(WinUnitFamily::LengthCm(100_000.0, "km")),
+        "mi" | "mile" | "miles" | "英里" => Some(WinUnitFamily::LengthCm(160_934.4, "mi")),
+        _ => None,
+    }
+}
+
+fn evaluate_unit_conversion(input: &str, has_leading_eq: bool) -> Option<InstantMathResult> {
+    let cleaned = input.replace(',', "");
+    static UNIT_RE: std::sync::OnceLock<regex_lite::Regex> = std::sync::OnceLock::new();
+    let re = UNIT_RE.get_or_init(|| {
+        regex_lite::Regex::new(
+            r"(?i)^(-?\d+(?:\.\d+)?)\s*(°?[a-zA-Z\u4e00-\u9fa5]+)(?:\s*(?:to|in|->|=>|转)\s*(°?[a-zA-Z\u4e00-\u9fa5]+))?$",
+        )
+        .unwrap()
+    });
+    let caps = re.captures(&cleaned)?;
+    let val: f64 = caps.get(1)?.as_str().parse().ok()?;
+    if !val.is_finite() {
+        return None;
+    }
+    let src_raw = caps.get(2)?.as_str();
+    let dst_raw = caps.get(3).map(|m| m.as_str());
+    let explicit = has_leading_eq || dst_raw.is_some() || cleaned.contains(' ');
+    let src_unit = classify_unit_token(src_raw, explicit)?;
+    let dst_unit = match dst_raw {
+        Some(dt) => Some(classify_unit_token(dt, true)?),
+        None => None,
+    };
+
+    let (out_val, out_lbl): (f64, &'static str) = match (src_unit, dst_unit) {
+        (WinUnitFamily::TempC, None) | (WinUnitFamily::TempC, Some(WinUnitFamily::TempF)) => {
+            if val < -273.15 {
+                return None;
+            }
+            (val * 9.0 / 5.0 + 32.0, "°F")
+        }
+        (WinUnitFamily::TempF, None) | (WinUnitFamily::TempF, Some(WinUnitFamily::TempC)) => {
+            if val < -459.67 {
+                return None;
+            }
+            ((val - 32.0) * 5.0 / 9.0, "°C")
+        }
+        (WinUnitFamily::DataBytes(sf, sl), Some(WinUnitFamily::DataBytes(df, dl))) => {
+            if val < 0.0 || sl == dl {
+                return None;
+            }
+            ((val * sf) / df, dl)
+        }
+        (WinUnitFamily::DataBytes(sf, sl), None) => {
+            if val < 0.0 {
+                return None;
+            }
+            let bytes = val * sf;
+            match sl {
+                "B" => {
+                    if bytes >= 1_073_741_824.0 {
+                        (bytes / 1_073_741_824.0, "GB")
+                    } else if bytes >= 1_048_576.0 {
+                        (bytes / 1_048_576.0, "MB")
+                    } else {
+                        (bytes / 1024.0, "KB")
+                    }
+                }
+                "KB" => {
+                    if bytes >= 1_073_741_824.0 {
+                        (bytes / 1_073_741_824.0, "GB")
+                    } else {
+                        (val / 1024.0, "MB")
+                    }
+                }
+                "MB" => {
+                    if val >= 1024.0 {
+                        (val / 1024.0, "GB")
+                    } else {
+                        (val * 1024.0, "KB")
+                    }
+                }
+                "GB" => {
+                    if val >= 1024.0 {
+                        (val / 1024.0, "TB")
+                    } else {
+                        (val * 1024.0, "MB")
+                    }
+                }
+                _ => (val * 1024.0, "GB"),
+            }
+        }
+        (WinUnitFamily::DurationSec(sf, sl), Some(WinUnitFamily::DurationSec(df, dl))) => {
+            if val < 0.0 || sl == dl {
+                return None;
+            }
+            ((val * sf) / df, dl)
+        }
+        (WinUnitFamily::DurationSec(sf, sl), None) => {
+            if val < 0.0 {
+                return None;
+            }
+            let secs = val * sf;
+            match sl {
+                "ms" => {
+                    if secs >= 60.0 {
+                        (secs / 60.0, "min")
+                    } else {
+                        (secs, "s")
+                    }
+                }
+                "s" => {
+                    if secs >= 86_400.0 {
+                        (secs / 86_400.0, "d")
+                    } else if secs >= 3600.0 {
+                        (secs / 3600.0, "h")
+                    } else {
+                        (secs / 60.0, "min")
+                    }
+                }
+                "min" => {
+                    if secs >= 3600.0 {
+                        (secs / 3600.0, "h")
+                    } else {
+                        (secs, "s")
+                    }
+                }
+                "h" => {
+                    if val >= 24.0 {
+                        (val / 24.0, "d")
+                    } else {
+                        (val * 60.0, "min")
+                    }
+                }
+                _ => (val * 24.0, "h"),
+            }
+        }
+        (WinUnitFamily::MassKg(sf, sl), Some(WinUnitFamily::MassKg(df, dl))) => {
+            if val < 0.0 || sl == dl {
+                return None;
+            }
+            ((val * sf) / df, dl)
+        }
+        (WinUnitFamily::MassKg(sf, sl), None) => {
+            if val < 0.0 {
+                return None;
+            }
+            if sl == "kg" {
+                (val / 0.453_592_37, "lb")
+            } else {
+                (val * sf, "kg")
+            }
+        }
+        (WinUnitFamily::LengthCm(sf, sl), Some(WinUnitFamily::LengthCm(df, dl))) => {
+            if val < 0.0 || sl == dl {
+                return None;
+            }
+            ((val * sf) / df, dl)
+        }
+        (WinUnitFamily::LengthCm(sf, sl), None) => {
+            if val < 0.0 {
+                return None;
+            }
+            match sl {
+                "in" => (val * sf, "cm"),
+                "cm" => (val / 2.54, "in"),
+                "mi" => ((val * sf) / 100_000.0, "km"),
+                _ => ((val * sf) / 160_934.4, "mi"),
+            }
+        }
+        _ => return None,
+    };
+
+    let rounded = (out_val * 10_000.0).round() / 10_000.0;
+    let num_plain = format_clean_decimal(rounded);
+    let plain_with_unit = format!("{num_plain} {out_lbl}");
+    Some(InstantMathResult {
+        expression_display: input.to_string(),
+        plain_value: plain_with_unit,
+        rmb_uppercase: None,
+        used_clipboard_context: false,
     })
 }
 
