@@ -1119,16 +1119,37 @@ enum OutboundLinkSafety {
               !host.isEmpty else {
             return nil
         }
-        guard host == "localhost" || host.contains(".") else {
+        // 拒绝含冒号/方括号的 IPv6 字面量主机（如 [::ffff:127.0.0.1] 映射混淆）及连续空段畸形主机
+        guard !host.contains(":"), !host.contains("["), !host.contains("]") else {
             return nil
         }
-        // 拦截十六进制 / 八进制混淆 IPv4 主机（如 http://0x7f.0.0.1 或 http://0177.0.0.1 绕过安全感知钓鱼）
-        let labels = host.split(separator: ".", omittingEmptySubsequences: false)
-        if labels.count == 4 && labels.allSatisfy({ !$0.isEmpty && ($0.hasPrefix("0x") || $0.allSatisfy(\.isNumber)) }) {
-            let hasHexOrOctal = labels.contains { seg in
-                seg.hasPrefix("0x") || (seg.count > 1 && seg.first == "0")
+        let cleanHost = host.hasSuffix(".") ? String(host.dropLast()) : host
+        guard !cleanHost.isEmpty,
+              !cleanHost.hasPrefix("."),
+              !cleanHost.hasSuffix("."),
+              !cleanHost.contains("..") else {
+            return nil
+        }
+        guard cleanHost == "localhost" || cleanHost.contains(".") else {
+            return nil
+        }
+        // RFC 1123 铁律：顶级域名绝不能全为数字或以 0x 开头；凡末段为数字/0x 者必被网络栈当作 IPv4 解析，强制必须为标准 4 段无前导零 0..255 十进制 IPv4，且拦截 169.254 云元数据段
+        let labels = cleanHost.split(separator: ".", omittingEmptySubsequences: false)
+        if let lastLabel = labels.last,
+           (lastLabel.hasPrefix("0x") || lastLabel.allSatisfy({ $0.isASCII && $0.isNumber })) {
+            guard labels.count == 4 else { return nil }
+            var octets: [Int] = []
+            octets.reserveCapacity(4)
+            for seg in labels {
+                guard !seg.isEmpty, seg.count <= 3,
+                      !(seg.count > 1 && seg.first == "0"),
+                      seg.allSatisfy({ $0.isASCII && $0.isNumber }),
+                      let v = Int(seg), (0...255).contains(v) else {
+                    return nil
+                }
+                octets.append(v)
             }
-            if hasHexOrOctal {
+            if octets[0] == 169 && octets[1] == 254 {
                 return nil
             }
         }
@@ -3818,6 +3839,177 @@ enum UniversalEscapeDecoder {
         }
 
         return []
+    }
+
+    /// 多行文本「去序号/项目符号净文（list-strip-markers）↔ 一键加数字序号（list-add-numbers）」双向排版助手
+    static func analyzeListNumberingToggle(_ raw: String) -> [ListBatchConversionAction] {
+        guard !raw.isEmpty, raw.utf8.count <= 65_536, raw.contains("\n"), !raw.contains("\t") else {
+            return []
+        }
+        let normalized = raw.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+        let trimmed = normalized.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              !looksLikeSourceCodeOrMarkdownBlock(normalized),
+              !(trimmed.hasPrefix("{") && trimmed.hasSuffix("}")),
+              !(trimmed.hasPrefix("[") && trimmed.hasSuffix("]")) else {
+            return []
+        }
+
+        let allLines = normalized.components(separatedBy: "\n")
+        let nonEmptyIndices = allLines.indices.filter {
+            !allLines[$0].trimmingCharacters(in: .whitespaces).isEmpty
+        }
+        let totalNonEmpty = nonEmptyIndices.count
+        guard totalNonEmpty >= 2, totalNonEmpty <= 200 else { return [] }
+
+        // 排除 Markdown 任务清单 `- [ ]` / `- [x]` 与 Markdown 表格 `|`
+        for idx in nonEmptyIndices {
+            let lt = allLines[idx].trimmingCharacters(in: .whitespaces)
+            if lt.hasPrefix("- [ ]") || lt.hasPrefix("- [x]") || lt.hasPrefix("- [X]")
+                || lt.hasPrefix("* [ ]") || lt.hasPrefix("* [x]") || lt.hasPrefix("|") {
+                return []
+            }
+        }
+
+        var strippedCount = 0
+        var strippedLines = allLines
+        for idx in nonEmptyIndices {
+            let lt = allLines[idx].trimmingCharacters(in: .whitespaces)
+            if let cleanBody = stripLeadingListMarker(lt), !cleanBody.isEmpty {
+                strippedCount += 1
+                strippedLines[idx] = cleanBody
+            } else {
+                strippedLines[idx] = lt
+            }
+        }
+
+        // 分支 A：>= 80% 非空行带有序号或项目符号 -> 一键剥除还原干净正文
+        if strippedCount >= 2 && strippedCount * 5 >= totalNonEmpty * 4 {
+            let out = strippedLines.joined(separator: "\n").trimmingCharacters(in: .newlines)
+            if !out.isEmpty && out != trimmed {
+                return [
+                    ListBatchConversionAction(
+                        id: "list-strip-markers",
+                        title: "去序号净文(\(totalNonEmpty)行)",
+                        symbolName: "text.alignleft",
+                        resultText: out,
+                        toastText: "已剥除 \(strippedCount) 行行首序号/项目符号，还原纯净文本"
+                    )
+                ]
+            }
+        }
+
+        // 分支 B：干净多行文本（3~200 行且无行首编号、标题、等号配置或纯链接列） -> 一键加 1. 2. 3. 序号
+        if strippedCount == 0 && totalNonEmpty >= 3 {
+            let unsuitable = nonEmptyIndices.contains { idx in
+                let lt = allLines[idx].trimmingCharacters(in: .whitespaces)
+                return lt.hasPrefix("#") || lt.hasPrefix(">") || lt.hasPrefix("http://") || lt.hasPrefix("https://")
+                    || (lt.contains("=") && !lt.contains(" "))
+            }
+            if !unsuitable {
+                var numLines = allLines
+                var seq = 1
+                for idx in nonEmptyIndices {
+                    let lt = allLines[idx].trimmingCharacters(in: .whitespaces)
+                    numLines[idx] = "\(seq). \(lt)"
+                    seq += 1
+                }
+                let out = numLines.joined(separator: "\n").trimmingCharacters(in: .newlines)
+                return [
+                    ListBatchConversionAction(
+                        id: "list-add-numbers",
+                        title: "加数字序号(\(totalNonEmpty)行)",
+                        symbolName: "list.number",
+                        resultText: out,
+                        toastText: "已为 \(totalNonEmpty) 行文本自动生成标准数字编号"
+                    )
+                ]
+            }
+        }
+
+        return []
+    }
+
+    private static func stripLeadingListMarker(_ line: String) -> String? {
+        let chars = Array(line)
+        guard !chars.isEmpty else { return nil }
+
+        // 1. 圆圈数字 ①~⑳
+        if let scalar = chars[0].unicodeScalars.first,
+           chars[0].unicodeScalars.count == 1,
+           (0x2460...0x2473).contains(scalar.value) {
+            var pos = 1
+            if pos < chars.count && (chars[pos] == "、" || chars[pos] == ".") { pos += 1 }
+            while pos < chars.count && chars[pos].isWhitespace { pos += 1 }
+            return pos < chars.count ? String(chars[pos...]) : nil
+        }
+
+        // 2. 项目符号 • · ● ▪ ◦ 或 `- ` / `* `（排除负数 -12）
+        if ["•", "·", "●", "▪", "◦", "▸"].contains(chars[0]) {
+            var pos = 1
+            while pos < chars.count && chars[pos].isWhitespace { pos += 1 }
+            return pos < chars.count ? String(chars[pos...]) : nil
+        }
+        if (chars[0] == "-" || chars[0] == "*") && chars.count >= 3 && chars[1] == " " {
+            var pos = 2
+            while pos < chars.count && chars[pos].isWhitespace { pos += 1 }
+            return pos < chars.count ? String(chars[pos...]) : nil
+        }
+
+        // 3. 括号序号 `(1) `、`（1）`、`[1] `、`（一）`
+        if let closeExpected: Character = (chars[0] == "(" ? ")" : (chars[0] == "（" ? "）" : (chars[0] == "[" ? "]" : nil))) {
+            var pos = 1
+            let startInner = pos
+            while pos < chars.count && pos - startInner < 4 && (chars[pos].isASCII && chars[pos].isNumber || isChineseListNumeral(chars[pos])) {
+                pos += 1
+            }
+            if pos > startInner && pos < chars.count && chars[pos] == closeExpected {
+                pos += 1
+                if pos < chars.count && chars[pos] == "、" { pos += 1 }
+                while pos < chars.count && chars[pos].isWhitespace { pos += 1 }
+                return pos < chars.count ? String(chars[pos...]) : nil
+            }
+        }
+
+        // 4. 阿拉伯数字序号 `1. `、`1、xxx`、`1) xxx`、`1）xxx`（严防误剥小数 3.14 或日期 2026.11）
+        if chars[0].isASCII && chars[0].isNumber {
+            var pos = 0
+            while pos < chars.count && pos < 3 && chars[pos].isASCII && chars[pos].isNumber {
+                pos += 1
+            }
+            if pos > 0 && pos < chars.count {
+                let delim = chars[pos]
+                if delim == "、" || delim == ")" || delim == "）" {
+                    pos += 1
+                    while pos < chars.count && chars[pos].isWhitespace { pos += 1 }
+                    return pos < chars.count ? String(chars[pos...]) : nil
+                }
+                if delim == "." && pos + 1 < chars.count && chars[pos + 1].isWhitespace {
+                    pos += 2
+                    while pos < chars.count && chars[pos].isWhitespace { pos += 1 }
+                    return pos < chars.count ? String(chars[pos...]) : nil
+                }
+            }
+        }
+
+        // 5. 中文数字顿号 `一、xxx`、`十二、xxx`
+        if isChineseListNumeral(chars[0]) {
+            var pos = 0
+            while pos < chars.count && pos < 3 && isChineseListNumeral(chars[pos]) {
+                pos += 1
+            }
+            if pos > 0 && pos < chars.count && chars[pos] == "、" {
+                pos += 1
+                while pos < chars.count && chars[pos].isWhitespace { pos += 1 }
+                return pos < chars.count ? String(chars[pos...]) : nil
+            }
+        }
+
+        return nil
+    }
+
+    private static func isChineseListNumeral(_ c: Character) -> Bool {
+        ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十"].contains(c)
     }
 }
 

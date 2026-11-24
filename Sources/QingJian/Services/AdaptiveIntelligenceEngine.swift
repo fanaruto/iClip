@@ -846,7 +846,13 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
         }
         #if !ICLIP_EDITION_FLOW
         let snap = SemanticEngine.analyze(item)
-        let sparkEligible = snap.actions.filter { $0.id != "query-to-json" && $0.id != "json-to-query" && $0.id != "kv-to-json" }
+        let sparkEligible = snap.actions.filter {
+            $0.id != "query-to-json"
+                && $0.id != "json-to-query"
+                && $0.id != "kv-to-json"
+                && $0.id != "list-strip-markers"
+                && $0.id != "list-add-numbers"
+        }
         let ranked = rankActions(sparkEligible, idOf: \.id, sourceApp: item.sourceAppName)
         if let top = ranked.first {
             let cat = Self.categoryKey(forActionID: top.id)

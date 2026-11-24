@@ -798,6 +798,118 @@ fn evaluate_business_and_radix(
     static PCT_DELTA_RE: OnceLock<Regex> = OnceLock::new();
     static RADIX_RE: OnceLock<Regex> = OnceLock::new();
     static INVOICE_TAX_RE: OnceLock<Regex> = OnceLock::new();
+    static SALARY_WAGE_RE: OnceLock<Regex> = OnceLock::new();
+    static AA_SPLIT_RE: OnceLock<Regex> = OnceLock::new();
+
+    // 0a. 职场法定计薪折算（国家标准 21.75 计薪日 × 8h = 174h/月）：`25000 日薪`、`25k 时薪`、`2.5万 加班费` 或剪贴板续算 `日薪`
+    let salary_re = SALARY_WAGE_RE.get_or_init(|| {
+        Regex::new(
+            r"^(?:[¥￥$]?\s*(\d[\d,]*(?:\.\d+)?)\s*([kKwW万])?\s*)?(?:算|折算|转)?(日薪|时薪|月薪|加班费)$",
+        )
+        .unwrap()
+    });
+    if let Some(caps) = salary_re.captures(trimmed) {
+        let mode_str = caps.get(3)?.as_str();
+        let (monthly_salary, used_ctx) = if let Some(amt_m) = caps.get(1) {
+            let raw_num: f64 = amt_m.as_str().replace(',', "").parse().ok()?;
+            if raw_num <= 0.0 {
+                return None;
+            }
+            let mul = match caps.get(2).map(|m| m.as_str()) {
+                Some("k") | Some("K") => 1_000.0,
+                Some("w") | Some("W") | Some("万") => 10_000.0,
+                _ => 1.0,
+            };
+            (raw_num * mul, false)
+        } else {
+            let ctx_num = latest_clip_text.and_then(extract_leading_amount)?;
+            let v: f64 = ctx_num.parse().ok()?;
+            if v <= 0.0 {
+                return None;
+            }
+            (v, true)
+        };
+        let daily = (monthly_salary / 21.75 * 100.0).round() / 100.0;
+        let hourly = (monthly_salary / 174.0 * 100.0).round() / 100.0;
+        let ot15 = (hourly * 1.5 * 100.0).round() / 100.0;
+        let ot20 = (hourly * 2.0 * 100.0).round() / 100.0;
+        let daily_str = format_clean_decimal(daily);
+        let hourly_str = format_clean_decimal(hourly);
+        let ot15_str = format_clean_decimal(ot15);
+        let ot20_str = format_clean_decimal(ot20);
+        let wants_hourly = mode_str == "时薪" || mode_str == "加班费";
+        let (plain_out, expr_disp) = if wants_hourly {
+            (
+                hourly_str,
+                format!("时薪 (日薪 {daily_str} · 1.5倍 {ot15_str}/h · 2倍 {ot20_str}/h)"),
+            )
+        } else {
+            (
+                daily_str,
+                format!("日薪 (时薪 {hourly_str} · 21.75天 · 1.5倍 {ot15_str}/h)"),
+            )
+        };
+        return Some(InstantMathResult {
+            expression_display: expr_disp,
+            plain_value: plain_out,
+            rmb_uppercase: None,
+            used_clipboard_context: used_ctx,
+        });
+    }
+
+    // 0b. 多人 AA 平摊零尾差直算：`1286 / 6人`、`1286 aa 6` 或复制账单金额后直接敲 `aa 6` / `平摊 6人`
+    let aa_re = AA_SPLIT_RE.get_or_init(|| {
+        Regex::new(
+            r"^(?:[¥￥$]?\s*(\d[\d,]*(?:\.\d+)?)\s*)?(?:(?:aa|AA|平摊|分摊|均摊)\s*(\d{1,5})\s*人?|[/÷]\s*(\d{1,5})\s*人)$",
+        )
+        .unwrap()
+    });
+    if let Some(caps) = aa_re.captures(trimmed) {
+        let cnt_str = caps.get(2).or_else(|| caps.get(3))?.as_str();
+        let people: i64 = cnt_str.parse().ok()?;
+        if !(2..=10_000).contains(&people) {
+            return None;
+        }
+        let (total_amt, used_ctx) = if let Some(amt_m) = caps.get(1) {
+            let v: f64 = amt_m.as_str().replace(',', "").parse().ok()?;
+            if v <= 0.0 {
+                return None;
+            }
+            (v, false)
+        } else {
+            let ctx_num = latest_clip_text.and_then(extract_leading_amount)?;
+            let v: f64 = ctx_num.parse().ok()?;
+            if v <= 0.0 {
+                return None;
+            }
+            (v, true)
+        };
+        let total_cents = (total_amt * 100.0).round() as i64;
+        let per_cents = ((total_cents as f64) / (people as f64)).round() as i64;
+        let diff_cents = per_cents * people - total_cents;
+        let per_val = per_cents as f64 / 100.0;
+        let per_str = format_clean_decimal(per_val);
+        let diff_desc = if diff_cents == 0 {
+            "整除无尾差".to_string()
+        } else if diff_cents > 0 {
+            format!("合计多收 +{:.2}", diff_cents as f64 / 100.0)
+        } else {
+            format!("合计尾差 {:.2}", diff_cents as f64 / 100.0)
+        };
+        let rmb = if per_val >= 0.0 && per_val < 1_000_000_000_000.0 {
+            let abs_fixed = format!("{:.2}", per_val.abs());
+            let (i_part, f_part) = abs_fixed.split_once('.').unwrap_or((&abs_fixed, "00"));
+            to_chinese_uppercase_rmb(i_part, Some(f_part))
+        } else {
+            None
+        };
+        return Some(InstantMathResult {
+            expression_display: format!("每人应付 ({people}人AA · {diff_desc})"),
+            plain_value: per_str,
+            rmb_uppercase: rmb,
+            used_clipboard_context: used_ctx,
+        });
+    }
 
     // 0. 零尾差发票价税分离 & 加税开票直算：`12800 含税 6%`、`1130 含税`（默认 13%）、`10000 加税 6%` 或剪贴板免重敲 `含税 6%`
     let tax_re = INVOICE_TAX_RE.get_or_init(|| {

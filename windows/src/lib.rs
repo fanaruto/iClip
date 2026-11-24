@@ -2610,5 +2610,70 @@ mod tests {
         let hdr_blk = "POST /v1/chat HTTP/1.1\nContent-Type: application/json\nX-Request-Id: req_99";
         let kv_hdr = crate::security::analyze_kv_block_to_json(hdr_blk);
         assert!(kv_hdr[0].2.contains("\"Content-Type\": \"application/json\""));
+
+        // 第 34 轮自省：纯密码动作云隔离/30s擦除契约、混淆 IPv4/IPv6 URL 阻断、法定计薪/AA分摊直算与多行序号一键去/加
+        assert_eq!(
+            crate::security::ephemeral_scrub_ms_for_action("wifi-extract-password"),
+            Some(30_000)
+        );
+        assert_eq!(
+            crate::security::ephemeral_scrub_ms_for_action("img-wifi-password"),
+            Some(30_000)
+        );
+        assert_eq!(
+            crate::security::ephemeral_scrub_ms_for_action("restore-privacy-twin"),
+            Some(45_000)
+        );
+        assert_eq!(
+            crate::security::ephemeral_scrub_ms_for_action("redact-secrets"),
+            None
+        );
+
+        assert!(crate::security::sanitize_safe_browser_url("http://[::ffff:127.0.0.1]:8080/admin").is_none());
+        assert!(crate::security::sanitize_safe_browser_url("http://127.1/secret").is_none());
+        assert!(crate::security::sanitize_safe_browser_url("http://0x7f.1/secret").is_none());
+        assert!(crate::security::sanitize_safe_browser_url("http://0x7f.0.0.1./").is_none());
+        assert!(crate::security::sanitize_safe_browser_url("http://169.254.169.254/latest/meta-data/").is_none());
+        assert!(crate::security::sanitize_safe_browser_url("http://localhost:3000/api").is_some());
+        assert!(crate::security::sanitize_safe_browser_url("http://127.0.0.1:8080/health").is_some());
+        assert!(crate::security::sanitize_safe_browser_url("https://01.cdn.example.com/app.js").is_some());
+
+        let daily_wage = crate::intelligence::evaluate_instant_math("21750 日薪", None).unwrap();
+        assert_eq!(daily_wage.plain_value, "1000");
+        assert!(daily_wage.expression_display.contains("125"));
+        assert_eq!(
+            crate::intelligence::evaluate_instant_math("21.75k 时薪", None)
+                .unwrap()
+                .plain_value,
+            "125"
+        );
+        assert_eq!(
+            crate::intelligence::evaluate_instant_math("时薪", Some("¥17,400"))
+                .unwrap()
+                .plain_value,
+            "100"
+        );
+
+        let aa_res = crate::intelligence::evaluate_instant_math("1286 / 6人", None).unwrap();
+        assert_eq!(aa_res.plain_value, "214.33");
+        assert!(aa_res.expression_display.contains("-0.02"));
+        assert_eq!(
+            crate::intelligence::evaluate_instant_math("aa 4", Some("¥360"))
+                .unwrap()
+                .plain_value,
+            "90"
+        );
+
+        let numbered_txt = "1. 核对季度财报\n2. 整理供应商合同\n3. 归档发票明细";
+        let strip_act = &crate::security::analyze_list_numbering_toggle(numbered_txt)[0];
+        assert_eq!(strip_act.0, "list-strip-markers");
+        assert_eq!(strip_act.2, "核对季度财报\n整理供应商合同\n归档发票明细");
+
+        let plain_lines = "核对季度财报\n整理供应商合同\n归档发票明细";
+        let add_act = &crate::security::analyze_list_numbering_toggle(plain_lines)[0];
+        assert_eq!(add_act.0, "list-add-numbers");
+        assert_eq!(add_act.2, numbered_txt);
+        let decimals_toggle = crate::security::analyze_list_numbering_toggle("3.14\n2.71\n1.41");
+        assert!(decimals_toggle.iter().all(|a| a.0 != "list-strip-markers"));
     }
 }

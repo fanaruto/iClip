@@ -978,9 +978,10 @@ enum SemanticEngine {
             }
         }
 
-        // 竖列单号/词条 ↔ 后台逗号批量查询单行 / SQL IN 列表双向秒转
+        // 竖列去序号/加序号 & 竖列单号/词条 ↔ 后台逗号批量查询单行 / SQL IN 列表双向秒转
         if actions.count < 3, raw.utf8.count <= 65_536 {
-            let listActs = UniversalEscapeDecoder.analyzeListBatchConversion(raw, includeSQLIn: true)
+            let listActs = UniversalEscapeDecoder.analyzeListNumberingToggle(raw)
+                + UniversalEscapeDecoder.analyzeListBatchConversion(raw, includeSQLIn: true)
             if !listActs.isEmpty {
                 let hasSec = SensitiveCredentialVeil.classify(raw) != nil || containsPIIOrPrivateIP(in: raw)
                 for la in listActs where actions.count < 3 {

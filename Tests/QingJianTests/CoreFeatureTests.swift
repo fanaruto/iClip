@@ -3365,5 +3365,42 @@ final class CoreFeatureTests: XCTestCase {
         let headersBlock = "POST /v1/chat HTTP/1.1\nContent-Type: application/json\nX-Request-Id: req_99"
         let kvHdr = try XCTUnwrap(UniversalEscapeDecoder.analyzeKeyValueBlockToJSON(headersBlock).first)
         XCTAssertTrue(kvHdr.resultText.contains("\"Content-Type\" : \"application/json\""))
+
+        // 17. 第 34 轮自省：验证纯密码衍生动作云隔离/30s擦除契约、外跳混淆 IPv4/IPv6 URL 阻断、法定计薪/AA分摊直算与多行序号一键去/加
+        XCTAssertEqual(ClipboardStore.ephemeralScrubPolicy(forActionID: "wifi-extract-password")?.scrubSeconds, 30.0)
+        XCTAssertEqual(ClipboardStore.ephemeralScrubPolicy(forActionID: "img-wifi-password")?.scrubSeconds, 30.0)
+        XCTAssertEqual(ClipboardStore.ephemeralScrubPolicy(forActionID: "restore-privacy-twin")?.scrubSeconds, 45.0)
+        XCTAssertNil(ClipboardStore.ephemeralScrubPolicy(forActionID: "redact-secrets"))
+
+        XCTAssertNil(OutboundLinkSafety.validatedBrowserURL(from: "http://[::ffff:127.0.0.1]:8080/admin"))
+        XCTAssertNil(OutboundLinkSafety.validatedBrowserURL(from: "http://127.1/secret"))
+        XCTAssertNil(OutboundLinkSafety.validatedBrowserURL(from: "http://0x7f.1/secret"))
+        XCTAssertNil(OutboundLinkSafety.validatedBrowserURL(from: "http://0x7f.0.0.1./"))
+        XCTAssertNil(OutboundLinkSafety.validatedBrowserURL(from: "http://169.254.169.254/latest/meta-data/"))
+        XCTAssertNotNil(OutboundLinkSafety.validatedBrowserURL(from: "http://localhost:3000/api"))
+        XCTAssertNotNil(OutboundLinkSafety.validatedBrowserURL(from: "http://127.0.0.1:8080/health"))
+        XCTAssertNotNil(OutboundLinkSafety.validatedBrowserURL(from: "https://01.cdn.example.com/app.js"))
+
+        let dailyWage = try XCTUnwrap(InstantMathEvaluator.evaluate("21750 日薪"))
+        XCTAssertEqual(dailyWage.plainValue, "1000")
+        XCTAssertTrue(dailyWage.formattedThousands.contains("时薪 125"))
+        XCTAssertEqual(InstantMathEvaluator.evaluate("21.75k 时薪")?.plainValue, "125")
+        XCTAssertEqual(InstantMathEvaluator.evaluate("时薪", latestClipboardText: "¥17,400")?.plainValue, "100")
+
+        let aaSplit = try XCTUnwrap(InstantMathEvaluator.evaluate("1286 / 6人"))
+        XCTAssertEqual(aaSplit.plainValue, "214.33")
+        XCTAssertTrue(aaSplit.formattedThousands.contains("-0.02"))
+        XCTAssertEqual(InstantMathEvaluator.evaluate("aa 4", latestClipboardText: "¥360")?.plainValue, "90")
+
+        let numberedText = "1. 核对季度财报\n2. 整理供应商合同\n3. 归档发票明细"
+        let stripNumAct = try XCTUnwrap(UniversalEscapeDecoder.analyzeListNumberingToggle(numberedText).first)
+        XCTAssertEqual(stripNumAct.id, "list-strip-markers")
+        XCTAssertEqual(stripNumAct.resultText, "核对季度财报\n整理供应商合同\n归档发票明细")
+
+        let plainLines = "核对季度财报\n整理供应商合同\n归档发票明细"
+        let addNumAct = try XCTUnwrap(UniversalEscapeDecoder.analyzeListNumberingToggle(plainLines).first)
+        XCTAssertEqual(addNumAct.id, "list-add-numbers")
+        XCTAssertEqual(addNumAct.resultText, numberedText)
+        XCTAssertTrue(UniversalEscapeDecoder.analyzeListNumberingToggle("3.14\n2.71\n1.41").first?.id != "list-strip-markers")
     }
 }

@@ -574,7 +574,11 @@ pub fn analyze_text_actions(raw: &str, minimal_mode: bool) -> Vec<QuickAction> {
 
     if actions.len() < 3 && raw.len() <= 65_536 {
         let include_sql = cfg!(feature = "dev");
-        let list_acts = crate::security::analyze_list_batch_conversion(raw, include_sql);
+        let mut list_acts = crate::security::analyze_list_numbering_toggle(raw);
+        list_acts.extend(crate::security::analyze_list_batch_conversion(
+            raw,
+            include_sql,
+        ));
         if !list_acts.is_empty() {
             let has_sec = crate::security::classify_sensitive_text(raw).is_some()
                 || redact_pii_and_private_ip(raw) != raw;

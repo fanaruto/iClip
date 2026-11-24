@@ -836,6 +836,12 @@ enum InstantMathEvaluator {
     private static let invoiceTaxRegex = try! NSRegularExpression(
         pattern: #"^(?:[¥￥$]?\s*(\d[\d,]*(?:\.\d+)?)\s*)?(含税|价税分离|去税|除税|加税|不含税|税前)\s*(?:(\d{1,2}(?:\.\d{1,2})?)\s*[%％]?)?$"#
     )
+    private static let salaryWageRegex = try! NSRegularExpression(
+        pattern: #"^(?:[¥￥$]?\s*(\d[\d,]*(?:\.\d+)?)\s*([kKwW万])?\s*)?(?:算|折算|转)?(日薪|时薪|月薪|加班费)$"#
+    )
+    private static let aaSplitRegex = try! NSRegularExpression(
+        pattern: #"^(?:[¥￥$]?\s*(\d[\d,]*(?:\.\d+)?)\s*)?(?:(?:aa|AA|平摊|分摊|均摊)\s*(\d{1,5})\s*人?|[/÷]\s*(\d{1,5})\s*人)$"#
+    )
 
     private static func evaluateBusinessAndRadixExpression(
         _ input: String,
@@ -843,6 +849,106 @@ enum InstantMathEvaluator {
     ) -> InstantMathResult? {
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
         let fullRange = NSRange(trimmed.startIndex..<trimmed.endIndex, in: trimmed)
+
+        // 0a. 职场法定计薪折算（国家标准 21.75 计薪日 × 8h = 174h/月）：`25000 日薪`、`25k 时薪`、`2.5万 加班费` 或剪贴板续算 `日薪`
+        if let sm = salaryWageRegex.firstMatch(in: trimmed, range: fullRange),
+           let modeR = Range(sm.range(at: 3), in: trimmed) {
+            let modeStr = String(trimmed[modeR])
+            let monthlySalary: Double
+            if sm.range(at: 1).location != NSNotFound,
+               let amtR = Range(sm.range(at: 1), in: trimmed),
+               let rawNum = Double(trimmed[amtR].replacingOccurrences(of: ",", with: "")),
+               rawNum > 0 {
+                var mul = 1.0
+                if sm.range(at: 2).location != NSNotFound,
+                   let unitR = Range(sm.range(at: 2), in: trimmed) {
+                    let u = trimmed[unitR].lowercased()
+                    if u == "k" { mul = 1_000.0 }
+                    else if u == "w" || u == "万" { mul = 10_000.0 }
+                }
+                monthlySalary = rawNum * mul
+            } else if let ctx = extractCleanClipboardNumber(from: latestClipboardText),
+                      let v = Double(ctx.plainNumeric), v > 0 {
+                monthlySalary = v
+            } else {
+                return nil
+            }
+
+            let daily = (monthlySalary / 21.75 * 100.0).rounded() / 100.0
+            let hourly = (monthlySalary / 174.0 * 100.0).rounded() / 100.0
+            let ot15 = (hourly * 1.5 * 100.0).rounded() / 100.0
+            let ot20 = (hourly * 2.0 * 100.0).rounded() / 100.0
+            let dailyStr = formatCleanDouble(daily)
+            let hourlyStr = formatCleanDouble(hourly)
+            let ot15Str = formatCleanDouble(ot15)
+            let ot20Str = formatCleanDouble(ot20)
+
+            let wantsHourly = (modeStr == "时薪" || modeStr == "加班费")
+            let primaryOut = wantsHourly ? hourlyStr : dailyStr
+            let exprTitle = "月薪 \(formatCleanDouble(monthlySalary)) 法定折算"
+            let richSummary = wantsHourly
+                ? "时薪 \(hourlyStr) · 日薪 \(dailyStr)（1.5倍 \(ot15Str)/h · 2倍 \(ot20Str)/h）"
+                : "日薪 \(dailyStr) · 时薪 \(hourlyStr)（法定21.75天 · 1.5倍 \(ot15Str)/h）"
+
+            return InstantMathResult(
+                expressionDisplay: exprTitle,
+                plainValue: primaryOut,
+                formattedThousands: richSummary,
+                rmbUppercase: nil,
+                isExplicitOrContextual: true
+            )
+        }
+
+        // 0b. 多人 AA 平摊零尾差直算：`1286 / 6人`、`1286 aa 6` 或复制账单金额后直接敲 `aa 6` / `平摊 6人`
+        if let am = aaSplitRegex.firstMatch(in: trimmed, range: fullRange) {
+            let countRange = (am.range(at: 2).location != NSNotFound) ? am.range(at: 2) : am.range(at: 3)
+            guard countRange.location != NSNotFound,
+                  let cntR = Range(countRange, in: trimmed),
+                  let people = Int(trimmed[cntR]),
+                  (2...10_000).contains(people) else {
+                return nil
+            }
+            let totalAmount: Double
+            if am.range(at: 1).location != NSNotFound,
+               let amtR = Range(am.range(at: 1), in: trimmed),
+               let v = Double(trimmed[amtR].replacingOccurrences(of: ",", with: "")),
+               v > 0 {
+                totalAmount = v
+            } else if let ctx = extractCleanClipboardNumber(from: latestClipboardText),
+                      let v = Double(ctx.plainNumeric), v > 0 {
+                totalAmount = v
+            } else {
+                return nil
+            }
+
+            let totalCents = Int64((totalAmount * 100.0).rounded())
+            let perCents = Int64((Double(totalCents) / Double(people)).rounded())
+            let diffCents = perCents * Int64(people) - totalCents
+            let perVal = Double(perCents) / 100.0
+            let perStr = formatCleanDouble(perVal)
+            let diffDesc: String
+            if diffCents == 0 {
+                diffDesc = "刚好整除无尾差"
+            } else if diffCents > 0 {
+                diffDesc = String(format: "合计多收 +%.2f", Double(diffCents) / 100.0)
+            } else {
+                diffDesc = String(format: "合计尾差 %.2f", Double(diffCents) / 100.0)
+            }
+            let parts = perStr.split(separator: ".", omittingEmptySubsequences: false)
+            let intDigits = parts.first.map(String.init) ?? "0"
+            let fracDigits = parts.count > 1 ? String(parts[1]) : nil
+            let rmb = intDigits.count <= 12
+                ? FinanceNumberEngine.toChineseUppercaseRMB(intDigits: intDigits, fracDigits: fracDigits.map { String($0.prefix(2)) })
+                : nil
+
+            return InstantMathResult(
+                expressionDisplay: "\(formatCleanDouble(totalAmount)) ÷ \(people)人 AA",
+                plainValue: perStr,
+                formattedThousands: "每人 \(perStr)（共 \(people) 人 · \(diffDesc)）",
+                rmbUppercase: rmb,
+                isExplicitOrContextual: true
+            )
+        }
 
         // 0. 零尾差发票价税分离 & 加税开票直算：`12800 含税 6%`、`1130 含税`（默认 13%）、`10000 加税 6%` 或剪贴板免重敲 `含税 6%`
         if let tm = invoiceTaxRegex.firstMatch(in: trimmed, range: fullRange),

@@ -671,9 +671,13 @@ final class ClipboardStore: ObservableObject {
                 pasteboard.setString(text, forType: .tabularText)
                 pasteboard.setString(htmlTable, forType: .html)
             }
-            let forceSecret = (candidate.actionID == "img-totp-code")
-            let scrubSec: TimeInterval = forceSecret ? 30.0 : 45.0
-            commitOutboundPasteboardGuard(for: text, forceProtected: forceSecret, isPinnedSource: false, scrubDelay: scrubSec)
+            let policy = Self.ephemeralScrubPolicy(forActionID: candidate.actionID)
+            commitOutboundPasteboardGuard(
+                for: text,
+                forceProtected: policy?.forceProtected ?? false,
+                isPinnedSource: false,
+                scrubDelay: policy?.scrubSeconds ?? 45.0
+            )
             TactileFeedbackEngine.shared.perform(.magicTransform)
 
         case .compressImage(let itemID):
@@ -2523,6 +2527,18 @@ final class ClipboardStore: ObservableObject {
         }
     }
 
+    /// 判定微星标或转换动作是否产出无特征前缀的机密明文（纯 Wi-Fi 密码、6 位 TOTP、替身还原真值），强制开启 LocalOnly 云隔离与超时擦除
+    nonisolated static func ephemeralScrubPolicy(forActionID actionID: String) -> (forceProtected: Bool, scrubSeconds: TimeInterval)? {
+        switch actionID {
+        case "img-totp-code", "totp-live-code", "img-wifi-password", "wifi-extract-password":
+            return (true, 30.0)
+        case "restore-privacy-twin":
+            return (true, 45.0)
+        default:
+            return nil
+        }
+    }
+
     func togglePin(_ item: ClipItem) {
         guard let idx = items.firstIndex(where: { $0.id == item.id }) else { return }
         items[idx].isPinned.toggle()
@@ -3034,13 +3050,25 @@ final class ClipboardStore: ObservableObject {
             )
             return
         }
+        if action.id == "wifi-extract-password" {
+            pasteEphemeralSecret(
+                action.resultText,
+                toast: "已键入纯 Wi-Fi 密码（本机隔离 · 30s 后擦除）",
+                scrubDelaySeconds: 30.0,
+                shouldAutoPaste: shouldAutoPaste,
+                onBeforePaste: onBeforePaste
+            )
+            return
+        }
         let htmlPayload = (action.id == "tbl-md-to-excel") ? TableBridgeEngine.toHTMLTable(fromTSV: action.resultText) : nil
+        let forceProt = Self.ephemeralScrubPolicy(forActionID: action.id)?.forceProtected ?? false
         pasteCustomString(
             action.resultText,
             htmlTable: htmlPayload,
             sourceItem: item,
             toast: action.toastText,
             shouldAutoPaste: shouldAutoPaste,
+            extraForceProtected: forceProt,
             onBeforePaste: onBeforePaste
         )
     }
@@ -3909,7 +3937,8 @@ final class ClipboardStore: ObservableObject {
             }
         }
         if analyzed.count < 3, raw.utf8.count <= 65_536 {
-            let listActs = UniversalEscapeDecoder.analyzeListBatchConversion(raw, includeSQLIn: false)
+            let listActs = UniversalEscapeDecoder.analyzeListNumberingToggle(raw)
+                + UniversalEscapeDecoder.analyzeListBatchConversion(raw, includeSQLIn: false)
             for la in listActs where analyzed.count < 3 {
                 analyzed.append(
                     FinanceQuickAction(
@@ -4103,17 +4132,28 @@ final class ClipboardStore: ObservableObject {
             )
             return
         }
+        if action.id == "wifi-extract-password" {
+            pasteEphemeralSecret(
+                action.resultText,
+                toast: "已键入纯 Wi-Fi 密码（本机隔离 · 30s 后擦除）",
+                scrubDelaySeconds: 30.0,
+                shouldAutoPaste: shouldAutoPaste,
+                onBeforePaste: onBeforePaste
+            )
+            return
+        }
         pasteboard.clearContents()
         pasteboard.setString(action.resultText, forType: .string)
         if action.id == "tbl-md-to-excel", let html = TableBridgeEngine.toHTMLTable(fromTSV: action.resultText) {
             pasteboard.setString(action.resultText, forType: .tabularText)
             pasteboard.setString(html, forType: .html)
         }
+        let policy = Self.ephemeralScrubPolicy(forActionID: action.id)
         commitOutboundPasteboardGuard(
             for: action.resultText,
-            forceProtected: item.isBurnAfterPaste,
-            isPinnedSource: item.isPinned,
-            scrubDelay: item.isBurnAfterPaste ? 5.0 : 45.0
+            forceProtected: item.isBurnAfterPaste || (policy?.forceProtected ?? false),
+            isPinnedSource: item.isPinned && policy == nil,
+            scrubDelay: item.isBurnAfterPaste ? 5.0 : (policy?.scrubSeconds ?? 45.0)
         )
 
         if shouldAutoPaste {

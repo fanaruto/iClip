@@ -1431,28 +1431,61 @@ pub fn sanitize_safe_browser_url(raw_input: &str) -> Option<String> {
         .next()
         .unwrap_or("")
         .trim();
-    if authority.is_empty() || authority.contains('@') {
-        return None;
-    }
-    let host = authority
-        .split(':')
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    if host.is_empty() || (host != "localhost" && !host.contains('.')) {
-        return None;
-    }
-    // 拦截十六进制 / 八进制混淆 IPv4 主机（如 http://0x7f.0.0.1 或 http://0177.0.0.1 绕过安全感知钓鱼）
-    let segs: Vec<&str> = host.split('.').collect();
-    if segs.len() == 4
-        && segs.iter().all(|s| {
-            !s.is_empty() && (s.starts_with("0x") || s.bytes().all(|b| b.is_ascii_digit()))
-        })
-        && segs
-            .iter()
-            .any(|s| s.starts_with("0x") || (s.len() > 1 && s.starts_with('0')))
+    if authority.is_empty()
+        || authority.contains('@')
+        || authority.contains('[')
+        || authority.contains(']')
     {
         return None;
+    }
+    let mut auth_parts = authority.split(':');
+    let raw_host = auth_parts.next().unwrap_or("").to_ascii_lowercase();
+    if let Some(port_str) = auth_parts.next() {
+        if port_str.is_empty()
+            || port_str.len() > 5
+            || !port_str.bytes().all(|b| b.is_ascii_digit())
+            || auth_parts.next().is_some()
+        {
+            return None;
+        }
+    }
+    let clean_host = raw_host.strip_suffix('.').unwrap_or(&raw_host);
+    if clean_host.is_empty()
+        || clean_host.starts_with('.')
+        || clean_host.ends_with('.')
+        || clean_host.contains("..")
+        || (clean_host != "localhost" && !clean_host.contains('.'))
+    {
+        return None;
+    }
+    // RFC 1123 铁律：顶级域名绝不能全为数字或以 0x 开头；凡末段为数字/0x 者必被网络栈按 IPv4 解析，强制必须为标准 4 段无前导零 0..=255 十进制 IPv4，且拦截 169.254 云元数据段
+    let segs: Vec<&str> = clean_host.split('.').collect();
+    if let Some(&last_seg) = segs.last() {
+        if last_seg.starts_with("0x") || last_seg.bytes().all(|b| b.is_ascii_digit()) {
+            if segs.len() != 4 {
+                return None;
+            }
+            let mut octets = [0u16; 4];
+            for (i, seg) in segs.iter().enumerate() {
+                if seg.is_empty()
+                    || seg.len() > 3
+                    || (seg.len() > 1 && seg.starts_with('0'))
+                    || !seg.bytes().all(|b| b.is_ascii_digit())
+                {
+                    return None;
+                }
+                let Ok(val) = seg.parse::<u16>() else {
+                    return None;
+                };
+                if val > 255 {
+                    return None;
+                }
+                octets[i] = val;
+            }
+            if octets[0] == 169 && octets[1] == 254 {
+                return None;
+            }
+        }
     }
     Some(normalized)
 }
@@ -4853,4 +4886,223 @@ fn describe_cron_time(min_f: &str, hour_f: &str, has_date_scope: bool) -> String
         }
     }
     format!("{day_prefix}{hour_f}时 {min_f}分")
+}
+
+/// 判定动作是否产出无特征前缀的机密明文（纯 Wi-Fi 密码、6 位 TOTP、替身还原真值），返回强制云隔离与定时擦除毫秒数
+pub fn ephemeral_scrub_ms_for_action(action_id: &str) -> Option<u32> {
+    match action_id {
+        "totp-live-code" | "img-totp-code" | "wifi-extract-password" | "img-wifi-password" => {
+            Some(30_000)
+        }
+        "restore-privacy-twin" => Some(45_000),
+        _ => None,
+    }
+}
+
+/// 多行文本「去序号/项目符号净文（list-strip-markers）↔ 一键加数字序号（list-add-numbers）」双向排版助手
+pub fn analyze_list_numbering_toggle(
+    raw: &str,
+) -> Vec<(&'static str, String, String, String)> {
+    if raw.is_empty() || raw.len() > 65_536 || !raw.contains('\n') || raw.contains('\t') {
+        return Vec::new();
+    }
+    let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
+    let trimmed = normalized.trim();
+    if trimmed.is_empty()
+        || looks_like_source_code_or_md_fence(&normalized)
+        || (trimmed.starts_with('{') && trimmed.ends_with('}'))
+        || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+    {
+        return Vec::new();
+    }
+
+    let all_lines: Vec<&str> = normalized.split('\n').collect();
+    let non_empty_indices: Vec<usize> = all_lines
+        .iter()
+        .enumerate()
+        .filter_map(|(i, l)| (!l.trim().is_empty()).then_some(i))
+        .collect();
+    let total_non_empty = non_empty_indices.len();
+    if !(2..=200).contains(&total_non_empty) {
+        return Vec::new();
+    }
+
+    for &idx in &non_empty_indices {
+        let lt = all_lines[idx].trim();
+        if lt.starts_with("- [ ]")
+            || lt.starts_with("- [x]")
+            || lt.starts_with("- [X]")
+            || lt.starts_with("* [ ]")
+            || lt.starts_with("* [x]")
+            || lt.starts_with('|')
+        {
+            return Vec::new();
+        }
+    }
+
+    let mut stripped_cnt = 0usize;
+    let mut stripped_lines: Vec<String> = all_lines.iter().map(|&s| s.to_string()).collect();
+    for &idx in &non_empty_indices {
+        let lt = all_lines[idx].trim();
+        if let Some(clean_body) = strip_leading_list_marker(lt) {
+            if !clean_body.is_empty() {
+                stripped_cnt += 1;
+                stripped_lines[idx] = clean_body.to_string();
+                continue;
+            }
+        }
+        stripped_lines[idx] = lt.to_string();
+    }
+
+    if stripped_cnt >= 2 && stripped_cnt * 5 >= total_non_empty * 4 {
+        let out = stripped_lines.join("\n").trim_matches('\n').to_string();
+        if !out.is_empty() && out != trimmed {
+            return vec![(
+                "list-strip-markers",
+                format!("去序号净文({total_non_empty}行)"),
+                out,
+                format!("已剥除 {stripped_cnt} 行行首序号/项目符号，还原纯净文本"),
+            )];
+        }
+    }
+
+    if stripped_cnt == 0 && total_non_empty >= 3 {
+        let unsuitable = non_empty_indices.iter().any(|&idx| {
+            let lt = all_lines[idx].trim();
+            lt.starts_with('#')
+                || lt.starts_with('>')
+                || lt.starts_with("http://")
+                || lt.starts_with("https://")
+                || (lt.contains('=') && !lt.contains(' '))
+        });
+        if !unsuitable {
+            let mut num_lines: Vec<String> = all_lines.iter().map(|&s| s.to_string()).collect();
+            for (seq, &idx) in non_empty_indices.iter().enumerate() {
+                let lt = all_lines[idx].trim();
+                num_lines[idx] = format!("{}. {}", seq + 1, lt);
+            }
+            let out = num_lines.join("\n").trim_matches('\n').to_string();
+            return vec![(
+                "list-add-numbers",
+                format!("加数字序号({total_non_empty}行)"),
+                out,
+                format!("已为 {total_non_empty} 行文本自动生成标准数字编号"),
+            )];
+        }
+    }
+
+    Vec::new()
+}
+
+fn strip_leading_list_marker(line: &str) -> Option<&str> {
+    let chars: Vec<(usize, char)> = line.char_indices().collect();
+    if chars.is_empty() {
+        return None;
+    }
+    let first_ch = chars[0].1;
+
+    // 1. 圆圈数字 ①~⑳
+    if ('\u{2460}'..='\u{2473}').contains(&first_ch) {
+        let mut idx = 1;
+        if idx < chars.len() && matches!(chars[idx].1, '、' | '.') {
+            idx += 1;
+        }
+        while idx < chars.len() && chars[idx].1.is_whitespace() {
+            idx += 1;
+        }
+        return (idx < chars.len()).then(|| &line[chars[idx].0..]);
+    }
+
+    // 2. 项目符号 • · ● ▪ ◦ ▸ 或 `- ` / `* `
+    if matches!(first_ch, '•' | '·' | '●' | '▪' | '◦' | '▸') {
+        let mut idx = 1;
+        while idx < chars.len() && chars[idx].1.is_whitespace() {
+            idx += 1;
+        }
+        return (idx < chars.len()).then(|| &line[chars[idx].0..]);
+    }
+    if matches!(first_ch, '-' | '*') && chars.len() >= 3 && chars[1].1 == ' ' {
+        let mut idx = 2;
+        while idx < chars.len() && chars[idx].1.is_whitespace() {
+            idx += 1;
+        }
+        return (idx < chars.len()).then(|| &line[chars[idx].0..]);
+    }
+
+    // 3. 括号序号 `(1) `、`（1）`、`[1] `、`（一）`
+    let close_expected = match first_ch {
+        '(' => Some(')'),
+        '（' => Some('）'),
+        '[' => Some(']'),
+        _ => None,
+    };
+    if let Some(close_ch) = close_expected {
+        let mut idx = 1;
+        let start = idx;
+        while idx < chars.len()
+            && idx - start < 4
+            && (chars[idx].1.is_ascii_digit() || is_chinese_list_numeral(chars[idx].1))
+        {
+            idx += 1;
+        }
+        if idx > start && idx < chars.len() && chars[idx].1 == close_ch {
+            idx += 1;
+            if idx < chars.len() && chars[idx].1 == '、' {
+                idx += 1;
+            }
+            while idx < chars.len() && chars[idx].1.is_whitespace() {
+                idx += 1;
+            }
+            return (idx < chars.len()).then(|| &line[chars[idx].0..]);
+        }
+    }
+
+    // 4. 阿拉伯数字序号 `1. `、`1、`、`1)`、`1）`（防误剥小数 3.14 或日期 2026.11）
+    if first_ch.is_ascii_digit() {
+        let mut idx = 0;
+        while idx < chars.len() && idx < 3 && chars[idx].1.is_ascii_digit() {
+            idx += 1;
+        }
+        if idx > 0 && idx < chars.len() {
+            let delim = chars[idx].1;
+            if matches!(delim, '、' | ')' | '）') {
+                idx += 1;
+                while idx < chars.len() && chars[idx].1.is_whitespace() {
+                    idx += 1;
+                }
+                return (idx < chars.len()).then(|| &line[chars[idx].0..]);
+            }
+            if delim == '.' && idx + 1 < chars.len() && chars[idx + 1].1.is_whitespace() {
+                idx += 2;
+                while idx < chars.len() && chars[idx].1.is_whitespace() {
+                    idx += 1;
+                }
+                return (idx < chars.len()).then(|| &line[chars[idx].0..]);
+            }
+        }
+    }
+
+    // 5. 中文数字顿号 `一、`、`十二、`
+    if is_chinese_list_numeral(first_ch) {
+        let mut idx = 0;
+        while idx < chars.len() && idx < 3 && is_chinese_list_numeral(chars[idx].1) {
+            idx += 1;
+        }
+        if idx > 0 && idx < chars.len() && chars[idx].1 == '、' {
+            idx += 1;
+            while idx < chars.len() && chars[idx].1.is_whitespace() {
+                idx += 1;
+            }
+            return (idx < chars.len()).then(|| &line[chars[idx].0..]);
+        }
+    }
+
+    None
+}
+
+fn is_chinese_list_numeral(c: char) -> bool {
+    matches!(
+        c,
+        '一' | '二' | '三' | '四' | '五' | '六' | '七' | '八' | '九' | '十'
+    )
 }

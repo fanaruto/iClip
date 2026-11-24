@@ -2305,14 +2305,28 @@ unsafe fn handle_clipboard_update(hwnd: HWND) {
                                 )
                                 .into_iter()
                                 .filter(|a| {
-                                    a.id != "todo-split-checklist" && a.id != "contact-split-queue"
+                                    a.id != "todo-split-checklist"
+                                        && a.id != "contact-split-queue"
+                                        && a.id != "query-to-json"
+                                        && a.id != "json-to-query"
+                                        && a.id != "kv-to-json"
+                                        && a.id != "list-strip-markers"
+                                        && a.id != "list-add-numbers"
                                 })
                                 .collect();
                             if let Some(top_act) = acts.first() {
-                                if top_act.id == "totp-live-code" {
-                                    // 保留原始 otpauth:// 入库，剪贴板仅无痕替换为 6 位动态码并 30s 自动擦除
-                                    rewrite_clipboard_text = Some(top_act.result_text.clone());
-                                    rewrite_scrub_ms = Some(30_000);
+                                if let Some(scrub_ms) =
+                                    iclip_core::security::ephemeral_scrub_ms_for_action(top_act.id)
+                                {
+                                    if scrub_ms == 30_000 {
+                                        // 保留原始 otpauth:// 或 WIFI: 分享串入库，剪贴板仅无痕替换为动态码/纯密码并 30s 自动擦除
+                                        rewrite_clipboard_text = Some(top_act.result_text.clone());
+                                        rewrite_scrub_ms = Some(scrub_ms);
+                                    } else {
+                                        raw_text = top_act.result_text.clone();
+                                        rewrite_clipboard_text = Some(raw_text.clone());
+                                        rewrite_scrub_ms = Some(scrub_ms);
+                                    }
                                     feedback_toast =
                                         Some(format!("双按复制智变：{}", top_act.toast_text));
                                 } else {
@@ -3317,6 +3331,16 @@ unsafe fn commit_quick_action(hwnd: HWND, item_idx: usize, action: &QuickAction)
         }
     }
 
+    if action.id == "wifi-extract-password" {
+        commit_ephemeral_secret_paste_with_delay(
+            hwnd,
+            &action.result_text,
+            "已键入纯 Wi-Fi 密码（本机云隔离 · 30s后自动擦除）".to_string(),
+            30_000,
+        );
+        return;
+    }
+
     if action.id == "todo-split-checklist" {
         if let Some(id) = item_id {
             let created = APP_STATE.with(|c| {
@@ -3377,8 +3401,9 @@ unsafe fn commit_quick_action(hwnd: HWND, item_idx: usize, action: &QuickAction)
         .html_table_payload
         .as_deref()
         .map(|h| (cf_html_id, h));
-    let out_is_sens =
-        source_burn || iclip_core::security::classify_sensitive_text(&action.result_text).is_some();
+    let out_is_sens = source_burn
+        || iclip_core::security::ephemeral_scrub_ms_for_action(action.id).is_some()
+        || iclip_core::security::classify_sensitive_text(&action.result_text).is_some();
     let (out_guard, scrub_45s) = APP_STATE.with(|c| {
         c.borrow()
             .as_ref()
