@@ -52,7 +52,8 @@ final class LiquidGlassSurfaceHost {
         cornerRadius: CGFloat,
         style: PanelSurfaceStyle,
         appearance: LiquidGlassAppearance,
-        maskOpacity: Double
+        maskOpacity: Double,
+        autoResizeWithWindow: Bool = false
     ) {
         self.cornerRadius = cornerRadius
         self.currentStyle = style
@@ -74,14 +75,29 @@ final class LiquidGlassSurfaceHost {
                     bleed: bleed,
                     cornerRadius: cornerRadius,
                     appearance: appearance,
-                    maskOpacity: maskOpacity
+                    maskOpacity: maskOpacity,
+                    autoResizeWithWindow: autoResizeWithWindow
                 )
                 return
             }
-            installFrostedSurface(on: panel, hostingView: hostingView, cardBounds: cardBounds, bleed: bleed, cornerRadius: cornerRadius)
+            installFrostedSurface(
+                on: panel,
+                hostingView: hostingView,
+                cardBounds: cardBounds,
+                bleed: bleed,
+                cornerRadius: cornerRadius,
+                autoResizeWithWindow: autoResizeWithWindow
+            )
 
         case .frosted:
-            installFrostedSurface(on: panel, hostingView: hostingView, cardBounds: cardBounds, bleed: bleed, cornerRadius: cornerRadius)
+            installFrostedSurface(
+                on: panel,
+                hostingView: hostingView,
+                cardBounds: cardBounds,
+                bleed: bleed,
+                cornerRadius: cornerRadius,
+                autoResizeWithWindow: autoResizeWithWindow
+            )
         }
     }
 
@@ -113,13 +129,14 @@ final class LiquidGlassSurfaceHost {
         bleed: CGFloat,
         cornerRadius: CGFloat,
         appearance: LiquidGlassAppearance,
-        maskOpacity: Double
+        maskOpacity: Double,
+        autoResizeWithWindow: Bool
     ) {
         let cardFrame = NSRect(x: bleed, y: bleed, width: cardBounds.width, height: cardBounds.height)
 
         // 底层：支持动态无级调节高斯模糊半径（0pt ~ 38pt）的连续圆角柔焦层，彻底消除传统半透明叠加导致的背后文字重影
         let blurBackdrop = ConfigurableBlurVisualEffectView(frame: cardFrame)
-        blurBackdrop.autoresizingMask = bleed > 0 ? [] : [.width, .height]
+        blurBackdrop.autoresizingMask = (bleed > 0 && !autoResizeWithWindow) ? [] : [.width, .height]
         blurBackdrop.material = .popover
         blurBackdrop.blendingMode = .behindWindow
         blurBackdrop.state = .active
@@ -131,7 +148,7 @@ final class LiquidGlassSurfaceHost {
 
         // 顶层：macOS 26 原生 NSGlassEffectView 光学透镜外壳，保留边缘折射与高光
         let glassView = NSGlassEffectView(frame: cardFrame)
-        glassView.autoresizingMask = bleed > 0 ? [] : [.width, .height]
+        glassView.autoresizingMask = (bleed > 0 && !autoResizeWithWindow) ? [] : [.width, .height]
         glassView.cornerRadius = cornerRadius
 
         // 内部内容容器：严格同心连续圆角裁切，承接外观监听与拖拽复制
@@ -166,8 +183,12 @@ final class LiquidGlassSurfaceHost {
             width: cardBounds.width + bleed * 2,
             height: cardBounds.height + bleed * 2
         )
-        let bleedRoot = LiquidGlassBleedRootView(frame: windowBounds, cardFrame: cardFrame)
-        if bleed == 0 {
+        let bleedRoot = LiquidGlassBleedRootView(
+            frame: windowBounds,
+            cardFrame: cardFrame,
+            autoLayoutBleed: autoResizeWithWindow ? bleed : nil
+        )
+        if bleed == 0 || autoResizeWithWindow {
             bleedRoot.autoresizingMask = [.width, .height]
         }
         bleedRoot.addSubview(blurBackdrop)
@@ -188,13 +209,14 @@ final class LiquidGlassSurfaceHost {
         hostingView: NSView,
         cardBounds: NSRect,
         bleed: CGFloat,
-        cornerRadius: CGFloat
+        cornerRadius: CGFloat,
+        autoResizeWithWindow: Bool
     ) {
         self.activeGlassView = nil
 
         let cardFrame = NSRect(x: bleed, y: bleed, width: cardBounds.width, height: cardBounds.height)
         let effectView = NSVisualEffectView(frame: cardFrame)
-        effectView.autoresizingMask = bleed > 0 ? [] : [.width, .height]
+        effectView.autoresizingMask = (bleed > 0 && !autoResizeWithWindow) ? [] : [.width, .height]
         effectView.material = .popover
         effectView.blendingMode = .behindWindow
         effectView.state = .active
@@ -230,7 +252,14 @@ final class LiquidGlassSurfaceHost {
                 width: cardBounds.width + bleed * 2,
                 height: cardBounds.height + bleed * 2
             )
-            let bleedRoot = LiquidGlassBleedRootView(frame: windowBounds, cardFrame: cardFrame)
+            let bleedRoot = LiquidGlassBleedRootView(
+                frame: windowBounds,
+                cardFrame: cardFrame,
+                autoLayoutBleed: autoResizeWithWindow ? bleed : nil
+            )
+            if autoResizeWithWindow {
+                bleedRoot.autoresizingMask = [.width, .height]
+            }
             bleedRoot.addSubview(effectView)
             panel.contentView = bleedRoot
         } else {
@@ -288,8 +317,12 @@ final class LiquidGlassSurfaceHost {
 
     /// 生成真正符合苹果 `.continuous` 连续曲率（Squircle）的 `@2x` 高清圆角遮罩
     /// 彻底根除 `NSVisualEffectView(.behindWindow)` 在 WindowServer 合成层的四角直角灰块溢出
+    /// 苹果 `.continuous` squircle 曲线沿边缘延伸至约 `1.53 × radius`，`capInsets` 取 `1.55 × radius` 防止缩放变形
     static func continuousCornerMaskImage(size: NSSize, radius: CGFloat) -> NSImage {
-        let minSide = radius * 2 + 4
+        let desiredCap = max(radius, ceil(radius * 1.55))
+        let halfShortSide = floor(min(size.width, size.height) * 0.5)
+        let capInset = max(radius, min(desiredCap, halfShortSide))
+        let minSide = radius * 2 + 2
         let safeSize = NSSize(width: max(size.width, minSide), height: max(size.height, minSide))
         let scale: CGFloat = 2.0
         let pixelWidth = max(1, Int(ceil(safeSize.width * scale)))
@@ -327,7 +360,7 @@ final class LiquidGlassSurfaceHost {
 
             let image = NSImage(size: safeSize)
             image.addRepresentation(rep)
-            image.capInsets = NSEdgeInsets(top: radius, left: radius, bottom: radius, right: radius)
+            image.capInsets = NSEdgeInsets(top: capInset, left: capInset, bottom: capInset, right: capInset)
             image.resizingMode = .stretch
             return image
         }
@@ -405,9 +438,11 @@ private final class ConfigurableBlurVisualEffectView: NSVisualEffectView {
 /// 透明阴影出血根容器：隔离 NSNextStepFrame 对 NSGlassEffectView 的直角边框挂钩，并为连续圆角卡片预留无裁切外圈空间
 final class LiquidGlassBleedRootView: NSView {
     var cardFrame: NSRect
+    var autoLayoutBleed: CGFloat?
 
-    init(frame frameRect: NSRect, cardFrame: NSRect) {
+    init(frame frameRect: NSRect, cardFrame: NSRect, autoLayoutBleed: CGFloat? = nil) {
         self.cardFrame = cardFrame
+        self.autoLayoutBleed = autoLayoutBleed
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.backgroundColor = NSColor.clear.cgColor
@@ -417,13 +452,50 @@ final class LiquidGlassBleedRootView: NSView {
 
     required init?(coder: NSCoder) {
         self.cardFrame = .zero
+        self.autoLayoutBleed = nil
         super.init(coder: coder)
     }
 
     override var isOpaque: Bool { false }
 
+    override func layout() {
+        super.layout()
+        guard let bleed = autoLayoutBleed else { return }
+        let insetRect = NSRect(
+            x: bleed,
+            y: bleed,
+            width: max(1, bounds.width - bleed * 2),
+            height: max(1, bounds.height - bleed * 2)
+        )
+        self.cardFrame = insetRect
+        for sub in subviews {
+            if sub.frame != insetRect {
+                sub.frame = insetRect
+            }
+            if #available(macOS 26.0, *),
+               let glass = sub as? NSGlassEffectView,
+               let contentView = glass.contentView {
+                let zeroOriginRect = NSRect(origin: .zero, size: insetRect.size)
+                if contentView.frame != zeroOriginRect {
+                    contentView.frame = zeroOriginRect
+                }
+            }
+        }
+    }
+
     override func hitTest(_ point: NSPoint) -> NSView? {
-        guard cardFrame.contains(point) else { return nil }
+        let activeCardFrame: NSRect = {
+            if let bleed = autoLayoutBleed {
+                return NSRect(
+                    x: bleed,
+                    y: bleed,
+                    width: max(1, bounds.width - bleed * 2),
+                    height: max(1, bounds.height - bleed * 2)
+                )
+            }
+            return cardFrame
+        }()
+        guard activeCardFrame.contains(point) else { return nil }
         return super.hitTest(point)
     }
 }

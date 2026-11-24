@@ -1698,6 +1698,15 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertEqual(rep.colorAt(x: 1, y: 1)?.alphaComponent ?? 1, 0, accuracy: 0.001)
         XCTAssertEqual(rep.colorAt(x: rep.pixelsWide - 2, y: rep.pixelsHigh - 2)?.alphaComponent ?? 1, 0, accuracy: 0.001)
         XCTAssertEqual(rep.colorAt(x: rep.pixelsWide / 2, y: rep.pixelsHigh / 2)?.alphaComponent ?? 0, 1, accuracy: 0.001)
+
+        // 胶囊半径（radius = height / 2）不得触发过大的 capInsets 挤压变形
+        let pillMask = LiquidGlassSurfaceHost.continuousCornerMaskImage(size: NSSize(width: 220, height: 40), radius: 20)
+        XCTAssertLessThanOrEqual(pillMask.size.height, 42)
+        XCTAssertLessThanOrEqual(pillMask.capInsets.top, 20.001)
+        if let pillRep = pillMask.representations.first as? NSBitmapImageRep {
+            // (x=0, y=12pt) 位于 2pt×2 -> (0, 24px) 处，应在胶囊弧外保持全透明
+            XCTAssertEqual(pillRep.colorAt(x: 0, y: 24)?.alphaComponent ?? 1, 0, accuracy: 0.001)
+        }
     }
 
     // MARK: - 40. 剪贴即待办（闪念待办零歧义解析、多行清单拆解、搜索词匹配与旧版 JSON 兼容）测试
@@ -3770,5 +3779,137 @@ final class CoreFeatureTests: XCTestCase {
 
         VisionOCRService.evictWordBoxCache(for: blankURL)
         XCTAssertNil(VisionOCRService.cachedWordBoxes(at: blankURL, granularity: .word))
+    }
+
+    func testLiquidGlassBleedRootDynamicAutoLayoutResize() {
+        let bleed: CGFloat = 24
+        let root = LiquidGlassBleedRootView(
+            frame: NSRect(x: 0, y: 0, width: 448, height: 348),
+            cardFrame: NSRect(x: bleed, y: bleed, width: 400, height: 300),
+            autoLayoutBleed: bleed
+        )
+        let child = NSView(frame: root.cardFrame)
+        root.addSubview(child)
+
+        root.frame = NSRect(x: 0, y: 0, width: 648, height: 488)
+        root.layout()
+
+        let expectedCard = NSRect(x: 24, y: 24, width: 600, height: 440)
+        XCTAssertEqual(root.cardFrame, expectedCard)
+        XCTAssertEqual(child.frame, expectedCard)
+        XCTAssertNotNil(root.hitTest(NSPoint(x: 25, y: 25)))
+        XCTAssertNil(root.hitTest(NSPoint(x: 10, y: 25)))
+        XCTAssertNil(root.hitTest(NSPoint(x: 635, y: 400)))
+
+        // 即使尚未触发 layout()，autoLayoutBleed 模式下 hitTest 也必须实时按最新 bounds 生效
+        root.frame = NSRect(x: 0, y: 0, width: 348, height: 248)
+        XCTAssertNil(root.hitTest(NSPoint(x: 330, y: 120)))
+    }
+
+    func testBigBangFlowLayoutGeometryAndWidthFloorParity() {
+        let items: [(size: CGSize, isBreak: Bool)] = [
+            (CGSize(width: 60, height: 26), false),
+            (CGSize(width: 60, height: 26), false),
+            (CGSize(width: 30, height: 26), false),
+            (CGSize(width: 0, height: 0), true),
+            (CGSize(width: 110, height: 26), false),
+        ]
+        // maxWidth = 100（< 160）验证与 placeSubviews 一致的窄宽折行与超宽钳制行为
+        let narrow = BigBangFlowLayout.computeLayout(
+            items: items,
+            maxWidth: 100,
+            spacing: 7,
+            lineSpacing: 8,
+            fullWidthRows: false
+        )
+        XCTAssertEqual(narrow.size.width, 100, accuracy: 0.01)
+        XCTAssertEqual(narrow.frames[0], CGRect(x: 0, y: 0, width: 60, height: 26))
+        XCTAssertEqual(narrow.frames[1], CGRect(x: 0, y: 34, width: 60, height: 26))
+        XCTAssertEqual(narrow.frames[2], CGRect(x: 67, y: 34, width: 30, height: 26))
+        XCTAssertEqual(narrow.frames[4], CGRect(x: 0, y: 68, width: 100, height: 26))
+        XCTAssertEqual(narrow.size.height, 94, accuracy: 0.01)
+
+        // fullWidthRows = true 逐行等宽排布（标准 .line 序列无显式换行占位）与带空行占位
+        let fullRows = BigBangFlowLayout.computeLayout(
+            items: [
+                (CGSize(width: 180, height: 28), false),
+                (CGSize(width: 90, height: 32), false),
+            ],
+            maxWidth: 420,
+            spacing: 7,
+            lineSpacing: 8,
+            fullWidthRows: true
+        )
+        XCTAssertEqual(fullRows.frames[0], CGRect(x: 0, y: 0, width: 420, height: 28))
+        XCTAssertEqual(fullRows.frames[1], CGRect(x: 0, y: 36, width: 420, height: 32))
+        XCTAssertEqual(fullRows.size, CGSize(width: 420, height: 68))
+    }
+
+    func testVisionOCRWordBoxDetailedStatesAndUnsafeDimensionCache() async throws {
+        // 1. 缺失文件返回 .failed 且绝不写缓存
+        let missingURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("iclip-detailed-missing-\(UUID().uuidString).png")
+        let missing = await VisionOCRService.recognizeWordBoxesDetailed(at: missingURL, granularity: .word)
+        XCTAssertEqual(missing, .failed)
+        XCTAssertNil(VisionOCRService.cachedWordBoxResult(at: missingURL, granularity: .word))
+
+        // 2. 真实合法的超宽图片（16385×1 PNG，体积仅数 KB），验证返回 .unsupportedDimensions 且确定性缓存
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: 16_385,
+            pixelsHigh: 1,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ), let basePNG = rep.representation(using: .png, properties: [:]) else {
+            XCTFail("无法创建超宽测试 PNG 数据")
+            return
+        }
+
+        let oversizedURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("iclip-oversized-\(UUID().uuidString).png")
+        defer {
+            VisionOCRService.evictWordBoxCache(for: oversizedURL)
+            try? FileManager.default.removeItem(at: oversizedURL)
+        }
+        try basePNG.write(to: oversizedURL)
+
+        let detailed = await VisionOCRService.recognizeWordBoxesDetailed(at: oversizedURL, granularity: .word)
+        XCTAssertEqual(detailed, .unsupportedDimensions)
+        XCTAssertEqual(VisionOCRService.cachedWordBoxResult(at: oversizedURL, granularity: .word), .unsupportedDimensions)
+        XCTAssertNil(VisionOCRService.cachedWordBoxes(at: oversizedURL, granularity: .word))
+
+        VisionOCRService.evictWordBoxCache(for: oversizedURL)
+        XCTAssertNil(VisionOCRService.cachedWordBoxResult(at: oversizedURL, granularity: .word))
+
+        // 3. 截断/损坏 PNG 数据必须归类为 .failed 且绝不写负缓存，避免误报分辨率过高
+        let corruptURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("iclip-corrupt-\(UUID().uuidString).png")
+        defer {
+            VisionOCRService.evictWordBoxCache(for: corruptURL)
+            try? FileManager.default.removeItem(at: corruptURL)
+        }
+        try Data(basePNG.prefix(16)).write(to: corruptURL)
+        let corruptRes = await VisionOCRService.recognizeWordBoxesDetailed(at: corruptURL, granularity: .word)
+        XCTAssertEqual(corruptRes, .failed)
+        XCTAssertNil(VisionOCRService.cachedWordBoxResult(at: corruptURL, granularity: .word))
+    }
+
+    func testClipCardHoverActionBarWidthZeroOverlapInvariant() {
+        let totalW: CGFloat = 340
+        for count in 1...6 {
+            let actualCapsuleWidth = CGFloat(count) * 22.0 + CGFloat(max(0, count - 1)) * 5.0 + 9.0
+            let reserved = ClipCardLayoutMetrics.hoverActionBarWidth(buttonCount: count)
+            XCTAssertGreaterThan(reserved, actualCapsuleWidth)
+
+            let stops = ClipCardLayoutMetrics.hoverActionMaskStops(totalWidth: totalW, reservedActionWidth: reserved)
+            XCTAssertLessThan(stops.fadeStart, stops.fadeEnd)
+            XCTAssertLessThanOrEqual(stops.fadeEnd * totalW, totalW - actualCapsuleWidth)
+        }
+        XCTAssertEqual(ClipCardLayoutMetrics.hoverActionBarWidth(buttonCount: 0), 0)
     }
 }

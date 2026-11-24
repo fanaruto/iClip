@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import Combine
 
 enum BigBangInitialPreviewMode: Equatable {
     /// 图片默认纯净全图大屏预览（支持一键/O 切换原位大爆炸）；文本/链接默认大爆炸形态展开
@@ -41,23 +42,36 @@ final class TokenFrameRegistry {
 }
 
 /// SwiftUI 原生 Layout 流式分词排布（zero-jitter、零 GeometryReader 反馈环）
+struct BigBangFlowLayoutResult: Equatable {
+    let size: CGSize
+    let frames: [CGRect]
+}
+
 struct BigBangFlowLayout: Layout {
     var spacing: CGFloat = 7
     var lineSpacing: CGFloat = 8
     var fullWidthRows: Bool = false
 
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let maxW = max(160, proposal.width ?? 620)
+    static func computeLayout(
+        items: [(size: CGSize, isBreak: Bool)],
+        maxWidth: CGFloat,
+        spacing: CGFloat,
+        lineSpacing: CGFloat,
+        fullWidthRows: Bool
+    ) -> BigBangFlowLayoutResult {
+        let maxW = max(1, maxWidth)
+        var frames: [CGRect] = []
+        frames.reserveCapacity(items.count)
+
         var x: CGFloat = 0
         var y: CGFloat = 0
         var rowH: CGFloat = 0
         var usedW: CGFloat = 0
         var hasRow = false
 
-        for sub in subviews {
-            let ideal = sub.sizeThatFits(.unspecified)
-            let isBreak = ideal.width <= 0.5 && ideal.height <= 0.5
-            if isBreak {
+        for item in items {
+            if item.isBreak {
+                frames.append(CGRect(x: 0, y: y, width: 0, height: 0))
                 usedW = max(usedW, x)
                 x = 0
                 y += (rowH > 0 ? rowH + lineSpacing : 14)
@@ -65,80 +79,79 @@ struct BigBangFlowLayout: Layout {
                 continue
             }
             if fullWidthRows {
-                let rowSize = sub.sizeThatFits(ProposedViewSize(width: maxW, height: nil))
                 if hasRow {
                     y += lineSpacing
                 }
-                y += rowSize.height
+                frames.append(CGRect(x: 0, y: y, width: maxW, height: item.size.height))
+                y += item.size.height
                 hasRow = true
                 usedW = maxW
                 continue
             }
-            let size: CGSize = ideal.width > maxW
-                ? sub.sizeThatFits(ProposedViewSize(width: maxW, height: nil))
-                : ideal
-            let clampedW = min(size.width, maxW)
+            let clampedW = min(item.size.width, maxW)
             if x > 0 && x + clampedW > maxW {
                 usedW = max(usedW, x)
                 x = 0
                 y += rowH + lineSpacing
                 rowH = 0
             }
+            frames.append(CGRect(x: x, y: y, width: clampedW, height: item.size.height))
             x += clampedW + spacing
-            rowH = max(rowH, size.height)
+            rowH = max(rowH, item.size.height)
             usedW = max(usedW, x - spacing)
         }
+
         let totalH = fullWidthRows ? y : (y + rowH)
-        return CGSize(width: min(maxW, max(usedW, maxW)), height: totalH)
+        let finalSize = CGSize(width: min(maxW, max(usedW, maxW)), height: totalH)
+        return BigBangFlowLayoutResult(size: finalSize, frames: frames)
+    }
+
+    private func measureItems(subviews: Subviews, maxWidth: CGFloat) -> [(size: CGSize, isBreak: Bool)] {
+        let maxW = max(1, maxWidth)
+        return subviews.map { sub in
+            let ideal = sub.sizeThatFits(.unspecified)
+            let isBreak = ideal.width <= 0.5 && ideal.height <= 0.5
+            if isBreak {
+                return (ideal, true)
+            }
+            if fullWidthRows || ideal.width > maxW {
+                let constrained = sub.sizeThatFits(ProposedViewSize(width: maxW, height: nil))
+                return (constrained, false)
+            }
+            return (ideal, false)
+        }
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let maxW = max(1, proposal.width ?? 620)
+        let items = measureItems(subviews: subviews, maxWidth: maxW)
+        return Self.computeLayout(
+            items: items,
+            maxWidth: maxW,
+            spacing: spacing,
+            lineSpacing: lineSpacing,
+            fullWidthRows: fullWidthRows
+        ).size
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
         let maxW = max(1, bounds.width)
-        var x = bounds.minX
-        var y = bounds.minY
-        var rowH: CGFloat = 0
-        var hasRow = false
-
-        for sub in subviews {
-            let ideal = sub.sizeThatFits(.unspecified)
-            let isBreak = ideal.width <= 0.5 && ideal.height <= 0.5
-            if isBreak {
-                sub.place(at: CGPoint(x: bounds.minX, y: y), proposal: ProposedViewSize(.zero))
-                x = bounds.minX
-                y += (rowH > 0 ? rowH + lineSpacing : 14)
-                rowH = 0
-                continue
-            }
-            if fullWidthRows {
-                let rowSize = sub.sizeThatFits(ProposedViewSize(width: maxW, height: nil))
-                if hasRow {
-                    y += lineSpacing
-                }
-                sub.place(
-                    at: CGPoint(x: bounds.minX, y: y),
-                    anchor: .topLeading,
-                    proposal: ProposedViewSize(width: maxW, height: rowSize.height)
-                )
-                y += rowSize.height
-                hasRow = true
-                continue
-            }
-            let size: CGSize = ideal.width > maxW
-                ? sub.sizeThatFits(ProposedViewSize(width: maxW, height: nil))
-                : ideal
-            let clampedW = min(size.width, maxW)
-            if x > bounds.minX && (x - bounds.minX) + clampedW > maxW {
-                x = bounds.minX
-                y += rowH + lineSpacing
-                rowH = 0
-            }
+        let items = measureItems(subviews: subviews, maxWidth: maxW)
+        let result = Self.computeLayout(
+            items: items,
+            maxWidth: maxW,
+            spacing: spacing,
+            lineSpacing: lineSpacing,
+            fullWidthRows: fullWidthRows
+        )
+        for (idx, sub) in subviews.enumerated() where idx < result.frames.count {
+            let rect = result.frames[idx]
+            let isBreak = items[idx].isBreak
             sub.place(
-                at: CGPoint(x: x, y: y),
+                at: CGPoint(x: bounds.minX + rect.minX, y: bounds.minY + rect.minY),
                 anchor: .topLeading,
-                proposal: ProposedViewSize(width: clampedW, height: size.height)
+                proposal: isBreak ? ProposedViewSize(.zero) : ProposedViewSize(width: rect.width, height: rect.height)
             )
-            x += clampedW + spacing
-            rowH = max(rowH, size.height)
         }
     }
 }
@@ -164,6 +177,7 @@ final class BigBangStageController: ObservableObject {
     @Published private(set) var recognizedImageFullText: String = ""
     @Published var imageSelectedBoxIDs: Set<Int> = []
     @Published private(set) var imageOCRMessage: String? = nil
+    @Published private(set) var imageOCRCanRetry: Bool = false
 
     @Published private(set) var textTabs: [QuickLookTabItem] = []
     /// 在文本视图中：true 显示顶部「大爆炸选词」；false 显示 `textTabs[selectedTabIndex]`
@@ -202,6 +216,10 @@ final class BigBangStageController: ObservableObject {
     private weak var hostWindow: NSWindow?
     private weak var storeRef: ClipboardStore?
     private var hostingView: NSHostingView<BigBangStageRootView>?
+    private let surfaceHost = LiquidGlassSurfaceHost()
+    private var surfaceCancellables = Set<AnyCancellable>()
+    private let stageCornerRadius: CGFloat = 20
+    private let stageShadowBleed: CGFloat = 24
     private var imageDecodeTask: Task<Void, Never>?
     private var ocrTask: Task<Void, Never>?
     private var prewarmTask: Task<Void, Never>?
@@ -239,7 +257,8 @@ final class BigBangStageController: ObservableObject {
     }
 
     var visiblePanelScreenFrame: NSRect? {
-        isVisible ? panel?.frame : nil
+        guard isVisible, let frame = panel?.frame else { return nil }
+        return frame.insetBy(dx: stageShadowBleed, dy: stageShadowBleed)
     }
 
     func syncSharingType(_ sharingType: NSWindow.SharingType) {
@@ -294,6 +313,7 @@ final class BigBangStageController: ObservableObject {
         self.imageSelectedBoxIDs = []
         self.textSelectedTokenIDs = []
         self.imageOCRMessage = nil
+        self.imageOCRCanRetry = false
 
         ensurePanelCreated(store: store)
         guard let stagePanel = panel else { return false }
@@ -319,37 +339,40 @@ final class BigBangStageController: ObservableObject {
             configureTextSession(for: item, store: store, initialMode: initialMode)
         }
 
-        let targetFrame = computeTargetScreenFrame(for: item, image: fullPreviewImage)
+        let targetCardFrame = computeTargetScreenFrame(for: item, image: fullPreviewImage)
+        let targetWindowFrame = windowFrame(forCardRect: targetCardFrame)
         if !wasVisible {
             let sourceRect = SystemQuickLookController.shared.liveVisibleScreenRect(for: item.id)
-            let startFrame: NSRect
+            let startCardFrame: NSRect
             if let sr = sourceRect, sr.width > 12, sr.height > 12 {
-                startFrame = sr
+                startCardFrame = sr
             } else {
-                let shrinkW = targetFrame.width * 0.94
-                let shrinkH = targetFrame.height * 0.94
-                startFrame = NSRect(
-                    x: targetFrame.midX - shrinkW * 0.5,
-                    y: targetFrame.midY - shrinkH * 0.5,
+                let shrinkW = targetCardFrame.width * 0.94
+                let shrinkH = targetCardFrame.height * 0.94
+                startCardFrame = NSRect(
+                    x: targetCardFrame.midX - shrinkW * 0.5,
+                    y: targetCardFrame.midY - shrinkH * 0.5,
                     width: shrinkW,
                     height: shrinkH
                 )
             }
-            stagePanel.setFrame(startFrame, display: false)
+            stagePanel.setFrame(windowFrame(forCardRect: startCardFrame), display: false)
             stagePanel.alphaValue = 0.08
             stagePanel.orderFrontRegardless()
             stagePanel.enforceUnifiedActiveAppearance()
+            surfaceHost.refreshInPlace()
+            stagePanel.invalidateShadow()
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = 0.21
                 ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.18, 1.0, 0.32, 1.0)
-                stagePanel.animator().setFrame(targetFrame, display: true)
+                stagePanel.animator().setFrame(targetWindowFrame, display: true)
                 stagePanel.animator().alphaValue = 1.0
             }
         } else {
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = 0.18
                 ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
-                stagePanel.animator().setFrame(targetFrame, display: true)
+                stagePanel.animator().setFrame(targetWindowFrame, display: true)
                 stagePanel.animator().alphaValue = 1.0
             }
         }
@@ -363,21 +386,22 @@ final class BigBangStageController: ObservableObject {
             return
         }
         isEditingText = false
-        let endRect: NSRect
+        let endCardRect: NSRect
         if let id = currentItem?.id,
            let sr = SystemQuickLookController.shared.liveVisibleScreenRect(for: id),
            sr.width > 12, sr.height > 12 {
-            endRect = sr
+            endCardRect = sr
         } else {
-            let f = stagePanel.frame
+            let f = stagePanel.frame.insetBy(dx: stageShadowBleed, dy: stageShadowBleed)
             let w = f.width * 0.95
             let h = f.height * 0.95
-            endRect = NSRect(x: f.midX - w * 0.5, y: f.midY - h * 0.5, width: w, height: h)
+            endCardRect = NSRect(x: f.midX - w * 0.5, y: f.midY - h * 0.5, width: w, height: h)
         }
+        let endWindowRect = windowFrame(forCardRect: endCardRect)
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.14
             ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
-            stagePanel.animator().setFrame(endRect, display: true)
+            stagePanel.animator().setFrame(endWindowRect, display: true)
             stagePanel.animator().alphaValue = 0.0
         }
         let work = DispatchWorkItem { [weak self] in
@@ -427,23 +451,15 @@ final class BigBangStageController: ObservableObject {
         // 后台预热原位 OCR 词框 + 相邻两张图片高清图，切换时 0 延迟
         if let url = store.imageURL(for: targetItem) {
             let activeGranularity = self.granularity == .line ? .word : self.granularity
-            if let hit = VisionOCRService.cachedWordBoxes(at: url, granularity: activeGranularity) {
-                self.imageWordBoxes = hit.boxes
-                self.recognizedImageFullText = hit.fullText
-                self.imageOCRMessage = hit.boxes.isEmpty ? "未在图片中检测到可选文字" : nil
+            if let cached = VisionOCRService.cachedWordBoxResult(at: url, granularity: activeGranularity) {
+                applyWordBoxResult(cached)
             } else {
                 self.isAnalyzingOCR = true
                 ocrTask = Task { [weak self] in
-                    let res = await VisionOCRService.recognizeWordBoxes(at: url, granularity: activeGranularity)
+                    let res = await VisionOCRService.recognizeWordBoxesDetailed(at: url, granularity: activeGranularity)
                     guard !Task.isCancelled, let self, self.currentItem?.id == targetItem.id else { return }
                     self.isAnalyzingOCR = false
-                    if let res {
-                        self.imageWordBoxes = res.boxes
-                        self.recognizedImageFullText = res.fullText
-                        self.imageOCRMessage = res.boxes.isEmpty ? "未在图片中检测到可选文字" : nil
-                    } else {
-                        self.imageOCRMessage = "未在图片中检测到可选文字"
-                    }
+                    self.applyWordBoxResult(res)
                 }
             }
         }
@@ -455,7 +471,7 @@ final class BigBangStageController: ObservableObject {
                     if Task.isCancelled { break }
                     _ = await store.loadPreviewImage(for: n)
                     if let url = store.imageURL(for: n) {
-                        _ = await VisionOCRService.recognizeWordBoxes(at: url, granularity: .word)
+                        _ = await VisionOCRService.recognizeWordBoxesDetailed(at: url, granularity: .word)
                     }
                 }
             }
@@ -529,28 +545,58 @@ final class BigBangStageController: ObservableObject {
         return textTabs.first?.textValue ?? currentItem?.rawContentPreview ?? ""
     }
 
+    private func applyWordBoxResult(_ result: VisionOCRService.WordBoxRecognitionResult) {
+        let fallbackOCRText = currentItem?.ocrText ?? ""
+        switch result {
+        case .recognized(let fullText, let boxes):
+            self.imageWordBoxes = boxes
+            self.recognizedImageFullText = fullText.isEmpty ? fallbackOCRText : fullText
+            self.imageOCRMessage = boxes.isEmpty ? "未在图片中检测到可选文字" : nil
+            self.imageOCRCanRetry = false
+        case .emptyImage:
+            self.imageWordBoxes = []
+            self.recognizedImageFullText = fallbackOCRText
+            self.imageOCRMessage = "未在图片中检测到可选文字"
+            self.imageOCRCanRetry = false
+        case .unsupportedDimensions:
+            self.imageWordBoxes = []
+            self.recognizedImageFullText = fallbackOCRText
+            self.imageOCRMessage = "图片分辨率过高，已跳过离线识字"
+            self.imageOCRCanRetry = false
+        case .failed:
+            self.imageWordBoxes = []
+            self.recognizedImageFullText = fallbackOCRText
+            self.imageOCRMessage = "离线识字暂时不可用，请点击重试"
+            self.imageOCRCanRetry = true
+        }
+    }
+
+    private func startImageWordBoxRecognition(for item: ClipItem, url: URL, granularity: BigBangGranularity) {
+        ocrTask?.cancel()
+        ocrTask = nil
+        if let cached = VisionOCRService.cachedWordBoxResult(at: url, granularity: granularity) {
+            isAnalyzingOCR = false
+            applyWordBoxResult(cached)
+            return
+        }
+        imageWordBoxes = []
+        imageOCRMessage = nil
+        imageOCRCanRetry = false
+        isAnalyzingOCR = true
+        ocrTask = Task { [weak self] in
+            let res = await VisionOCRService.recognizeWordBoxesDetailed(at: url, granularity: granularity)
+            guard !Task.isCancelled, let self, self.currentItem?.id == item.id else { return }
+            self.isAnalyzingOCR = false
+            self.applyWordBoxResult(res)
+        }
+    }
+
     private func rebuildActiveTokensForGranularity() {
         if activeModeIsImage {
             imageSelectedBoxIDs = []
             guard let item = currentItem, let url = storeRef?.imageURL(for: item) else { return }
             let effGranularity: BigBangGranularity = (granularity == .line) ? .word : granularity
-            if let hit = VisionOCRService.cachedWordBoxes(at: url, granularity: effGranularity) {
-                imageWordBoxes = hit.boxes
-                recognizedImageFullText = hit.fullText
-                return
-            }
-            isAnalyzingOCR = true
-            ocrTask?.cancel()
-            ocrTask = Task { [weak self] in
-                let res = await VisionOCRService.recognizeWordBoxes(at: url, granularity: effGranularity)
-                guard !Task.isCancelled, let self, self.currentItem?.id == item.id else { return }
-                self.isAnalyzingOCR = false
-                if let res {
-                    self.imageWordBoxes = res.boxes
-                    self.recognizedImageFullText = res.fullText
-                    self.imageOCRMessage = res.boxes.isEmpty ? "未在图片中检测到可选文字" : nil
-                }
-            }
+            startImageWordBoxRecognition(for: item, url: url, granularity: effGranularity)
         } else {
             textSelectedTokenIDs = []
             let source = activeSourceTextForTextBigBang()
@@ -560,24 +606,21 @@ final class BigBangStageController: ObservableObject {
 
     private func enterImageBigBangOCR(for item: ClipItem) {
         isImageBigBangActive = true
-        if imageWordBoxes.isEmpty && !isAnalyzingOCR, let url = storeRef?.imageURL(for: item) {
+        if (imageWordBoxes.isEmpty || imageOCRCanRetry) && !isAnalyzingOCR,
+           let url = storeRef?.imageURL(for: item) {
             let eff: BigBangGranularity = (granularity == .line) ? .word : granularity
-            isAnalyzingOCR = true
-            ocrTask?.cancel()
-            ocrTask = Task { [weak self] in
-                let res = await VisionOCRService.recognizeWordBoxes(at: url, granularity: eff)
-                guard !Task.isCancelled, let self, self.currentItem?.id == item.id else { return }
-                self.isAnalyzingOCR = false
-                if let res {
-                    self.imageWordBoxes = res.boxes
-                    self.recognizedImageFullText = res.fullText
-                    self.imageOCRMessage = res.boxes.isEmpty ? "未在图片中检测到可选文字" : nil
-                } else {
-                    self.imageOCRMessage = "未在图片中检测到可选文字"
-                }
-            }
+            startImageWordBoxRecognition(for: item, url: url, granularity: eff)
         }
         TactileFeedbackEngine.shared.perform(.tabSwitch)
+    }
+
+    func retryImageBigBangOCR() {
+        guard activeModeIsImage, let item = currentItem, let url = storeRef?.imageURL(for: item), !isAnalyzingOCR else {
+            return
+        }
+        let eff: BigBangGranularity = (granularity == .line) ? .word : granularity
+        startImageWordBoxRecognition(for: item, url: url, granularity: eff)
+        TactileFeedbackEngine.shared.performNavigationStepHaptic()
     }
 
     // MARK: - 实时组装与交互指令
@@ -795,10 +838,29 @@ final class BigBangStageController: ObservableObject {
 
     // MARK: - 内部窗口与尺寸辅助
 
+    private func windowFrame(forCardRect cardRect: NSRect) -> NSRect {
+        let minCardEdge = max(72, ceil(stageCornerRadius * 3.2) + 8)
+        let w = max(minCardEdge, cardRect.width)
+        let h = max(minCardEdge, cardRect.height)
+        let safeCard = NSRect(
+            x: cardRect.midX - w * 0.5,
+            y: cardRect.midY - h * 0.5,
+            width: w,
+            height: h
+        )
+        return safeCard.insetBy(dx: -stageShadowBleed, dy: -stageShadowBleed)
+    }
+
     private func ensurePanelCreated(store: ClipboardStore) {
         if panel != nil { return }
+        let initialCardSize = NSSize(width: 720, height: 540)
         let p = BigBangStagePanel(
-            contentRect: NSRect(x: 0, y: 0, width: 720, height: 540),
+            contentRect: NSRect(
+                x: 0,
+                y: 0,
+                width: initialCardSize.width + stageShadowBleed * 2,
+                height: initialCardSize.height + stageShadowBleed * 2
+            ),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -814,12 +876,60 @@ final class BigBangStageController: ObservableObject {
 
         let rootView = BigBangStageRootView(controller: self, store: store)
         let hv = FirstMouseStageHostingView(rootView: rootView)
+        hv.sizingOptions = []
+        hv.frame = NSRect(origin: .zero, size: initialCardSize)
+        hv.autoresizingMask = [.width, .height]
         hv.wantsLayer = true
         hv.layer?.backgroundColor = NSColor.clear.cgColor
-        p.contentView = hv
+        hv.layer?.cornerCurve = .continuous
+        hv.layer?.cornerRadius = stageCornerRadius
+        hv.layer?.masksToBounds = true
 
         self.panel = p
         self.hostingView = hv
+        applyNativeSurface(style: store.surfaceStyle, store: store)
+        observeSurfaceStyle(store: store)
+        p.enforceUnifiedActiveAppearance()
+    }
+
+    private func applyNativeSurface(style: PanelSurfaceStyle, store: ClipboardStore) {
+        guard let stagePanel = panel, let hv = hostingView else { return }
+        let cardW = max(64, stagePanel.frame.width - stageShadowBleed * 2)
+        let cardH = max(64, stagePanel.frame.height - stageShadowBleed * 2)
+        let bounds = NSRect(origin: .zero, size: NSSize(width: cardW, height: cardH))
+        surfaceHost.install(
+            on: stagePanel,
+            hostingView: hv,
+            bounds: bounds,
+            bleed: stageShadowBleed,
+            cornerRadius: stageCornerRadius,
+            style: style,
+            appearance: store.liquidGlassAppearance,
+            maskOpacity: store.liquidGlassMaskOpacity,
+            autoResizeWithWindow: true
+        )
+    }
+
+    private func observeSurfaceStyle(store: ClipboardStore) {
+        surfaceCancellables.removeAll()
+        store.$surfaceStyle
+            .dropFirst()
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self, weak store] newStyle in
+                guard let self, let store else { return }
+                self.applyNativeSurface(style: newStyle, store: store)
+            }
+            .store(in: &surfaceCancellables)
+
+        Publishers.CombineLatest(store.$liquidGlassAppearance, store.$liquidGlassMaskOpacity)
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self, weak store] appearance, opacity in
+                guard let self, store?.surfaceStyle == .liquidGlass else { return }
+                self.surfaceHost.updateLiquidGlass(appearance: appearance, maskOpacity: opacity)
+            }
+            .store(in: &surfaceCancellables)
     }
 
     private func computeTargetScreenFrame(for item: ClipItem, image: NSImage?) -> NSRect {
@@ -883,6 +993,7 @@ final class BigBangStageController: ObservableObject {
         recognizedImageFullText = ""
         imageSelectedBoxIDs = []
         imageOCRMessage = nil
+        imageOCRCanRetry = false
         textTokens = []
         isTextTokensTruncated = false
         textSelectedTokenIDs = []
@@ -935,19 +1046,14 @@ struct BigBangStageRootView: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)
         }
-        .background(
+        .overlay(
             RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(.regularMaterial)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 20, style: .continuous)
-                        .strokeBorder(
-                            Color.white.opacity(colorScheme == .dark ? 0.16 : 0.48),
-                            lineWidth: 0.9
-                        )
+                .strokeBorder(
+                    Color.white.opacity(colorScheme == .dark ? 0.14 : 0.42),
+                    lineWidth: 0.85
                 )
         )
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.45 : 0.22), radius: 28, y: 12)
         .onChange(of: controller.currentItem?.id) { _, _ in
             hoveredBoxID = nil
             boxDragTargetSelect = nil
@@ -1121,7 +1227,7 @@ struct BigBangStageRootView: View {
             let absImageRect = fitRect.offsetBy(dx: 12, dy: 10)
 
             ZStack(alignment: .topLeading) {
-                Color.black.opacity(colorScheme == .dark ? 0.24 : 0.06)
+                Color.black.opacity(colorScheme == .dark ? 0.16 : 0.04)
 
                 if let nsImage = controller.fullPreviewImage {
                     Image(nsImage: nsImage)
@@ -1155,13 +1261,27 @@ struct BigBangStageRootView: View {
                         .background(Capsule().fill(Color.black.opacity(0.68)))
                         .position(x: geo.size.width * 0.5, y: geo.size.height * 0.5)
                     } else if controller.imageWordBoxes.isEmpty {
-                        Text(controller.imageOCRMessage ?? "未在图片中检测到可选文字")
-                            .font(.system(size: 12.5, weight: .medium))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 8)
-                            .background(Capsule().fill(Color.black.opacity(0.68)))
-                            .position(x: geo.size.width * 0.5, y: geo.size.height * 0.5)
+                        HStack(spacing: 10) {
+                            Text(controller.imageOCRMessage ?? "未在图片中检测到可选文字")
+                                .font(.system(size: 12.5, weight: .medium))
+                                .foregroundStyle(.white)
+
+                            if controller.imageOCRCanRetry {
+                                Button("重试") {
+                                    controller.retryImageBigBangOCR()
+                                }
+                                .buttonStyle(.plain)
+                                .font(.system(size: 11.5, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 4)
+                                .background(Capsule().fill(brandCobalt))
+                            }
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(Capsule().fill(Color.black.opacity(0.68)))
+                        .position(x: geo.size.width * 0.5, y: geo.size.height * 0.5)
                     } else {
                         ForEach(controller.imageWordBoxes) { box in
                             let mapped = BigBangTokenizer.mapNormalizedBox(box.normalizedRect, into: absImageRect)

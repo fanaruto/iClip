@@ -76,10 +76,10 @@ use windows_sys::Win32::UI::HiDpi::{
     GetDpiForWindow, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, RegisterHotKey, ReleaseCapture, SendInput, SetFocus, TrackMouseEvent,
-    UnregisterHotKey, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, MOD_NOREPEAT,
-    TME_LEAVE, TRACKMOUSEEVENT, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_ESCAPE, VK_LEFT,
-    VK_MENU, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
+    GetCapture, GetKeyState, RegisterHotKey, ReleaseCapture, SendInput, SetCapture, SetFocus,
+    TrackMouseEvent, UnregisterHotKey, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
+    MOD_NOREPEAT, TME_LEAVE, TRACKMOUSEEVENT, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_ESCAPE,
+    VK_LEFT, VK_MENU, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
 use windows_sys::Win32::UI::Shell::{
     DragQueryFileW, ShellExecuteW, Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD,
@@ -103,6 +103,7 @@ const WS_EX_NOACTIVATE_VAL: u32 = 0x0800_0000;
 const SWP_NOACTIVATE_VAL: u32 = 0x0010;
 const WM_MOUSEACTIVATE_MSG: u32 = 0x0021;
 const WM_NCACTIVATE_MSG: u32 = 0x0086;
+const WM_CAPTURECHANGED_MSG: u32 = 0x0215;
 const WM_MOUSELEAVE_MSG: u32 = 0x02A3;
 const MA_NOACTIVATE_RES: LRESULT = 3;
 const WM_CLIPBOARDUPDATE_MSG: u32 = 0x031D;
@@ -326,6 +327,7 @@ struct WinAppState {
     ql_stage_ocr_text: Option<String>,
     ql_stage_ocr_selected: HashSet<usize>,
     ql_stage_sweep_target: Option<bool>,
+    ql_stage_tracking_mouse_leave: bool,
     ql_stage_hit_regions: Vec<HitRegion>,
     tracking_mouse_leave: bool,
     hovered_link_badge_store_idx: Option<usize>,
@@ -511,7 +513,11 @@ pub fn run_windows_app() -> i32 {
         apply_dwm_glass_style(hwnd, sys_dark, store.config.blur_concentration_pct);
         apply_screen_capture_shield(hwnd, store.config.screen_share_privacy);
         if !ql_hwnd.is_null() {
-            apply_dwm_glass_style(ql_hwnd, sys_dark, 78);
+            apply_dwm_glass_style(
+                ql_hwnd,
+                sys_dark,
+                store.config.blur_concentration_pct.max(58),
+            );
             apply_screen_capture_shield(ql_hwnd, store.config.screen_share_privacy);
         }
 
@@ -562,6 +568,7 @@ pub fn run_windows_app() -> i32 {
                 ql_stage_ocr_text: None,
                 ql_stage_ocr_selected: HashSet::new(),
                 ql_stage_sweep_target: None,
+                ql_stage_tracking_mouse_leave: false,
                 ql_stage_hit_regions: Vec::new(),
                 tracking_mouse_leave: false,
                 hovered_link_badge_store_idx: None,
@@ -744,6 +751,7 @@ pub fn run_windows_self_test() -> Result<(), String> {
             ql_stage_ocr_text: None,
             ql_stage_ocr_selected: HashSet::new(),
             ql_stage_sweep_target: None,
+            ql_stage_tracking_mouse_leave: false,
             ql_stage_hit_regions: Vec::new(),
             tracking_mouse_leave: false,
             hovered_link_badge_store_idx: None,
@@ -1148,6 +1156,11 @@ unsafe fn sync_effective_theme(hwnd: HWND) {
     if changed {
         apply_dwm_glass_style(hwnd, cur_dark, blur_pct);
         let _ = InvalidateRect(hwnd, null(), FALSE);
+        let ql_h = QL_STAGE_HWND_RAW.load(Ordering::SeqCst) as HWND;
+        if !ql_h.is_null() && IsWindowVisible(ql_h) != FALSE {
+            apply_dwm_glass_style(ql_h, cur_dark, blur_pct.max(58));
+            let _ = InvalidateRect(ql_h, null(), FALSE);
+        }
     }
 }
 
@@ -2273,6 +2286,24 @@ unsafe extern "system" fn wnd_proc(
                     st.big_bang_sweep_target = None;
                     if st.pressed_visible_pos.take().is_some() {
                         need_redraw = true;
+                    }
+                }
+            });
+            if need_redraw {
+                let _ = InvalidateRect(hwnd, null(), FALSE);
+            }
+            0
+        }
+        WM_CAPTURECHANGED_MSG => {
+            let mut need_redraw = false;
+            APP_STATE.with(|c| {
+                if let Ok(mut b) = c.try_borrow_mut() {
+                    if let Some(st) = b.as_mut() {
+                        st.dragging_slider_track = None;
+                        st.big_bang_sweep_target = None;
+                        if st.pressed_visible_pos.take().is_some() {
+                            need_redraw = true;
+                        }
                     }
                 }
             });
@@ -4752,6 +4783,299 @@ unsafe fn render_panel_frame_dib(
     let _ = GdiFlush();
 }
 
+#[allow(clippy::too_many_arguments)]
+fn draw_image_grid_tile(
+    canvas: &mut PixelCanvas,
+    texts: &mut Vec<TextDrawCmd>,
+    w: i32,
+    pad: i32,
+    scale: f32,
+    palette: &GlassPalette,
+    st: &mut WinAppState,
+    images_dir: &std::path::Path,
+    tx: i32,
+    tile_y: i32,
+    tw: i32,
+    row_h: i32,
+    vis_pos: usize,
+    store_idx: usize,
+) {
+    let s = |v: i32| ((v as f32) * scale).round() as i32;
+    let sf = |v: f32| v * scale;
+    let item = st.store.items[store_idx].clone();
+    let is_sel = vis_pos == st.selected_visible_pos;
+    let is_hov = st.hovered_visible_pos == Some(vis_pos);
+    let is_tile_pressed = st.pressed_visible_pos == Some(vis_pos);
+
+    if is_hov {
+        canvas.draw_soft_shadow_round_rect_xy(
+            tx,
+            tile_y,
+            tw,
+            row_h,
+            sf(13.0),
+            (sf(-7.0) * st.hover_card_nx).round(),
+            sf(5.5) - (sf(4.0) * st.hover_card_ny).round(),
+            sf(11.0),
+            Color4::rgba(0, 0, 0, if st.is_dark_mode { 84 } else { 42 }),
+        );
+    }
+    canvas.fill_round_rect(tx, tile_y, tw, row_h, sf(13.0), palette.card_bg);
+    if let Some(fname) = &item.image_file_name {
+        if let Some((iw, ih, rgba)) = load_or_get_thumbnail(&mut st.thumb_cache, images_dir, fname)
+        {
+            canvas.blit_rgba_round_rect(tx, tile_y, tw, row_h, sf(13.0), rgba, iw, ih);
+            if st.store.config.mask_sensitive_previews
+                && !is_sel
+                && !is_hov
+                && item.detected_sensitive_kind().is_some()
+            {
+                canvas.fill_round_rect(
+                    tx,
+                    tile_y,
+                    tw,
+                    row_h,
+                    sf(13.0),
+                    Color4::rgba(18, 20, 28, 212),
+                );
+                let pill_w = s(64);
+                let pill_h = s(20);
+                let px = tx + (tw - pill_w) / 2;
+                let py = tile_y + (row_h - pill_h) / 2 - s(4);
+                canvas.fill_round_rect(
+                    px,
+                    py,
+                    pill_w,
+                    pill_h,
+                    sf(10.0),
+                    palette.amber.with_alpha(52),
+                );
+                texts.push(TextDrawCmd {
+                    text: "隐私雾化".to_string(),
+                    rect: RECT {
+                        left: px,
+                        top: py,
+                        right: px + pill_w,
+                        bottom: py + pill_h,
+                    },
+                    color: Color4::rgba(255, 255, 255, 240),
+                    font_kind: FontKind::KeyCap,
+                    flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                });
+            }
+        }
+    }
+
+    // 底部 30px 渐变暗带（显示分辨率 / 备注）
+    let grad_h = s(30);
+    canvas.fill_vgrad_round_rect(
+        tx,
+        tile_y + row_h - grad_h,
+        tw,
+        grad_h,
+        sf(13.0),
+        Color4::rgba(0, 0, 0, 0),
+        Color4::rgba(0, 0, 0, 148),
+    );
+    let dim_txt = if let Some(al) = item
+        .custom_alias
+        .as_deref()
+        .filter(|a| !a.trim().is_empty())
+    {
+        al.to_string()
+    } else if let (Some(iw), Some(ih)) = (item.image_width, item.image_height) {
+        format!("{iw}×{ih}")
+    } else {
+        "PNG".to_string()
+    };
+    texts.push(TextDrawCmd {
+        text: dim_txt,
+        rect: RECT {
+            left: tx + s(7),
+            top: tile_y + row_h - s(20),
+            right: tx + tw - s(7),
+            bottom: tile_y + row_h - s(3),
+        },
+        color: Color4::rgba(255, 255, 255, 236),
+        font_kind: FontKind::KeyCap,
+        flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+    });
+
+    // 左上角 ^1 胶囊（复刻 ClipImageGridTile.swift:125）
+    if vis_pos < 9 {
+        let bw = s(28);
+        let bh = s(17);
+        let bx = tx + s(6);
+        let by = tile_y + s(6);
+        canvas.fill_round_rect(
+            bx,
+            by,
+            bw,
+            bh,
+            sf(8.5),
+            if is_sel {
+                palette.cobalt
+            } else {
+                Color4::rgba(0, 0, 0, 134)
+            },
+        );
+        texts.push(TextDrawCmd {
+            text: format!("^{}", vis_pos + 1),
+            rect: RECT {
+                left: bx,
+                top: by,
+                right: bx + bw,
+                bottom: by + bh,
+            },
+            color: Color4::rgb(255, 255, 255),
+            font_kind: FontKind::KeyCap,
+            flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+        });
+    }
+
+    // 右上角悬停微圆钮或选中回车圆标
+    if is_hov {
+        let b_sz = s(22);
+        let del_x = tx + tw - b_sz - s(5);
+        let pin_x = del_x - b_sz - s(4);
+        let by = tile_y + s(5);
+
+        canvas.fill_circle(
+            (pin_x + b_sz / 2) as f32,
+            (by + b_sz / 2) as f32,
+            sf(11.0),
+            Color4::rgba(18, 22, 28, 178),
+        );
+        canvas.draw_icon_star(
+            (pin_x + b_sz / 2) as f32,
+            (by + b_sz / 2) as f32,
+            sf(11.5),
+            sf(1.4),
+            if item.is_pinned {
+                palette.amber
+            } else {
+                Color4::rgb(255, 255, 255)
+            },
+            item.is_pinned,
+        );
+        st.hit_regions.push(HitRegion {
+            rect: RECT {
+                left: pin_x,
+                top: by,
+                right: pin_x + b_sz,
+                bottom: by + b_sz,
+            },
+            interactive_cursor: true,
+            action: HitAction::TogglePin(item.id.clone()),
+        });
+
+        canvas.fill_circle(
+            (del_x + b_sz / 2) as f32,
+            (by + b_sz / 2) as f32,
+            sf(11.0),
+            Color4::rgba(18, 22, 28, 178),
+        );
+        canvas.draw_icon_trash(
+            (del_x + b_sz / 2) as f32,
+            (by + b_sz / 2) as f32,
+            sf(11.0),
+            sf(1.4),
+            Color4::rgb(255, 112, 104),
+        );
+        st.hit_regions.push(HitRegion {
+            rect: RECT {
+                left: del_x,
+                top: by,
+                right: del_x + b_sz,
+                bottom: by + b_sz,
+            },
+            interactive_cursor: true,
+            action: HitAction::DeleteItem(item.id.clone()),
+        });
+    } else if is_sel {
+        let r_cx = (tx + tw - s(15)) as f32;
+        let r_cy = (tile_y + s(15)) as f32;
+        canvas.fill_circle(r_cx, r_cy, sf(9.5), palette.cobalt);
+        canvas.stroke_circle(
+            r_cx,
+            r_cy,
+            sf(9.5),
+            sf(1.0),
+            Color4::rgb(255, 255, 255),
+        );
+        canvas.draw_icon_return_arrow(
+            r_cx,
+            r_cy,
+            sf(9.5),
+            sf(1.4),
+            Color4::rgb(255, 255, 255),
+        );
+    }
+
+    if is_hov {
+        canvas.draw_apple_tv_glare_round_rect(
+            tx,
+            tile_y,
+            tw,
+            row_h,
+            sf(13.0),
+            st.hover_card_nx,
+            st.hover_card_ny,
+            if is_tile_pressed {
+                16
+            } else if st.is_dark_mode {
+                44
+            } else {
+                62
+            },
+        );
+    }
+
+    // 外白内蓝双环选中框（复刻 ClipImageGridTile.swift:204）
+    if is_sel {
+        canvas.stroke_round_rect(
+            tx,
+            tile_y,
+            tw,
+            row_h,
+            sf(13.0),
+            sf(3.2),
+            Color4::rgba(255, 255, 255, 232),
+        );
+        canvas.stroke_round_rect(
+            tx,
+            tile_y,
+            tw,
+            row_h,
+            sf(13.0),
+            sf(2.0),
+            palette.cobalt,
+        );
+    } else {
+        let bd = if item.is_pinned {
+            palette.amber.with_alpha(190)
+        } else if is_hov {
+            palette.card_hover_border
+        } else {
+            palette.card_border
+        };
+        canvas.stroke_round_rect(tx, tile_y, tw, row_h, sf(13.0), sf(0.85), bd);
+    }
+
+    let _ = w;
+    let _ = pad;
+    st.hit_regions.push(HitRegion {
+        rect: RECT {
+            left: tx,
+            top: tile_y,
+            right: tx + tw,
+            bottom: tile_y + row_h,
+        },
+        interactive_cursor: false,
+        action: HitAction::SelectCard(vis_pos),
+    });
+}
+
 // ============================================================================
 // 1:1 复刻 macOS `ClipboardPopoverView` 主视图布局
 // ============================================================================
@@ -6450,6 +6774,7 @@ fn layout_and_draw_main_view(
         });
     } else {
         let images_dir = st.store.images_dir.clone();
+        let mut deferred_hovered_tile: Option<(i32, i32, i32, i32, usize, usize)> = None;
         for row in rows.iter().skip(st.scroll_row_offset) {
             match row {
                 DisplayRow::ImageGridRow { cells } => {
@@ -6460,294 +6785,30 @@ fn layout_and_draw_main_view(
                     }
                     let gap = s(9);
                     let tile_w = (track_w - gap * 2) / 3;
-                    let mut draw_order: Vec<(usize, (usize, usize))> =
-                        cells.iter().copied().enumerate().collect();
-                    draw_order.sort_by_key(|&(_, (vp, _))| {
-                        if st.hovered_visible_pos == Some(vp) { 1u8 } else { 0u8 }
-                    });
-                    for (col_idx, (vis_pos, store_idx)) in draw_order {
+                    for (col_idx, &(vis_pos, store_idx)) in cells.iter().enumerate() {
                         let tx = pad + (col_idx as i32) * (tile_w + gap);
                         let tw = if col_idx == 2 { w - pad - tx } else { tile_w };
-                        let item = st.store.items[store_idx].clone();
-                        let is_sel = vis_pos == st.selected_visible_pos;
-                        let is_hov = st.hovered_visible_pos == Some(vis_pos);
-                        let is_tile_pressed = st.pressed_visible_pos == Some(vis_pos);
-
-                        if is_hov {
-                            canvas.draw_soft_shadow_round_rect_xy(
-                                tx,
-                                cur_y,
-                                tw,
-                                row_h,
-                                sf(13.0),
-                                (sf(-7.0) * st.hover_card_nx).round(),
-                                sf(5.5) - (sf(4.0) * st.hover_card_ny).round(),
-                                sf(11.0),
-                                Color4::rgba(0, 0, 0, if st.is_dark_mode { 84 } else { 42 }),
-                            );
-                        }
-                        canvas.fill_round_rect(tx, cur_y, tw, row_h, sf(13.0), palette.card_bg);
-                        if let Some(fname) = &item.image_file_name {
-                            if let Some((iw, ih, rgba)) =
-                                load_or_get_thumbnail(&mut st.thumb_cache, &images_dir, fname)
-                            {
-                                canvas.blit_rgba_round_rect(
-                                    tx,
-                                    cur_y,
-                                    tw,
-                                    row_h,
-                                    sf(13.0),
-                                    rgba,
-                                    iw,
-                                    ih,
-                                );
-                                if st.store.config.mask_sensitive_previews
-                                    && !is_sel
-                                    && !is_hov
-                                    && item.detected_sensitive_kind().is_some()
-                                {
-                                    canvas.fill_round_rect(
-                                        tx,
-                                        cur_y,
-                                        tw,
-                                        row_h,
-                                        sf(13.0),
-                                        Color4::rgba(18, 20, 28, 212),
-                                    );
-                                    let pill_w = s(64);
-                                    let pill_h = s(20);
-                                    let px = tx + (tw - pill_w) / 2;
-                                    let py = cur_y + (row_h - pill_h) / 2 - s(4);
-                                    canvas.fill_round_rect(
-                                        px,
-                                        py,
-                                        pill_w,
-                                        pill_h,
-                                        sf(10.0),
-                                        palette.amber.with_alpha(52),
-                                    );
-                                    texts.push(TextDrawCmd {
-                                        text: "隐私雾化".to_string(),
-                                        rect: RECT {
-                                            left: px,
-                                            top: py,
-                                            right: px + pill_w,
-                                            bottom: py + pill_h,
-                                        },
-                                        color: Color4::rgba(255, 255, 255, 240),
-                                        font_kind: FontKind::KeyCap,
-                                        flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-                                    });
-                                }
-                            }
-                        }
-
-                        // 底部 30px 渐变暗带（显示分辨率 / 备注）
-                        let grad_h = s(30);
-                        canvas.fill_vgrad_round_rect(
-                            tx,
-                            cur_y + row_h - grad_h,
-                            tw,
-                            grad_h,
-                            sf(13.0),
-                            Color4::rgba(0, 0, 0, 0),
-                            Color4::rgba(0, 0, 0, 148),
-                        );
-                        let dim_txt = if let Some(al) = item
-                            .custom_alias
-                            .as_deref()
-                            .filter(|a| !a.trim().is_empty())
-                        {
-                            al.to_string()
-                        } else if let (Some(iw), Some(ih)) = (item.image_width, item.image_height) {
-                            format!("{iw}×{ih}")
+                        if st.hovered_visible_pos == Some(vis_pos) {
+                            deferred_hovered_tile =
+                                Some((tx, cur_y, tw, row_h, vis_pos, store_idx));
                         } else {
-                            "PNG".to_string()
-                        };
-                        texts.push(TextDrawCmd {
-                            text: dim_txt,
-                            rect: RECT {
-                                left: tx + s(7),
-                                top: cur_y + row_h - s(20),
-                                right: tx + tw - s(7),
-                                bottom: cur_y + row_h - s(3),
-                            },
-                            color: Color4::rgba(255, 255, 255, 236),
-                            font_kind: FontKind::KeyCap,
-                            flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
-                        });
-
-                        // 左上角 ^1 胶囊（复刻 ClipImageGridTile.swift:125）
-                        if vis_pos < 9 {
-                            let bw = s(28);
-                            let bh = s(17);
-                            let bx = tx + s(6);
-                            let by = cur_y + s(6);
-                            canvas.fill_round_rect(
-                                bx,
-                                by,
-                                bw,
-                                bh,
-                                sf(8.5),
-                                if is_sel {
-                                    palette.cobalt
-                                } else {
-                                    Color4::rgba(0, 0, 0, 134)
-                                },
-                            );
-                            texts.push(TextDrawCmd {
-                                text: format!("^{}", vis_pos + 1),
-                                rect: RECT {
-                                    left: bx,
-                                    top: by,
-                                    right: bx + bw,
-                                    bottom: by + bh,
-                                },
-                                color: Color4::rgb(255, 255, 255),
-                                font_kind: FontKind::KeyCap,
-                                flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-                            });
-                        }
-
-                        // 右上角悬停微圆钮或选中回车圆标
-                        if is_hov {
-                            let b_sz = s(22);
-                            let del_x = tx + tw - b_sz - s(5);
-                            let pin_x = del_x - b_sz - s(4);
-                            let by = cur_y + s(5);
-
-                            canvas.fill_circle(
-                                (pin_x + b_sz / 2) as f32,
-                                (by + b_sz / 2) as f32,
-                                sf(11.0),
-                                Color4::rgba(18, 22, 28, 178),
-                            );
-                            canvas.draw_icon_star(
-                                (pin_x + b_sz / 2) as f32,
-                                (by + b_sz / 2) as f32,
-                                sf(11.5),
-                                sf(1.4),
-                                if item.is_pinned {
-                                    palette.amber
-                                } else {
-                                    Color4::rgb(255, 255, 255)
-                                },
-                                item.is_pinned,
-                            );
-                            st.hit_regions.push(HitRegion {
-                                rect: RECT {
-                                    left: pin_x,
-                                    top: by,
-                                    right: pin_x + b_sz,
-                                    bottom: by + b_sz,
-                                },
-                                interactive_cursor: true,
-                                action: HitAction::TogglePin(item.id.clone()),
-                            });
-
-                            canvas.fill_circle(
-                                (del_x + b_sz / 2) as f32,
-                                (by + b_sz / 2) as f32,
-                                sf(11.0),
-                                Color4::rgba(18, 22, 28, 178),
-                            );
-                            canvas.draw_icon_trash(
-                                (del_x + b_sz / 2) as f32,
-                                (by + b_sz / 2) as f32,
-                                sf(11.0),
-                                sf(1.4),
-                                Color4::rgb(255, 112, 104),
-                            );
-                            st.hit_regions.push(HitRegion {
-                                rect: RECT {
-                                    left: del_x,
-                                    top: by,
-                                    right: del_x + b_sz,
-                                    bottom: by + b_sz,
-                                },
-                                interactive_cursor: true,
-                                action: HitAction::DeleteItem(item.id.clone()),
-                            });
-                        } else if is_sel {
-                            let r_cx = (tx + tw - s(15)) as f32;
-                            let r_cy = (cur_y + s(15)) as f32;
-                            canvas.fill_circle(r_cx, r_cy, sf(9.5), palette.cobalt);
-                            canvas.stroke_circle(
-                                r_cx,
-                                r_cy,
-                                sf(9.5),
-                                sf(1.0),
-                                Color4::rgb(255, 255, 255),
-                            );
-                            canvas.draw_icon_return_arrow(
-                                r_cx,
-                                r_cy,
-                                sf(9.5),
-                                sf(1.4),
-                                Color4::rgb(255, 255, 255),
-                            );
-                        }
-
-                        if is_hov {
-                            canvas.draw_apple_tv_glare_round_rect(
+                            draw_image_grid_tile(
+                                canvas,
+                                texts,
+                                w,
+                                pad,
+                                scale,
+                                palette,
+                                st,
+                                &images_dir,
                                 tx,
                                 cur_y,
                                 tw,
                                 row_h,
-                                sf(13.0),
-                                st.hover_card_nx,
-                                st.hover_card_ny,
-                                if is_tile_pressed {
-                                    16
-                                } else if st.is_dark_mode {
-                                    44
-                                } else {
-                                    62
-                                },
+                                vis_pos,
+                                store_idx,
                             );
                         }
-
-                        // 外白内蓝双环选中框（复刻 ClipImageGridTile.swift:204）
-                        if is_sel {
-                            canvas.stroke_round_rect(
-                                tx,
-                                cur_y,
-                                tw,
-                                row_h,
-                                sf(13.0),
-                                sf(3.2),
-                                Color4::rgba(255, 255, 255, 232),
-                            );
-                            canvas.stroke_round_rect(
-                                tx,
-                                cur_y,
-                                tw,
-                                row_h,
-                                sf(13.0),
-                                sf(2.0),
-                                palette.cobalt,
-                            );
-                        } else {
-                            let bd = if item.is_pinned {
-                                palette.amber.with_alpha(190)
-                            } else if is_hov {
-                                palette.card_hover_border
-                            } else {
-                                palette.card_border
-                            };
-                            canvas.stroke_round_rect(tx, cur_y, tw, row_h, sf(13.0), sf(0.85), bd);
-                        }
-
-                        st.hit_regions.push(HitRegion {
-                            rect: RECT {
-                                left: tx,
-                                top: cur_y,
-                                right: tx + tw,
-                                bottom: cur_y + row_h,
-                            },
-                            interactive_cursor: false,
-                            action: HitAction::SelectCard(vis_pos),
-                        });
                     }
 
                     // 零抖动常驻轻雾图片工作坊胶囊条
@@ -7608,6 +7669,24 @@ fn layout_and_draw_main_view(
                     cur_y += card_h + s(9);
                 }
             }
+        }
+        if let Some((tx, tile_y, tw, row_h, vis_pos, store_idx)) = deferred_hovered_tile {
+            draw_image_grid_tile(
+                canvas,
+                texts,
+                w,
+                pad,
+                scale,
+                palette,
+                st,
+                &images_dir,
+                tx,
+                tile_y,
+                tw,
+                row_h,
+                vis_pos,
+                store_idx,
+            );
         }
     }
 
@@ -10767,20 +10846,30 @@ unsafe fn apply_slider_drag_pct(hwnd: HWND, x: i32, track_left: i32, track_width
     };
     let mut is_dark = false;
     let mut changed = false;
+    let mut ql_blur_changed = false;
     APP_STATE.with(|c| {
         if let Some(st) = c.borrow_mut().as_mut() {
             is_dark = st.is_dark_mode;
+            let old_ql_blur = st.store.config.blur_concentration_pct.max(58);
             if st.store.config.blur_concentration_pct != raw_pct {
                 st.store.config.blur_concentration_pct = raw_pct;
                 st.store.config.glass_appearance = mapped_mode;
                 st.store.save_config();
                 changed = true;
+                ql_blur_changed = raw_pct.max(58) != old_ql_blur;
             }
         }
     });
     if changed {
         apply_dwm_glass_style(hwnd, is_dark, raw_pct);
         let _ = InvalidateRect(hwnd, null(), FALSE);
+        if ql_blur_changed {
+            let ql_h = QL_STAGE_HWND_RAW.load(Ordering::SeqCst) as HWND;
+            if !ql_h.is_null() && IsWindowVisible(ql_h) != FALSE {
+                apply_dwm_glass_style(ql_h, is_dark, raw_pct.max(58));
+                let _ = InvalidateRect(ql_h, null(), FALSE);
+            }
+        }
     }
 }
 
@@ -10790,6 +10879,7 @@ unsafe fn handle_mouse_move(hwnd: HWND, x: i32, y: i32, left_held: bool) {
         let st = b.as_mut()?;
         if !left_held {
             st.dragging_slider_track = None;
+            st.big_bang_sweep_target = None;
         }
         st.dragging_slider_track
     });
@@ -12264,6 +12354,7 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
     }
 
     if vk == VK_SPACE as u32 {
+        let mut need_dismiss_ql_stage = false;
         let toggled = APP_STATE.with(|c| {
             let mut b = c.borrow_mut();
             let Some(st) = b.as_mut() else { return false };
@@ -12289,7 +12380,7 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
                     st.ql_stage_big_bang = false;
                     st.ql_stage_ocr_selected.clear();
                     st.ql_stage_hit_regions.clear();
-                    dismiss_large_ql_stage();
+                    need_dismiss_ql_stage = true;
                     return false;
                 }
                 if !st.show_quick_look {
@@ -12317,6 +12408,10 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
             }
             false
         });
+        if need_dismiss_ql_stage {
+            dismiss_large_ql_stage();
+            return;
+        }
         if toggled {
             let _ = InvalidateRect(hwnd, null(), FALSE);
             return;
@@ -12443,6 +12538,7 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
             VK_LEFT => GridMoveDir::Left,
             _ => GridMoveDir::Right,
         };
+        let mut need_dismiss_ql_stage = false;
         APP_STATE.with(|c| {
             if let Some(st) = c.borrow_mut().as_mut() {
                 if st.view_mode == ActiveViewMode::Settings {
@@ -12487,12 +12583,15 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
                             st.ql_stage_cached_key = None;
                             st.ql_stage_big_bang = false;
                             st.ql_stage_sweep_target = None;
-                            dismiss_large_ql_stage();
+                            need_dismiss_ql_stage = true;
                         }
                     }
                 }
             }
         });
+        if need_dismiss_ql_stage {
+            dismiss_large_ql_stage();
+        }
         let _ = InvalidateRect(hwnd, null(), FALSE);
         return;
     }
@@ -13695,9 +13794,20 @@ unsafe fn cancel_ota_download(hwnd: HWND) {
 
 unsafe fn dismiss_large_ql_stage() {
     let ql_h = QL_STAGE_HWND_RAW.load(Ordering::SeqCst) as HWND;
+    if !ql_h.is_null() && GetCapture() == ql_h {
+        let _ = ReleaseCapture();
+    }
     if !ql_h.is_null() && IsWindowVisible(ql_h) != FALSE {
         let _ = ShowWindow(ql_h, SW_HIDE);
     }
+    APP_STATE.with(|c| {
+        if let Ok(mut b) = c.try_borrow_mut() {
+            if let Some(st) = b.as_mut() {
+                st.ql_stage_tracking_mouse_leave = false;
+                st.ql_stage_sweep_target = None;
+            }
+        }
+    });
 }
 
 unsafe fn present_or_update_large_ql_stage(
@@ -13816,7 +13926,11 @@ unsafe fn present_or_update_large_ql_stage(
 
     st.ql_stage_visible = true;
 
-    apply_dwm_glass_style(ql_h, st.is_dark_mode, 78);
+    apply_dwm_glass_style(
+        ql_h,
+        st.is_dark_mode,
+        st.store.config.blur_concentration_pct.max(58),
+    );
     apply_screen_capture_shield(main_hwnd, st.store.config.screen_share_privacy);
     let _ = DefWindowProcW(ql_h, WM_NCACTIVATE_MSG, 1, (-1isize) as LPARAM);
     let _ = SetWindowPos(
@@ -13887,6 +14001,7 @@ unsafe fn handle_ql_stage_wnd_proc(
                             }
                         }
                     });
+                    let _ = SetCapture(hwnd);
                     let _ = InvalidateRect(hwnd, null(), FALSE);
                 }
                 Some(HitAction::PasteBigBangSelection) | Some(HitAction::CopyBigBangSelection) => {
@@ -13949,44 +14064,102 @@ unsafe fn handle_ql_stage_wnd_proc(
             0
         }
         WM_MOUSEMOVE => {
-            if (wparam & 0x0001) != 0 {
-                let x = (lparam & 0xFFFF) as i16 as i32;
-                let y = ((lparam >> 16) & 0xFFFF) as i16 as i32;
-                let changed = APP_STATE.with(|c| {
-                    let mut b = c.borrow_mut();
-                    let Some(st) = b.as_mut() else { return false };
-                    let Some(target) = st.ql_stage_sweep_target else {
-                        return false;
-                    };
-                    if !st.ql_stage_big_bang {
-                        return false;
+            let need_track = APP_STATE.with(|c| {
+                if let Some(st) = c.borrow_mut().as_mut() {
+                    if !st.ql_stage_tracking_mouse_leave {
+                        st.ql_stage_tracking_mouse_leave = true;
+                        return true;
                     }
-                    let mut found_id = None;
-                    for r in &st.ql_stage_hit_regions {
-                        if point_in_rect(x, y, &r.rect) {
-                            if let HitAction::ToggleBigBangToken(id) = r.action {
-                                found_id = Some(id);
-                                break;
-                            }
+                }
+                false
+            });
+            if need_track {
+                let mut tme = TRACKMOUSEEVENT {
+                    cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+                    dwFlags: TME_LEAVE,
+                    hwndTrack: hwnd,
+                    dwHoverTime: 0,
+                };
+                if TrackMouseEvent(&mut tme) == FALSE {
+                    APP_STATE.with(|c| {
+                        if let Some(st) = c.borrow_mut().as_mut() {
+                            st.ql_stage_tracking_mouse_leave = false;
                         }
+                    });
+                }
+            }
+            let x = (lparam & 0xFFFF) as i16 as i32;
+            let y = ((lparam >> 16) & 0xFFFF) as i16 as i32;
+            let left_held = (wparam & 0x0001) != 0;
+            if !left_held && GetCapture() == hwnd {
+                let _ = ReleaseCapture();
+            }
+            let (changed, use_hand) = APP_STATE.with(|c| {
+                let mut b = c.borrow_mut();
+                let Some(st) = b.as_mut() else {
+                    return (false, false);
+                };
+                if !left_held {
+                    st.ql_stage_sweep_target = None;
+                }
+                let mut hand = false;
+                let mut hit_token_id = None;
+                for r in &st.ql_stage_hit_regions {
+                    if point_in_rect(x, y, &r.rect) {
+                        hand = r.interactive_cursor;
+                        if let HitAction::ToggleBigBangToken(id) = r.action {
+                            hit_token_id = Some(id);
+                        }
+                        break;
                     }
-                    if let Some(id) = found_id {
-                        if target {
+                }
+                let mut sweep_changed = false;
+                if left_held && st.ql_stage_big_bang {
+                    if let (Some(target), Some(id)) = (st.ql_stage_sweep_target, hit_token_id) {
+                        sweep_changed = if target {
                             st.ql_stage_ocr_selected.insert(id)
                         } else {
                             st.ql_stage_ocr_selected.remove(&id)
-                        }
-                    } else {
-                        false
+                        };
                     }
-                });
-                if changed {
-                    let _ = InvalidateRect(hwnd, null(), FALSE);
                 }
+                (sweep_changed, hand)
+            });
+            SetCursor(LoadCursorW(
+                null_mut(),
+                if use_hand { IDC_HAND } else { IDC_ARROW },
+            ));
+            if changed {
+                let _ = InvalidateRect(hwnd, null(), FALSE);
             }
             0
         }
+        WM_MOUSELEAVE_MSG => {
+            let holding_capture = GetCapture() == hwnd;
+            APP_STATE.with(|c| {
+                if let Some(st) = c.borrow_mut().as_mut() {
+                    st.ql_stage_tracking_mouse_leave = false;
+                    if !holding_capture {
+                        st.ql_stage_sweep_target = None;
+                    }
+                }
+            });
+            0
+        }
+        WM_CAPTURECHANGED_MSG => {
+            APP_STATE.with(|c| {
+                if let Ok(mut b) = c.try_borrow_mut() {
+                    if let Some(st) = b.as_mut() {
+                        st.ql_stage_sweep_target = None;
+                    }
+                }
+            });
+            0
+        }
         WM_LBUTTONUP => {
+            if GetCapture() == hwnd {
+                let _ = ReleaseCapture();
+            }
             APP_STATE.with(|c| {
                 if let Some(st) = c.borrow_mut().as_mut() {
                     st.ql_stage_sweep_target = None;
@@ -14023,7 +14196,10 @@ unsafe fn handle_ql_stage_wnd_proc(
                         st.ql_stage_hit_regions.clear();
                         let s = |v: i32| ((v as f32) * scale).round() as i32;
                         let sf = |v: f32| v * scale;
-                        let palette = GlassPalette::for_macos_liquid_glass(st.is_dark_mode, 78);
+                        let palette = GlassPalette::for_macos_liquid_glass(
+                            st.is_dark_mode,
+                            st.store.config.blur_concentration_pct.max(58),
+                        );
                         let mut canvas = PixelCanvas::new(dib_slice, w, h);
                         canvas.clear(Color4::rgba(0, 0, 0, 0));
                         canvas.fill_round_rect(

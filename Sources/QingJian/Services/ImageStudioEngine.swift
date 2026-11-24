@@ -14,25 +14,50 @@ enum ImageStudioEngine {
         let byteCount: Int
     }
 
+    enum ImageDimensionInspection: Equatable {
+        case safe
+        case unreadableOrCorrupt
+        case exceededLimits
+    }
+
+    /// 零像素分配前置校验图像宽高，精准区分「文件损坏/头部不可读」与「尺寸超限压缩炸弹（CWE-409）」
+    static func inspectImageDimensions(
+        _ source: CGImageSource,
+        maxSingleEdge: Int = 16_384,
+        maxTotalPixels: Int64 = 67_108_864
+    ) -> ImageDimensionInspection {
+        guard CGImageSourceGetCount(source) > 0,
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let wNum = props[kCGImagePropertyPixelWidth] as? NSNumber,
+              let hNum = props[kCGImagePropertyPixelHeight] as? NSNumber else {
+            return .unreadableOrCorrupt
+        }
+        let w = wNum.int64Value
+        let h = hNum.int64Value
+        guard w > 0, h > 0 else {
+            return .unreadableOrCorrupt
+        }
+        guard w <= Int64(maxSingleEdge), h <= Int64(maxSingleEdge) else {
+            return .exceededLimits
+        }
+        let (total, overflow) = w.multipliedReportingOverflow(by: h)
+        if overflow || total > maxTotalPixels {
+            return .exceededLimits
+        }
+        return .safe
+    }
+
     /// 零像素分配前置校验图像宽高，阻断恶意压缩炸弹（Decompression Bomb / CWE-409）耗尽进程内存
     static func hasSafeImageDimensions(
         _ source: CGImageSource,
         maxSingleEdge: Int = 16_384,
         maxTotalPixels: Int64 = 67_108_864
     ) -> Bool {
-        guard CGImageSourceGetCount(source) > 0,
-              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
-              let wNum = props[kCGImagePropertyPixelWidth] as? NSNumber,
-              let hNum = props[kCGImagePropertyPixelHeight] as? NSNumber else {
-            return false
-        }
-        let w = wNum.int64Value
-        let h = hNum.int64Value
-        guard w > 0, h > 0, w <= Int64(maxSingleEdge), h <= Int64(maxSingleEdge) else {
-            return false
-        }
-        let (total, overflow) = w.multipliedReportingOverflow(by: h)
-        return !overflow && total <= maxTotalPixels
+        inspectImageDimensions(
+            source,
+            maxSingleEdge: maxSingleEdge,
+            maxTotalPixels: maxTotalPixels
+        ) == .safe
     }
 
     static func hasSafeImageDimensions(

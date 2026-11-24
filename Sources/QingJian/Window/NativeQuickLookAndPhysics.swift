@@ -1077,18 +1077,19 @@ extension View {
         self.mask(
             GeometryReader { geo in
                 let totalW = max(1, geo.size.width)
-                let extraCut = max(0, reservedActionWidth - 36)
-                let fadeEnd = max(0.18, min(0.98, (totalW - extraCut) / totalW))
-                let fadeStart = max(0.08, fadeEnd - (24.0 / totalW))
-                let maskedRightOpacity: Double = (isHovered && extraCut > 0) ? 0.0 : 1.0
-                let firstLineBandHeight = min(geo.size.height, 19.0)
+                let stops = ClipCardLayoutMetrics.hoverActionMaskStops(
+                    totalWidth: totalW,
+                    reservedActionWidth: reservedActionWidth
+                )
+                let maskedRightOpacity: Double = (isHovered && reservedActionWidth > 0) ? 0.0 : 1.0
+                let firstLineBandHeight = min(geo.size.height, 19.5)
 
                 VStack(spacing: 0) {
                     LinearGradient(
                         stops: [
                             .init(color: .black, location: 0.0),
-                            .init(color: .black, location: fadeStart),
-                            .init(color: .black.opacity(maskedRightOpacity), location: fadeEnd),
+                            .init(color: .black, location: stops.fadeStart),
+                            .init(color: .black.opacity(maskedRightOpacity), location: stops.fadeEnd),
                             .init(color: .black.opacity(maskedRightOpacity), location: 1.0)
                         ],
                         startPoint: .leading,
@@ -1109,7 +1110,7 @@ extension View {
     func floatingActionIslandBackdrop(isSelected: Bool, colorScheme: ColorScheme) -> some View {
         self
             .padding(.horizontal, 4.5)
-            .padding(.vertical, 2.5)
+            .padding(.vertical, 2.0)
             .background(
                 Capsule(style: .continuous)
                     .fill(

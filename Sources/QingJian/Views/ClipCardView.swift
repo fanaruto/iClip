@@ -62,7 +62,7 @@ struct ClipCardView: View {
             if item.isTodo && onEditAlias != nil { count += 1 }
             if onToggleTodo != nil { count += 1 }
         }
-        return CGFloat(count) * 26.5 + 14.0
+        return ClipCardLayoutMetrics.hoverActionBarWidth(buttonCount: count)
     }
 
     var body: some View {
@@ -210,7 +210,7 @@ struct ClipCardView: View {
                     if isHovered {
                         hoverActions
                             .floatingActionIslandBackdrop(isSelected: isSelected, colorScheme: colorScheme)
-                            .offset(y: -4.5)
+                            .offset(y: -6.5)
                             .transition(.opacity.combined(with: .scale(scale: 0.92, anchor: .trailing)))
                     } else if index < 9 {
                         shortcutBadge
@@ -488,8 +488,8 @@ struct ClipCardView: View {
             if item.type == .link || hasEmbeddedWebLink {
                 HoverActionCircleButton(
                     symbolName: "arrow.up.right",
-                    size: 24,
-                    iconSize: 11,
+                    size: 22,
+                    iconSize: 10.5,
                     surface: surface,
                     kind: .openURL,
                     helpText: "在浏览器中打开链接（⌘O / ⌘单击）",
@@ -500,8 +500,8 @@ struct ClipCardView: View {
             if !ClipboardStore.shared.minimalModeEnabled, item.isTodo, let onEditAlias {
                 HoverActionCircleButton(
                     symbolName: "pencil",
-                    size: 24,
-                    iconSize: 10.5,
+                    size: 22,
+                    iconSize: 10.0,
                     surface: surface,
                     kind: .alias,
                     helpText: (item.customAlias?.isEmpty == false) ? "修改待办标题（⌘R）" : "添加待办标题说明（⌘R）",
@@ -512,8 +512,8 @@ struct ClipCardView: View {
             if !ClipboardStore.shared.minimalModeEnabled, let onToggleTodo {
                 HoverActionCircleButton(
                     symbolName: item.isTodoCompleted ? "checkmark.circle.fill" : (item.isTodo ? "circle.inset.filled" : "checkmark.circle"),
-                    size: 24,
-                    iconSize: 11,
+                    size: 22,
+                    iconSize: 10.5,
                     surface: surface,
                     kind: .todo(isTodo: item.isTodo, isCompleted: item.isTodoCompleted),
                     helpText: item.isTodoCompleted ? "已完成 · 点击恢复未完成（⌘T）" : (item.isTodo ? "标记待办已完成（⌘T）" : "加入待办清单（⌘T）"),
@@ -523,8 +523,8 @@ struct ClipCardView: View {
 
             HoverActionCircleButton(
                 symbolName: item.isPinned ? "star.fill" : "star",
-                size: 24,
-                iconSize: 11,
+                size: 22,
+                iconSize: 10.5,
                 surface: surface,
                 kind: .star(isPinned: item.isPinned),
                 helpText: item.isPinned ? "取消收藏" : "收藏",
@@ -534,8 +534,8 @@ struct ClipCardView: View {
             HoverActionCircleButton(
                 symbolName: "trash",
                 hoverSymbolName: "trash.fill",
-                size: 24,
-                iconSize: 11,
+                size: 22,
+                iconSize: 10.5,
                 surface: surface,
                 kind: .delete,
                 helpText: "删除此条记录",
@@ -773,6 +773,21 @@ struct ClipCardView: View {
         Button("删除", role: .destructive) {
             onDelete()
         }
+    }
+}
+
+enum ClipCardLayoutMetrics {
+    static func hoverActionBarWidth(buttonCount: Int) -> CGFloat {
+        let count = max(0, buttonCount)
+        guard count > 0 else { return 0 }
+        return CGFloat(count) * 27.0 + 6.0
+    }
+
+    static func hoverActionMaskStops(totalWidth: CGFloat, reservedActionWidth: CGFloat) -> (fadeStart: CGFloat, fadeEnd: CGFloat) {
+        let totalW = max(1, totalWidth)
+        let fadeEnd = max(0.05, min(0.98, (totalW - max(0, reservedActionWidth)) / totalW))
+        let fadeStart = max(0.0, fadeEnd - (22.0 / totalW))
+        return (fadeStart, fadeEnd)
     }
 }
 
