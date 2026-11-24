@@ -71,6 +71,7 @@ final class UpdateManager: NSObject, ObservableObject {
 
         checkRequestEpoch &+= 1
         let requestID = checkRequestEpoch
+        Self.pruneStaleLocalOTACache(currentVersion: currentVersion)
 
         // 优先检测同级目录或本地 LocalOTA 缓存中是否存在与当前版本一致的目标角色签名包（零流量秒切且严防被远端旧 Release 降级覆盖）
         if isSwitchingEdition,
@@ -416,6 +417,25 @@ final class UpdateManager: NSObject, ObservableObject {
         }
 
         return nil
+    }
+
+    /// 自动清理与当前运行版本不一致的过期 `LocalOTA` 安装包缓存，回收无用磁盘占用
+    static func pruneStaleLocalOTACache(
+        currentVersion: String,
+        localOTADirectoryOverride: URL? = nil
+    ) {
+        let fm = FileManager.default
+        let targetDir: URL? = localOTADirectoryOverride ?? fm
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first?
+            .appendingPathComponent("QingJian", isDirectory: true)
+            .appendingPathComponent("LocalOTA", isDirectory: true)
+        guard let dir = targetDir, fm.fileExists(atPath: dir.path) else { return }
+
+        let versionMarker = dir.appendingPathComponent("VERSION")
+        let cachedVer = (try? String(contentsOf: versionMarker, encoding: .utf8)) ?? ""
+        guard normalizeVersion(cachedVer) != normalizeVersion(currentVersion) else { return }
+        try? fm.removeItem(at: dir)
     }
 
     private static func isVersion(_ lhs: String, newerThan rhs: String) -> Bool {

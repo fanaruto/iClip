@@ -1952,4 +1952,90 @@ mod tests {
         let actions = analyze_text_actions("/Users/dev/My Secret Folder/a'b.txt", false);
         assert!(actions.iter().any(|a| a.id == "path-shell-quote"));
     }
+
+    #[test]
+    fn test_redis_empty_user_uri_trim_memory_forget_ctrl_w_and_strip_markdown() {
+        use crate::engines::{analyze_document_typography, analyze_text_actions, redact_secrets};
+        use crate::hotkey::{classify_non_active_panel_key, NonActiveKeyRoute, MOD_CONTROL_BITS};
+        use crate::security::{
+            classify_sensitive_text, inspect_restorable_privacy_twins, mask_with_privacy_twins,
+            wipe_privacy_twins, SensitiveSecretKind,
+        };
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+
+        // 1. 验证无用户名 Redis 连接串识别、掩码与双向 AI 替身回填
+        let redis_uri = "redis://:prod_cache_pw_2026@10.0.8.12:6379/0";
+        assert_eq!(
+            classify_sensitive_text(redis_uri),
+            Some(SensitiveSecretKind::ConnectionSecret)
+        );
+        let redacted = redact_secrets(redis_uri);
+        assert!(!redacted.contains("prod_cache_pw_2026") && redacted.contains("***REDACTED***"));
+
+        wipe_privacy_twins();
+        let (masked, cnt) = mask_with_privacy_twins(&format!("ERR: {redis_uri}")).unwrap();
+        assert!(cnt >= 1 && !masked.contains("prod_cache_pw_2026"));
+        let (restored, _) = inspect_restorable_privacy_twins(&masked).unwrap();
+        assert!(restored.contains("prod_cache_pw_2026"));
+        wipe_privacy_twins();
+
+        // 2. 验证 Ctrl+W / Ctrl+V 无激活面板按键路由（防穿透关掉宿主浏览器标签页）
+        assert_eq!(
+            classify_non_active_panel_key(0x57, MOD_CONTROL_BITS, true, false, false),
+            NonActiveKeyRoute::DispatchPanelCommand
+        );
+        assert_eq!(
+            classify_non_active_panel_key(0x56, MOD_CONTROL_BITS, true, false, false),
+            NonActiveKeyRoute::DispatchPanelCommand
+        );
+
+        // 3. 验证容量淘汰自动遗忘被挤出记录的行为哈希 + 孤儿图片清扫
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "iclip-iter21-test-{}-{}",
+            std::process::id(),
+            crate::model::now_unix_secs()
+        ));
+        let _ = fs::create_dir_all(&tmp_dir);
+        let mut store = ClipboardStore::new(tmp_dir.clone());
+        store.config.max_history_count = 10;
+        let old_item = ClipItem::new_text("old-evicted-secret-0".to_string(), None);
+        let old_hash = old_item.content_hash.clone();
+        store.items.push(old_item);
+        store.record_paste_usage(&old_hash, Some("WeChat"));
+        assert_eq!(store.reuse_count(&old_hash), 1);
+        for i in 1..=12 {
+            let mut newer = ClipItem::new_text(format!("newer-entry-{i}"), None);
+            newer.created_unix_secs += i as u64;
+            store.items.insert(0, newer);
+        }
+        store.trim_history_if_needed();
+        assert_eq!(store.reuse_count(&old_hash), 0);
+
+        fs::write(store.images_dir.join("orphan_ghost.png"), b"ghost").unwrap();
+        store.sweep_orphaned_image_files();
+        assert!(!store.images_dir.join("orphan_ghost.png").exists());
+        let _ = fs::remove_dir_all(&tmp_dir);
+
+        // 4. 验证 Base64 解码防 Bidi 投毒与 AI 回复「去 Markdown 纯文本」
+        let b64_poison = BASE64.encode("echo safe\u{202e}evil_payload".as_bytes());
+        let b64_actions = analyze_text_actions(&b64_poison, false);
+        if let Some(act) = b64_actions.iter().find(|a| a.id == "base64-decode") {
+            assert!(!act.result_text.contains('\u{202e}') && act.is_security);
+        }
+
+        let md = "### 一、发布结论\n- [x] **核心优化**：完成 `零失焦` 重构\n- [ ] 官网 [点击访问](https://app.webfooo.com/iClip)\n算式：2 * 3 * 4 = 24";
+        let doc_acts = analyze_document_typography(md);
+        let strip_act = doc_acts
+            .iter()
+            .find(|a| a.id == "doc-strip-markdown")
+            .unwrap();
+        assert!(!strip_act.result_text.contains("###") && !strip_act.result_text.contains("**"));
+        assert!(strip_act
+            .result_text
+            .contains("☑ 核心优化：完成 零失焦 重构"));
+        assert!(strip_act
+            .result_text
+            .contains("☐ 官网 点击访问 (https://app.webfooo.com/iClip)"));
+        assert!(strip_act.result_text.contains("2 * 3 * 4 = 24"));
+    }
 }

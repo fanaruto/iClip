@@ -8886,7 +8886,7 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32) {
         return;
     }
 
-    if vk == VK_ESCAPE as u32 {
+    if vk == VK_ESCAPE as u32 || (ctrl_down && !alt_down && !shift_down && vk == 0x57) {
         let handled_inner = APP_STATE.with(|c| {
             let mut b = c.borrow_mut();
             let Some(st) = b.as_mut() else { return false };
@@ -8898,7 +8898,7 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32) {
                 st.view_mode = ActiveViewMode::MainList;
                 return true;
             }
-            if !st.search_query.is_empty() {
+            if vk == VK_ESCAPE as u32 && !st.search_query.is_empty() {
                 st.search_query.clear();
                 st.selected_visible_pos = 0;
                 st.scroll_row_offset = 0;
@@ -8910,6 +8910,31 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32) {
             let _ = InvalidateRect(hwnd, null(), FALSE);
         } else {
             hide_panel(hwnd, true);
+        }
+        return;
+    }
+
+    // Ctrl+V：在主列表非搜索输入聚焦态（或搜索词为空）时，直接粘贴当前选中的历史卡片
+    if ctrl_down && !alt_down && !shift_down && vk == 0x56 {
+        let paste_idx = APP_STATE.with(|c| {
+            let b = c.borrow();
+            let st = b.as_ref()?;
+            if st.view_mode != ActiveViewMode::MainList {
+                return None;
+            }
+            if GetForegroundWindow() == hwnd && !st.search_query.is_empty() {
+                return None;
+            }
+            let filtered = st.store.filtered_indices_ext(
+                st.selected_tab,
+                st.selected_pin_category,
+                &st.search_query,
+                st.active_target_app_name.as_deref(),
+            );
+            filtered.get(st.selected_visible_pos).copied()
+        });
+        if let Some(idx) = paste_idx {
+            commit_paste_item_by_index(hwnd, idx, false);
         }
         return;
     }

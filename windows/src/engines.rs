@@ -485,18 +485,34 @@ pub fn analyze_text_actions(raw: &str, minimal_mode: bool) -> Vec<QuickAction> {
 
     #[cfg(feature = "dev")]
     if actions.is_empty() {
-        // Dev 5: Base64 解码
+        // Dev 5: Base64 解码（含 URL-Safe 兼容与内联防 Bidi/终端投毒护盾）
         if (12..=4096).contains(&trimmed.len())
-            && trimmed.len() % 4 == 0
             && !trimmed.contains(' ')
             && !trimmed.contains('\n')
-            && trimmed
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'=')
+            && trimmed.bytes().all(|b| {
+                b.is_ascii_alphanumeric()
+                    || b == b'+'
+                    || b == b'/'
+                    || b == b'-'
+                    || b == b'_'
+                    || b == b'='
+            })
         {
-            if let Ok(bytes) = BASE64.decode(trimmed) {
-                if let Ok(decoded) = String::from_utf8(bytes) {
-                    let clean = decoded.trim();
+            let mut b64_norm = trimmed.replace('-', "+").replace('_', "/");
+            let rem = b64_norm.len() % 4;
+            if rem > 0 {
+                b64_norm.push_str(&"=".repeat(4 - rem));
+            }
+            if let Ok(bytes) = BASE64.decode(&b64_norm) {
+                if let Ok(raw_decoded) = String::from_utf8(bytes) {
+                    let had_poison =
+                        crate::security::inspect_clipboard_poison(&raw_decoded).is_some();
+                    let safe_decoded = if had_poison {
+                        crate::security::sanitize_clipboard_poison(&raw_decoded)
+                    } else {
+                        raw_decoded
+                    };
+                    let clean = safe_decoded.trim();
                     if clean.chars().count() >= 3
                         && !clean
                             .chars()
@@ -504,11 +520,19 @@ pub fn analyze_text_actions(raw: &str, minimal_mode: bool) -> Vec<QuickAction> {
                     {
                         actions.push(QuickAction {
                             id: "base64-decode",
-                            title: "Base64 解码".to_string(),
-                            is_security: false,
-                            result_text: decoded,
+                            title: if had_poison {
+                                "Base64 安全解码".to_string()
+                            } else {
+                                "Base64 解码".to_string()
+                            },
+                            is_security: had_poison,
+                            result_text: safe_decoded,
                             html_table_payload: None,
-                            toast_text: "已解码 Base64 文本".to_string(),
+                            toast_text: if had_poison {
+                                "已解码 Base64 并剥除暗藏毒字符".to_string()
+                            } else {
+                                "已解码 Base64 文本".to_string()
+                            },
                         });
                     }
                 }
@@ -1034,12 +1058,28 @@ pub fn analyze_document_typography(raw: &str) -> Vec<QuickAction> {
     }
 
     let mut actions = Vec::new();
+
+    if looks_like_markdown_document(raw) {
+        if let Some(stripped) = strip_markdown_to_clean_text(raw) {
+            if stripped != trimmed {
+                actions.push(QuickAction {
+                    id: "doc-strip-markdown",
+                    title: "去 Markdown 纯文本".to_string(),
+                    is_security: false,
+                    result_text: stripped,
+                    html_table_payload: None,
+                    toast_text: "已剥除 Markdown 语法符号，转为干净可读纯文本".to_string(),
+                });
+            }
+        }
+    }
+
     let non_empty_lines: Vec<&str> = trimmed
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty())
         .collect();
-    if non_empty_lines.len() >= 2 {
+    if actions.is_empty() && non_empty_lines.len() >= 2 {
         let mid_breaks = non_empty_lines[..non_empty_lines.len() - 1]
             .iter()
             .filter(|l| {
@@ -1070,13 +1110,14 @@ pub fn analyze_document_typography(raw: &str) -> Vec<QuickAction> {
         .map(|a| a.result_text.as_str())
         .unwrap_or(trimmed);
     let spaced = apply_pangu_spacing(base);
-    if spaced != base {
+    if spaced != base && spaced != trimmed {
+        let is_pdf_first = actions.first().is_some_and(|a| a.id == "doc-pdf-heal");
         actions.push(QuickAction {
             id: "doc-pangu-space",
-            title: if actions.is_empty() {
-                "中英空格美化".to_string()
-            } else {
+            title: if is_pdf_first {
                 "缝合+中英美化".to_string()
+            } else {
+                "中英空格美化".to_string()
             },
             is_security: false,
             result_text: spaced,
@@ -1086,6 +1127,138 @@ pub fn analyze_document_typography(raw: &str) -> Vec<QuickAction> {
     }
 
     actions
+}
+
+pub fn looks_like_markdown_document(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    if trimmed.chars().count() < 6
+        || trimmed.starts_with("#!")
+        || trimmed.contains("|---")
+        || crate::security::explain_cron_expression(trimmed).is_some()
+    {
+        return false;
+    }
+    let lines: Vec<&str> = trimmed.lines().collect();
+    if lines.len() == 2
+        && lines[0].starts_with("# ")
+        && crate::security::explain_cron_expression(lines[1]).is_some()
+    {
+        return false;
+    }
+
+    let bold_re = Regex::new(r"\*\*[^\s*](?:.*?[^\s*])?\*\*|__[^\s_](?:.*?[^\s_])?__").unwrap();
+    let link_re = Regex::new(r"\[[^\]]+\]\(https?://[^)\s]+\)").unwrap();
+    let strike_re = Regex::new(r"~~[^\s~](?:.*?[^\s~])?~~").unwrap();
+    let code_re = Regex::new(r"`[^`\n]+`").unwrap();
+    let heading_re = Regex::new(r"^\s*(#{1,6})\s+\S").unwrap();
+    let list_re = Regex::new(r"^\s*[-*+]\s+\S").unwrap();
+    let quote_re = Regex::new(r"^\s*>\s*\S").unwrap();
+
+    let mut score = 0usize;
+    score += bold_re.find_iter(trimmed).count() * 2;
+    score += link_re.find_iter(trimmed).count() * 2;
+    score += strike_re.find_iter(trimmed).count() * 2;
+    if code_re.is_match(trimmed) {
+        score += 1;
+    }
+
+    let mut fence_cnt = 0usize;
+    for line in &lines {
+        if line.trim_start().starts_with("```") {
+            fence_cnt += 1;
+            continue;
+        }
+        if let Some(caps) = heading_re.captures(line) {
+            let hashes = caps.get(1).map(|m| m.as_str().len()).unwrap_or(1);
+            score += if hashes >= 2 { 2 } else { 1 };
+        } else if list_re.is_match(line) || quote_re.is_match(line) {
+            score += 1;
+        }
+    }
+    if fence_cnt >= 2 {
+        score += 2;
+    }
+    score >= 2
+}
+
+pub fn strip_markdown_to_clean_text(raw: &str) -> Option<String> {
+    let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
+    let hr_re =
+        Regex::new(r"^\s*(?:-\s*-\s*-[-\s]*|_\s*_\s*_[_\s]*|\*\s*\*\s*\*[\*\s]*)$").unwrap();
+    let quote_re = Regex::new(r"^(\s*)(?:>\s?)+").unwrap();
+    let heading_re = Regex::new(r"^(\s*)#{1,6}\s+").unwrap();
+    let task_un_re = Regex::new(r"^(\s*)[-*+]\s+\[\s\]\s+").unwrap();
+    let task_ok_re = Regex::new(r"^(\s*)[-*+]\s+\[[xX]\]\s+").unwrap();
+    let ul_re = Regex::new(r"^(\s*)[-*+]\s+").unwrap();
+    let img_re = Regex::new(r"!\s*\[([^\]]*)\]\(([^)\n]+)\)").unwrap();
+    let link_re = Regex::new(r"\[([^\]]+)\]\((https?://[^)\s]+)\)").unwrap();
+    let bold_star_re = Regex::new(r"\*\*([^\s*](?:.*?[^\s*])?)\*\*").unwrap();
+    let bold_under_re = Regex::new(r"__([^\s_](?:.*?[^\s_])?)__").unwrap();
+    let strike_re = Regex::new(r"~~[^\s~](?:.*?[^\s~])?~~").unwrap();
+    let inline_code_re = Regex::new(r"`([^`\n]+)`").unwrap();
+    let blank_re = Regex::new(r"\n{3,}").unwrap();
+
+    let mut out_lines = Vec::new();
+    let mut in_fence = false;
+
+    for raw_line in normalized.lines() {
+        if raw_line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            out_lines.push(raw_line.to_string());
+            continue;
+        }
+        if hr_re.is_match(raw_line) {
+            out_lines.push(String::new());
+            continue;
+        }
+        let mut line = quote_re.replace(raw_line, "$1").into_owned();
+        line = heading_re.replace(&line, "$1").into_owned();
+        if task_un_re.is_match(&line) {
+            line = task_un_re.replace(&line, "${1}☐ ").into_owned();
+        } else if task_ok_re.is_match(&line) {
+            line = task_ok_re.replace(&line, "${1}☑ ").into_owned();
+        } else {
+            line = ul_re.replace(&line, "${1}• ").into_owned();
+        }
+        line = img_re
+            .replace_all(&line, |caps: &regex_lite::Captures| {
+                let alt = caps.get(1).map(|m| m.as_str().trim()).unwrap_or("");
+                if alt.is_empty() {
+                    String::new()
+                } else {
+                    format!("[图片: {alt}]")
+                }
+            })
+            .into_owned();
+        line = link_re
+            .replace_all(&line, |caps: &regex_lite::Captures| {
+                let label = caps.get(1).map(|m| m.as_str().trim()).unwrap_or("");
+                let url = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+                if label.is_empty() || label == url {
+                    url.to_string()
+                } else {
+                    format!("{label} ({url})")
+                }
+            })
+            .into_owned();
+        line = bold_star_re.replace_all(&line, "$1").into_owned();
+        line = bold_under_re.replace_all(&line, "$1").into_owned();
+        line = strike_re.replace_all(&line, "$1").into_owned();
+        line = inline_code_re.replace_all(&line, "$1").into_owned();
+        out_lines.push(line);
+    }
+
+    let joined = out_lines.join("\n");
+    let collapsed = blank_re.replace_all(&joined, "\n\n");
+    let cleaned = collapsed.trim().to_string();
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
 }
 
 fn is_cjk(c: char) -> bool {
@@ -2135,7 +2308,7 @@ pub fn redact_secrets(text: &str) -> String {
         ),
         (
             "://",
-            r"([a-zA-Z][a-zA-Z0-9+.\-]*://[^:\s/@]+:)([^@\s/]+)(@)",
+            r"([a-zA-Z][a-zA-Z0-9+.\-]*://[^:\s/@]*:)([^@\s/]+)(@)",
             "${1}***REDACTED***${3}",
         ),
         (

@@ -282,10 +282,47 @@ impl ClipboardStore {
         let now_init = now_unix_secs();
         let archived = store.archive_expired_completed_todos(now_init);
         let purged_sec = store.purge_expired_unpinned_secrets(now_init, 86_400);
+        store.sweep_orphaned_image_files_with_min_age(60);
         if (healed_from_backup || legacy_migrated) && archived == 0 && purged_sec == 0 {
             store.save_history();
         }
         store
+    }
+
+    pub fn sweep_orphaned_image_files(&self) {
+        self.sweep_orphaned_image_files_with_min_age(0);
+    }
+
+    pub fn sweep_orphaned_image_files_with_min_age(&self, min_age_secs: u64) {
+        if min_age_secs > 0 && !self.history_file.exists() {
+            return;
+        }
+        let referenced: std::collections::HashSet<&str> = self
+            .items
+            .iter()
+            .filter_map(|i| i.image_file_name.as_deref())
+            .collect();
+        let now = std::time::SystemTime::now();
+        if let Ok(entries) = fs::read_dir(&self.images_dir) {
+            for entry in entries.flatten() {
+                if let Some(name) = entry.file_name().to_str() {
+                    if !name.starts_with('.') && !referenced.contains(name) {
+                        if min_age_secs > 0 {
+                            if let Ok(meta) = entry.metadata() {
+                                if let Ok(mtime) = meta.modified() {
+                                    if let Ok(age) = now.duration_since(mtime) {
+                                        if age.as_secs() < min_age_secs {
+                                            continue;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        let _ = fs::remove_file(entry.path());
+                    }
+                }
+            }
+        }
     }
 
     pub fn write_image_bytes(&self, file_name: &str, plain_png: &[u8]) -> std::io::Result<()> {
@@ -1677,17 +1714,36 @@ impl ClipboardStore {
         let max_unpinned = self.config.max_history_count.max(10);
         let mut unpinned_seen = 0usize;
         let mut retained = Vec::with_capacity(self.items.len());
+        let mut evicted_hashes = Vec::new();
+        let mut evicted_ids = std::collections::HashSet::new();
         for item in self.items.drain(..) {
             if item.is_pinned || item.is_pending_todo() {
                 retained.push(item);
             } else if unpinned_seen < max_unpinned {
                 unpinned_seen += 1;
                 retained.push(item);
-            } else if let Some(img) = item.image_file_name {
-                let _ = fs::remove_file(self.images_dir.join(img));
+            } else {
+                if let Some(img) = item.image_file_name {
+                    let _ = fs::remove_file(self.images_dir.join(img));
+                }
+                evicted_hashes.push(item.content_hash);
+                evicted_ids.insert(item.id);
             }
         }
         self.items = retained;
+        if !evicted_ids.is_empty() {
+            self.paste_queue_ids
+                .retain(|qid| !evicted_ids.contains(qid));
+            let active_hashes: std::collections::HashSet<&str> =
+                self.items.iter().map(|i| i.content_hash.as_str()).collect();
+            let dead_hashes: Vec<String> = evicted_hashes
+                .into_iter()
+                .filter(|h| !active_hashes.contains(h.as_str()))
+                .collect();
+            if !dead_hashes.is_empty() {
+                self.forget_memory_hashes(&dead_hashes);
+            }
+        }
     }
 
     fn sort_items(list: &mut [ClipItem]) {

@@ -813,10 +813,33 @@ final class ClipboardStore: ObservableObject {
         )
         self.items = sortItems(outcome.items)
         _ = purgeExpiredUnpinnedSecrets()
+        sweepOrphanedImageFiles()
         if case .recoveredFromBackup(let recovered) = outcome, !recovered.isEmpty {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
                 self?.showToast("已从原子备份自动恢复 \(recovered.count) 条历史记录", duration: 3.0)
             }
+        }
+    }
+
+    /// 清扫 `images/` 目录下超过宽限期且未被任何存活历史记录引用的孤儿加密图片，兼顾并发写图安全与零残留
+    func sweepOrphanedImageFiles(minAgeSeconds: TimeInterval = 60) {
+        guard FileManager.default.fileExists(atPath: historyFileURL.path) || minAgeSeconds <= 0 else {
+            return
+        }
+        let referenced = Set(items.compactMap(\.imageFileName))
+        let fm = FileManager.default
+        guard let files = try? fm.contentsOfDirectory(atPath: imagesDirectoryURL.path) else {
+            return
+        }
+        let now = Date()
+        for name in files where !name.hasPrefix(".") && !referenced.contains(name) {
+            let fileURL = imagesDirectoryURL.appendingPathComponent(name)
+            if minAgeSeconds > 0,
+               let mtime = (try? fm.attributesOfItem(atPath: fileURL.path))?[.modificationDate] as? Date,
+               now.timeIntervalSince(mtime) < minAgeSeconds {
+                continue
+            }
+            try? fm.removeItem(at: fileURL)
         }
     }
 
@@ -2057,12 +2080,30 @@ final class ClipboardStore: ObservableObject {
         let protectedItems = items.filter { $0.isPinned || $0.isPendingTodo }
         var unprotected = items.filter { !$0.isPinned && !$0.isPendingTodo }
         if unprotected.count > maxHistoryCount {
-            let removed = unprotected[maxHistoryCount...]
+            let removed = Array(unprotected[maxHistoryCount...])
+            unprotected = Array(unprotected.prefix(maxHistoryCount))
+            let nextItems = sortItems(protectedItems + unprotected)
+            let activeHashes = Set(nextItems.map(\.contentHash))
+            let deadHashes = Set(removed.map(\.contentHash)).subtracting(activeHashes)
+            if !deadHashes.isEmpty {
+                AdaptiveIntelligenceEngine.shared.forgetContentHashes(deadHashes)
+            }
+            let removedIDs = Set(removed.map(\.id))
             for item in removed {
+                pendingOTPExpirationTasks[item.id]?.cancel()
+                pendingOTPExpirationTasks.removeValue(forKey: item.id)
+                evictItemMemoryCaches(for: item)
                 deleteImageFileIfNeeded(for: item)
             }
-            unprotected = Array(unprotected.prefix(maxHistoryCount))
-            items = sortItems(protectedItems + unprotected)
+            #if ICLIP_EDITION_FLOW
+            if !pasteQueueIDs.isEmpty {
+                pasteQueueIDs.removeAll { removedIDs.contains($0) }
+            }
+            if !selectedMergeIDs.isEmpty {
+                selectedMergeIDs.removeAll { removedIDs.contains($0) }
+            }
+            #endif
+            items = nextItems
             saveHistory()
         }
     }

@@ -518,7 +518,7 @@ pub fn classify_non_active_panel_key(
         return NonActiveKeyRoute::DispatchPanelCommand;
     }
 
-    // 面板功能快捷键：Ctrl + B/C/D/E/F/K/M/O/P/R/S/T/Y/Z/, 及 Ctrl+Shift+C
+    // 面板功能快捷键：Ctrl + B/C/D/E/F/K/M/O/P/R/S/T/V/W/Y/Z/, 及 Ctrl+Shift+C
     if clean_mods == MOD_CONTROL_BITS
         && matches!(
             vk,
@@ -533,6 +533,8 @@ pub fn classify_non_active_panel_key(
                 | 0x52
                 | 0x53
                 | 0x54
+                | 0x56
+                | 0x57
                 | 0x59
                 | 0x5A
                 | 0xBC

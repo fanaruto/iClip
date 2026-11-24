@@ -877,7 +877,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
 
         // QuickLook 速览态：支持 Space/ESC/⌘Y 关闭、⌘E 原位微调、←/→ 切页、↑/↓ 连续扫视、↵ 键入
         if nav.showQuickLook {
-            if event.keyCode == 53 || (flags.isEmpty && event.keyCode == 49) || (flags == .command && event.keyCode == 16) {
+            if event.keyCode == 53 || (flags.isEmpty && event.keyCode == 49) || (flags == .command && (event.keyCode == 16 || event.keyCode == 13)) {
                 withAnimation(.easeOut(duration: 0.15)) {
                     nav.showQuickLook = false
                 }
@@ -972,6 +972,18 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         // ⇧⌘C (keyCode 8)：将当前选中条目换行追加至系统剪贴板末尾（免切窗连环续接）
         if !store.minimalModeEnabled, flags == [.command, .shift], event.keyCode == 8 {
             rootView.appendSelectedToClipboard()
+            return nil
+        }
+
+        // ⌘W (keyCode 13)：收起 iClip 悬浮面板，严防零失焦模式下 ⌘W 穿透误关底层浏览器标签页
+        if flags == .command, event.keyCode == 13 {
+            hide(restoreFocus: true)
+            return nil
+        }
+
+        // ⌘V (keyCode 9)：当面板处于零失焦非 Key 态（或搜索框为空且未在编辑文本）时，直接将当前选中的卡片粘贴至目标位置
+        if flags == .command, event.keyCode == 9, (!panel.isKeyWindow || nav.searchText.isEmpty && !(panel.firstResponder is NSTextView)) {
+            rootView.pasteSelected()
             return nil
         }
 
@@ -1825,7 +1837,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
 
         // QuickLook 速览态：支持 Space/ESC/⌘Y 关闭、⌘E 原位微调、←/→ 切页、↑/↓ 连续扫视、↵ 键入
         if nav.showQuickLook {
-            if event.keyCode == 53 || (flags.isEmpty && event.keyCode == 49) || (flags == .command && event.keyCode == 16) {
+            if event.keyCode == 53 || (flags.isEmpty && event.keyCode == 49) || (flags == .command && (event.keyCode == 16 || event.keyCode == 13)) {
                 withAnimation(.easeOut(duration: 0.15)) {
                     nav.showQuickLook = false
                 }
@@ -1918,6 +1930,18 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         // ⇧⌘C (keyCode 8)：将当前选中条目换行追加至系统剪贴板末尾（免切窗连环续接）
         if !store.minimalModeEnabled, flags == [.command, .shift], event.keyCode == 8 {
             rootView.appendSelectedToClipboard()
+            return nil
+        }
+
+        // ⌘W (keyCode 13)：收起 iClip 悬浮面板，严防零失焦模式下 ⌘W 穿透误关底层浏览器标签页
+        if flags == .command, event.keyCode == 13 {
+            hide(restoreFocus: true)
+            return nil
+        }
+
+        // ⌘V (keyCode 9)：当面板处于零失焦非 Key 态（或搜索框为空且未在编辑文本）时，直接将当前选中的卡片粘贴至目标位置
+        if flags == .command, event.keyCode == 9, (!panel.isKeyWindow || nav.searchText.isEmpty && !(panel.firstResponder is NSTextView)) {
+            rootView.pasteSelected()
             return nil
         }
 

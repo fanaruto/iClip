@@ -2937,4 +2937,56 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertEqual(posixSpacePath.id, "path-shell-quote")
         XCTAssertEqual(posixSpacePath.resultText, "'/Users/dev/My Secret Folder/a'\\''b.txt'")
     }
+
+    @MainActor
+    func testRedisEmptyUserURIStaleOTAPruneBase64PoisonGuardAndStripMarkdown() throws {
+        // 1. 验证无用户名 Redis 连接串（redis://:pw@host / rediss://）识别、脱敏与双向替身回填
+        let redisNoUser = "redis://:prod_cache_pw_2026@10.0.8.12:6379/0"
+        XCTAssertEqual(SensitiveCredentialVeil.classify(redisNoUser), .connectionSecret)
+        let redactedRedis = SensitiveCredentialVeil.redactForExternalSharing(redisNoUser)
+        XCTAssertFalse(redactedRedis.contains("prod_cache_pw_2026"))
+        XCTAssertTrue(redactedRedis.contains("***REDACTED***"))
+
+        ReversiblePrivacyTwin.wipeAll()
+        let twinMasked = try XCTUnwrap(ReversiblePrivacyTwin.maskWithTwins("连接失败：\(redisNoUser)"))
+        XCTAssertFalse(twinMasked.maskedText.contains("prod_cache_pw_2026"))
+        let restored = try XCTUnwrap(ReversiblePrivacyTwin.inspectRestorableTwins(in: twinMasked.maskedText))
+        XCTAssertTrue(restored.restoredText.contains("prod_cache_pw_2026"))
+        ReversiblePrivacyTwin.wipeAll()
+
+        // 2. 验证过期 LocalOTA 版本包自动清理，同版本缓存保留
+        let otaDir = FileManager.default.temporaryDirectory.appendingPathComponent("iclip-ota-test-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: otaDir) }
+        try FileManager.default.createDirectory(at: otaDir, withIntermediateDirectories: true)
+        try "2.5.0".write(to: otaDir.appendingPathComponent("VERSION"), atomically: true, encoding: .utf8)
+        try Data([0x50, 0x4B]).write(to: otaDir.appendingPathComponent("iClip-Dev-macOS.zip"))
+        UpdateManager.pruneStaleLocalOTACache(currentVersion: "2.6.0", localOTADirectoryOverride: otaDir)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: otaDir.path))
+
+        // 3. 验证 Base64 解码内联剥除暗藏 U+202E Trojan Bidi 木马符（防 Base64 Smuggling）
+        #if !ICLIP_EDITION_FLOW
+        let smuggledRaw = "echo safe\u{202E}evil_payload"
+        let smuggledB64 = Data(smuggledRaw.utf8).base64EncodedString()
+        let b64Item = ClipItem(type: .text, text: smuggledB64, contentHash: "text:b64poison")
+        let snap = SemanticEngine.analyze(b64Item)
+        let b64Act = try XCTUnwrap(snap.actions.first(where: { $0.id == "base64-decode" }))
+        XCTAssertFalse(b64Act.resultText.contains("\u{202E}"))
+        XCTAssertTrue(b64Act.isSecurityAction)
+        #endif
+
+        // 4. 验证 AI 回复「去 Markdown 纯文本」（剥除 ###、**加粗**、[链接](url)、任务框并保护算式乘号）
+        let aiMarkdown = """
+        ### 一、版本发布结论
+        - [x] **核心优化**：已完成 `零失焦唤醒` 重构
+        - [ ] 查看 [线上地址](https://app.webfooo.com/iClip)
+        算式校验：2 * 3 * 4 = 24
+        """
+        let docActions = DocumentTypographyEngine.analyze(aiMarkdown)
+        let stripAct = try XCTUnwrap(docActions.first(where: { $0.id == "doc-strip-markdown" }))
+        XCTAssertFalse(stripAct.resultText.contains("###"))
+        XCTAssertFalse(stripAct.resultText.contains("**"))
+        XCTAssertTrue(stripAct.resultText.contains("☑ 核心优化：已完成 零失焦唤醒 重构"))
+        XCTAssertTrue(stripAct.resultText.contains("☐ 查看 线上地址 (https://app.webfooo.com/iClip)"))
+        XCTAssertTrue(stripAct.resultText.contains("2 * 3 * 4 = 24"))
+    }
 }

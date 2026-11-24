@@ -39,15 +39,27 @@ enum DocumentTypographyEngine {
 
         var actions: [FinanceQuickAction] = []
 
-        // 1. PDF 硬折行愈合检测
-        if looksLikeBrokenPDFParagraphs(rawText) {
+        // 0. AI 回复 / 笔记文档「去 Markdown 纯文本」（一键剥除 **加粗**、### 标题、[链接](url)、`代码` 直发微信/飞书/公文）
+        if looksLikeMarkdownDocument(rawText),
+           let stripped = stripMarkdownToCleanText(rawText),
+           stripped != trimmed {
+            actions.append(FinanceQuickAction(
+                id: "doc-strip-markdown",
+                title: "去 Markdown 纯文本",
+                symbolName: "doc.plaintext",
+                resultText: stripped,
+                toastText: "已剥除 Markdown 语法符号，转为干净可读纯文本"
+            ))
+        }
+
+        // 1. PDF 硬折行愈合检测（排除 Markdown 文档避免误缝标题）
+        if actions.isEmpty && looksLikeBrokenPDFParagraphs(rawText) {
             let healed = healPDFLineBreaks(rawText)
             if healed != trimmed {
-                // 若愈合后还包含中英粘连，顺便提供一个「断行愈合 + 中英美化」一步到位动作
                 actions.append(FinanceQuickAction(
                     id: "doc-pdf-heal",
                     title: "缝合 PDF 断行",
-                    symbolName: "doc.text.below.ecg",
+                    symbolName: "text.redaction",
                     resultText: healed,
                     toastText: "已智能缝合 PDF 跨行断句并保留真实分段"
                 ))
@@ -58,28 +70,148 @@ enum DocumentTypographyEngine {
         if containsUnspacedCJKAndLatin(trimmed) {
             let base = actions.first?.resultText ?? trimmed
             let spaced = applyPanguSpacing(base)
-            if spaced != trimmed {
+            if spaced != base && spaced != trimmed {
                 actions.append(FinanceQuickAction(
                     id: "doc-pangu-space",
-                    title: actions.isEmpty ? "中英空格美化" : "缝合+中英美化",
-                    symbolName: "text.justify",
+                    title: actions.isEmpty ? "中英空格美化" : (actions.first?.id == "doc-pdf-heal" ? "缝合+中英美化" : "中英空格美化"),
+                    symbolName: "character.textbox",
                     resultText: spaced,
                     toastText: "已完成中英数字间距排版美化"
                 ))
             }
         }
 
-        // 修正 SF Symbol 标准有效名称
-        return actions.map { act in
-            let validSym = (act.id == "doc-pdf-heal") ? "text.redaction" : "character.textbox"
-            return FinanceQuickAction(
-                id: act.id,
-                title: act.title,
-                symbolName: validSym,
-                resultText: act.resultText,
-                toastText: act.toastText
-            )
+        return actions
+    }
+
+    // MARK: - AI 回复与笔记 Markdown 语法剥除净文器
+
+    private static let mdHeadingLineRegex = try! NSRegularExpression(pattern: #"^(\s*)(#{1,6})\s+\S"#)
+    private static let mdHeadingStripRegex = try! NSRegularExpression(pattern: #"^(\s*)#{1,6}\s+"#)
+    private static let mdTaskUncheckedRegex = try! NSRegularExpression(pattern: #"^(\s*)[-*+]\s+\[\s\]\s+"#)
+    private static let mdTaskCheckedRegex = try! NSRegularExpression(pattern: #"^(\s*)[-*+]\s+\[[xX]\]\s+"#)
+    private static let mdUnorderedListRegex = try! NSRegularExpression(pattern: #"^(\s*)[-*+]\s+"#)
+    private static let mdBlockquoteRegex = try! NSRegularExpression(pattern: #"^(\s*)(?:>\s?)+"#)
+    private static let mdHrRegex = try! NSRegularExpression(pattern: #"^\s*(?:-\s*-\s*-[-\s]*|_\s*_\s*_[_\s]*|\*\s*\*\s*\*[\*\s]*)$"#)
+    private static let mdImageRegex = try! NSRegularExpression(pattern: #"!\s*\[([^\]]*)\]\(([^)\n]+)\)"#)
+    private static let mdLinkRegex = try! NSRegularExpression(pattern: #"\[([^\]]+)\]\((https?://[^)\s]+)\)"#)
+    private static let mdBoldStarRegex = try! NSRegularExpression(pattern: #"\*\*([^\s*](?:.*?[^\s*])?)\*\*"#)
+    private static let mdBoldUnderRegex = try! NSRegularExpression(pattern: #"__([^\s_](?:.*?[^\s_])?)__"#)
+    private static let mdStrikeRegex = try! NSRegularExpression(pattern: #"~~([^\s~](?:.*?[^\s~])?)~~"#)
+    private static let mdInlineCodeRegex = try! NSRegularExpression(pattern: #"`([^`\n]+)`"#)
+    private static let mdMultiBlankRegex = try! NSRegularExpression(pattern: #"\n{3,}"#)
+
+    static func looksLikeMarkdownDocument(_ rawText: String) -> Bool {
+        let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count >= 6, !trimmed.hasPrefix("#!") else { return false }
+        if CronAndPathHelper.explainCronExpression(trimmed) != nil { return false }
+
+        let lines = trimmed.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n")
+        if lines.count == 2 && lines[0].hasPrefix("# ") && CronAndPathHelper.explainCronExpression(lines[1]) != nil {
+            return false
         }
+
+        var score = 0
+        let fullRange = NSRange(trimmed.startIndex..<trimmed.endIndex, in: trimmed)
+        let boldCount = mdBoldStarRegex.numberOfMatches(in: trimmed, range: fullRange)
+            + mdBoldUnderRegex.numberOfMatches(in: trimmed, range: fullRange)
+        score += boldCount * 2
+        score += mdLinkRegex.numberOfMatches(in: trimmed, range: fullRange) * 2
+        score += mdStrikeRegex.numberOfMatches(in: trimmed, range: fullRange) * 2
+        if mdInlineCodeRegex.firstMatch(in: trimmed, range: fullRange) != nil {
+            score += 1
+        }
+
+        var fenceCount = 0
+        for line in lines {
+            let lr = NSRange(line.startIndex..<line.endIndex, in: line)
+            if line.trimmingCharacters(in: .whitespaces).hasPrefix("```") {
+                fenceCount += 1
+                continue
+            }
+            if let m = mdHeadingLineRegex.firstMatch(in: line, range: lr),
+               let hashesRange = Range(m.range(at: 2), in: line) {
+                score += (line[hashesRange].count >= 2) ? 2 : 1
+            } else if mdUnorderedListRegex.firstMatch(in: line, range: lr) != nil {
+                score += 1
+            } else if mdBlockquoteRegex.firstMatch(in: line, range: lr) != nil {
+                score += 1
+            }
+        }
+        if fenceCount >= 2 { score += 2 }
+        return score >= 2
+    }
+
+    static func stripMarkdownToCleanText(_ rawText: String) -> String? {
+        let normalized = rawText
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        let lines = normalized.components(separatedBy: "\n")
+        var outLines: [String] = []
+        outLines.reserveCapacity(lines.count)
+        var inFence = false
+
+        for rawLine in lines {
+            if rawLine.trimmingCharacters(in: .whitespaces).hasPrefix("```") {
+                inFence.toggle()
+                continue
+            }
+            if inFence {
+                outLines.append(rawLine)
+                continue
+            }
+
+            var line = rawLine
+            let fullLineRange = { NSRange(line.startIndex..<line.endIndex, in: line) }
+            if mdHrRegex.firstMatch(in: line, range: fullLineRange()) != nil {
+                outLines.append("")
+                continue
+            }
+            line = mdBlockquoteRegex.stringByReplacingMatches(in: line, range: fullLineRange(), withTemplate: "$1")
+            line = mdHeadingStripRegex.stringByReplacingMatches(in: line, range: fullLineRange(), withTemplate: "$1")
+            if mdTaskUncheckedRegex.firstMatch(in: line, range: fullLineRange()) != nil {
+                line = mdTaskUncheckedRegex.stringByReplacingMatches(in: line, range: fullLineRange(), withTemplate: "$1☐ ")
+            } else if mdTaskCheckedRegex.firstMatch(in: line, range: fullLineRange()) != nil {
+                line = mdTaskCheckedRegex.stringByReplacingMatches(in: line, range: fullLineRange(), withTemplate: "$1☑ ")
+            } else {
+                line = mdUnorderedListRegex.stringByReplacingMatches(in: line, range: fullLineRange(), withTemplate: "$1• ")
+            }
+
+            // 图片语法 ![alt](url)
+            let imgMatches = mdImageRegex.matches(in: line, range: fullLineRange())
+            for m in imgMatches.reversed() {
+                guard let fullR = Range(m.range, in: line),
+                      let altR = Range(m.range(at: 1), in: line) else { continue }
+                let alt = line[altR].trimmingCharacters(in: .whitespaces)
+                line.replaceSubrange(fullR, with: alt.isEmpty ? "" : "[图片: \(alt)]")
+            }
+
+            // 链接语法 [title](https://...)
+            let linkMatches = mdLinkRegex.matches(in: line, range: fullLineRange())
+            for m in linkMatches.reversed() {
+                guard let fullR = Range(m.range, in: line),
+                      let titleR = Range(m.range(at: 1), in: line),
+                      let urlR = Range(m.range(at: 2), in: line) else { continue }
+                let label = line[titleR].trimmingCharacters(in: .whitespaces)
+                let url = String(line[urlR])
+                line.replaceSubrange(fullR, with: (label == url || label.isEmpty) ? url : "\(label) (\(url))")
+            }
+
+            line = mdBoldStarRegex.stringByReplacingMatches(in: line, range: fullLineRange(), withTemplate: "$1")
+            line = mdBoldUnderRegex.stringByReplacingMatches(in: line, range: fullLineRange(), withTemplate: "$1")
+            line = mdStrikeRegex.stringByReplacingMatches(in: line, range: fullLineRange(), withTemplate: "$1")
+            line = mdInlineCodeRegex.stringByReplacingMatches(in: line, range: fullLineRange(), withTemplate: "$1")
+            outLines.append(line)
+        }
+
+        var joined = outLines.joined(separator: "\n")
+        joined = mdMultiBlankRegex.stringByReplacingMatches(
+            in: joined,
+            range: NSRange(joined.startIndex..<joined.endIndex, in: joined),
+            withTemplate: "\n\n"
+        )
+        let cleaned = joined.trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned.isEmpty ? nil : cleaned
     }
 
     // MARK: - PDF 断行愈合核心算法

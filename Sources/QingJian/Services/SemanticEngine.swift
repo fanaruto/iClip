@@ -708,32 +708,35 @@ enum SemanticEngine {
             }
         }
 
-        // 7. Base64 可读文本解码检测
+        // 7. Base64（含 URL-Safe）可读文本安全解码检测（内联剥除隐藏 Trojan Bidi / 终端控制符，阻断 Base64 Smuggling 投毒）
         if primaryKind == nil,
            trimmed.count >= 12, trimmed.count <= 4096,
-           trimmed.count % 4 == 0,
            !trimmed.contains(" "), !trimmed.contains("\n"),
-           trimmed.range(of: #"^[A-Za-z0-9+/]+={0,2}$"#, options: .regularExpression) != nil,
-           let decodedData = Data(base64Encoded: trimmed),
-           let decodedStr = String(data: decodedData, encoding: .utf8) {
-            let cleanDecoded = decodedStr.trimmingCharacters(in: .whitespacesAndNewlines)
+           trimmed.range(of: #"^[A-Za-z0-9+/_-]+={0,2}$"#, options: .regularExpression) != nil,
+           let decodedData = Self.decodeStandardOrURLSafeBase64(trimmed),
+           let rawDecodedStr = String(data: decodedData, encoding: .utf8) {
+            let hadPoison = ClipboardPoisonGuard.inspect(rawDecodedStr) != nil
+            let safeDecoded = hadPoison ? ClipboardPoisonGuard.sanitize(rawDecodedStr) : rawDecodedStr
+            let cleanDecoded = safeDecoded.trimmingCharacters(in: .whitespacesAndNewlines)
             if cleanDecoded.count >= 3, isMostlyPrintableText(cleanDecoded) {
                 primaryKind = .base64
                 actions.append(TransformAction(
                     id: "base64-decode",
-                    title: "Base64 解码",
+                    title: hadPoison ? "Base64 安全解码" : "Base64 解码",
                     symbolName: "lock.open",
-                    isSecurityAction: false,
-                    resultText: decodedStr,
-                    toastText: "已解码 Base64 文本并键入"
+                    isSecurityAction: hadPoison,
+                    resultText: safeDecoded,
+                    toastText: hadPoison ? "已解码 Base64 并剥除暗藏毒字符" : "已解码 Base64 文本并键入"
                 ))
             }
         }
 
-        // 8. PDF 跨行断句愈合与中英间距美化 vs 多行数据列转换（SQL IN / JSON 数组）
+        // 8. Markdown 去符号纯文本 / PDF 跨行断句愈合与中英间距美化 vs 多行数据列转换
         if raw.utf8.count <= 32_768 && primaryKind == nil {
             let docActions = DocumentTypographyEngine.analyze(raw)
-            if DocumentTypographyEngine.looksLikeBrokenPDFParagraphs(raw), !docActions.isEmpty {
+            let hasMarkdownOrPDF = DocumentTypographyEngine.looksLikeMarkdownDocument(raw)
+                || DocumentTypographyEngine.looksLikeBrokenPDFParagraphs(raw)
+            if hasMarkdownOrPDF, !docActions.isEmpty {
                 primaryKind = .pdfTypography
                 for da in docActions {
                     actions.append(TransformAction(
@@ -1086,6 +1089,16 @@ enum SemanticEngine {
             base64 += String(repeating: "=", count: 4 - remainder)
         }
         return Data(base64Encoded: base64)
+    }
+
+    private static func decodeStandardOrURLSafeBase64(_ input: String) -> Data? {
+        if input.count % 4 == 0, let d = Data(base64Encoded: input) {
+            return d
+        }
+        if input.contains("-") || input.contains("_") {
+            return decodeBase64URL(input)
+        }
+        return nil
     }
 
     private static func numericEpochSeconds(from raw: Any?) -> TimeInterval? {
