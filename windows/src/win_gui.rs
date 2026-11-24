@@ -8110,12 +8110,13 @@ fn layout_and_draw_highlights_overlay(
     let mx = (w - mw) / 2;
     let my = (h - mh) / 2;
 
-    canvas.fill_soft_shadow(
+    canvas.draw_soft_shadow_round_rect(
         mx,
-        my + s(6),
+        my,
         mw,
         mh,
         sf(20.0),
+        sf(6.0),
         sf(18.0),
         Color4::rgba(0, 0, 0, if st.is_dark_mode { 98 } else { 42 }),
     );
@@ -8135,7 +8136,7 @@ fn layout_and_draw_highlights_overlay(
             bottom: my + s(46),
         },
         color: palette.text_primary,
-        font_kind: FontKind::Title,
+        font_kind: FontKind::Headline,
         flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     });
     texts.push(TextDrawCmd {
