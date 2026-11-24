@@ -804,6 +804,27 @@ pub fn run_windows_self_test() -> Result<(), String> {
                 rh as u32,
                 &dark_settings,
             );
+
+            // 额外补拍设置页下半屏（验证 Ctrl+E 微键帽与紧凑物理热键录制胶囊）
+            state.settings_scroll_px = 180;
+            let dark_settings_scrolled = render_to_dib_and_capture(
+                screen_dc,
+                rw,
+                rh,
+                2.0,
+                &mut state,
+                Some(Color4::rgb(16, 22, 36)),
+            )?;
+            save_rgba_png(
+                &dir.join(format!(
+                    "preview-{}-dark-settings-scrolled.png",
+                    ClipboardStore::edition_key()
+                )),
+                rw as u32,
+                rh as u32,
+                &dark_settings_scrolled,
+            );
+            state.settings_scroll_px = 0;
         }
 
         ReleaseDC(hwnd, screen_dc);
@@ -6299,13 +6320,13 @@ fn layout_and_draw_main_view(
                             palette.glass_top_highlight,
                             palette.select_border,
                         );
-                        // 左侧 3px 圆头品牌电光钴蓝精选指示条
-                        let ind_h = (card_h - s(22)).max(s(20));
+                        // 左侧 3px 圆头品牌电光钴蓝精选指示条（上下收紧至卡片高度 58%，远离卡片外圆角拐点）
+                        let ind_h = ((card_h as f32) * 0.58).round() as i32;
                         canvas.fill_round_rect(
                             pad + s(1),
                             cur_y + (card_h - ind_h) / 2,
                             s(3),
-                            ind_h,
+                            ind_h.max(s(22)),
                             sf(1.5),
                             palette.select_indicator,
                         );
@@ -6853,10 +6874,10 @@ fn layout_and_draw_main_view(
                         for (a_idx, act) in quick_actions.iter().enumerate() {
                             let label = act.title.clone();
                             let is_primary_chip = a_idx == 0;
-                            let txt_w = estimate_text_px(&label, sf(11.2));
-                            let extra_key_w = if is_primary_chip { s(16) } else { 0 };
+                            let txt_w = estimate_text_px(&label, sf(10.4));
+                            let extra_key_w = if is_primary_chip { s(22) } else { 0 };
                             let cw =
-                                (s(22) + txt_w + extra_key_w + s(8)).min(w - pad - chip_x - s(10));
+                                (s(21) + txt_w + extra_key_w + s(7)).min(w - pad - chip_x - s(10));
                             if cw < s(52) {
                                 break;
                             }
@@ -6930,14 +6951,14 @@ fn layout_and_draw_main_view(
                                 bolt_c,
                             );
                             let text_right = if is_primary_chip {
-                                chip_x + cw - s(20)
+                                chip_x + cw - s(26)
                             } else {
                                 chip_x + cw - s(8)
                             };
                             texts.push(TextDrawCmd {
                                 text: label,
                                 rect: RECT {
-                                    left: chip_x + s(20),
+                                    left: chip_x + s(19),
                                     top: chip_top,
                                     right: text_right,
                                     bottom: chip_top + chip_h,
@@ -6950,14 +6971,23 @@ fn layout_and_draw_main_view(
                                 },
                                 flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                             });
-                            // 首枚胶囊右侧用像素对齐矢量回车图标替代歪斜 Unicode `⇧↵`
+                            // 首枚胶囊右侧绘制像素对齐矢量 Shift + Enter 双图标，与底栏 [⇧ ↵] 转换 100% 语义统一
                             if is_primary_chip && cw >= s(72) {
+                                let icy = (chip_top + chip_h / 2) as f32;
+                                let key_c = chip_fg.with_alpha(210);
+                                canvas.draw_icon_shift_arrow(
+                                    (chip_x + cw - s(19)) as f32,
+                                    icy,
+                                    sf(8.2),
+                                    sf(1.18),
+                                    key_c,
+                                );
                                 canvas.draw_icon_return_arrow(
-                                    (chip_x + cw - s(11)) as f32,
-                                    (chip_top + chip_h / 2) as f32,
-                                    sf(8.8),
-                                    sf(1.25),
-                                    chip_fg.with_alpha(205),
+                                    (chip_x + cw - s(10)) as f32,
+                                    icy,
+                                    sf(8.4),
+                                    sf(1.22),
+                                    key_c,
                                 );
                             }
                             st.hit_regions.push(HitRegion {
@@ -7347,7 +7377,7 @@ fn layout_and_draw_settings_view(
             ),
             OtaState::UpToDate { latest } => (
                 format!("iClip v{latest} · 已是最新"),
-                "当前为最新原生版本 · 启动时后台自动静默检测".to_string(),
+                "已是最新原生版 · 启动时后台静默检测".to_string(),
                 "检查更新".to_string(),
                 false,
                 Some(HitAction::CheckForUpdates),
@@ -7489,7 +7519,7 @@ fn layout_and_draw_settings_view(
         }
 
         let txt_left = ic_x + ic_box + s(11);
-        let txt_right = ob_x - s(10);
+        let txt_right = ob_x - s(16);
         texts.push(TextDrawCmd {
             text: ota_title,
             rect: RECT {
@@ -7589,7 +7619,7 @@ fn layout_and_draw_settings_view(
                 bottom: y + s(30),
             },
             color: palette.text_secondary,
-            font_kind: FontKind::Mono,
+            font_kind: FontKind::Meta,
             flags: DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
         });
 
@@ -7693,7 +7723,7 @@ fn layout_and_draw_settings_view(
                     right: cx_a + s(20),
                     bottom: lbl_y + s(15),
                 },
-                color: palette.text_muted,
+                color: palette.text_secondary,
                 font_kind: FontKind::Meta,
                 flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
             });
@@ -8546,6 +8576,47 @@ fn layout_and_draw_settings_view(
     let total_content_h = (y + st.settings_scroll_px) - view_top;
     let visible_h = (view_bottom - view_top).max(1);
     st.settings_max_scroll_px = (total_content_h - visible_h).max(0);
+
+    // 若设置页下方尚有可滚动内容，绘制原生极细悬浮滚动条与底部轻柔渐隐过渡，彻底告别硬切感
+    if st.settings_max_scroll_px > 0 {
+        let track_h_sb = (view_bottom - view_top - s(8)).max(s(40));
+        let thumb_h = ((visible_h as f32 / total_content_h.max(1) as f32) * track_h_sb as f32)
+            .round()
+            .clamp(sf(34.0), (track_h_sb - s(16)) as f32) as i32;
+        let scroll_ratio = (st.settings_scroll_px as f32 / st.settings_max_scroll_px as f32)
+            .clamp(0.0, 1.0);
+        let thumb_y = view_top + s(4) + ((track_h_sb - thumb_h) as f32 * scroll_ratio).round() as i32;
+        let sb_w = s(3);
+        let sb_x = w - s(6);
+        canvas.fill_round_rect(
+            sb_x,
+            thumb_y,
+            sb_w,
+            thumb_h,
+            sf(1.5),
+            palette.text_muted.with_alpha(if st.is_dark_mode { 115 } else { 95 }),
+        );
+        if st.settings_scroll_px < st.settings_max_scroll_px - s(4) {
+            let fade_h = s(18);
+            let fade_top = Color4::rgba(palette.window_bg.r, palette.window_bg.g, palette.window_bg.b, 0);
+            let fade_bot = Color4::rgba(
+                palette.window_bg.r,
+                palette.window_bg.g,
+                palette.window_bg.b,
+                if st.is_dark_mode { 228 } else { 232 },
+            );
+            canvas.fill_vgrad_round_rect(
+                pad,
+                view_bottom - fade_h,
+                content_w,
+                fade_h + s(4),
+                sf(8.0),
+                fade_top,
+                fade_bot,
+            );
+        }
+    }
+
     (scroll_text_start, view_top, view_bottom)
 }
 
@@ -8711,9 +8782,9 @@ fn layout_and_draw_toast_pill(
 
     let can_undo = st.store.has_active_undo(now_unix_secs())
         && (msg.contains("删除") || msg.contains("清空") || msg.contains("Ctrl+Z"));
-    let text_w = (estimate_text_px(msg, sf(11.5)) + s(32)).clamp(s(140), w - s(36));
+    let text_w = (estimate_text_px(msg, sf(13.8)) + s(34)).clamp(s(148), w - s(24));
     let pill_w = if can_undo {
-        (text_w + s(52)).min(w - s(28))
+        (text_w + s(54)).min(w - s(20))
     } else {
         text_w
     };

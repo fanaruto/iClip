@@ -1884,11 +1884,11 @@ impl<'a> PixelCanvas<'a> {
             self.fill_circle(
                 tx,
                 tick_y,
-                (track_h as f32 * if active { 0.42 } else { 0.30 }).max(1.3),
+                (track_h as f32 * if active { 0.44 } else { 0.34 }).max(1.5),
                 if active {
                     accent
                 } else {
-                    Color4::rgba(148, 163, 184, 132)
+                    Color4::rgba(164, 178, 198, 196)
                 },
             );
         }
