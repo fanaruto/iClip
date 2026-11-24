@@ -846,7 +846,7 @@ final class ClipboardStore: ObservableObject {
     /// 清理超过指定存活窗口（默认 24 小时）的未收藏、非待办高敏凭据（API Key / 私钥 / 连接密码 / 身份证 / 银行卡 / 含敏截图）
     @discardableResult
     func purgeExpiredUnpinnedSecrets(now: Date = Date(), maxAgeSeconds: TimeInterval = 86_400) -> Int {
-        guard autoExpireUnpinnedSecrets, !minimalModeEnabled else { return 0 }
+        guard autoExpireUnpinnedSecrets else { return 0 }
         var kept: [ClipItem] = []
         kept.reserveCapacity(items.count)
         var purged: [ClipItem] = []
@@ -1592,12 +1592,20 @@ final class ClipboardStore: ObservableObject {
         return String(decoding: utf8[..<idx], as: UTF8.self)
     }
 
-    /// 自动二维码解码安全出口决议：若二维码内容为 `otpauth://` 2FA 密钥，绝不裸写根密钥到剪贴板，改为直算 6 位动态码 + 30s 自动擦除
+    /// 自动二维码解码安全出口决议：支持 `otpauth://` 直算 2FA 动态码、`WIFI:` 直提纯密码（均 30s 自动擦除）并内联剥除隐藏毒字符
     nonisolated static func resolveSafeAutoQRCodeOutput(
         for qr: String,
         date: Date = Date()
     ) -> (outputText: String, isSensitiveOrEphemeral: Bool, scrubDelay: TimeInterval, toastText: String) {
-        if let totp = TOTPAuthenticator.evaluate(uri: qr, timestampSeconds: Int64(date.timeIntervalSince1970)) {
+        let sanitizedQR: String = {
+            let noNull = qr.replacingOccurrences(of: "\0", with: "")
+            if case .pastejackingOrBidi = ClipboardPoisonGuard.inspect(noNull) {
+                let clean = ClipboardPoisonGuard.sanitize(noNull)
+                return clean.isEmpty ? noNull : clean
+            }
+            return noNull
+        }()
+        if let totp = TOTPAuthenticator.evaluate(uri: sanitizedQR, timestampSeconds: Int64(date.timeIntervalSince1970)) {
             return (
                 outputText: totp.code,
                 isSensitiveOrEphemeral: true,
@@ -1605,9 +1613,18 @@ final class ClipboardStore: ObservableObject {
                 toastText: "已从二维码直算 2FA 动态码 \(totp.formattedCode)（30s后自动擦除）"
             )
         }
-        let isSens = SensitiveCredentialVeil.classify(qr) != nil
+        if let wifi = UniversalEscapeDecoder.parseWiFiQRCode(sanitizedQR) {
+            let ssidHint = wifi.ssid.isEmpty ? "" : "「\(wifi.ssid)」"
+            return (
+                outputText: wifi.password,
+                isSensitiveOrEphemeral: true,
+                scrubDelay: 30.0,
+                toastText: "已从二维码提取\(ssidHint) Wi-Fi 密码（30s后自动擦除）"
+            )
+        }
+        let isSens = SensitiveCredentialVeil.classify(sanitizedQR) != nil
         return (
-            outputText: qr,
+            outputText: sanitizedQR,
             isSensitiveOrEphemeral: isSens,
             scrubDelay: 45.0,
             toastText: LearnedAutoRuleKind.extractQRCode.shortToast
@@ -2171,8 +2188,8 @@ final class ClipboardStore: ObservableObject {
         }
         #endif
 
-        // 终端粘贴劫持（Pastejacking / Trojan Bidi）实时主动防御：目标窗口为终端且剪贴含高危隐藏控制符时自动剥离
-        if !minimalModeEnabled && !forceRawSecret,
+        // 终端粘贴劫持（Pastejacking / Trojan Bidi）实时主动防御：无论是否开启极简界面，目标窗口为终端且含高危隐藏控制符时一律强制剥离
+        if !forceRawSecret,
            let raw = item.text,
            case .pastejackingOrBidi = item.detectedPoisonThreat,
            ClipboardPoisonGuard.isTerminalApp(activeTargetAppName) {
@@ -2333,10 +2350,9 @@ final class ClipboardStore: ObservableObject {
         copyAndOptionallyPaste(item, plainTextOnly: true, shouldAutoPaste: false, onBeforePaste: nil)
     }
 
-    /// 针对一次性验证码条目在粘贴后启动 30 秒无痕清理倒计时（极简模式或已固定记录绝不误删）
+    /// 针对一次性验证码条目在粘贴后启动 30 秒无痕清理倒计时（已固定收藏记录绝不误删，极简界面下依然保持隐私保护）
     func scheduleOTPAutoExpireIfNeeded(for item: ClipItem, delaySeconds: TimeInterval = 30.0) {
-        guard !minimalModeEnabled,
-              autoExpireOTP,
+        guard autoExpireOTP,
               !item.isPinned,
               item.type == .text,
               let raw = item.text,
@@ -2350,8 +2366,7 @@ final class ClipboardStore: ObservableObject {
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.pendingOTPExpirationTasks.removeValue(forKey: targetID)
-            guard !self.minimalModeEnabled,
-                  self.autoExpireOTP,
+            guard self.autoExpireOTP,
                   let current = self.items.first(where: { $0.id == targetID }),
                   !current.isPinned else {
                 return
@@ -3866,7 +3881,21 @@ final class ClipboardStore: ObservableObject {
             )
         }
         if analyzed.count < 3, raw.utf8.count <= 32_768 {
+            if let wifi = UniversalEscapeDecoder.parseWiFiQRCode(raw) {
+                let lbl = wifi.ssid.isEmpty ? "提取 Wi-Fi 密码" : "Wi-Fi 密码 · \(wifi.ssid)"
+                analyzed.insert(
+                    FinanceQuickAction(
+                        id: "wifi-extract-password",
+                        title: lbl,
+                        symbolName: "wifi",
+                        resultText: wifi.password,
+                        toastText: "已提取纯 Wi-Fi 密码（本机隔离保护）"
+                    ),
+                    at: 0
+                )
+            }
             let qjActs = UniversalEscapeDecoder.analyzeQueryJSONBridge(raw)
+                + UniversalEscapeDecoder.analyzeKeyValueBlockToJSON(raw)
             for qa in qjActs where analyzed.count < 3 {
                 analyzed.append(
                     FinanceQuickAction(
@@ -4487,6 +4516,18 @@ final class ClipboardStore: ObservableObject {
             pasteEphemeralSecret(
                 totp.code,
                 toast: "已从二维码算出 2FA 动态码 \(totp.formattedCode)（剩 \(totp.remainingSeconds)s · 30s 后擦除）",
+                scrubDelaySeconds: sourceItem.isBurnAfterPaste ? 5.0 : 30.0,
+                shouldAutoPaste: shouldAutoPaste,
+                onBeforePaste: onBeforePaste
+            )
+            return
+        }
+        if isQRCode && !isExternalAI, let wifi = UniversalEscapeDecoder.parseWiFiQRCode(text) {
+            scheduleBurnAfterPasteIfNeeded(for: sourceItem, delaySeconds: 5.0)
+            let ssidHint = wifi.ssid.isEmpty ? "" : "「\(wifi.ssid)」"
+            pasteEphemeralSecret(
+                wifi.password,
+                toast: "已从二维码提取\(ssidHint)纯 Wi-Fi 密码（30s 后自动擦除）",
                 scrubDelaySeconds: sourceItem.isBurnAfterPaste ? 5.0 : 30.0,
                 shouldAutoPaste: shouldAutoPaste,
                 onBeforePaste: onBeforePaste

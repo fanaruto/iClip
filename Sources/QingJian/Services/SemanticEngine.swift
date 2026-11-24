@@ -575,15 +575,33 @@ enum SemanticEngine {
             ))
         }
 
-        // 4.4 URL 参数串 / 表单 Query ↔ 扁平 JSON 双向破壁
+        if !trimmed.contains("\n"), trimmed.utf8.count <= 1024,
+           let wifi = UniversalEscapeDecoder.parseWiFiQRCode(trimmed) {
+            let lbl = wifi.ssid.isEmpty ? "提取 Wi-Fi 密码" : "Wi-Fi 密码 · \(wifi.ssid)"
+            actions.insert(
+                TransformAction(
+                    id: "wifi-extract-password",
+                    title: lbl,
+                    symbolName: "wifi",
+                    isSecurityAction: true,
+                    resultText: wifi.password,
+                    toastText: "已提取纯 Wi-Fi 密码并启用本机隐私隔离"
+                ),
+                at: 0
+            )
+        }
+
+        // 4.4 URL 参数串 / 表单 Query / .env & HTTP Headers ↔ JSON 双向破壁
         if actions.count < 3, raw.utf8.count <= 32_768 {
             let qjActs = UniversalEscapeDecoder.analyzeQueryJSONBridge(raw)
+                + UniversalEscapeDecoder.analyzeKeyValueBlockToJSON(raw)
+            let hasSec = SensitiveCredentialVeil.classify(raw) != nil
             for qa in qjActs where actions.count < 3 {
                 actions.append(TransformAction(
                     id: qa.id,
                     title: qa.title,
                     symbolName: qa.symbolName,
-                    isSecurityAction: false,
+                    isSecurityAction: hasSec,
                     resultText: qa.resultText,
                     toastText: qa.toastText
                 ))

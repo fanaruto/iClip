@@ -4204,6 +4204,173 @@ pub fn analyze_query_json_bridge(raw: &str) -> Vec<(&'static str, String, String
     )]
 }
 
+/// 解析标准 `WIFI:T:WPA;S:MyNet;P:SecretPass;;` 二维码/分享串（支持 ZXing 反斜杠 `\;` `\:` `\\` 转义还原）
+pub fn parse_wifi_qr_payload(raw: &str) -> Option<(String, String)> {
+    let trimmed = raw.trim();
+    if !(10..=1024).contains(&trimmed.len()) {
+        return None;
+    }
+    let head = trimmed.as_bytes().get(..5)?;
+    if !head.eq_ignore_ascii_case(b"WIFI:") {
+        return None;
+    }
+    let body = &trimmed[5..];
+    let mut fields: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut escaped = false;
+    for ch in body.chars() {
+        if escaped {
+            cur.push(ch);
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == ';' {
+            fields.push(std::mem::take(&mut cur));
+        } else {
+            cur.push(ch);
+        }
+    }
+    if !cur.is_empty() {
+        fields.push(cur);
+    }
+
+    let mut ssid = String::new();
+    let mut password = String::new();
+    for field in fields {
+        if field.is_empty() {
+            continue;
+        }
+        let Some((k, v)) = field.split_once(':') else {
+            continue;
+        };
+        if k.eq_ignore_ascii_case("S") {
+            ssid = sanitize_decoded_output(&v.replace('\0', ""));
+        } else if k.eq_ignore_ascii_case("P") {
+            password = sanitize_decoded_output(&v.replace('\0', ""));
+        }
+    }
+    if password.is_empty() {
+        return None;
+    }
+    Some((ssid, password))
+}
+
+/// 将多行 `.env` 环境变量块（`KEY=VAL`）或 HTTP 请求头块（`Header-Name: val`）一键转为标准缩进 JSON 对象
+pub fn analyze_kv_block_to_json(raw: &str) -> Vec<(&'static str, String, String, String)> {
+    if !raw.contains('\n') || raw.len() > 32_768 {
+        return Vec::new();
+    }
+    let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
+    let trimmed = normalized.trim();
+    if trimmed.starts_with('{') || trimmed.starts_with('[') || trimmed.contains("```") {
+        return Vec::new();
+    }
+
+    let lines: Vec<&str> = trimmed
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with("//"))
+        .collect();
+    if !(2..=120).contains(&lines.len()) {
+        return Vec::new();
+    }
+
+    // 模式 1：.env 环境变量块
+    let mut env_map = serde_json::Map::new();
+    let mut all_env = true;
+    for line in &lines {
+        let work = line
+            .strip_prefix("export ")
+            .map(str::trim)
+            .unwrap_or(*line);
+        let Some((rk, rv)) = work.split_once('=') else {
+            all_env = false;
+            break;
+        };
+        let k = rk.trim();
+        let mut v = rv.trim();
+        let valid_key = !k.is_empty()
+            && k.len() <= 96
+            && k.bytes()
+                .next()
+                .map(|b| b.is_ascii_alphabetic() || b == b'_')
+                .unwrap_or(false)
+            && k.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.'));
+        if !valid_key {
+            all_env = false;
+            break;
+        }
+        if ((v.starts_with('"') && v.ends_with('"')) || (v.starts_with('\'') && v.ends_with('\'')))
+            && v.len() >= 2
+        {
+            v = &v[1..v.len() - 1];
+        }
+        let clean_v = sanitize_decoded_output(&v.replace('\0', ""));
+        env_map.insert(k.to_string(), serde_json::Value::String(clean_v));
+    }
+
+    if all_env && env_map.len() >= 2 {
+        let cnt = env_map.len();
+        if let Ok(json_str) = serde_json::to_string_pretty(&serde_json::Value::Object(env_map)) {
+            return vec![(
+                "kv-to-json",
+                format!("转 JSON 对象({cnt}项)"),
+                json_str,
+                format!("已将 {cnt} 项环境变量转为标准 JSON 对象"),
+            )];
+        }
+    }
+
+    // 模式 2：多行 HTTP Headers
+    let start_idx = usize::from(
+        lines[0].starts_with("GET ")
+            || lines[0].starts_with("POST ")
+            || lines[0].starts_with("PUT ")
+            || lines[0].starts_with("DELETE ")
+            || lines[0].starts_with("HTTP/"),
+    );
+    let hdr_lines = &lines[start_idx..];
+    if hdr_lines.len() < 2 {
+        return Vec::new();
+    }
+    let mut hdr_map = serde_json::Map::new();
+    let mut all_hdr = true;
+    for line in hdr_lines {
+        let Some((rk, rv)) = line.split_once(':') else {
+            all_hdr = false;
+            break;
+        };
+        let k = rk.trim();
+        let v = rv.trim();
+        let valid_hdr = (2..=64).contains(&k.len())
+            && !v.is_empty()
+            && k.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+            && k.bytes().any(|b| b.is_ascii_alphabetic());
+        if !valid_hdr {
+            all_hdr = false;
+            break;
+        }
+        let clean_v = sanitize_decoded_output(&v.replace('\0', ""));
+        hdr_map.insert(k.to_string(), serde_json::Value::String(clean_v));
+    }
+
+    if all_hdr && hdr_map.len() >= 2 {
+        let cnt = hdr_map.len();
+        if let Ok(json_str) = serde_json::to_string_pretty(&serde_json::Value::Object(hdr_map)) {
+            return vec![(
+                "kv-to-json",
+                format!("Headers 转 JSON({cnt}项)"),
+                json_str,
+                format!("已将 {cnt} 个 HTTP 请求头转为标准 JSON 对象"),
+            )];
+        }
+    }
+
+    Vec::new()
+}
+
 fn percent_encode_rfc3986(input: &str) -> String {
     let mut out = String::with_capacity(input.len() + 8);
     for &b in input.as_bytes() {

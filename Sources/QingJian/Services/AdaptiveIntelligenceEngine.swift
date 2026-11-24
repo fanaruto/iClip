@@ -659,6 +659,23 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
                         )
                     )
                 }
+                if let wifi = UniversalEscapeDecoder.parseWiFiQRCode(qr) {
+                    let shortTitle = wifi.ssid.isEmpty ? "提取 Wi-Fi 密码" : "Wi-Fi 密码 · \(wifi.ssid)"
+                    return AdaptiveSparkCandidate(
+                        actionID: "img-wifi-password",
+                        categoryKey: "qrcode",
+                        sourceApp: item.sourceAppName,
+                        symbolName: "wifi",
+                        shortTitle: shortTitle,
+                        badgeHint: "免扫直连",
+                        promotableRule: nil,
+                        payload: .replaceClipboardText(
+                            text: wifi.password,
+                            htmlTable: nil,
+                            toast: "已提取纯 Wi-Fi 密码（30s后自动擦除）"
+                        )
+                    )
+                }
                 let isWeb = ClipboardStore.isValidWebURL(qr)
                 let promo = promotableRuleIfEligible(forActionID: "img-qrcode")
                 return AdaptiveSparkCandidate(
@@ -829,7 +846,7 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
         }
         #if !ICLIP_EDITION_FLOW
         let snap = SemanticEngine.analyze(item)
-        let sparkEligible = snap.actions.filter { $0.id != "query-to-json" && $0.id != "json-to-query" }
+        let sparkEligible = snap.actions.filter { $0.id != "query-to-json" && $0.id != "json-to-query" && $0.id != "kv-to-json" }
         let ranked = rankActions(sparkEligible, idOf: \.id, sourceApp: item.sourceAppName)
         if let top = ranked.first {
             let cat = Self.categoryKey(forActionID: top.id)

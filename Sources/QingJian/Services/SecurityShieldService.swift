@@ -3675,6 +3675,150 @@ enum UniversalEscapeDecoder {
             )
         ]
     }
+
+    struct WiFiCredentials: Equatable {
+        let ssid: String
+        let password: String
+    }
+
+    /// 解析标准 `WIFI:T:WPA;S:MyNet;P:SecretPass;;` 二维码/分享串（支持 ZXing 反斜杠 `\;` `\:` `\\` 转义还原）
+    static func parseWiFiQRCode(_ raw: String) -> WiFiCredentials? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count >= 10, trimmed.utf8.count <= 1024,
+              trimmed.uppercased().hasPrefix("WIFI:") else {
+            return nil
+        }
+        let body = String(trimmed.dropFirst(5))
+        var fields: [String] = []
+        var cur = ""
+        var escaped = false
+        for ch in body {
+            if escaped {
+                cur.append(ch)
+                escaped = false
+            } else if ch == "\\" {
+                escaped = true
+            } else if ch == ";" {
+                fields.append(cur)
+                cur = ""
+            } else {
+                cur.append(ch)
+            }
+        }
+        if !cur.isEmpty { fields.append(cur) }
+
+        var ssid = ""
+        var password = ""
+        for field in fields where !field.isEmpty {
+            guard let colon = field.firstIndex(of: ":") else { continue }
+            let key = field[..<colon].uppercased()
+            let val = String(field[field.index(after: colon)...])
+            if key == "S" {
+                ssid = sanitizeDecodedOutput(val.replacingOccurrences(of: "\0", with: ""))
+            } else if key == "P" {
+                password = sanitizeDecodedOutput(val.replacingOccurrences(of: "\0", with: ""))
+            }
+        }
+        guard !password.isEmpty else { return nil }
+        return WiFiCredentials(ssid: ssid, password: password)
+    }
+
+    /// 将多行 `.env` 环境变量块（`KEY=VAL`）或 HTTP 请求头块（`Header-Name: val`）一键转为标准缩进 JSON 对象
+    static func analyzeKeyValueBlockToJSON(_ raw: String) -> [ListBatchConversionAction] {
+        guard raw.contains("\n"), raw.utf8.count <= 32_768 else { return [] }
+        let normalized = raw.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+        let trimmed = normalized.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.hasPrefix("{"), !trimmed.hasPrefix("["), !trimmed.contains("```") else { return [] }
+
+        let lines = trimmed.components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && !$0.hasPrefix("#") && !$0.hasPrefix("//") }
+        guard lines.count >= 2, lines.count <= 120 else { return [] }
+
+        // 模式 1：.env 环境变量块（全部有效行均为 `[export ]KEY=VALUE`）
+        var envMap: [String: String] = [:]
+        var allEnv = true
+        for line in lines {
+            var work = line
+            if work.hasPrefix("export ") {
+                work = String(work.dropFirst(7)).trimmingCharacters(in: .whitespaces)
+            }
+            guard let eqIdx = work.firstIndex(of: "=") else {
+                allEnv = false
+                break
+            }
+            let k = work[..<eqIdx].trimmingCharacters(in: .whitespaces)
+            var v = work[work.index(after: eqIdx)...].trimmingCharacters(in: .whitespaces)
+            guard !k.isEmpty, k.count <= 96,
+                  let firstScalar = k.unicodeScalars.first,
+                  (CharacterSet.letters.contains(firstScalar) || firstScalar == "_"),
+                  k.unicodeScalars.allSatisfy({ CharacterSet.alphanumerics.contains($0) || $0 == "_" || $0 == "." }) else {
+                allEnv = false
+                break
+            }
+            if (v.hasPrefix("\"") && v.hasSuffix("\"") && v.count >= 2) ||
+               (v.hasPrefix("'") && v.hasSuffix("'") && v.count >= 2) {
+                v = String(v.dropFirst().dropLast())
+            }
+            envMap[k] = sanitizeDecodedOutput(v.replacingOccurrences(of: "\0", with: ""))
+        }
+
+        if allEnv && envMap.count >= 2,
+           let jsonData = try? JSONSerialization.data(withJSONObject: envMap, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]),
+           let jsonStr = String(data: jsonData, encoding: .utf8) {
+            return [
+                ListBatchConversionAction(
+                    id: "kv-to-json",
+                    title: "转 JSON 对象(\(envMap.count)项)",
+                    symbolName: "curlybraces",
+                    resultText: jsonStr,
+                    toastText: "已将 \(envMap.count) 项环境变量转为标准 JSON 对象"
+                )
+            ]
+        }
+
+        // 模式 2：多行 HTTP Headers（`Header-Key: value`，排除会议发言人 `张总：` 等中文键与时间戳）
+        var headerLines = lines
+        if let first = headerLines.first,
+           (first.hasPrefix("GET ") || first.hasPrefix("POST ") || first.hasPrefix("PUT ") || first.hasPrefix("DELETE ") || first.hasPrefix("HTTP/")) {
+            headerLines.removeFirst()
+        }
+        guard headerLines.count >= 2 else { return [] }
+
+        var headerMap: [String: String] = [:]
+        var allHeaders = true
+        for line in headerLines {
+            guard let colonIdx = line.firstIndex(of: ":") else {
+                allHeaders = false
+                break
+            }
+            let k = line[..<colonIdx].trimmingCharacters(in: .whitespaces)
+            let v = line[line.index(after: colonIdx)...].trimmingCharacters(in: .whitespaces)
+            guard k.count >= 2, k.count <= 64, !v.isEmpty,
+                  k.unicodeScalars.allSatisfy({ $0.isASCII && (CharacterSet.alphanumerics.contains($0) || $0 == "-" || $0 == "_") }),
+                  k.unicodeScalars.contains(where: { CharacterSet.letters.contains($0) }) else {
+                allHeaders = false
+                break
+            }
+            headerMap[k] = sanitizeDecodedOutput(v.replacingOccurrences(of: "\0", with: ""))
+        }
+
+        if allHeaders && headerMap.count >= 2,
+           let jsonData = try? JSONSerialization.data(withJSONObject: headerMap, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]),
+           let jsonStr = String(data: jsonData, encoding: .utf8) {
+            return [
+                ListBatchConversionAction(
+                    id: "kv-to-json",
+                    title: "Headers 转 JSON(\(headerMap.count)项)",
+                    symbolName: "curlybraces",
+                    resultText: jsonStr,
+                    toastText: "已将 \(headerMap.count) 个 HTTP 请求头转为标准 JSON 对象"
+                )
+            ]
+        }
+
+        return []
+    }
 }
 
 

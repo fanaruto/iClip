@@ -51,13 +51,20 @@ enum VisionOCRService {
         var seen = Set<String>()
         var payloads: [String] = []
         for obs in observations {
-            guard let raw = obs.payloadStringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !raw.isEmpty,
-                  !seen.contains(raw) else {
+            guard let rawVal = obs.payloadStringValue?.replacingOccurrences(of: "\0", with: "").trimmingCharacters(in: .whitespacesAndNewlines),
+                  !rawVal.isEmpty else {
                 continue
             }
-            seen.insert(raw)
-            payloads.append(raw)
+            let safeVal: String
+            if case .pastejackingOrBidi = ClipboardPoisonGuard.inspect(rawVal) {
+                let cleaned = ClipboardPoisonGuard.sanitize(rawVal)
+                safeVal = cleaned.isEmpty ? rawVal : cleaned
+            } else {
+                safeVal = rawVal
+            }
+            guard !seen.contains(safeVal) else { continue }
+            seen.insert(safeVal)
+            payloads.append(safeVal)
         }
         return payloads.isEmpty ? nil : payloads.joined(separator: "\n")
     }
@@ -131,7 +138,12 @@ enum VisionOCRService {
             return text
         }
 
-        let joined = lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-        return joined.isEmpty ? nil : joined
+        let joinedRaw = lines.joined(separator: "\n").replacingOccurrences(of: "\0", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !joinedRaw.isEmpty else { return nil }
+        if case .pastejackingOrBidi = ClipboardPoisonGuard.inspect(joinedRaw) {
+            let cleaned = ClipboardPoisonGuard.sanitize(joinedRaw)
+            return cleaned.isEmpty ? joinedRaw : cleaned
+        }
+        return joinedRaw
     }
 }

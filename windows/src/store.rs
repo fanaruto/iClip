@@ -1429,7 +1429,7 @@ impl ClipboardStore {
     }
 
     pub fn schedule_otp_expire_if_needed(&mut self, item_id: &str, delay_secs: u64) {
-        if self.config.minimal_mode_enabled || !self.config.auto_expire_otp {
+        if !self.config.auto_expire_otp {
             return;
         }
         let Some(item) = self.items.iter().find(|it| it.id == item_id) else {
@@ -1472,11 +1472,7 @@ impl ClipboardStore {
         for id in expired_ids {
             if let Some(it) = self.items.iter().find(|i| i.id == id) {
                 let is_burn = it.is_burn_after_paste();
-                if is_burn
-                    || (!it.is_pinned
-                        && !self.config.minimal_mode_enabled
-                        && self.config.auto_expire_otp)
-                {
+                if is_burn || (!it.is_pinned && self.config.auto_expire_otp) {
                     self.delete_by_id_with_undo(&id, false);
                     count += 1;
                 }
@@ -1491,7 +1487,7 @@ impl ClipboardStore {
         current_unix_secs: u64,
         max_age_secs: u64,
     ) -> usize {
-        if self.config.minimal_mode_enabled || !self.config.auto_expire_unpinned_secrets {
+        if !self.config.auto_expire_unpinned_secrets {
             return 0;
         }
         let expired_ids: Vec<String> = self

@@ -96,7 +96,7 @@ pub fn analyze_text_actions(raw: &str, minimal_mode: bool) -> Vec<QuickAction> {
         }
     }
 
-    // 0.2 双角色共享：离线 2FA TOTP 动态验证码实时直出（`otpauth://totp/...`）
+    // 0.2 双角色共享：离线 2FA TOTP 动态验证码实时直出（`otpauth://totp/...`）与 Wi-Fi 分享串免扫直提纯密码
     if trimmed.len() <= 2048 {
         if let Some(totp) =
             crate::security::evaluate_totp_uri(trimmed, crate::model::now_unix_secs())
@@ -115,6 +115,22 @@ pub fn analyze_text_actions(raw: &str, minimal_mode: bool) -> Vec<QuickAction> {
                     totp.formatted_code
                 ),
             });
+        } else if !trimmed.contains('\n') {
+            if let Some((ssid, pw)) = crate::security::parse_wifi_qr_payload(trimmed) {
+                let title = if ssid.is_empty() {
+                    "提取 Wi-Fi 密码".to_string()
+                } else {
+                    format!("Wi-Fi 密码 · {ssid}")
+                };
+                actions.push(QuickAction {
+                    id: "wifi-extract-password",
+                    title,
+                    is_security: true,
+                    result_text: pw,
+                    html_table_payload: None,
+                    toast_text: "已提取纯 Wi-Fi 密码并启用本机云隔离保护".to_string(),
+                });
+            }
         }
     }
 
@@ -537,8 +553,10 @@ pub fn analyze_text_actions(raw: &str, minimal_mode: bool) -> Vec<QuickAction> {
     }
 
     if actions.len() < 3 && raw.len() <= 32_768 {
-        for (act_id, act_title, act_res, act_toast) in
-            crate::security::analyze_query_json_bridge(raw)
+        let has_sec = crate::security::classify_sensitive_text(raw).is_some();
+        for (act_id, act_title, act_res, act_toast) in crate::security::analyze_query_json_bridge(raw)
+            .into_iter()
+            .chain(crate::security::analyze_kv_block_to_json(raw))
         {
             if actions.len() >= 3 {
                 break;
@@ -546,7 +564,7 @@ pub fn analyze_text_actions(raw: &str, minimal_mode: bool) -> Vec<QuickAction> {
             actions.push(QuickAction {
                 id: act_id,
                 title: act_title,
-                is_security: false,
+                is_security: has_sec,
                 result_text: act_res,
                 html_table_payload: None,
                 toast_text: act_toast,

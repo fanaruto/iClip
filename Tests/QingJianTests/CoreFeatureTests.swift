@@ -3345,5 +3345,25 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertEqual(InstantMathEvaluator.evaluate("snake userOrderId")?.plainValue, "user_order_id")
         XCTAssertEqual(InstantMathEvaluator.evaluate("kebab UserOrderId")?.plainValue, "user-order-id")
         XCTAssertEqual(InstantMathEvaluator.evaluate("to const", latestClipboardText: "userOrderId")?.plainValue, "USER_ORDER_ID")
+
+        // 16. 第 33 轮自省：验证 Wi-Fi 二维码/分享串免手机直提纯密码（含 WPA 反斜杠转义还原 + 30s 无痕自擦）及 .env / HTTP Headers 一键转 JSON 对象
+        let wifiRaw = #"WIFI:T:WPA;S:Guest\;5G;P:My\:Pass\\2026!;;"#
+        let wifiParsed = try XCTUnwrap(UniversalEscapeDecoder.parseWiFiQRCode(wifiRaw))
+        XCTAssertEqual(wifiParsed.ssid, "Guest;5G")
+        XCTAssertEqual(wifiParsed.password, #"My:Pass\2026!"#)
+        let autoWifi = ClipboardStore.resolveSafeAutoQRCodeOutput(for: wifiRaw)
+        XCTAssertEqual(autoWifi.outputText, #"My:Pass\2026!"#)
+        XCTAssertTrue(autoWifi.isSensitiveOrEphemeral)
+        XCTAssertEqual(autoWifi.scrubDelay, 30.0)
+
+        let envBlock = "# 服务配置\nexport APP_PORT=8080\nLOG_LEVEL=\"info\"\n"
+        let kvEnv = try XCTUnwrap(UniversalEscapeDecoder.analyzeKeyValueBlockToJSON(envBlock).first)
+        XCTAssertEqual(kvEnv.id, "kv-to-json")
+        XCTAssertTrue(kvEnv.resultText.contains("\"APP_PORT\" : \"8080\""))
+        XCTAssertTrue(kvEnv.resultText.contains("\"LOG_LEVEL\" : \"info\""))
+
+        let headersBlock = "POST /v1/chat HTTP/1.1\nContent-Type: application/json\nX-Request-Id: req_99"
+        let kvHdr = try XCTUnwrap(UniversalEscapeDecoder.analyzeKeyValueBlockToJSON(headersBlock).first)
+        XCTAssertTrue(kvHdr.resultText.contains("\"Content-Type\" : \"application/json\""))
     }
 }

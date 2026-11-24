@@ -2581,5 +2581,34 @@ mod tests {
                 .plain_value,
             "USER_ORDER_ID"
         );
+
+        // 17. 第 33 轮自省：验证极简界面下敏感凭据 24h 自动销毁与 OTP 30s 自毁不降级、Wi-Fi 二维码直提纯密码及 .env / HTTP Headers 转 JSON
+        let min_tmp = std::env::temp_dir().join(format!(
+            "iclip-min33-{}",
+            crate::model::generate_pseudo_uuid("min33")
+        ));
+        let mut min_store = ClipboardStore::new(min_tmp.clone());
+        min_store.config.minimal_mode_enabled = true;
+        let now_s = crate::model::now_unix_secs();
+        let mut old_key =
+            ClipItem::new_text("OPENAI_API_KEY=sk-proj-1234567890abcdefghijkl".to_string(), None);
+        old_key.created_unix_secs = now_s.saturating_sub(90_000);
+        min_store.items.push(old_key);
+        assert_eq!(min_store.purge_expired_unpinned_secrets(now_s, 86_400), 1);
+        let _ = std::fs::remove_dir_all(&min_tmp);
+
+        let wifi_raw = r"WIFI:T:WPA;S:Guest\;5G;P:My\:Pass\\2026!;;";
+        let (ssid, pw) = crate::security::parse_wifi_qr_payload(wifi_raw).unwrap();
+        assert_eq!(ssid, "Guest;5G");
+        assert_eq!(pw, r"My:Pass\2026!");
+
+        let env_blk = "# config\nexport APP_PORT=8080\nLOG_LEVEL=\"info\"\n";
+        let kv_env = crate::security::analyze_kv_block_to_json(env_blk);
+        assert_eq!(kv_env[0].0, "kv-to-json");
+        assert!(kv_env[0].2.contains("\"APP_PORT\": \"8080\""));
+
+        let hdr_blk = "POST /v1/chat HTTP/1.1\nContent-Type: application/json\nX-Request-Id: req_99";
+        let kv_hdr = crate::security::analyze_kv_block_to_json(hdr_blk);
+        assert!(kv_hdr[0].2.contains("\"Content-Type\": \"application/json\""));
     }
 }

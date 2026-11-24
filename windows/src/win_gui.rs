@@ -3087,7 +3087,6 @@ unsafe fn commit_paste_item_by_index(hwnd: HWND, item_idx: usize, force_plain: b
                                 }
                                 text_to_write = Some(rendered);
                             } else if !force_plain
-                                && !st.store.config.minimal_mode_enabled
                                 && matches!(
                                     item.detected_poison_threat(),
                                     Some(
