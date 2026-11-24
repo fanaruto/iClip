@@ -98,6 +98,12 @@ struct CoreHighlightsOverlay: View {
     let glassPalette: LiquidGlassPalette
     @Environment(\.colorScheme) private var colorScheme
 
+    private var shortDisplayVersion: String {
+        let raw = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "2.8.0"
+        let parts = raw.split(separator: ".")
+        return parts.count >= 2 ? "\(parts[0]).\(parts[1])" : raw
+    }
+
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 26, style: .continuous)
@@ -109,7 +115,7 @@ struct CoreHighlightsOverlay: View {
             VStack(alignment: .leading, spacing: 16) {
                 HStack(alignment: .top) {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("欢迎使用 iClip 2.7")
+                        Text("欢迎使用 iClip \(shortDisplayVersion)")
                             .font(.system(size: 19.5, weight: .bold))
                             .foregroundStyle(.primary)
                         Text("轻如无物，一呼即贴 · 按 ↵ 立即开始")

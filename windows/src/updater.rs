@@ -372,7 +372,11 @@ pub mod win_runtime {
             parse_https_url(url).ok_or_else(|| "无效的 HTTPS 地址".to_string())?;
 
         unsafe {
-            let ua = to_wide_z("iClip-Windows-OTA/2.7 (+https://github.com/fanaruto/iClip)");
+            let ua = to_wide_z(concat!(
+                "iClip-Windows-OTA/",
+                env!("CARGO_PKG_VERSION"),
+                " (+https://github.com/fanaruto/iClip)"
+            ));
             let h_session = WinHttpHandle(WinHttpOpen(
                 ua.as_ptr(),
                 WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,

@@ -9221,8 +9221,16 @@ fn layout_and_draw_highlights_overlay(
     };
     canvas.fill_round_rect(mx, my, mw, mh, sf(20.0), modal_bg);
 
+    let ver_short = {
+        let parts: Vec<&str> = env!("CARGO_PKG_VERSION").split('.').collect();
+        if parts.len() >= 2 {
+            format!("{}.{}", parts[0], parts[1])
+        } else {
+            env!("CARGO_PKG_VERSION").to_string()
+        }
+    };
     texts.push(TextDrawCmd {
-        text: "欢迎使用 iClip 2.7".to_string(),
+        text: format!("欢迎使用 iClip {ver_short}"),
         rect: RECT {
             left: mx + s(22),
             top: my + s(20),
