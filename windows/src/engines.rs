@@ -496,6 +496,28 @@ pub fn analyze_text_actions(raw: &str, minimal_mode: bool) -> Vec<QuickAction> {
         }
     }
 
+    if actions.len() < 3 && raw.len() <= 65_536 {
+        let include_sql = cfg!(feature = "dev");
+        let list_acts = crate::security::analyze_list_batch_conversion(raw, include_sql);
+        if !list_acts.is_empty() {
+            let has_sec = crate::security::classify_sensitive_text(raw).is_some()
+                || redact_pii_and_private_ip(raw) != raw;
+            for (act_id, act_title, act_res, act_toast) in list_acts {
+                if actions.len() >= 3 {
+                    break;
+                }
+                actions.push(QuickAction {
+                    id: act_id,
+                    title: act_title,
+                    is_security: has_sec,
+                    result_text: act_res,
+                    html_table_payload: None,
+                    toast_text: act_toast,
+                });
+            }
+        }
+    }
+
     #[cfg(feature = "dev")]
     if actions.is_empty() {
         // Dev 5: Base64 解码（含 URL-Safe 兼容与内联防 Bidi/终端投毒护盾）
@@ -2217,10 +2239,14 @@ pub fn redact_secrets(text: &str) -> String {
         )
         .unwrap();
         out = pem_re
-            .replace_all(
-                &out,
-                "-----BEGIN PRIVATE KEY-----\n[REDACTED_BY_iCLIP]\n-----END PRIVATE KEY-----",
-            )
+            .replace_all(&out, |caps: &regex_lite::Captures| {
+                let s = &caps[0];
+                if !s.contains('\n') && s.contains("\\n") {
+                    "-----BEGIN PRIVATE KEY-----\\n[REDACTED_BY_iCLIP]\\n-----END PRIVATE KEY-----"
+                } else {
+                    "-----BEGIN PRIVATE KEY-----\n[REDACTED_BY_iCLIP]\n-----END PRIVATE KEY-----"
+                }
+            })
             .into_owned();
     }
     if out.contains("PuTTY-User-Key-File-") {
@@ -2300,6 +2326,17 @@ pub fn redact_secrets(text: &str) -> String {
             "whsec_",
             r"\bwhsec_[A-Za-z0-9]{16,}\b",
             "whsec_***REDACTED***",
+        ),
+        (
+            "tskey-",
+            r"\btskey-(?:auth|api|client|webhook)-[A-Za-z0-9_-]{16,}\b",
+            "tskey-***REDACTED***",
+        ),
+        ("vcp_", r"\bvcp_[A-Za-z0-9]{24,}\b", "vcp_***REDACTED***"),
+        (
+            "cfut_",
+            r"\bcfut_[A-Za-z0-9_-]{24,}\b",
+            "cfut_***REDACTED***",
         ),
         (
             "gh",
@@ -2443,7 +2480,7 @@ pub fn redact_secrets(text: &str) -> String {
             .into_owned();
 
         let json_sec_re = Regex::new(
-            r##"(?i)("(?:password|passwd|secret|client_secret|api_key|apikey|access_token|refresh_token|id_token|session_token|private_key)"\s*:\s*")([^"\r\n]{6,})(")"##,
+            r##"(?i)("(?:password|passwd|secret|client_secret|app_secret|appsecret|bot_token|webhook_secret|signing_secret|api_key|apikey|access_token|refresh_token|id_token|session_token|private_key)"\s*:\s*")([^"\r\n]{6,})(")"##,
         )
         .unwrap();
         out = json_sec_re

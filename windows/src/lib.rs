@@ -2218,5 +2218,65 @@ mod tests {
         assert!(excel_act.result_text.contains("供应商\t单价\t周期"));
         assert!(excel_act.result_text.contains("方案甲\t1280\t3天"));
         assert!(!excel_act.result_text.contains("建议优先选方案甲"));
+
+        // 10. 第 26 轮自省：验证单行 GCP JSON 私钥防肩窥零泄露与脱敏不断行、`0600` 防符号链接覆盖、Tailscale `tskey-` 识别、超界密文信封 O(1) 拦截及竖列 ↔ 逗号/SQL IN 双向秒转
+        let gcp_one_line = r#"{"type":"service_account","project_id":"demo","private_key":"-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQSecretPayload9988\n-----END PRIVATE KEY-----\n"}"#;
+        let veiled_gcp = crate::security::veiled_sensitive_preview(gcp_one_line);
+        assert!(!veiled_gcp.contains("MIIEvgIBADAN"));
+        assert!(!veiled_gcp.contains("SecretPayload9988"));
+        let redacted_gcp = crate::engines::redact_secrets(gcp_one_line);
+        assert!(!redacted_gcp.contains('\n'));
+        assert!(serde_json::from_str::<serde_json::Value>(&redacted_gcp).is_ok());
+
+        let ts_key = "tskey-auth-k99887766CNTRL-aabbccddeeff1122334455";
+        assert_eq!(
+            crate::security::classify_sensitive_text(ts_key),
+            Some(crate::security::SensitiveSecretKind::ApiKey)
+        );
+        assert!(!crate::engines::redact_secrets(ts_key).contains("aabbccddeeff1122334455"));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{symlink, PermissionsExt};
+            let sym_dir = std::env::temp_dir().join(format!(
+                "iclip-sym26-{}-{}",
+                std::process::id(),
+                crate::security::random_hex_16()
+            ));
+            let _ = fs::create_dir_all(&sym_dir);
+            let victim = sym_dir.join("victim.txt");
+            let link = sym_dir.join("link.json");
+            let normal = sym_dir.join("vault.bin");
+            fs::write(&victim, b"SAFE_ORIGINAL").unwrap();
+            symlink(&victim, &link).unwrap();
+            assert!(crate::security::write_protected_atomic(&link, b"EVIL").is_err());
+            assert_eq!(fs::read(&victim).unwrap(), b"SAFE_ORIGINAL");
+            crate::security::write_protected_atomic(&normal, b"SECRET_VAULT").unwrap();
+            let mode = fs::metadata(&normal).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+            let _ = fs::remove_dir_all(&sym_dir);
+        }
+
+        let oversized_cap = format!("ICLPMSG1:{}", "A".repeat(100_000));
+        assert!(!crate::security::contains_secret_capsule(Some(
+            &oversized_cap
+        )));
+        assert!(crate::security::open_secret_capsule(&oversized_cap, "test").is_none());
+
+        let order_col = "ORD20261101\nORD20261102\nORD20261103";
+        let batch_acts = crate::security::analyze_list_batch_conversion(order_col, true);
+        assert_eq!(batch_acts[0].0, "list-join-comma");
+        assert_eq!(batch_acts[0].2, "ORD20261101, ORD20261102, ORD20261103");
+        assert_eq!(batch_acts[1].0, "list-join-sql-in");
+        assert_eq!(
+            batch_acts[1].2,
+            "('ORD20261101', 'ORD20261102', 'ORD20261103')"
+        );
+
+        let inline_names = "陈伟峰、林晓明、张思远、王梓涵";
+        let split_acts = crate::security::analyze_list_batch_conversion(inline_names, false);
+        assert_eq!(split_acts[0].0, "list-split-lines");
+        assert_eq!(split_acts[0].2, "陈伟峰\n林晓明\n张思远\n王梓涵");
+        assert!(crate::security::analyze_list_batch_conversion("1,234,567,890", true).is_empty());
     }
 }

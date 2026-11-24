@@ -3128,5 +3128,49 @@ final class CoreFeatureTests: XCTestCase {
         bombPNG.append(contentsOf: [0x00, 0x00, 0x00, 0x00]) // CRC placeholder
         XCTAssertFalse(ImageStudioEngine.hasSafeImageDimensions(in: bombPNG))
         XCTAssertNil(ImageStudioEngine.renderAppleMockupFrame(from: bombPNG))
+
+        // 9. 第 26 轮自省：验证单行 GCP JSON 私钥防肩窥零泄露与脱敏不断行、`0600` 防符号链接覆盖、Tailscale `tskey-` 识别及竖列 ↔ 逗号/SQL IN 双向秒转
+        let gcpOneLineJSON = #"{"type":"service_account","project_id":"demo","private_key":"-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQSecretPayload9988\n-----END PRIVATE KEY-----\n"}"#
+        let veiledGCP = SensitiveCredentialVeil.veiledPreview(for: gcpOneLineJSON)
+        XCTAssertFalse(veiledGCP.contains("MIIEvgIBADAN"))
+        XCTAssertFalse(veiledGCP.contains("SecretPayload9988"))
+        let redactedGCP = SensitiveCredentialVeil.redactForExternalSharing(gcpOneLineJSON)
+        XCTAssertFalse(redactedGCP.contains("\n")) // 保持单行合法 JSON 不断行
+        XCTAssertNotNil(try? JSONSerialization.jsonObject(with: Data(redactedGCP.utf8)))
+
+        let tailscaleKey = "tskey-auth-k99887766CNTRL-aabbccddeeff1122334455"
+        XCTAssertEqual(SensitiveCredentialVeil.classify(tailscaleKey), .apiKey)
+        XCTAssertFalse(SensitiveCredentialVeil.redactForExternalSharing(tailscaleKey).contains("aabbccddeeff1122334455"))
+
+        // 验证 writeProtectedFile 拒绝覆盖恶意符号链接（CWE-59）且权限严格为 0600
+        let symDir = FileManager.default.temporaryDirectory.appendingPathComponent("iclip-sym26-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: symDir) }
+        try FileManager.default.createDirectory(at: symDir, withIntermediateDirectories: true)
+        let victimURL = symDir.appendingPathComponent("victim.txt")
+        let linkURL = symDir.appendingPathComponent("link.json")
+        let normalURL = symDir.appendingPathComponent("vault.bin")
+        try "SAFE_ORIGINAL".write(to: victimURL, atomically: true, encoding: .utf8)
+        try FileManager.default.createSymbolicLink(at: linkURL, withDestinationURL: victimURL)
+        XCTAssertThrowsError(try LocalVaultCrypto.writeProtectedFile(Data("EVIL".utf8), to: linkURL))
+        XCTAssertEqual(try String(contentsOf: victimURL, encoding: .utf8), "SAFE_ORIGINAL")
+        try LocalVaultCrypto.writeProtectedFile(Data("SECRET_VAULT".utf8), to: normalURL)
+        let perms = (try FileManager.default.attributesOfItem(atPath: normalURL.path)[.posixPermissions] as? NSNumber)?.intValue
+        XCTAssertEqual(perms, 0o600)
+
+        // 验证超界 `ICLPMSG1:` 伪造载荷 O(1) 拒绝（>96000 字符）
+        let oversizedCapsule = "ICLPMSG1:" + String(repeating: "A", count: 100_000)
+        XCTAssertFalse(SecretCapsuleMessenger.containsCapsule(oversizedCapsule))
+        XCTAssertNil(SecretCapsuleMessenger.openCapsule(in: oversizedCapsule, passphrase: "test"))
+
+        // 验证竖列单号 -> 逗号单行 & SQL IN，以及顿号单行 -> 竖列（且豁免 1,234,567,890 千分位数字）
+        let orderColumn = "ORD20261101\nORD20261102\nORD20261103"
+        let batchActs = UniversalEscapeDecoder.analyzeListBatchConversion(orderColumn, includeSQLIn: true)
+        XCTAssertEqual(batchActs.first(where: { $0.id == "list-join-comma" })?.resultText, "ORD20261101, ORD20261102, ORD20261103")
+        XCTAssertEqual(batchActs.first(where: { $0.id == "list-join-sql-in" })?.resultText, "('ORD20261101', 'ORD20261102', 'ORD20261103')")
+
+        let inlineNames = "陈伟峰、林晓明、张思远、王梓涵"
+        let splitActs = UniversalEscapeDecoder.analyzeListBatchConversion(inlineNames, includeSQLIn: false)
+        XCTAssertEqual(splitActs.first?.resultText, "陈伟峰\n林晓明\n张思远\n王梓涵")
+        XCTAssertTrue(UniversalEscapeDecoder.analyzeListBatchConversion("1,234,567,890", includeSQLIn: true).isEmpty)
     }
 }

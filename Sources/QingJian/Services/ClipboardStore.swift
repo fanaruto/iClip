@@ -3801,6 +3801,20 @@ final class ClipboardStore: ObservableObject {
                 )
             )
         }
+        if analyzed.count < 3, raw.utf8.count <= 65_536 {
+            let listActs = UniversalEscapeDecoder.analyzeListBatchConversion(raw, includeSQLIn: false)
+            for la in listActs where analyzed.count < 3 {
+                analyzed.append(
+                    FinanceQuickAction(
+                        id: la.id,
+                        title: la.title,
+                        symbolName: la.symbolName,
+                        resultText: la.resultText,
+                        toastText: la.toastText
+                    )
+                )
+            }
+        }
         if analyzed.count < 3, !raw.contains("\n"), raw.utf8.count <= 512 {
             if let cronDesc = CronAndPathHelper.explainCronExpression(raw) {
                 analyzed.append(

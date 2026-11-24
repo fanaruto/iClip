@@ -464,13 +464,7 @@ impl ClipboardStore {
     }
 
     fn atomic_write(dest: &Path, bytes: &[u8]) {
-        let tmp = dest.with_extension("tmp");
-        if fs::write(&tmp, bytes).is_ok() {
-            if fs::rename(&tmp, dest).is_err() {
-                let _ = fs::write(dest, bytes);
-                let _ = fs::remove_file(&tmp);
-            }
-        }
+        let _ = crate::security::write_protected_atomic(dest, bytes);
     }
 
     pub fn insert_or_promote(&mut self, new_item: ClipItem) -> String {
@@ -1401,7 +1395,14 @@ impl ClipboardStore {
                 let mut restored = 0usize;
                 for (item, img_bytes) in snap.entries {
                     if let (Some(fname), Some(bytes)) = (&item.image_file_name, img_bytes) {
-                        let _ = fs::write(self.images_dir.join(fname), bytes);
+                        if let Some(clean_name) = Path::new(fname).file_name() {
+                            if clean_name == std::ffi::OsStr::new(fname) && !fname.contains("..") {
+                                let _ = crate::security::write_protected_atomic(
+                                    &self.images_dir.join(clean_name),
+                                    &bytes,
+                                );
+                            }
+                        }
                     }
                     if !self.items.iter().any(|existing| existing.id == item.id) {
                         self.items.push(item);

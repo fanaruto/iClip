@@ -930,6 +930,24 @@ enum SemanticEngine {
             }
         }
 
+        // 竖列单号/词条 ↔ 后台逗号批量查询单行 / SQL IN 列表双向秒转
+        if actions.count < 3, raw.utf8.count <= 65_536 {
+            let listActs = UniversalEscapeDecoder.analyzeListBatchConversion(raw, includeSQLIn: true)
+            if !listActs.isEmpty {
+                let hasSec = SensitiveCredentialVeil.classify(raw) != nil || containsPIIOrPrivateIP(in: raw)
+                for la in listActs where actions.count < 3 {
+                    actions.append(TransformAction(
+                        id: la.id,
+                        title: la.title,
+                        symbolName: la.symbolName,
+                        isSecurityAction: hasSec,
+                        resultText: la.resultText,
+                        toastText: la.toastText
+                    ))
+                }
+            }
+        }
+
         // 单行中英混排粘连排版美化兜底
         if primaryKind == nil && !trimmed.contains("\n") && raw.utf8.count <= 8_192 {
             let docActions = DocumentTypographyEngine.analyze(raw)
@@ -973,18 +991,6 @@ enum SemanticEngine {
 
     static func redactSecrets(in text: String) -> String {
         var result = text
-        if result.contains("-----BEGIN ") && (result.contains("PRIVATE KEY-----") || result.contains("PRIVATE KEY BLOCK-----")),
-           let pemRegex = try? NSRegularExpression(
-               pattern: #"-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----"#
-           ) {
-            let fullRange = NSRange(result.startIndex..<result.endIndex, in: result)
-            result = pemRegex.stringByReplacingMatches(
-                in: result,
-                options: [],
-                range: fullRange,
-                withTemplate: "-----BEGIN PRIVATE KEY-----\n[REDACTED_BY_iCLIP]\n-----END PRIVATE KEY-----"
-            )
-        }
         for item in secretPatterns {
             let fullRange = NSRange(result.startIndex..<result.endIndex, in: result)
             result = item.regex.stringByReplacingMatches(

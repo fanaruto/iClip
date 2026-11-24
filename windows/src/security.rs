@@ -219,16 +219,11 @@ pub fn load_or_create_vault_key(data_dir: &Path) -> [u8; 32] {
         let _ = fs::create_dir_all(data_dir);
         #[cfg(target_os = "windows")]
         if let Some(protected) = win_dpapi::protect_bytes(&fresh) {
-            let _ = fs::write(&key_path, protected);
+            let _ = write_protected_atomic(&key_path, &protected);
         }
         #[cfg(not(target_os = "windows"))]
         {
-            let _ = fs::write(&key_path, fresh);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600));
-            }
+            let _ = write_protected_atomic(&key_path, &fresh);
         }
         fresh
     };
@@ -420,23 +415,76 @@ pub fn random_hex_16() -> String {
     out
 }
 
+/// 零竞态 `0600` 原子写入且拒绝符号链接穿透覆盖（CWE-59 / CWE-377）
+pub fn write_protected_atomic(dest: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Ok(meta) = fs::symlink_metadata(dest) {
+        if meta.file_type().is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "refusing symlink target",
+            ));
+        }
+    }
+    let parent = dest.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing parent directory")
+    })?;
+    fs::create_dir_all(parent)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
+    }
+    let base_name = dest
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("vault.bin");
+    let tmp = parent.join(format!(".{base_name}.tmp.{}", random_hex_16()));
+
+    let write_res = {
+        use std::io::Write;
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        opts.open(&tmp).and_then(|mut f| {
+            f.write_all(bytes)?;
+            f.flush()
+        })
+    };
+    if let Err(e) = write_res {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+    if let Err(e) = fs::rename(&tmp, dest) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
 pub fn write_encrypted_image_to_dir(
     images_dir: &Path,
     file_name: &str,
     plain_png: &[u8],
 ) -> std::io::Result<()> {
+    let clean_name = Path::new(file_name).file_name().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid image filename")
+    })?;
+    if clean_name != std::ffi::OsStr::new(file_name) || file_name.contains("..") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "unsafe image filename",
+        ));
+    }
     let _ = fs::create_dir_all(images_dir);
     let data_dir = data_dir_from_images_dir(images_dir);
     let key = load_or_create_vault_key(data_dir);
     let sealed = seal_image_bytes(plain_png, &key, data_dir);
-    let dest = images_dir.join(file_name);
-    fs::write(&dest, sealed)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&dest, fs::Permissions::from_mode(0o600));
-    }
-    Ok(())
+    let dest = images_dir.join(clean_name);
+    write_protected_atomic(&dest, &sealed)
 }
 
 pub fn read_decrypted_image_from_dir(images_dir: &Path, file_name: &str) -> Option<Vec<u8>> {
@@ -454,10 +502,13 @@ pub fn upgrade_plain_images_in_dir(images_dir: &Path, master_key: &[u8; 32]) -> 
     let data_dir = data_dir_from_images_dir(images_dir);
     let mut upgraded = 0usize;
     for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
+        let Ok(ft) = entry.file_type() else {
+            continue;
+        };
+        if ft.is_symlink() || !ft.is_file() {
             continue;
         }
+        let path = entry.path();
         let Ok(raw) = fs::read(&path) else {
             continue;
         };
@@ -465,12 +516,7 @@ pub fn upgrade_plain_images_in_dir(images_dir: &Path, master_key: &[u8; 32]) -> 
             continue;
         }
         let sealed = seal_image_bytes(&raw, master_key, data_dir);
-        if fs::write(&path, sealed).is_ok() {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
-            }
+        if write_protected_atomic(&path, &sealed).is_ok() {
             upgraded += 1;
         }
     }
@@ -941,13 +987,16 @@ pub fn classify_sensitive_text(raw: &str) -> Option<SensitiveSecretKind> {
     static BEARER_RE: OnceLock<Regex> = OnceLock::new();
 
     let api_re = API_RE.get_or_init(|| {
-        Regex::new(r"\b(?:sk-(?:proj-|ant-|or-v1-)?[A-Za-z0-9_-]{18,}|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}|whsec_[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{24,}|github_pat_[A-Za-z0-9_]{28,}|glpat-[A-Za-z0-9_-]{18,}|glsa_[A-Za-z0-9_-]{24,}|glc_[A-Za-z0-9_=+-]{24,}|dapi[a-fA-F0-9]{32}|re_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{18,}|AIzaSy[A-Za-z0-9_-]{31,}|hf_[A-Za-z0-9]{24,}|gsk_[A-Za-z0-9]{24,}|pplx-[A-Za-z0-9]{24,}|r8_[A-Za-z0-9]{24,}|ntn_[A-Za-z0-9]{24,}|secret_[A-Za-z0-9]{32,}|sbp_[a-fA-F0-9]{32,}|figd_[A-Za-z0-9_-]{24,}|lin_api_[A-Za-z0-9]{24,}|PMAK-[a-fA-F0-9]{24}-[a-fA-F0-9]{34}|dop_v1_[a-fA-F0-9]{64}|dckr_pat_[A-Za-z0-9_-]{20,}|hvs\.[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|LTAI[A-Za-z0-9]{12,24}|AKID[A-Za-z0-9]{13,32}|\d{8,10}:AA[A-Za-z0-9_-]{33}|npm_[A-Za-z0-9]{36}|pypi-[A-Za-z0-9_-]{40,}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,})\b").unwrap()
+        Regex::new(r"\b(?:sk-(?:proj-|ant-|or-v1-)?[A-Za-z0-9_-]{18,}|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}|whsec_[A-Za-z0-9]{16,}|tskey-(?:auth|api|client|webhook)-[A-Za-z0-9_-]{16,}|vcp_[A-Za-z0-9]{24,}|cfut_[A-Za-z0-9_-]{24,}|gh[pousr]_[A-Za-z0-9]{24,}|github_pat_[A-Za-z0-9_]{28,}|glpat-[A-Za-z0-9_-]{18,}|glsa_[A-Za-z0-9_-]{24,}|glc_[A-Za-z0-9_=+-]{24,}|dapi[a-fA-F0-9]{32}|re_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{18,}|AIzaSy[A-Za-z0-9_-]{31,}|hf_[A-Za-z0-9]{24,}|gsk_[A-Za-z0-9]{24,}|pplx-[A-Za-z0-9]{24,}|r8_[A-Za-z0-9]{24,}|ntn_[A-Za-z0-9]{24,}|secret_[A-Za-z0-9]{32,}|sbp_[a-fA-F0-9]{32,}|figd_[A-Za-z0-9_-]{24,}|lin_api_[A-Za-z0-9]{24,}|PMAK-[a-fA-F0-9]{24}-[a-fA-F0-9]{34}|dop_v1_[a-fA-F0-9]{64}|dckr_pat_[A-Za-z0-9_-]{20,}|hvs\.[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|LTAI[A-Za-z0-9]{12,24}|AKID[A-Za-z0-9]{13,32}|\d{8,10}:AA[A-Za-z0-9_-]{33}|npm_[A-Za-z0-9]{36}|pypi-[A-Za-z0-9_-]{40,}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,})\b").unwrap()
     });
     const API_FAST_HINTS: &[&str] = &[
         "sk-",
         "_live_",
         "_test_",
         "whsec_",
+        "tskey-",
+        "vcp_",
+        "cfut_",
         "ghp_",
         "gho_",
         "ghu_",
@@ -1537,12 +1586,29 @@ pub fn veiled_sensitive_preview(raw: &str) -> String {
     if trimmed.is_empty() {
         return "••••••••••••".to_string();
     }
-    if trimmed.contains("PRIVATE KEY-----") {
-        let first_line = trimmed
-            .lines()
-            .next()
-            .unwrap_or("-----BEGIN PRIVATE KEY-----");
-        return format!("{first_line} ••••••••••••••••");
+    if let Some(begin_pos) = trimmed.find("-----BEGIN ") {
+        let after = &trimmed[begin_pos..];
+        let end_off = after
+            .find("PRIVATE KEY BLOCK-----")
+            .map(|i| i + "PRIVATE KEY BLOCK-----".len())
+            .or_else(|| {
+                after
+                    .find("PRIVATE KEY-----")
+                    .map(|i| i + "PRIVATE KEY-----".len())
+            });
+        if let Some(off) = end_off {
+            let header_label: String = after[..off].chars().take(48).collect();
+            if begin_pos == 0 {
+                return format!("{header_label} ••••••••••••••••");
+            }
+            let lead: String = trimmed[..begin_pos]
+                .replace('\n', " ")
+                .replace('\r', "")
+                .chars()
+                .take(12)
+                .collect();
+            return format!("{lead}••• {header_label} ••••••••••••");
+        }
     }
     let single = trimmed.replace('\n', " ").replace('\r', "");
     let chars: Vec<char> = single.chars().collect();
@@ -2663,14 +2729,32 @@ pub enum SecretCapsuleCommand {
     },
 }
 
+const MAX_CAPSULE_B64_LEN: usize = 96_000;
+
+fn extract_bounded_capsule_token(raw: &str) -> Option<&str> {
+    let idx = raw.find(SECRET_CAPSULE_PREFIX)?;
+    let tail = &raw[idx + SECRET_CAPSULE_PREFIX.len()..];
+    let mut len = 0usize;
+    for b in tail.bytes() {
+        if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' {
+            len += 1;
+            if len > MAX_CAPSULE_B64_LEN {
+                return None;
+            }
+        } else {
+            break;
+        }
+    }
+    if len >= 80 {
+        Some(&tail[..len])
+    } else {
+        None
+    }
+}
+
 pub fn contains_secret_capsule(raw: Option<&str>) -> bool {
     let Some(s) = raw else { return false };
-    if !s.contains(SECRET_CAPSULE_PREFIX) {
-        return false;
-    }
-    static CAP_RE: OnceLock<Regex> = OnceLock::new();
-    let re = CAP_RE.get_or_init(|| Regex::new(r"ICLPMSG1:([A-Za-z0-9_-]{80,})").unwrap());
-    re.is_match(s)
+    extract_bounded_capsule_token(s).is_some()
 }
 
 pub fn seal_secret_capsule(plain_text: &str, passphrase: &str, seed_dir: &Path) -> Option<String> {
@@ -2691,14 +2775,15 @@ pub fn open_secret_capsule(raw_envelope: &str, passphrase: &str) -> Option<Strin
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 
     let pw = passphrase.trim();
-    if pw.is_empty() || !raw_envelope.contains(SECRET_CAPSULE_PREFIX) {
+    if pw.is_empty() {
         return None;
     }
-    static CAP_RE: OnceLock<Regex> = OnceLock::new();
-    let re = CAP_RE.get_or_init(|| Regex::new(r"ICLPMSG1:([A-Za-z0-9_-]{80,})").unwrap());
-    let caps = re.captures(raw_envelope)?;
-    let b64_part = caps.get(1)?.as_str();
+    let b64_part = extract_bounded_capsule_token(raw_envelope)?;
     let cipher_bytes = URL_SAFE_NO_PAD.decode(b64_part).ok()?;
+    let canonical = URL_SAFE_NO_PAD.encode(&cipher_bytes);
+    if canonical != b64_part {
+        return None;
+    }
     let plain_bytes = open_encrypted_archive_bytes(&cipher_bytes, pw)?;
     String::from_utf8(plain_bytes).ok()
 }
@@ -2983,7 +3068,7 @@ pub fn mask_with_privacy_twins(raw: &str) -> Option<(String, usize)> {
             Regex::new(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----").unwrap()
         });
         let key_re = KEY_RE.get_or_init(|| {
-            Regex::new(r"\b(?:AGE-SECRET-KEY-1[A-Z0-9]{50,}|eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}|sk-(?:proj-|ant-|or-v1-)?[A-Za-z0-9_-]{18,}|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}|whsec_[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{24,}|github_pat_[A-Za-z0-9_]{28,}|glpat-[A-Za-z0-9_-]{18,}|glsa_[A-Za-z0-9_-]{24,}|glc_[A-Za-z0-9_=+-]{24,}|dapi[a-fA-F0-9]{32}|re_[A-Za-z0-9_]{24,}|xox[baprs]-[A-Za-z0-9-]{18,}|AIzaSy[A-Za-z0-9_-]{31,}|hf_[A-Za-z0-9]{24,}|gsk_[A-Za-z0-9]{24,}|pplx-[A-Za-z0-9]{24,}|r8_[A-Za-z0-9]{24,}|ntn_[A-Za-z0-9]{24,}|secret_[A-Za-z0-9]{32,}|sbp_[a-fA-F0-9]{32,}|figd_[A-Za-z0-9_-]{24,}|lin_api_[A-Za-z0-9]{24,}|PMAK-[a-fA-F0-9]{24}-[a-fA-F0-9]{34}|dop_v1_[a-fA-F0-9]{64}|dckr_pat_[A-Za-z0-9_-]{20,}|hvs\.[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|LTAI[A-Za-z0-9]{12,24}|AKID[A-Za-z0-9]{13,32}|\d{8,10}:AA[A-Za-z0-9_-]{33}|npm_[A-Za-z0-9]{36}|pypi-[A-Za-z0-9_-]{40,}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,})\b").unwrap()
+            Regex::new(r"\b(?:AGE-SECRET-KEY-1[A-Z0-9]{50,}|eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}|sk-(?:proj-|ant-|or-v1-)?[A-Za-z0-9_-]{18,}|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}|whsec_[A-Za-z0-9]{16,}|tskey-(?:auth|api|client|webhook)-[A-Za-z0-9_-]{16,}|vcp_[A-Za-z0-9]{24,}|cfut_[A-Za-z0-9_-]{24,}|gh[pousr]_[A-Za-z0-9]{24,}|github_pat_[A-Za-z0-9_]{28,}|glpat-[A-Za-z0-9_-]{18,}|glsa_[A-Za-z0-9_-]{24,}|glc_[A-Za-z0-9_=+-]{24,}|dapi[a-fA-F0-9]{32}|re_[A-Za-z0-9_]{24,}|xox[baprs]-[A-Za-z0-9-]{18,}|AIzaSy[A-Za-z0-9_-]{31,}|hf_[A-Za-z0-9]{24,}|gsk_[A-Za-z0-9]{24,}|pplx-[A-Za-z0-9]{24,}|r8_[A-Za-z0-9]{24,}|ntn_[A-Za-z0-9]{24,}|secret_[A-Za-z0-9]{32,}|sbp_[a-fA-F0-9]{32,}|figd_[A-Za-z0-9_-]{24,}|lin_api_[A-Za-z0-9]{24,}|PMAK-[a-fA-F0-9]{24}-[a-fA-F0-9]{34}|dop_v1_[a-fA-F0-9]{64}|dckr_pat_[A-Za-z0-9_-]{20,}|hvs\.[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|LTAI[A-Za-z0-9]{12,24}|AKID[A-Za-z0-9]{13,32}|\d{8,10}:AA[A-Za-z0-9_-]{33}|npm_[A-Za-z0-9]{36}|pypi-[A-Za-z0-9_-]{40,}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,})\b").unwrap()
         });
         let uri_pw_re = URI_PW_RE.get_or_init(|| {
             Regex::new(r"(?i)\b((?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|rediss?|amqps?|clickhouse|https?)://[^:\s/@]*:)([^@\s/]{4,})(@)").unwrap()
@@ -3678,6 +3763,159 @@ pub fn deduplicate_list_lines(raw: &str) -> Option<(String, usize, usize)> {
         return None;
     }
     Some((unique.join("\n"), removed, unique.len()))
+}
+
+/// Excel 竖列单号/词条 ↔ 后台批量查询逗号单行 / SQL `IN` 列表离线双向秒转
+pub fn analyze_list_batch_conversion(
+    raw: &str,
+    include_sql_in: bool,
+) -> Vec<(&'static str, String, String, String)> {
+    if raw.is_empty() || raw.len() > 65_536 || raw.contains('\t') {
+        return Vec::new();
+    }
+    let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
+    let trimmed = normalized.trim();
+    if trimmed.is_empty() || trimmed.contains("://") {
+        return Vec::new();
+    }
+
+    // 方向 A：竖列（3~500 行短词条） -> 逗号单行 & SQL IN 列表
+    if trimmed.contains('\n') {
+        if looks_like_source_code_or_md_fence(&normalized) {
+            return Vec::new();
+        }
+        let raw_lines: Vec<&str> = normalized
+            .split('\n')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        if !(3..=500).contains(&raw_lines.len()) {
+            return Vec::new();
+        }
+        const FORBIDDEN_PREFIXES: &[&str] =
+            &["#", "|", ">", "- ", "* ", "+ ", "[]", "[ ]", "[x]", "[X]"];
+        for line in &raw_lines {
+            let cnt = line.chars().count();
+            if cnt == 0 || cnt > 64 {
+                return Vec::new();
+            }
+            if FORBIDDEN_PREFIXES.iter().any(|p| line.starts_with(p)) {
+                return Vec::new();
+            }
+            if line.contains('。')
+                || line.contains('！')
+                || line.contains('？')
+                || line.contains('；')
+                || line.contains(". ")
+                || line.contains("! ")
+                || line.contains("? ")
+            {
+                return Vec::new();
+            }
+        }
+
+        let mut seen = std::collections::HashSet::with_capacity(raw_lines.len());
+        let mut items: Vec<&str> = Vec::with_capacity(raw_lines.len());
+        for line in raw_lines {
+            if seen.insert(line) {
+                items.push(line);
+            }
+        }
+        if items.len() < 2 {
+            return Vec::new();
+        }
+
+        let mut out = vec![(
+            "list-join-comma",
+            format!("合并逗号单行({}项)", items.len()),
+            items.join(", "),
+            format!(
+                "已将 {} 条竖列合并为逗号分隔单行，可直接粘入后台批量查询",
+                items.len()
+            ),
+        )];
+
+        if include_sql_in
+            && items.iter().all(|it| {
+                it.chars().count() <= 48
+                    && !it
+                        .chars()
+                        .any(|c| c.is_whitespace() || matches!(c, '"' | '`' | '(' | ')'))
+            })
+        {
+            let sql_items: Vec<String> = items
+                .iter()
+                .map(|it| format!("'{}'", it.replace('\'', "''")))
+                .collect();
+            out.push((
+                "list-join-sql-in",
+                format!("转 SQL IN ({}项)", items.len()),
+                format!("({})", sql_items.join(", ")),
+                format!("已生成防注入转义的 SQL IN 列表（共 {} 项）", items.len()),
+            ));
+        }
+        return out;
+    }
+
+    // 方向 B：单行顿号/分号/逗号分隔名单（4~500 项） -> 竖列（直粘 Excel 自动成列）
+    if trimmed.len() > 16_384 || trimmed.contains('=') {
+        return Vec::new();
+    }
+    if let Some(first) = trimmed.chars().next() {
+        if matches!(first, '{' | '[' | '<' | '#') {
+            return Vec::new();
+        }
+    }
+
+    for sep in ['、', '；', ';', '，', ','] {
+        let sep_count = trimmed.chars().filter(|&c| c == sep).count();
+        if sep_count < 3 {
+            continue;
+        }
+        let parts: Vec<&str> = trimmed
+            .split(sep)
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .collect();
+        if !(4..=500).contains(&parts.len()) {
+            continue;
+        }
+        if !parts.iter().all(|p| {
+            let cnt = p.chars().count();
+            (1..=48).contains(&cnt)
+                && !p.contains('。')
+                && !p.contains('！')
+                && !p.contains('？')
+                && p.chars().filter(|&c| c == ' ').count() <= 2
+        }) {
+            continue;
+        }
+        // 排除英文逗号千分位大数字（如 1,234,567,890）
+        if sep == ',' {
+            let tail_three = parts[1..]
+                .iter()
+                .filter(|p| p.len() == 3 && p.bytes().all(|b| b.is_ascii_digit()))
+                .count();
+            if tail_three == parts.len() - 1
+                && parts[0]
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || matches!(c, '-' | '+' | '$' | '¥'))
+            {
+                continue;
+            }
+        }
+        return vec![(
+            "list-split-lines",
+            format!("拆分为 {} 行竖列", parts.len()),
+            parts.join("\n"),
+            format!(
+                "已拆分为 {} 行竖列，粘贴至 Excel / 表格即可自动分列成行",
+                parts.len()
+            ),
+        )];
+    }
+
+    Vec::new()
 }
 
 fn looks_like_source_code_or_md_fence(text: &str) -> bool {

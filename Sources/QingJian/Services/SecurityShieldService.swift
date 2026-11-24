@@ -153,7 +153,7 @@ enum LocalVaultCrypto {
         return nil
     }
 
-    /// 原子写入数据并将目录锁死为 `0700`、文件锁死为 `0600`（防止同机其他低权进程窥探）
+    /// 零竞态 `0600` 原子写入（POSIX `O_CREAT|O_EXCL|O_NOFOLLOW` 诞生即锁权 `0600` + `lstat` 拒绝符号链接穿透 CWE-59/CWE-377）
     static func writeProtectedFile(_ data: Data, to fileURL: URL) throws {
         let fm = FileManager.default
         let dirURL = fileURL.deletingLastPathComponent()
@@ -166,8 +166,44 @@ enum LocalVaultCrypto {
         } else {
             try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dirURL.path)
         }
-        try data.write(to: fileURL, options: .atomic)
-        try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
+
+        var st = stat()
+        if Darwin.lstat(fileURL.path, &st) == 0, (st.st_mode & S_IFMT) == S_IFLNK {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(ELOOP))
+        }
+
+        let tmpURL = dirURL.appendingPathComponent(".\(fileURL.lastPathComponent).tmp.\(UUID().uuidString)")
+        let fd = Darwin.open(tmpURL.path, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW, 0o600)
+        guard fd >= 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+
+        var writeErr: Int32 = 0
+        data.withUnsafeBytes { rawBuf in
+            guard let base = rawBuf.baseAddress else { return }
+            var offset = 0
+            while offset < rawBuf.count {
+                let n = Darwin.write(fd, base.advanced(by: offset), rawBuf.count - offset)
+                if n > 0 {
+                    offset += n
+                } else if n < 0 && errno == EINTR {
+                    continue
+                } else {
+                    writeErr = errno == 0 ? EIO : errno
+                    break
+                }
+            }
+        }
+        _ = Darwin.close(fd)
+        if writeErr != 0 {
+            _ = Darwin.unlink(tmpURL.path)
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(writeErr))
+        }
+        if Darwin.rename(tmpURL.path, fileURL.path) != 0 {
+            let err = errno
+            _ = Darwin.unlink(tmpURL.path)
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(err))
+        }
     }
 
     // MARK: - 本地剪贴板截图全模态静态透明加密（`ICLPIMG1` + AES-256-GCM + 旧明文 PNG 自动升级）
@@ -233,13 +269,17 @@ enum LocalVaultCrypto {
         try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: imagesDir.path)
         guard let files = try? fm.contentsOfDirectory(
             at: imagesDir,
-            includingPropertiesForKeys: nil,
+            includingPropertiesForKeys: [.isSymbolicLinkKey, .isRegularFileKey],
             options: [.skipsHiddenFiles]
         ) else { return 0 }
 
         var upgraded = 0
-        for fileURL in files where !fileURL.hasDirectoryPath {
-            guard let raw = try? Data(contentsOf: fileURL), !raw.isEmpty else { continue }
+        for fileURL in files {
+            guard let vals = try? fileURL.resourceValues(forKeys: [.isSymbolicLinkKey, .isRegularFileKey]),
+                  vals.isSymbolicLink != true,
+                  vals.isRegularFile == true,
+                  let raw = try? Data(contentsOf: fileURL),
+                  !raw.isEmpty else { continue }
             if raw.starts(with: imageEncryptedMagic) {
                 try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
                 continue
@@ -495,7 +535,7 @@ enum ClipboardPoisonGuard {
 /// 2. 离线微秒级高敏凭据嗅探与防肩窥圆点雾化遮罩（零布局抖动，选中/悬停即刻原位显影）
 enum SensitiveCredentialVeil {
     private static let apiKeyRegex = try! NSRegularExpression(
-        pattern: #"\b(?:sk-(?:proj-|ant-|or-v1-)?[A-Za-z0-9_-]{18,}|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}|whsec_[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{24,}|github_pat_[A-Za-z0-9_]{28,}|glpat-[A-Za-z0-9_-]{18,}|glsa_[A-Za-z0-9_-]{24,}|glc_[A-Za-z0-9_=+-]{24,}|dapi[a-fA-F0-9]{32}|re_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{18,}|AIzaSy[A-Za-z0-9_-]{31,}|hf_[A-Za-z0-9]{24,}|gsk_[A-Za-z0-9]{24,}|pplx-[A-Za-z0-9]{24,}|r8_[A-Za-z0-9]{24,}|ntn_[A-Za-z0-9]{24,}|secret_[A-Za-z0-9]{32,}|sbp_[a-fA-F0-9]{32,}|figd_[A-Za-z0-9_-]{24,}|lin_api_[A-Za-z0-9]{24,}|PMAK-[a-fA-F0-9]{24}-[a-fA-F0-9]{34}|dop_v1_[a-fA-F0-9]{64}|dckr_pat_[A-Za-z0-9_-]{20,}|hvs\.[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|LTAI[A-Za-z0-9]{12,24}|AKID[A-Za-z0-9]{13,32}|\d{8,10}:AA[A-Za-z0-9_-]{33}|npm_[A-Za-z0-9]{36}|pypi-[A-Za-z0-9_-]{40,}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,})\b"#
+        pattern: #"\b(?:sk-(?:proj-|ant-|or-v1-)?[A-Za-z0-9_-]{18,}|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}|whsec_[A-Za-z0-9]{16,}|tskey-(?:auth|api|client|webhook)-[A-Za-z0-9_-]{16,}|vcp_[A-Za-z0-9]{24,}|cfut_[A-Za-z0-9_-]{24,}|gh[pousr]_[A-Za-z0-9]{24,}|github_pat_[A-Za-z0-9_]{28,}|glpat-[A-Za-z0-9_-]{18,}|glsa_[A-Za-z0-9_-]{24,}|glc_[A-Za-z0-9_=+-]{24,}|dapi[a-fA-F0-9]{32}|re_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{18,}|AIzaSy[A-Za-z0-9_-]{31,}|hf_[A-Za-z0-9]{24,}|gsk_[A-Za-z0-9]{24,}|pplx-[A-Za-z0-9]{24,}|r8_[A-Za-z0-9]{24,}|ntn_[A-Za-z0-9]{24,}|secret_[A-Za-z0-9]{32,}|sbp_[a-fA-F0-9]{32,}|figd_[A-Za-z0-9_-]{24,}|lin_api_[A-Za-z0-9]{24,}|PMAK-[a-fA-F0-9]{24}-[a-fA-F0-9]{34}|dop_v1_[a-fA-F0-9]{64}|dckr_pat_[A-Za-z0-9_-]{20,}|hvs\.[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|LTAI[A-Za-z0-9]{12,24}|AKID[A-Za-z0-9]{13,32}|\d{8,10}:AA[A-Za-z0-9_-]{33}|npm_[A-Za-z0-9]{36}|pypi-[A-Za-z0-9_-]{40,}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,})\b"#
     )
     private static let wireGuardPrivateKeyRegex = try! NSRegularExpression(
         pattern: #"(?im)^(\s*(?:PrivateKey|PresharedKey)\s*=\s*)([A-Za-z0-9+/]{42,44}=)(\s*)$"#
@@ -561,7 +601,7 @@ enum SensitiveCredentialVeil {
         pattern: ##"(?i)(\bcurl\b[\s\S]{0,600}?\s(?:-u|--user|-b|--cookie)\s+['"]?)([^'"\s]{6,})(['"]?)"##
     )
     private static let jsonSecretFieldRegex = try! NSRegularExpression(
-        pattern: ##"(?i)("(?:password|passwd|secret|client_secret|api_key|apikey|access_token|refresh_token|id_token|session_token|private_key)"\s*:\s*")([^"\r\n]{6,})(")"##
+        pattern: ##"(?i)("(?:password|passwd|secret|client_secret|app_secret|appsecret|bot_token|webhook_secret|signing_secret|api_key|apikey|access_token|refresh_token|id_token|session_token|private_key)"\s*:\s*")([^"\r\n]{6,})(")"##
     )
     private static let otpAuthUriRegex = try! NSRegularExpression(
         pattern: #"(?i)\botpauth(?:-migration)?://(?:totp|hotp|offline)[^\s'"]+"#
@@ -599,7 +639,8 @@ enum SensitiveCredentialVeil {
     }
 
     private static let apiKeyFastHints: [String] = [
-        "sk-", "_live_", "_test_", "whsec_", "ghp_", "gho_", "ghu_", "ghs_", "ghr_",
+        "sk-", "_live_", "_test_", "whsec_", "tskey-", "vcp_", "cfut_",
+        "ghp_", "gho_", "ghu_", "ghs_", "ghr_",
         "github_pat_", "glpat-", "glsa_", "glc_", "dapi", "re_", "xox", "AIzaSy", "hf_", "gsk_", "pplx-", "r8_",
         "ntn_", "secret_", "sbp_", "figd_", "lin_api_", "PMAK-", "dop_v1_",
         "dckr_pat_", "hvs.", "AKIA", "LTAI", "AKID", ":AA", "npm_", "pypi-", "SG."
@@ -765,14 +806,24 @@ enum SensitiveCredentialVeil {
         return sum % 10 == 0
     }
 
-    /// 生成防肩窥雾化摘要（保留辨识头尾，中间替换为紧凑圆点，行数与视觉长度恒定零抖动）
+    /// 生成防肩窥雾化摘要（严防单行 JSON / `.env` 内联 PEM 私钥因无真实换行而裸露 360 字符私钥正文）
     static func veiledPreview(for rawText: String) -> String {
         let trimmed = rawText.prefix(360).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return "••••••••••••" }
 
-        if trimmed.contains("PRIVATE KEY-----") {
-            let firstLine = trimmed.components(separatedBy: .newlines).first ?? "-----BEGIN PRIVATE KEY-----"
-            return "\(firstLine) ••••••••••••••••"
+        if let beginRange = trimmed.range(of: "-----BEGIN ") {
+            let afterBegin = trimmed[beginRange.lowerBound...]
+            let endMarker = afterBegin.range(of: "PRIVATE KEY BLOCK-----") ?? afterBegin.range(of: "PRIVATE KEY-----")
+            if let marker = endMarker {
+                let headerLabel = String(trimmed[beginRange.lowerBound..<marker.upperBound].prefix(48))
+                if beginRange.lowerBound == trimmed.startIndex {
+                    return "\(headerLabel) ••••••••••••••••"
+                }
+                let lead = String(trimmed[..<beginRange.lowerBound])
+                    .replacingOccurrences(of: "\n", with: " ")
+                    .prefix(12)
+                return "\(lead)••• \(headerLabel) ••••••••••••"
+            }
         }
 
         let singleLine = trimmed.replacingOccurrences(of: "\n", with: " ")
@@ -799,17 +850,20 @@ enum SensitiveCredentialVeil {
         return markers.contains { raw.contains($0) }
     }
 
-    /// 双角色共享：一键掩码文本中的高敏密钥、私钥、连接凭据与身份证/银行卡（保留代码与日志上下文）
+    /// 双角色共享：一键掩码文本中的高敏密钥、私钥、连接凭据与身份证/银行卡（保留代码与单行 JSON 转义结构）
     static func redactForExternalSharing(_ rawText: String) -> String {
         guard !rawText.isEmpty, rawText.utf8.count <= 131_072 else { return rawText }
         var out = rawText
         if out.contains("-----BEGIN ") && (out.contains("PRIVATE KEY-----") || out.contains("PRIVATE KEY BLOCK-----")) {
-            let r = NSRange(out.startIndex..<out.endIndex, in: out)
-            out = pemBlockRegex.stringByReplacingMatches(
-                in: out,
-                range: r,
-                withTemplate: "-----BEGIN PRIVATE KEY-----\n[REDACTED_BY_iCLIP]\n-----END PRIVATE KEY-----"
-            )
+            let matches = pemBlockRegex.matches(in: out, range: NSRange(out.startIndex..<out.endIndex, in: out))
+            for m in matches.reversed() {
+                guard let swiftRange = Range(m.range, in: out) else { continue }
+                let block = out[swiftRange]
+                let replacement = (!block.contains("\n") && block.contains("\\n"))
+                    ? "-----BEGIN PRIVATE KEY-----\\n[REDACTED_BY_iCLIP]\\n-----END PRIVATE KEY-----"
+                    : "-----BEGIN PRIVATE KEY-----\n[REDACTED_BY_iCLIP]\n-----END PRIVATE KEY-----"
+                out.replaceSubrange(swiftRange, with: replacement)
+            }
         }
         if out.contains("PuTTY-User-Key-File-") {
             let r = NSRange(out.startIndex..<out.endIndex, in: out)
@@ -2130,9 +2184,30 @@ enum SecurityPostureAudit {
 /// 9. 零知识端到端认证加密密文信封（`@锁 口令` 加锁外发 / `@解锁 口令` 无痕阅后即焚，macOS ↔ Windows 100% 字节级互解）
 enum SecretCapsuleMessenger {
     static let tokenPrefix = "ICLPMSG1:"
-    private static let capsuleExtractRegex = try! NSRegularExpression(
-        pattern: #"ICLPMSG1:([A-Za-z0-9_-]{80,})"#
-    )
+    private static let maxCapsuleBase64Length = 96_000
+
+    /// O(1) 有界扫描提取 `ICLPMSG1:<Base64URL>` 载荷（严格限制 `80...96_000` 字符，阻断超长伪造文本按键实时解密 DoS）
+    private static func extractBoundedCapsuleToken(_ raw: String) -> String? {
+        guard let prefixRange = raw.range(of: tokenPrefix) else { return nil }
+        let tail = raw[prefixRange.upperBound...].utf8
+        var count = 0
+        var endIdx = tail.startIndex
+        while endIdx < tail.endIndex {
+            let b = tail[endIdx]
+            let isB64URL = (b >= 65 && b <= 90)
+                || (b >= 97 && b <= 122)
+                || (b >= 48 && b <= 57)
+                || b == 45 || b == 95
+            if !isB64URL { break }
+            count += 1
+            if count > maxCapsuleBase64Length {
+                return nil
+            }
+            endIdx = tail.index(after: endIdx)
+        }
+        guard count >= 80 else { return nil }
+        return String(decoding: tail[..<endIdx], as: UTF8.self)
+    }
 
     enum CommandState: Equatable {
         case lockReady(passphrase: String, plainSource: String, isInlineBody: Bool)
@@ -2142,9 +2217,8 @@ enum SecretCapsuleMessenger {
     }
 
     static func containsCapsule(_ text: String?) -> Bool {
-        guard let s = text, s.contains(tokenPrefix) else { return false }
-        let r = NSRange(s.startIndex..<s.endIndex, in: s)
-        return capsuleExtractRegex.firstMatch(in: s, range: r) != nil
+        guard let s = text else { return false }
+        return extractBoundedCapsuleToken(s) != nil
     }
 
     static func isCapsuleCommandPrefix(_ query: String) -> Bool {
@@ -2173,13 +2247,10 @@ enum SecretCapsuleMessenger {
 
     static func openCapsule(in rawEnvelope: String, passphrase: String) -> String? {
         let pw = passphrase.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !pw.isEmpty, rawEnvelope.contains(tokenPrefix) else { return nil }
-        let r = NSRange(rawEnvelope.startIndex..<rawEnvelope.endIndex, in: rawEnvelope)
-        guard let m = capsuleExtractRegex.firstMatch(in: rawEnvelope, range: r),
-              let b64Range = Range(m.range(at: 1), in: rawEnvelope) else {
+        guard !pw.isEmpty,
+              let rawB64URL = extractBoundedCapsuleToken(rawEnvelope) else {
             return nil
         }
-        let rawB64URL = String(rawEnvelope[b64Range])
         var std = rawB64URL
             .replacingOccurrences(of: "-", with: "+")
             .replacingOccurrences(of: "_", with: "/")
@@ -2281,7 +2352,7 @@ enum ReversiblePrivacyTwin {
         pattern: #"-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----"#
     )
     private static let standaloneSecretRegex = try! NSRegularExpression(
-        pattern: #"\b(?:AGE-SECRET-KEY-1[A-Z0-9]{50,}|eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}|sk-(?:proj-|ant-|or-v1-)?[A-Za-z0-9_-]{18,}|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}|whsec_[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{24,}|github_pat_[A-Za-z0-9_]{28,}|glpat-[A-Za-z0-9_-]{18,}|glsa_[A-Za-z0-9_-]{24,}|glc_[A-Za-z0-9_-]{24,}|dapi[a-fA-F0-9]{32}|re_[A-Za-z0-9_]{24,}|xox[baprs]-[A-Za-z0-9-]{18,}|AIzaSy[A-Za-z0-9_-]{31,}|hf_[A-Za-z0-9]{24,}|gsk_[A-Za-z0-9]{24,}|pplx-[A-Za-z0-9]{24,}|r8_[A-Za-z0-9]{24,}|ntn_[A-Za-z0-9]{24,}|secret_[A-Za-z0-9]{32,}|sbp_[a-fA-F0-9]{32,}|figd_[A-Za-z0-9_-]{24,}|lin_api_[A-Za-z0-9]{24,}|PMAK-[a-fA-F0-9]{24}-[a-fA-F0-9]{34}|dop_v1_[a-fA-F0-9]{64}|dckr_pat_[A-Za-z0-9_-]{20,}|hvs\.[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|LTAI[A-Za-z0-9]{12,24}|AKID[A-Za-z0-9]{13,32}|\d{8,10}:AA[A-Za-z0-9_-]{33}|npm_[A-Za-z0-9]{36}|pypi-[A-Za-z0-9_-]{40,}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,})\b"#
+        pattern: #"\b(?:AGE-SECRET-KEY-1[A-Z0-9]{50,}|eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}|sk-(?:proj-|ant-|or-v1-)?[A-Za-z0-9_-]{18,}|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}|whsec_[A-Za-z0-9]{16,}|tskey-(?:auth|api|client|webhook)-[A-Za-z0-9_-]{16,}|vcp_[A-Za-z0-9]{24,}|cfut_[A-Za-z0-9_-]{24,}|gh[pousr]_[A-Za-z0-9]{24,}|github_pat_[A-Za-z0-9_]{28,}|glpat-[A-Za-z0-9_-]{18,}|glsa_[A-Za-z0-9_-]{24,}|glc_[A-Za-z0-9_-]{24,}|dapi[a-fA-F0-9]{32}|re_[A-Za-z0-9_]{24,}|xox[baprs]-[A-Za-z0-9-]{18,}|AIzaSy[A-Za-z0-9_-]{31,}|hf_[A-Za-z0-9]{24,}|gsk_[A-Za-z0-9]{24,}|pplx-[A-Za-z0-9]{24,}|r8_[A-Za-z0-9]{24,}|ntn_[A-Za-z0-9]{24,}|secret_[A-Za-z0-9]{32,}|sbp_[a-fA-F0-9]{32,}|figd_[A-Za-z0-9_-]{24,}|lin_api_[A-Za-z0-9]{24,}|PMAK-[a-fA-F0-9]{24}-[a-fA-F0-9]{34}|dop_v1_[a-fA-F0-9]{64}|dckr_pat_[A-Za-z0-9_-]{20,}|hvs\.[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|LTAI[A-Za-z0-9]{12,24}|AKID[A-Za-z0-9]{13,32}|\d{8,10}:AA[A-Za-z0-9_-]{33}|npm_[A-Za-z0-9]{36}|pypi-[A-Za-z0-9_-]{40,}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,})\b"#
     )
     private static let uriPasswordGroupRegex = try! NSRegularExpression(
         pattern: #"(?i)\b((?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|rediss?|amqps?|clickhouse|https?)://[^:\s/@]*:)([^@\s/]{4,})(@)"#
@@ -3182,6 +3253,116 @@ enum UniversalEscapeDecoder {
             removedCount: removed,
             remainingCount: unique.count
         )
+    }
+
+    struct ListBatchConversionAction: Equatable {
+        let id: String
+        let title: String
+        let symbolName: String
+        let resultText: String
+        let toastText: String
+    }
+
+    /// Excel 竖列单号/词条 ↔ 后台批量查询逗号单行 / SQL `IN` 列表离线双向秒转（严苛排除代码、表格、千分位数字与自然语言段落）
+    static func analyzeListBatchConversion(_ raw: String, includeSQLIn: Bool) -> [ListBatchConversionAction] {
+        guard !raw.isEmpty, raw.utf8.count <= 65_536, !raw.contains("\t") else { return [] }
+        let normalized = raw.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+        let trimmed = normalized.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !trimmed.contains("://") else { return [] }
+
+        // 方向 A：竖列（3~500 行短词条） -> 逗号单行 & SQL IN 列表
+        if trimmed.contains("\n") {
+            guard !looksLikeSourceCodeOrMarkdownBlock(normalized) else { return [] }
+            let rawLines = normalized.components(separatedBy: "\n")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            guard rawLines.count >= 3, rawLines.count <= 500 else { return [] }
+
+            let forbiddenPrefixes = ["#", "|", ">", "- ", "* ", "+ ", "[]", "[ ]", "[x]", "[X]"]
+            let sentencePuncts: [Character] = ["。", "！", "？", "；"]
+            for line in rawLines {
+                let len = line.count
+                if len == 0 || len > 64 { return [] }
+                if forbiddenPrefixes.contains(where: { line.hasPrefix($0) }) { return [] }
+                if sentencePuncts.contains(where: { line.contains($0) }) { return [] }
+                if line.contains(". ") || line.contains("! ") || line.contains("? ") { return [] }
+            }
+
+            var seen = Set<String>()
+            var items: [String] = []
+            items.reserveCapacity(rawLines.count)
+            for line in rawLines where seen.insert(line).inserted {
+                items.append(line)
+            }
+            guard items.count >= 2 else { return [] }
+
+            var out: [ListBatchConversionAction] = [
+                ListBatchConversionAction(
+                    id: "list-join-comma",
+                    title: "合并逗号单行(\(items.count)项)",
+                    symbolName: "arrow.up.and.down.and.sparkles",
+                    resultText: items.joined(separator: ", "),
+                    toastText: "已将 \(items.count) 条竖列合并为逗号分隔单行，可直接粘入后台批量查询"
+                )
+            ]
+
+            if includeSQLIn,
+               items.allSatisfy({ item in
+                   item.count <= 48
+                       && !item.contains(where: { $0.isWhitespace || $0 == "\"" || $0 == "`" || $0 == "(" || $0 == ")" })
+               }) {
+                let sqlItems = items.map { "'\($0.replacingOccurrences(of: "'", with: "''"))'" }
+                out.append(ListBatchConversionAction(
+                    id: "list-join-sql-in",
+                    title: "转 SQL IN (\(items.count)项)",
+                    symbolName: "cylinder.split.1x2",
+                    resultText: "(\(sqlItems.joined(separator: ", ")))",
+                    toastText: "已生成防注入转义的 SQL IN 列表（共 \(items.count) 项）"
+                ))
+            }
+            return out
+        }
+
+        // 方向 B：单行顿号/分号/逗号分隔名单（4~500 项） -> 竖列（直粘 Excel 自动填入一竖列单元格）
+        guard trimmed.utf8.count <= 16_384,
+              let firstChar = trimmed.first,
+              !["{", "[", "<", "#"].contains(firstChar),
+              !trimmed.contains("=") else {
+            return []
+        }
+
+        let delimiters: [Character] = ["、", "；", ";", "，", ","]
+        for sep in delimiters {
+            let sepCount = trimmed.filter { $0 == sep }.count
+            guard sepCount >= 3 else { continue }
+            let parts = trimmed.split(separator: sep, omittingEmptySubsequences: false)
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            guard parts.count >= 4, parts.count <= 500 else { continue }
+            guard parts.allSatisfy({ p in
+                p.count >= 1 && p.count <= 48 && !p.contains("。") && !p.contains("！") && !p.contains("？") && p.filter({ $0 == " " }).count <= 2
+            }) else { continue }
+
+            // 排除英文逗号千分位大数字（如 1,234,567,890）
+            if sep == "," {
+                let tailThreeDigits = parts.dropFirst().filter { $0.count == 3 && $0.allSatisfy(\.isNumber) }.count
+                if tailThreeDigits == parts.count - 1 && parts[0].allSatisfy({ $0.isNumber || $0 == "-" || $0 == "+" || $0 == "$" || $0 == "¥" }) {
+                    continue
+                }
+            }
+
+            return [
+                ListBatchConversionAction(
+                    id: "list-split-lines",
+                    title: "拆分为 \(parts.count) 行竖列",
+                    symbolName: "list.bullet.indent",
+                    resultText: parts.joined(separator: "\n"),
+                    toastText: "已拆分为 \(parts.count) 行竖列，粘贴至 Excel / 表格即可自动分列成行"
+                )
+            ]
+        }
+
+        return []
     }
 
     private static func looksLikeSourceCodeOrMarkdownBlock(_ text: String) -> Bool {
