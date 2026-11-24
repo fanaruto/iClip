@@ -294,10 +294,25 @@ impl ClipItem {
         }
     }
 
+    /// 单条文本历史入库最大 UTF-8 字节上限（4 MB，O(1) 放行常规与 2MB 文本，超限时按合法字符边界截断防止 AES 写放大）
+    pub const MAX_PERSISTED_TEXT_UTF8_BYTES: usize = 4 * 1024 * 1024;
+
+    pub fn clamp_oversized_text(raw: String, max_bytes: usize) -> String {
+        if raw.len() <= max_bytes || max_bytes == 0 {
+            return raw;
+        }
+        let mut end = max_bytes;
+        while end > 0 && !raw.is_char_boundary(end) {
+            end -= 1;
+        }
+        raw[..end].to_string()
+    }
+
     pub fn new_text(raw: String, source_app: Option<String>) -> Self {
-        let trimmed = raw.trim();
+        let clamped = Self::clamp_oversized_text(raw, Self::MAX_PERSISTED_TEXT_UTF8_BYTES);
+        let trimmed = clamped.trim();
         let is_link = is_valid_web_url(trimmed);
-        let hash = sha256_hex(raw.as_bytes());
+        let hash = sha256_hex(clamped.as_bytes());
         Self {
             id: generate_pseudo_uuid(&hash),
             kind: if is_link {
@@ -305,7 +320,7 @@ impl ClipItem {
             } else {
                 ClipContentType::Text
             },
-            text: Some(raw),
+            text: Some(clamped),
             image_file_name: None,
             image_width: None,
             image_height: None,

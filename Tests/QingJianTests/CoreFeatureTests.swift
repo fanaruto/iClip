@@ -2884,4 +2884,57 @@ final class CoreFeatureTests: XCTestCase {
         let exportedFiles = (try? FileManager.default.contentsOfDirectory(atPath: exportDir.path)) ?? []
         XCTAssertTrue(exportedFiles.isEmpty)
     }
+
+    @MainActor
+    func testNonActivatingZeroBlurFocusPolicyOversizedClampCronAndPathSecurity() throws {
+        // 1. 验证非激活面板零失焦配置：becomesKeyOnlyIfNeeded == true 且唤醒不强抢搜索框焦点
+        let testPanel = KeyableFloatingPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 560),
+            styleMask: [.nonactivatingPanel, .borderless],
+            backing: .buffered,
+            defer: true
+        )
+        XCTAssertTrue(testPanel.styleMask.contains(.nonactivatingPanel))
+        XCTAssertTrue(testPanel.becomesKeyOnlyIfNeeded)
+        XCTAssertTrue(testPanel.canBecomeKey)
+        XCTAssertFalse(testPanel.canBecomeMain)
+
+        // 导航键/快捷键不触发盲搜获焦，普通字符键触发盲搜获焦，且已激活宿主应用粘贴时不重复 activate
+        XCTAssertFalse(PanelFocusPreservationPolicy.shouldBeginSearchTyping(
+            keyCode: 125, flags: [], charactersIgnoringModifiers: "\u{F701}", showSettings: false, showQuickLook: false
+        ))
+        XCTAssertFalse(PanelFocusPreservationPolicy.shouldBeginSearchTyping(
+            keyCode: 36, flags: [], charactersIgnoringModifiers: "\r", showSettings: false, showQuickLook: false
+        ))
+        XCTAssertTrue(PanelFocusPreservationPolicy.shouldBeginSearchTyping(
+            keyCode: 0, flags: [], charactersIgnoringModifiers: "a", showSettings: false, showQuickLook: false
+        ))
+        XCTAssertFalse(PanelFocusPreservationPolicy.shouldActivatePreviousApp(isPreviousAppActive: true))
+        XCTAssertTrue(PanelFocusPreservationPolicy.shouldActivatePreviousApp(isPreviousAppActive: false))
+
+        // 2. 验证超大文本 UTF-8 多字节汉字/Emoji 标量边界安全截断
+        let multiByte = "微信搜索🚀测试文本"
+        let clamped = ClipboardStore.clampOversizedTextForStorage(multiByte, maxUTF8Bytes: 15)
+        XCTAssertLessThanOrEqual(clamped.utf8.count, 15)
+        XCTAssertEqual(clamped, "微信搜索")
+
+        // 3. 验证新型云/AI 密钥（OpenRouter / Databricks / Grafana / Resend）离线脱敏保护
+        let openRouterKey = "sk-or-v1-" + "abcdef0123456789abcdef0123456789abcdef0123456789"
+        XCTAssertEqual(SensitiveCredentialVeil.classify(openRouterKey), .apiKey)
+        let databricksPat = "dapi" + "0123456789abcdef0123456789abcdef"
+        XCTAssertEqual(SensitiveCredentialVeil.classify(databricksPat), .apiKey)
+
+        // 4. 验证离线 5 段 Cron 自然中文直译（防误伤普通数字串）与跨平台路径斜杠/终端转义
+        let cron = try XCTUnwrap(CronAndPathHelper.explainCronExpression("*/15 9-18 * * 1-5"))
+        XCTAssertTrue(cron.shortSummary.contains("工作日"))
+        XCTAssertNil(CronAndPathHelper.explainCronExpression("1 2 3 4 5"))
+
+        let winPath = try XCTUnwrap(CronAndPathHelper.analyzePathAction(#"C:\Users\dev\my project\config.json"#))
+        XCTAssertEqual(winPath.id, "path-win-to-slash")
+        XCTAssertEqual(winPath.resultText, "C:/Users/dev/my project/config.json")
+
+        let posixSpacePath = try XCTUnwrap(CronAndPathHelper.analyzePathAction("/Users/dev/My Secret Folder/a'b.txt"))
+        XCTAssertEqual(posixSpacePath.id, "path-shell-quote")
+        XCTAssertEqual(posixSpacePath.resultText, "'/Users/dev/My Secret Folder/a'\\''b.txt'")
+    }
 }

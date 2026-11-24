@@ -1266,8 +1266,9 @@ final class ClipboardStore: ObservableObject {
             }
         }
 
-        // 3. 文本与链接
-        if let rawText = pasteboard.string(forType: .string) {
+        // 3. 文本与链接（持久化副本 4 MB UTF-8 字符边界门控：不覆盖系统剪贴板完整原文，彻底阻断误复制百兆 Dump 引发的 AES 写放大）
+        if let rawClipboardText = pasteboard.string(forType: .string) {
+            let rawText = Self.clampOversizedTextForStorage(rawClipboardText)
             let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { return }
 
@@ -1531,6 +1532,22 @@ final class ClipboardStore: ObservableObject {
         lastImportedDragPNGData = nil
     }
 
+    /// 单条文本历史入库最大 UTF-8 字节上限（4 MB，O(1) 放行常规与 2MB 文本，超限时按合法 UTF-8 标量边界截断且不修改系统剪贴板原文）
+    nonisolated static let maxPersistedTextUTF8Bytes = 4 * 1024 * 1024
+
+    nonisolated static func clampOversizedTextForStorage(
+        _ raw: String,
+        maxUTF8Bytes: Int = maxPersistedTextUTF8Bytes
+    ) -> String {
+        let utf8 = raw.utf8
+        guard utf8.count > maxUTF8Bytes, maxUTF8Bytes > 0 else { return raw }
+        var idx = utf8.index(utf8.startIndex, offsetBy: maxUTF8Bytes)
+        while idx > utf8.startIndex && (utf8[idx] & 0b1100_0000) == 0b1000_0000 {
+            idx = utf8.index(before: idx)
+        }
+        return String(decoding: utf8[..<idx], as: UTF8.self)
+    }
+
     /// 自动二维码解码安全出口决议：若二维码内容为 `otpauth://` 2FA 密钥，绝不裸写根密钥到剪贴板，改为直算 6 位动态码 + 30s 自动擦除
     nonisolated static func resolveSafeAutoQRCodeOutput(
         for qr: String,
@@ -1728,7 +1745,8 @@ final class ClipboardStore: ObservableObject {
         }
 
         // 4. 文本与选中文字片段
-        if let rawText = draggingPasteboard.string(forType: .string) {
+        if let rawDragString = draggingPasteboard.string(forType: .string) {
+            let rawText = Self.clampOversizedTextForStorage(rawDragString)
             let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { return false }
 
@@ -3715,6 +3733,29 @@ final class ClipboardStore: ObservableObject {
                 )
             )
         }
+        if analyzed.count < 3, !raw.contains("\n"), raw.utf8.count <= 512 {
+            if let cronDesc = CronAndPathHelper.explainCronExpression(raw) {
+                analyzed.append(
+                    FinanceQuickAction(
+                        id: "cron-explain",
+                        title: "Cron：\(cronDesc.shortSummary)",
+                        symbolName: "calendar.badge.clock",
+                        resultText: cronDesc.annotatedComment,
+                        toastText: "已生成 Cron 定时说明：\(cronDesc.shortSummary)"
+                    )
+                )
+            } else if let pathAct = CronAndPathHelper.analyzePathAction(raw) {
+                analyzed.append(
+                    FinanceQuickAction(
+                        id: pathAct.id,
+                        title: pathAct.title,
+                        symbolName: "folder.badge.gearshape",
+                        resultText: pathAct.resultText,
+                        toastText: pathAct.toastText
+                    )
+                )
+            }
+        }
         if !raw.contains("\n"),
            let publicURL = URLTrackingCleaner.sanitizeURLForPublicShare(raw.trimmingCharacters(in: .whitespacesAndNewlines)) {
             analyzed.insert(
@@ -4854,7 +4895,7 @@ final class ClipboardStore: ObservableObject {
         let ownPID = ProcessInfo.processInfo.processIdentifier
         let frontPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
         if frontPID != nil && frontPID != ownPID {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.045) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.035) {
                 simulateCommandV()
                 if autoTabAfter {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.055) {
@@ -4898,6 +4939,8 @@ final class ClipboardStore: ObservableObject {
         }
         keyDown.flags = .maskCommand
         keyUp.flags = .maskCommand
+        keyDown.setIntegerValueField(.eventSourceUserData, value: iClipSyntheticEventMagic)
+        keyUp.setIntegerValueField(.eventSourceUserData, value: iClipSyntheticEventMagic)
         keyDown.post(tap: .cghidEventTap)
         keyUp.post(tap: .cghidEventTap)
     }
@@ -4912,6 +4955,8 @@ final class ClipboardStore: ObservableObject {
         }
         keyDown.flags = .maskCommand
         keyUp.flags = .maskCommand
+        keyDown.setIntegerValueField(.eventSourceUserData, value: iClipSyntheticEventMagic)
+        keyUp.setIntegerValueField(.eventSourceUserData, value: iClipSyntheticEventMagic)
         keyDown.post(tap: .cghidEventTap)
         keyUp.post(tap: .cghidEventTap)
     }
@@ -4923,6 +4968,8 @@ final class ClipboardStore: ObservableObject {
               let keyUp = CGEvent(keyboardEventSource: source, virtualKey: tabKeyCode, keyDown: false) else {
             return
         }
+        keyDown.setIntegerValueField(.eventSourceUserData, value: iClipSyntheticEventMagic)
+        keyUp.setIntegerValueField(.eventSourceUserData, value: iClipSyntheticEventMagic)
         keyDown.post(tap: .cghidEventTap)
         keyUp.post(tap: .cghidEventTap)
     }

@@ -9,7 +9,8 @@ use iclip_core::engines::{
     render_dynamic_template, render_mockup_frame_png, strip_file_metadata_to_clean_png,
 };
 use iclip_core::hotkey::{
-    static_hotkey_conflict_reason, DoubleTapOutcome, WinHotKeyShortcut, WinHotKeySlot,
+    classify_non_active_panel_key, should_restore_foreground_window, static_hotkey_conflict_reason,
+    DoubleTapOutcome, NonActiveKeyRoute, WinHotKeyShortcut, WinHotKeySlot,
     WinModifierDoubleTapMachine, WinSingleModifier, MOD_ALT_BITS, MOD_CONTROL_BITS, MOD_SHIFT_BITS,
     MOD_WIN_BITS,
 };
@@ -87,6 +88,13 @@ const PANEL_BASE_H: i32 = 560;
 
 const WM_TRAYICON: u32 = WM_USER + 101;
 const WM_APP_DOUBLETAP: u32 = WM_USER + 102;
+const WM_APP_PANEL_KEY: u32 = WM_USER + 103;
+const WM_APP_PANEL_TYPE_CHAR: u32 = WM_USER + 104;
+const WM_APP_OUTSIDE_CLICK: u32 = WM_USER + 105;
+const WS_EX_NOACTIVATE_VAL: u32 = 0x0800_0000;
+const SWP_NOACTIVATE_VAL: u32 = 0x0010;
+const WM_MOUSEACTIVATE_MSG: u32 = 0x0021;
+const MA_NOACTIVATE_RES: LRESULT = 3;
 const WM_CLIPBOARDUPDATE_MSG: u32 = 0x031D;
 const WM_POWERBROADCAST_MSG: u32 = 0x0218;
 const PBT_APMSUSPEND_VAL: usize = 0x0004;
@@ -169,6 +177,7 @@ struct HitRegion {
 
 #[derive(Clone)]
 enum HitAction {
+    FocusSearch,
     ClearSearch,
     ToggleMinimalMode,
     ToggleAlwaysOnTop,
@@ -402,7 +411,7 @@ pub fn run_windows_app() -> i32 {
         RegisterClassExW(&wc);
 
         let hwnd = CreateWindowExW(
-            WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE_VAL,
             class_name.as_ptr(),
             to_wide("iClip").as_ptr(),
             WS_POPUP,
@@ -1031,7 +1040,7 @@ unsafe fn reload_global_hotkeys_and_hooks(hwnd: HWND) {
     let _ = UnregisterHotKey(hwnd, HOTKEY_ID_QUEUE_POP);
     let _ = UnregisterHotKey(hwnd, HOTKEY_ID_COPY_APPEND);
 
-    let (hk_toggle, hk_queue, append_on, recording) = APP_STATE.with(|c| {
+    let (hk_toggle, hk_queue, append_on, recording, is_visible) = APP_STATE.with(|c| {
         let b = c.borrow();
         let st = b.as_ref().unwrap();
         (
@@ -1039,6 +1048,7 @@ unsafe fn reload_global_hotkeys_and_hooks(hwnd: HWND) {
             st.store.config.hotkey_queue_pop.clone(),
             st.store.config.copy_append_enabled,
             st.recording_slot.is_some(),
+            st.visible,
         )
     });
 
@@ -1070,7 +1080,8 @@ unsafe fn reload_global_hotkeys_and_hooks(hwnd: HWND) {
         }
     }
 
-    let need_hooks = hk_toggle.is_double_tap() || hk_queue.is_double_tap() || recording;
+    let need_hooks =
+        hk_toggle.is_double_tap() || hk_queue.is_double_tap() || recording || is_visible;
     if need_hooks {
         install_low_level_hooks_if_needed();
     } else {
@@ -1251,6 +1262,44 @@ unsafe extern "system" fn ll_kbd_proc(code: i32, wparam: WPARAM, lparam: LPARAM)
                             WinSingleModifier::Win => 4usize,
                         };
                         let _ = PostMessageW(hwnd, WM_APP_DOUBLETAP, code_val, 0);
+                    } else if is_down && GetForegroundWindow() != hwnd {
+                        let mod_bits = current_async_mod_bits_excluding(None);
+                        let route = APP_STATE.with(|c| {
+                            let b = c.borrow();
+                            let Some(st) = b.as_ref() else {
+                                return NonActiveKeyRoute::PassThrough;
+                            };
+                            if !st.visible {
+                                return NonActiveKeyRoute::PassThrough;
+                            }
+                            let cur_combo = WinHotKeyShortcut::combo(vk, mod_bits);
+                            if st.recording_slot.is_none()
+                                && ((!st.store.config.hotkey_toggle.is_double_tap()
+                                    && cur_combo == st.store.config.hotkey_toggle)
+                                    || (!st.store.config.hotkey_queue_pop.is_double_tap()
+                                        && cur_combo == st.store.config.hotkey_queue_pop))
+                            {
+                                return NonActiveKeyRoute::PassThrough;
+                            }
+                            classify_non_active_panel_key(
+                                vk,
+                                mod_bits,
+                                st.view_mode == ActiveViewMode::MainList,
+                                st.show_quick_look,
+                                st.recording_slot.is_some(),
+                            )
+                        });
+                        match route {
+                            NonActiveKeyRoute::PassThrough => {}
+                            NonActiveKeyRoute::DispatchPanelCommand => {
+                                let _ = PostMessageW(hwnd, WM_APP_PANEL_KEY, vk as usize, 0);
+                                return 1;
+                            }
+                            NonActiveKeyRoute::ActivateAndTypeChar(ch) => {
+                                let _ = PostMessageW(hwnd, WM_APP_PANEL_TYPE_CHAR, ch as usize, 0);
+                                return 1;
+                            }
+                        }
                     }
                 }
             }
@@ -1271,6 +1320,34 @@ unsafe extern "system" fn ll_mouse_proc(code: i32, wparam: WPARAM, lparam: LPARA
                     st.double_tap_machine.mark_interfering_event();
                 }
             });
+        }
+        if matches!(m, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN) && lparam != 0 {
+            let hwnd = MAIN_HWND_RAW.load(Ordering::SeqCst) as HWND;
+            if !hwnd.is_null() {
+                let should_check = APP_STATE.with(|c| {
+                    c.borrow()
+                        .as_ref()
+                        .map(|s| {
+                            s.visible
+                                && !s.store.config.always_on_top
+                                && !s.suppress_deactivate_hide
+                                && s.recording_slot.is_none()
+                        })
+                        .unwrap_or(false)
+                });
+                if should_check {
+                    let ms = &*(lparam as *const MSLLHOOKSTRUCT);
+                    let mut rc: RECT = zeroed();
+                    if GetWindowRect(hwnd, &mut rc) != FALSE
+                        && (ms.pt.x < rc.left
+                            || ms.pt.x >= rc.right
+                            || ms.pt.y < rc.top
+                            || ms.pt.y >= rc.bottom)
+                    {
+                        let _ = PostMessageW(hwnd, WM_APP_OUTSIDE_CLICK, 0, 0);
+                    }
+                }
+            }
         }
     }
     CallNextHookEx(null_mut(), code, wparam, lparam)
@@ -1461,15 +1538,35 @@ unsafe fn show_panel_near_cursor(hwnd: HWND) {
         }
     });
 
-    SetWindowPos(hwnd, HWND_TOPMOST, x, y, win_w, win_h, SWP_SHOWWINDOW);
+    SetWindowPos(
+        hwnd,
+        HWND_TOPMOST,
+        x,
+        y,
+        win_w,
+        win_h,
+        SWP_NOACTIVATE_VAL | SWP_SHOWWINDOW,
+    );
+    reload_global_hotkeys_and_hooks(hwnd);
+    let _ = InvalidateRect(hwnd, null(), FALSE);
+}
+
+unsafe fn activate_panel_for_input(hwnd: HWND) {
     let _ = SetForegroundWindow(hwnd);
     let _ = SetFocus(hwnd);
-    let _ = InvalidateRect(hwnd, null(), FALSE);
+}
+
+unsafe fn restore_target_foreground_if_needed(target_fg: HWND) {
+    if !target_fg.is_null() && IsWindow(target_fg) != FALSE {
+        let cur_fg = GetForegroundWindow();
+        if should_restore_foreground_window(cur_fg as isize, target_fg as isize) {
+            let _ = SetForegroundWindow(target_fg);
+        }
+    }
 }
 
 unsafe fn hide_panel(hwnd: HWND, restore_focus: bool) {
     let mut target_fg: HWND = null_mut();
-    let mut was_recording = false;
     KillTimer(hwnd, TIMER_ID_SPRING_ANIM);
     APP_STATE.with(|cell| {
         if let Some(st) = cell.borrow_mut().as_mut() {
@@ -1483,20 +1580,17 @@ unsafe fn hide_panel(hwnd: HWND, restore_focus: bool) {
                 st.recording_slot = None;
                 st.hotkey_conflict_error = None;
                 st.hotkey_recording_hint = None;
-                was_recording = true;
             }
             if restore_focus {
                 target_fg = st.previous_foreground;
             }
         }
     });
-    if was_recording {
-        reload_global_hotkeys_and_hooks(hwnd);
-    }
+    reload_global_hotkeys_and_hooks(hwnd);
     iclip_core::security::wipe_all_temp_previews();
     ShowWindow(hwnd, SW_HIDE);
-    if restore_focus && !target_fg.is_null() && IsWindow(target_fg) != FALSE {
-        let _ = SetForegroundWindow(target_fg);
+    if restore_focus {
+        restore_target_foreground_if_needed(target_fg);
     }
 }
 
@@ -1576,6 +1670,50 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_APP_DOUBLETAP => {
             handle_double_tap_message(hwnd, wparam, lparam);
+            0
+        }
+        WM_MOUSEACTIVATE_MSG => MA_NOACTIVATE_RES,
+        WM_APP_PANEL_KEY => {
+            let vk = wparam as u32;
+            let ctrl_down = (GetKeyState(VK_CONTROL as i32) as u16 & 0x8000) != 0;
+            if vk == VK_BACK as u32 && !ctrl_down {
+                handle_char_input(hwnd, VK_BACK as u32);
+            } else if vk == 0x46 && ctrl_down {
+                activate_panel_for_input(hwnd);
+            } else {
+                handle_key_down(hwnd, vk);
+                let entered_alias = APP_STATE.with(|c| {
+                    c.borrow()
+                        .as_ref()
+                        .map(|s| s.editing_alias_item_id.is_some())
+                        .unwrap_or(false)
+                });
+                if entered_alias {
+                    activate_panel_for_input(hwnd);
+                }
+            }
+            0
+        }
+        WM_APP_PANEL_TYPE_CHAR => {
+            activate_panel_for_input(hwnd);
+            handle_char_input(hwnd, wparam as u32);
+            0
+        }
+        WM_APP_OUTSIDE_CLICK => {
+            let should_hide = APP_STATE.with(|c| {
+                c.borrow()
+                    .as_ref()
+                    .map(|s| {
+                        s.visible
+                            && !s.store.config.always_on_top
+                            && !s.suppress_deactivate_hide
+                            && s.recording_slot.is_none()
+                    })
+                    .unwrap_or(false)
+            });
+            if should_hide {
+                hide_panel(hwnd, false);
+            }
             0
         }
         WM_TIMER => {
@@ -2397,8 +2535,17 @@ unsafe fn read_unicode_text_from_clipboard(hwnd: HWND) -> Option<String> {
     let ptr = GlobalLock(handle) as *const u16;
     let byte_len = GlobalSize(handle);
     let out = if !ptr.is_null() && byte_len >= 2 {
-        let u16_slice = std::slice::from_raw_parts(ptr, byte_len / 2);
-        Some(from_wide_slice(u16_slice))
+        // 保护进程堆内存：读取全局句柄最多截取前 8 MB UTF-16 单元（跳过末尾孤立 UTF-16 高代理项）
+        let max_u16_units = 4 * 1024 * 1024;
+        let mut units = (byte_len / 2).min(max_u16_units);
+        let raw_slice = std::slice::from_raw_parts(ptr, units);
+        if units == max_u16_units && units > 0 {
+            let last_u = raw_slice[units - 1];
+            if (0xD800..=0xDBFF).contains(&last_u) {
+                units -= 1;
+            }
+        }
+        Some(from_wide_slice(&raw_slice[..units]))
     } else {
         None
     };
@@ -2882,9 +3029,7 @@ unsafe fn commit_paste_item_by_index(hwnd: HWND, item_idx: usize, force_plain: b
     }
 
     if always_top {
-        if !target_fg.is_null() && IsWindow(target_fg) != FALSE {
-            let _ = SetForegroundWindow(target_fg);
-        }
+        restore_target_foreground_if_needed(target_fg);
         set_toast(hwnd, "✓ 已键入目标窗口".to_string());
     } else {
         hide_panel(hwnd, true);
@@ -2930,9 +3075,7 @@ unsafe fn commit_ephemeral_secret_paste_with_delay(
     SetTimer(hwnd, TIMER_ID_CONCEALED_SCRUB, scrub_ms, None);
 
     if always_top {
-        if !target_fg.is_null() && IsWindow(target_fg) != FALSE {
-            let _ = SetForegroundWindow(target_fg);
-        }
+        restore_target_foreground_if_needed(target_fg);
         set_toast(hwnd, toast);
     } else {
         hide_panel(hwnd, true);
@@ -2978,9 +3121,7 @@ unsafe fn commit_direct_text_paste(hwnd: HWND, text: &str, toast: String) {
         SetTimer(hwnd, TIMER_ID_CONCEALED_SCRUB, 45_000, None);
     }
     if always_top {
-        if !target_fg.is_null() && IsWindow(target_fg) != FALSE {
-            let _ = SetForegroundWindow(target_fg);
-        }
+        restore_target_foreground_if_needed(target_fg);
         set_toast(hwnd, toast);
     } else {
         hide_panel(hwnd, true);
@@ -3078,9 +3219,7 @@ unsafe fn commit_quick_action(hwnd: HWND, item_idx: usize, action: &QuickAction)
         if let Some(clean_png) = strip_file_metadata_to_clean_png(Path::new(&action.result_text)) {
             let _ = write_image_bytes_to_clipboard(hwnd, &clean_png);
             if always_top {
-                if !target_fg.is_null() && IsWindow(target_fg) != FALSE {
-                    let _ = SetForegroundWindow(target_fg);
-                }
+                restore_target_foreground_if_needed(target_fg);
                 set_toast(hwnd, action.toast_text.clone());
             } else {
                 hide_panel(hwnd, true);
@@ -3139,9 +3278,7 @@ unsafe fn commit_quick_action(hwnd: HWND, item_idx: usize, action: &QuickAction)
     }
 
     if always_top {
-        if !target_fg.is_null() && IsWindow(target_fg) != FALSE {
-            let _ = SetForegroundWindow(target_fg);
-        }
+        restore_target_foreground_if_needed(target_fg);
         set_toast(hwnd, action.toast_text.clone());
     } else {
         hide_panel(hwnd, true);
@@ -3630,6 +3767,17 @@ fn layout_and_draw_main_view(
         });
         clear_rc.left - s(4)
     };
+
+    st.hit_regions.push(HitRegion {
+        rect: RECT {
+            left: pad,
+            top: top_y,
+            right: search_text_right,
+            bottom: top_y + btn_sz,
+        },
+        interactive_cursor: true,
+        action: HitAction::FocusSearch,
+    });
 
     texts.push(TextDrawCmd {
         text: if st.search_query.is_empty() {
@@ -7736,6 +7884,21 @@ fn layout_and_draw_quick_look_overlay(
         action: HitAction::CloseOverlay,
     });
 
+    if let Some(txt_for_metrics) = item.text.as_deref().or_else(|| item.ocr_text.as_deref()) {
+        texts.push(TextDrawCmd {
+            text: iclip_core::security::text_metrics_summary(txt_for_metrics),
+            rect: RECT {
+                left: mx + s(194),
+                top: my + s(11),
+                right: cx - s(8),
+                bottom: my + s(35),
+            },
+            color: palette.text_muted,
+            font_kind: FontKind::Meta,
+            flags: DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        });
+    }
+
     let body_top = my + s(44);
     let body_bottom = my + mh - s(32);
 
@@ -7985,6 +8148,10 @@ unsafe fn handle_left_click(hwnd: HWND, x: i32, y: i32, is_double: bool) {
     let ctrl_down = (GetKeyState(VK_CONTROL as i32) as u16 & 0x8000) != 0;
 
     match action {
+        HitAction::FocusSearch => {
+            activate_panel_for_input(hwnd);
+            let _ = InvalidateRect(hwnd, null(), FALSE);
+        }
         HitAction::ClearSearch => {
             APP_STATE.with(|c| {
                 if let Some(st) = c.borrow_mut().as_mut() {
@@ -8301,6 +8468,15 @@ unsafe fn handle_left_click(hwnd: HWND, x: i32, y: i32, is_double: bool) {
                 }
             });
             reload_global_hotkeys_and_hooks(hwnd);
+            let is_rec = APP_STATE.with(|c| {
+                c.borrow()
+                    .as_ref()
+                    .map(|s| s.recording_slot.is_some())
+                    .unwrap_or(false)
+            });
+            if is_rec {
+                activate_panel_for_input(hwnd);
+            }
             let _ = InvalidateRect(hwnd, null(), FALSE);
         }
         HitAction::ResetHotkeyDefault(slot) => {

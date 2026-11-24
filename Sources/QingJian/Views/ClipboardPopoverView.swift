@@ -30,6 +30,7 @@ final class PanelNavigationModel: ObservableObject {
     @Published var selectedPinCategory: PinCategory? = nil
     @Published var selectedIndex: Int = 0
     @Published var focusTrigger: UUID = UUID()
+    @Published var blurSearchTrigger: UUID = UUID()
     @Published var showSettings: Bool = false
     @Published var isPresented: Bool = false
     @Published var presentationEpoch: Int = 0
@@ -249,7 +250,7 @@ final class PanelNavigationModel: ObservableObject {
         isDragTargeted = false
         lockPointerAtCurrentMouse()
         presentationEpoch &+= 1
-        focusTrigger = UUID()
+        blurSearchTrigger = UUID()
     }
 
     func lockPointerAtCurrentMouse() {
@@ -538,6 +539,9 @@ struct ClipboardPopoverView: View {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                 isSearchFocused = true
             }
+        }
+        .onChange(of: nav.blurSearchTrigger) { _, _ in
+            isSearchFocused = false
         }
         .onChange(of: nav.searchText) { _, _ in
             nav.selectedIndex = 0
@@ -2706,9 +2710,6 @@ struct ClipboardPopoverView: View {
     func cancelAliasEdit() {
         aliasEditingItem = nil
         nav.isEditingAlias = false
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
-            isSearchFocused = true
-        }
     }
 
     func pasteSecondaryActionForSelected() {
@@ -2824,6 +2825,7 @@ struct ClipboardPopoverView: View {
 
     private func pickAppToIgnore() {
         nav.suppressAutoHide = true
+        NSApp.activate(ignoringOtherApps: true)
         let panel = NSOpenPanel()
         panel.title = "选择要忽略剪贴记录的应用"
         panel.canChooseFiles = true
@@ -2856,6 +2858,7 @@ struct ClipboardPopoverView: View {
         let defaultName = "iClip-收藏资产-\(df.string(from: Date())).iclip"
 
         nav.suppressAutoHide = true
+        NSApp.activate(ignoringOtherApps: true)
         let panel = NSSavePanel()
         panel.title = "导出 iClip 收藏与模板归档"
         panel.nameFieldStringValue = defaultName
@@ -2889,6 +2892,7 @@ struct ClipboardPopoverView: View {
 
     private func importPinnedArchiveAction() {
         nav.suppressAutoHide = true
+        NSApp.activate(ignoringOtherApps: true)
         let panel = NSOpenPanel()
         panel.title = "导入 .iclip 归档或 Raycast / Alfred / Markdown / CSV 常用语"
         panel.canChooseFiles = true
@@ -3001,6 +3005,7 @@ final class PanelNavigationModel: ObservableObject {
     @Published var selectedTab: ClipFilterTab = .all
     @Published var selectedIndex: Int = 0
     @Published var focusTrigger: UUID = UUID()
+    @Published var blurSearchTrigger: UUID = UUID()
     @Published var showSettings: Bool = false
     @Published var isPresented: Bool = false
     @Published var presentationEpoch: Int = 0
@@ -3232,7 +3237,7 @@ final class PanelNavigationModel: ObservableObject {
         isDragTargeted = false
         lockPointerAtCurrentMouse()
         presentationEpoch &+= 1
-        focusTrigger = UUID()
+        blurSearchTrigger = UUID()
     }
 
     func lockPointerAtCurrentMouse() {
@@ -3507,6 +3512,9 @@ struct ClipboardPopoverView: View {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                 isSearchFocused = true
             }
+        }
+        .onChange(of: nav.blurSearchTrigger) { _, _ in
+            isSearchFocused = false
         }
         .onChange(of: nav.searchText) { _, _ in
             nav.selectedIndex = 0
@@ -5505,9 +5513,6 @@ struct ClipboardPopoverView: View {
     func cancelAliasEdit() {
         aliasEditingItem = nil
         nav.isEditingAlias = false
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
-            isSearchFocused = true
-        }
     }
 
     func pasteTransformAtIndexForSelected(_ actionIndex: Int) {
@@ -5619,6 +5624,7 @@ struct ClipboardPopoverView: View {
 
     private func pickAppToIgnore() {
         nav.suppressAutoHide = true
+        NSApp.activate(ignoringOtherApps: true)
         let panel = NSOpenPanel()
         panel.title = "选择要忽略剪贴记录的应用"
         panel.canChooseFiles = true
@@ -5651,6 +5657,7 @@ struct ClipboardPopoverView: View {
         let defaultName = "iClip-收藏资产-\(df.string(from: Date())).iclip"
 
         nav.suppressAutoHide = true
+        NSApp.activate(ignoringOtherApps: true)
         let panel = NSSavePanel()
         panel.title = "导出 iClip 收藏与模板归档"
         panel.nameFieldStringValue = defaultName
@@ -5684,6 +5691,7 @@ struct ClipboardPopoverView: View {
 
     private func importPinnedArchiveAction() {
         nav.suppressAutoHide = true
+        NSApp.activate(ignoringOtherApps: true)
         let panel = NSOpenPanel()
         panel.title = "导入 .iclip 归档或 Raycast / Alfred / Markdown / CSV 常用语"
         panel.canChooseFiles = true

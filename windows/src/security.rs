@@ -917,7 +917,7 @@ pub fn classify_sensitive_text(raw: &str) -> Option<SensitiveSecretKind> {
     static BEARER_RE: OnceLock<Regex> = OnceLock::new();
 
     let api_re = API_RE.get_or_init(|| {
-        Regex::new(r"\b(?:sk-(?:proj-|ant-)?[A-Za-z0-9_-]{18,}|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}|whsec_[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{24,}|github_pat_[A-Za-z0-9_]{28,}|glpat-[A-Za-z0-9_-]{18,}|xox[baprs]-[A-Za-z0-9-]{18,}|AIzaSy[A-Za-z0-9_-]{31,}|hf_[A-Za-z0-9]{24,}|gsk_[A-Za-z0-9]{24,}|pplx-[A-Za-z0-9]{24,}|r8_[A-Za-z0-9]{24,}|ntn_[A-Za-z0-9]{24,}|secret_[A-Za-z0-9]{32,}|sbp_[a-fA-F0-9]{32,}|figd_[A-Za-z0-9_-]{24,}|lin_api_[A-Za-z0-9]{24,}|PMAK-[a-fA-F0-9]{24}-[a-fA-F0-9]{34}|dop_v1_[a-fA-F0-9]{64}|dckr_pat_[A-Za-z0-9_-]{20,}|hvs\.[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|LTAI[A-Za-z0-9]{12,24}|AKID[A-Za-z0-9]{13,32}|\d{8,10}:AA[A-Za-z0-9_-]{33}|npm_[A-Za-z0-9]{36}|pypi-[A-Za-z0-9_-]{40,}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,})\b").unwrap()
+        Regex::new(r"\b(?:sk-(?:proj-|ant-|or-v1-)?[A-Za-z0-9_-]{18,}|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}|whsec_[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{24,}|github_pat_[A-Za-z0-9_]{28,}|glpat-[A-Za-z0-9_-]{18,}|glsa_[A-Za-z0-9_-]{24,}|glc_[A-Za-z0-9_=+-]{24,}|dapi[a-fA-F0-9]{32}|re_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{18,}|AIzaSy[A-Za-z0-9_-]{31,}|hf_[A-Za-z0-9]{24,}|gsk_[A-Za-z0-9]{24,}|pplx-[A-Za-z0-9]{24,}|r8_[A-Za-z0-9]{24,}|ntn_[A-Za-z0-9]{24,}|secret_[A-Za-z0-9]{32,}|sbp_[a-fA-F0-9]{32,}|figd_[A-Za-z0-9_-]{24,}|lin_api_[A-Za-z0-9]{24,}|PMAK-[a-fA-F0-9]{24}-[a-fA-F0-9]{34}|dop_v1_[a-fA-F0-9]{64}|dckr_pat_[A-Za-z0-9_-]{20,}|hvs\.[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|LTAI[A-Za-z0-9]{12,24}|AKID[A-Za-z0-9]{13,32}|\d{8,10}:AA[A-Za-z0-9_-]{33}|npm_[A-Za-z0-9]{36}|pypi-[A-Za-z0-9_-]{40,}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,})\b").unwrap()
     });
     const API_FAST_HINTS: &[&str] = &[
         "sk-",
@@ -931,6 +931,10 @@ pub fn classify_sensitive_text(raw: &str) -> Option<SensitiveSecretKind> {
         "ghr_",
         "github_pat_",
         "glpat-",
+        "glsa_",
+        "glc_",
+        "dapi",
+        "re_",
         "xox",
         "AIzaSy",
         "hf_",
@@ -3784,4 +3788,285 @@ fn decode_html_entities(input: &str) -> String {
         })
         .into_owned();
     working.replace("&amp;", "&").replace("&AMP;", "&")
+}
+
+// ============================================================================
+// 15. 速览文本实时 Token 标尺、离线 Cron 5段中文直译与跨平台路径斜杠/终端安全转义
+// ============================================================================
+
+pub fn text_metrics_summary(text: &str) -> String {
+    let mut char_count = 0usize;
+    let mut lines = 1usize;
+    let mut ascii_count = 0usize;
+    let mut non_ascii_count = 0usize;
+    for ch in text.chars() {
+        char_count += 1;
+        if ch == '\n' {
+            lines += 1;
+        }
+        if ch.is_ascii() {
+            ascii_count += 1;
+        } else {
+            non_ascii_count += 1;
+        }
+    }
+    if char_count == 0 {
+        return "0 字".to_string();
+    }
+    let est_tokens =
+        ((ascii_count as f64 * 0.26 + non_ascii_count as f64 * 1.15).round() as usize).max(1);
+    if lines > 1 {
+        format!("{char_count}字 · {lines}行 · ≈{est_tokens} tok")
+    } else {
+        format!("{char_count}字 · ≈{est_tokens} tok")
+    }
+}
+
+pub fn explain_cron_expression(raw: &str) -> Option<(String, String)> {
+    let original_clean = raw.trim();
+    if original_clean.len() < 9 || original_clean.len() > 160 || original_clean.contains('\n') {
+        return None;
+    }
+
+    let mut working = original_clean;
+    let mut tz_label: Option<&str> = None;
+    if working
+        .as_bytes()
+        .get(..8)
+        .is_some_and(|b| b.eq_ignore_ascii_case(b"CRON_TZ="))
+        && working.len() > 8
+    {
+        let mut split = working.splitn(2, char::is_whitespace);
+        let first = split.next()?;
+        let rest = split.next()?.trim_start();
+        let tz = first[8..].trim_matches(|c| c == '"' || c == '\'');
+        if !tz.is_empty() {
+            tz_label = Some(tz);
+        }
+        working = rest;
+    }
+
+    let fields: Vec<&str> = working.split_whitespace().collect();
+    if fields.len() != 5 {
+        return None;
+    }
+    if !fields
+        .iter()
+        .any(|f| f.contains('*') || f.contains('/') || f.contains('-') || f.contains(','))
+    {
+        return None;
+    }
+
+    if !validate_cron_field(fields[0], 0, 59)
+        || !validate_cron_field(fields[1], 0, 23)
+        || !validate_cron_field(fields[2], 1, 31)
+        || !validate_cron_field(fields[3], 1, 12)
+        || !validate_cron_field(fields[4], 0, 7)
+    {
+        return None;
+    }
+
+    let (min_f, hour_f, dom_f, mon_f, dow_f) =
+        (fields[0], fields[1], fields[2], fields[3], fields[4]);
+    let mut segments: Vec<String> = Vec::new();
+    if let Some(tz) = tz_label {
+        segments.push(format!("[{tz}]"));
+    }
+    if mon_f != "*" {
+        segments.push(describe_cron_month(mon_f));
+    }
+    if dom_f != "*" {
+        segments.push(describe_cron_dom(dom_f));
+    }
+    if dow_f != "*" {
+        segments.push(describe_cron_dow(dow_f));
+    }
+    segments.push(describe_cron_time(
+        min_f,
+        hour_f,
+        dom_f != "*" || mon_f != "*" || dow_f != "*",
+    ));
+
+    let summary = segments.join(" ");
+    let annotated = format!("# {summary}\n{original_clean}");
+    Some((summary, annotated))
+}
+
+pub fn analyze_path_action(raw: &str) -> Option<(&'static str, String, String, String)> {
+    let trimmed = raw.trim();
+    if trimmed.len() < 4 || trimmed.len() > 512 || trimmed.contains('\n') || trimmed.contains('\r')
+    {
+        return None;
+    }
+
+    let bytes = trimmed.as_bytes();
+    let is_win_drive =
+        bytes.len() >= 4 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\';
+    let is_unc = trimmed.starts_with("\\\\") && trimmed[2..].contains('\\');
+
+    if is_win_drive || is_unc {
+        let mut normalized = trimmed.replace("\\\\", "/").replace('\\', "/");
+        if is_unc && !normalized.starts_with("//") {
+            normalized.insert(0, '/');
+        }
+        if normalized != trimmed {
+            return Some((
+                "path-win-to-slash",
+                "转为正斜杠 /".to_string(),
+                normalized,
+                "已将 Windows 反斜杠路径转为跨平台正斜杠".to_string(),
+            ));
+        }
+    }
+
+    if (trimmed.starts_with('/') || trimmed.starts_with("~/"))
+        && trimmed.contains(' ')
+        && !trimmed.starts_with('\'')
+        && !trimmed.starts_with('"')
+        && trimmed.chars().filter(|&c| c == '/').count() >= 2
+    {
+        let quoted = format!("'{}'", trimmed.replace('\'', "'\\''"));
+        return Some((
+            "path-shell-quote",
+            "终端安全转义".to_string(),
+            quoted,
+            "已为含空格路径包裹 Shell 安全引号".to_string(),
+        ));
+    }
+
+    None
+}
+
+fn validate_cron_field(field: &str, min: u32, max: u32) -> bool {
+    if field.is_empty() {
+        return false;
+    }
+    for part in field.split(',') {
+        if part.is_empty() {
+            return false;
+        }
+        let step_parts: Vec<&str> = part.split('/').collect();
+        if step_parts.len() > 2 {
+            return false;
+        }
+        if step_parts.len() == 2 {
+            let Ok(step) = step_parts[1].parse::<u32>() else {
+                return false;
+            };
+            if step < 1 || step > max {
+                return false;
+            }
+        }
+        let base = step_parts[0];
+        if base == "*" {
+            continue;
+        }
+        let range_parts: Vec<&str> = base.split('-').collect();
+        match range_parts.len() {
+            1 => {
+                let Ok(v) = range_parts[0].parse::<u32>() else {
+                    return false;
+                };
+                if v < min || v > max {
+                    return false;
+                }
+            }
+            2 => {
+                let (Ok(a), Ok(b)) = (range_parts[0].parse::<u32>(), range_parts[1].parse::<u32>())
+                else {
+                    return false;
+                };
+                if a < min || b > max || a > b {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn describe_cron_month(f: &str) -> String {
+    if let Ok(m) = f.parse::<u32>() {
+        return format!("{m}月");
+    }
+    if let Some(step) = f.strip_prefix("*/") {
+        return format!("每{step}个月");
+    }
+    format!("{f}月")
+}
+
+fn describe_cron_dom(f: &str) -> String {
+    if let Ok(d) = f.parse::<u32>() {
+        return format!("每月{d}日");
+    }
+    if let Some(step) = f.strip_prefix("*/") {
+        return format!("每{step}天");
+    }
+    format!("每月{f}日")
+}
+
+fn describe_cron_dow(f: &str) -> String {
+    if f == "1-5" {
+        return "工作日".to_string();
+    }
+    if f == "0,6" || f == "6,0" || f == "6-7" {
+        return "周末".to_string();
+    }
+    const NAMES: [&str; 8] = [
+        "周日", "周一", "周二", "周三", "周四", "周五", "周六", "周日",
+    ];
+    if let Ok(w) = f.parse::<usize>() {
+        if w <= 7 {
+            return format!("每{}", NAMES[w]);
+        }
+    }
+    let mapped: Vec<String> = f
+        .split(',')
+        .map(|sub| {
+            if let Ok(v) = sub.parse::<usize>() {
+                if v <= 7 {
+                    return NAMES[v].to_string();
+                }
+            }
+            sub.to_string()
+        })
+        .collect();
+    mapped.join("/")
+}
+
+fn describe_cron_time(min_f: &str, hour_f: &str, has_date_scope: bool) -> String {
+    let day_prefix = if has_date_scope { "" } else { "每天 " };
+    if min_f == "*" && hour_f == "*" {
+        return "每分钟".to_string();
+    }
+    if let Some(step) = min_f.strip_prefix("*/") {
+        if hour_f == "*" {
+            return format!("每 {step} 分钟");
+        }
+    }
+    if let Ok(m) = min_f.parse::<u32>() {
+        if hour_f == "*" {
+            return if m == 0 {
+                "每小时整点".to_string()
+            } else {
+                format!("每小时第 {m} 分")
+            };
+        }
+        if let Some(h_step) = hour_f.strip_prefix("*/") {
+            return format!("每 {h_step} 小时 (:{m:02})");
+        }
+        if let Ok(h) = hour_f.parse::<u32>() {
+            return format!("{day_prefix}{h:02}:{m:02}");
+        }
+        if hour_f.contains('-') && !hour_f.contains('/') {
+            let parts: Vec<&str> = hour_f.split('-').collect();
+            if parts.len() == 2 {
+                if let (Ok(h1), Ok(h2)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
+                    return format!("{day_prefix}{h1:02}:00–{h2:02}:59 第{m:02}分");
+                }
+            }
+        }
+    }
+    format!("{day_prefix}{hour_f}时 {min_f}分")
 }

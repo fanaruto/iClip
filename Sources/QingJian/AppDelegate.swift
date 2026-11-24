@@ -14,6 +14,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         _ = ClipboardStore.shared
         panelController = FloatingPanelController()
+        panelController.statusItemScreenRectProvider = { [weak self] in
+            self?.statusItemScreenRect()
+        }
 
         setupStatusItem()
         setupGlobalHotKey()

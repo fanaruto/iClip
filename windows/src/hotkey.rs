@@ -462,3 +462,134 @@ fn iclip_panel_reserved_name(s: &WinHotKeyShortcut) -> Option<&'static str> {
 
     None
 }
+
+/// 无激活零失焦悬浮态下的键盘事件路由决策
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NonActiveKeyRoute {
+    /// 放行给系统（如纯修饰键、全局呼出热键本身或系统级快捷键）
+    PassThrough,
+    /// 作为面板导航/功能键拦截转发（方向键、回车、Esc、Tab、Space、Backspace、面板组合键），全程不抢夺宿主窗口焦点
+    DispatchPanelCommand,
+    /// 用户敲击普通字符盲搜：按需激活面板输入焦点并将首字符送入搜索框
+    ActivateAndTypeChar(char),
+}
+
+pub fn classify_non_active_panel_key(
+    vk: u32,
+    mods: u32,
+    in_main_list: bool,
+    show_quick_look: bool,
+    is_recording: bool,
+) -> NonActiveKeyRoute {
+    if WinSingleModifier::from_vk(vk).is_some() {
+        return NonActiveKeyRoute::PassThrough;
+    }
+    let clean_mods = mods & MOD_ALL_MASK;
+    if (clean_mods & MOD_WIN_BITS) != 0 {
+        return NonActiveKeyRoute::PassThrough;
+    }
+    if is_recording {
+        return NonActiveKeyRoute::DispatchPanelCommand;
+    }
+
+    // 放行 Alt+Tab / Alt+F4 / Ctrl+Shift+Esc / Ctrl+Alt+Del 等系统组合键
+    if (clean_mods == MOD_ALT_BITS && (vk == 0x09 || vk == 0x73))
+        || (clean_mods == (MOD_CONTROL_BITS | MOD_SHIFT_BITS) && vk == 0x1B)
+        || (clean_mods == (MOD_CONTROL_BITS | MOD_ALT_BITS) && vk == 0x2E)
+    {
+        return NonActiveKeyRoute::PassThrough;
+    }
+
+    // 面板核心导航键：Esc / Enter / 方向键 / Tab / Space / Backspace / Delete
+    if matches!(
+        vk,
+        0x1B | 0x0D | 0x25 | 0x26 | 0x27 | 0x28 | 0x09 | 0x20 | 0x08 | 0x2E
+    ) {
+        return NonActiveKeyRoute::DispatchPanelCommand;
+    }
+
+    // 顺位快速粘贴与分类切换：Ctrl(+Shift/+Alt)+1~9, Alt+1~7
+    if (0x31..=0x39).contains(&vk)
+        && (clean_mods == MOD_CONTROL_BITS
+            || clean_mods == (MOD_CONTROL_BITS | MOD_SHIFT_BITS)
+            || clean_mods == (MOD_CONTROL_BITS | MOD_ALT_BITS)
+            || clean_mods == MOD_ALT_BITS)
+    {
+        return NonActiveKeyRoute::DispatchPanelCommand;
+    }
+
+    // 面板功能快捷键：Ctrl + B/C/D/E/F/K/M/O/P/R/S/T/Y/Z/, 及 Ctrl+Shift+C
+    if clean_mods == MOD_CONTROL_BITS
+        && matches!(
+            vk,
+            0x42 | 0x43
+                | 0x44
+                | 0x45
+                | 0x46
+                | 0x4B
+                | 0x4D
+                | 0x4F
+                | 0x50
+                | 0x52
+                | 0x53
+                | 0x54
+                | 0x59
+                | 0x5A
+                | 0xBC
+        )
+    {
+        return NonActiveKeyRoute::DispatchPanelCommand;
+    }
+    if clean_mods == (MOD_CONTROL_BITS | MOD_SHIFT_BITS) && vk == 0x43 {
+        return NonActiveKeyRoute::DispatchPanelCommand;
+    }
+
+    // 主列表下直接敲击无修饰（或 Shift）可打印字符时，按需激活面板并填入首字符盲搜
+    if in_main_list && !show_quick_look && (clean_mods == 0 || clean_mods == MOD_SHIFT_BITS) {
+        if let Some(ch) = vk_to_search_ascii(vk, clean_mods == MOD_SHIFT_BITS) {
+            return NonActiveKeyRoute::ActivateAndTypeChar(ch);
+        }
+    }
+
+    NonActiveKeyRoute::PassThrough
+}
+
+fn vk_to_search_ascii(vk: u32, shift: bool) -> Option<char> {
+    match vk {
+        0x41..=0x5A => {
+            let base = (vk as u8) - b'A';
+            Some((if shift { b'A' + base } else { b'a' + base }) as char)
+        }
+        0x30..=0x39 => {
+            if !shift {
+                Some((vk as u8) as char)
+            } else {
+                const SHIFTED: [char; 10] = [')', '!', '@', '#', '$', '%', '^', '&', '*', '('];
+                Some(SHIFTED[(vk - 0x30) as usize])
+            }
+        }
+        0x60..=0x69 if !shift => Some((b'0' + (vk - 0x60) as u8) as char),
+        0x6A => Some('*'),
+        0x6B => Some('+'),
+        0x6D => Some('-'),
+        0x6E => Some('.'),
+        0x6F => Some('/'),
+        0xBA => Some(if shift { ':' } else { ';' }),
+        0xBB => Some(if shift { '+' } else { '=' }),
+        0xBC => Some(if shift { '<' } else { ',' }),
+        0xBD => Some(if shift { '_' } else { '-' }),
+        0xBE => Some(if shift { '>' } else { '.' }),
+        0xBF => Some(if shift { '?' } else { '/' }),
+        0xC0 => Some(if shift { '~' } else { '`' }),
+        0xDB => Some(if shift { '{' } else { '[' }),
+        0xDC => Some(if shift { '|' } else { '\\' }),
+        0xDD => Some(if shift { '}' } else { ']' }),
+        0xDE => Some(if shift { '"' } else { '\'' }),
+        _ => None,
+    }
+}
+
+/// 仅当前台窗口不是原宿主窗口时才调用 SetForegroundWindow，避免重复激活冲掉宿主应用内已聚焦控件
+pub fn should_restore_foreground_window(current_fg: isize, target_fg: isize) -> bool {
+    target_fg != 0 && current_fg != target_fg
+}

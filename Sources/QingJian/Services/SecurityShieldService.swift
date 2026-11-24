@@ -495,7 +495,7 @@ enum ClipboardPoisonGuard {
 /// 2. 离线微秒级高敏凭据嗅探与防肩窥圆点雾化遮罩（零布局抖动，选中/悬停即刻原位显影）
 enum SensitiveCredentialVeil {
     private static let apiKeyRegex = try! NSRegularExpression(
-        pattern: #"\b(?:sk-(?:proj-|ant-)?[A-Za-z0-9_-]{18,}|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}|whsec_[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{24,}|github_pat_[A-Za-z0-9_]{28,}|glpat-[A-Za-z0-9_-]{18,}|xox[baprs]-[A-Za-z0-9-]{18,}|AIzaSy[A-Za-z0-9_-]{31,}|hf_[A-Za-z0-9]{24,}|gsk_[A-Za-z0-9]{24,}|pplx-[A-Za-z0-9]{24,}|r8_[A-Za-z0-9]{24,}|ntn_[A-Za-z0-9]{24,}|secret_[A-Za-z0-9]{32,}|sbp_[a-fA-F0-9]{32,}|figd_[A-Za-z0-9_-]{24,}|lin_api_[A-Za-z0-9]{24,}|PMAK-[a-fA-F0-9]{24}-[a-fA-F0-9]{34}|dop_v1_[a-fA-F0-9]{64}|dckr_pat_[A-Za-z0-9_-]{20,}|hvs\.[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|LTAI[A-Za-z0-9]{12,24}|AKID[A-Za-z0-9]{13,32}|\d{8,10}:AA[A-Za-z0-9_-]{33}|npm_[A-Za-z0-9]{36}|pypi-[A-Za-z0-9_-]{40,}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,})\b"#
+        pattern: #"\b(?:sk-(?:proj-|ant-|or-v1-)?[A-Za-z0-9_-]{18,}|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}|whsec_[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{24,}|github_pat_[A-Za-z0-9_]{28,}|glpat-[A-Za-z0-9_-]{18,}|glsa_[A-Za-z0-9_-]{24,}|glc_[A-Za-z0-9_=+-]{24,}|dapi[a-fA-F0-9]{32}|re_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{18,}|AIzaSy[A-Za-z0-9_-]{31,}|hf_[A-Za-z0-9]{24,}|gsk_[A-Za-z0-9]{24,}|pplx-[A-Za-z0-9]{24,}|r8_[A-Za-z0-9]{24,}|ntn_[A-Za-z0-9]{24,}|secret_[A-Za-z0-9]{32,}|sbp_[a-fA-F0-9]{32,}|figd_[A-Za-z0-9_-]{24,}|lin_api_[A-Za-z0-9]{24,}|PMAK-[a-fA-F0-9]{24}-[a-fA-F0-9]{34}|dop_v1_[a-fA-F0-9]{64}|dckr_pat_[A-Za-z0-9_-]{20,}|hvs\.[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|LTAI[A-Za-z0-9]{12,24}|AKID[A-Za-z0-9]{13,32}|\d{8,10}:AA[A-Za-z0-9_-]{33}|npm_[A-Za-z0-9]{36}|pypi-[A-Za-z0-9_-]{40,}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,})\b"#
     )
     private static let wireGuardPrivateKeyRegex = try! NSRegularExpression(
         pattern: #"(?im)^(\s*(?:PrivateKey|PresharedKey)\s*=\s*)([A-Za-z0-9+/]{42,44}=)(\s*)$"#
@@ -588,7 +588,7 @@ enum SensitiveCredentialVeil {
 
     private static let apiKeyFastHints: [String] = [
         "sk-", "_live_", "_test_", "whsec_", "ghp_", "gho_", "ghu_", "ghs_", "ghr_",
-        "github_pat_", "glpat-", "xox", "AIzaSy", "hf_", "gsk_", "pplx-", "r8_",
+        "github_pat_", "glpat-", "glsa_", "glc_", "dapi", "re_", "xox", "AIzaSy", "hf_", "gsk_", "pplx-", "r8_",
         "ntn_", "secret_", "sbp_", "figd_", "lin_api_", "PMAK-", "dop_v1_",
         "dckr_pat_", "hvs.", "AKIA", "LTAI", "AKID", ":AA", "npm_", "pypi-", "SG."
     ]
@@ -3211,5 +3211,200 @@ enum UniversalEscapeDecoder {
         }
         working = working.replacingOccurrences(of: "&amp;", with: "&", options: .caseInsensitive)
         return working
+    }
+}
+
+
+// MARK: - 15. 离线 Cron 5段定时表达式自然中文直译器与跨平台路径正斜杠/终端安全转义
+
+enum CronAndPathHelper {
+    struct CronExplanation: Equatable {
+        let shortSummary: String
+        let annotatedComment: String
+    }
+
+    struct PathQuickAction: Equatable {
+        let id: String
+        let title: String
+        let resultText: String
+        let toastText: String
+    }
+
+    /// 离线解析标准 5 段 Cron 表达式（支持可选 `CRON_TZ=...` 前缀），严格校验数值界限防误伤普通数字串
+    static func explainCronExpression(_ raw: String) -> CronExplanation? {
+        var working = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard working.count >= 9, working.utf8.count <= 160, !working.contains("\n") else { return nil }
+
+        var tzLabel: String?
+        if working.uppercased().hasPrefix("CRON_TZ=") {
+            let parts = working.split(maxSplits: 1, whereSeparator: \.isWhitespace)
+            guard parts.count == 2 else { return nil }
+            let tzRaw = String(parts[0].dropFirst(8)).trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+            if !tzRaw.isEmpty { tzLabel = tzRaw }
+            working = String(parts[1]).trimmingCharacters(in: .whitespaces)
+        }
+
+        let fields = working.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard fields.count == 5 else { return nil }
+        // 至少包含一个 `*`、`/`、`-` 或 `,` 定时特征符，彻底排除 "1 2 3 4 5" 普通纯数字序列误判
+        guard fields.contains(where: { $0.contains("*") || $0.contains("/") || $0.contains("-") || $0.contains(",") }) else {
+            return nil
+        }
+
+        guard validateCronField(fields[0], min: 0, max: 59),
+              validateCronField(fields[1], min: 0, max: 23),
+              validateCronField(fields[2], min: 1, max: 31),
+              validateCronField(fields[3], min: 1, max: 12),
+              validateCronField(fields[4], min: 0, max: 7) else {
+            return nil
+        }
+
+        let minF = fields[0], hourF = fields[1], domF = fields[2], monF = fields[3], dowF = fields[4]
+        var segments: [String] = []
+        if let tz = tzLabel {
+            segments.append("[\(tz)]")
+        }
+        if monF != "*" {
+            segments.append(describeMonth(monF))
+        }
+        if domF != "*" {
+            segments.append(describeDayOfMonth(domF))
+        }
+        if dowF != "*" {
+            segments.append(describeDayOfWeek(dowF))
+        }
+        segments.append(describeTime(minField: minF, hourField: hourF, hasDateScope: domF != "*" || monF != "*" || dowF != "*"))
+
+        let summary = segments.joined(separator: " ")
+        let originalClean = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return CronExplanation(
+            shortSummary: summary,
+            annotatedComment: "# \(summary)\n\(originalClean)"
+        )
+    }
+
+    /// 识别 Windows 反斜杠路径（一键转跨平台正斜杠 `/`）或含空格本地路径（一键包裹终端安全单引号）
+    static func analyzePathAction(_ raw: String) -> PathQuickAction? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count >= 4, trimmed.utf8.count <= 512, !trimmed.contains("\n"), !trimmed.contains("\r") else {
+            return nil
+        }
+
+        // 1. Windows 盘符路径 `C:\...` 或 UNC 网络路径 `\\server\share\...` -> 转为跨平台正斜杠
+        let bytes = Array(trimmed.utf8)
+        let isWinDrive = bytes.count >= 4
+            && ((bytes[0] >= 65 && bytes[0] <= 90) || (bytes[0] >= 97 && bytes[0] <= 122))
+            && bytes[1] == 58 // ':'
+            && bytes[2] == 92 // '\'
+        let isUNCPath = trimmed.hasPrefix("\\\\") && trimmed.dropFirst(2).contains("\\")
+
+        if isWinDrive || isUNCPath {
+            var normalized = trimmed.replacingOccurrences(of: "\\\\", with: "/")
+            normalized = normalized.replacingOccurrences(of: "\\", with: "/")
+            if isUNCPath && !normalized.hasPrefix("//") {
+                normalized = "/" + normalized
+            }
+            if normalized != trimmed {
+                return PathQuickAction(
+                    id: "path-win-to-slash",
+                    title: "转为正斜杠 /",
+                    resultText: normalized,
+                    toastText: "已将 Windows 反斜杠路径转为跨平台正斜杠"
+                )
+            }
+        }
+
+        // 2. 含空格且尚未加引号的本地 POSIX 路径（`/Users/...` 或 `~/...`）-> 终端安全单引号转义
+        if (trimmed.hasPrefix("/") || trimmed.hasPrefix("~/")),
+           trimmed.contains(" "),
+           !trimmed.hasPrefix("'"),
+           !trimmed.hasPrefix("\""),
+           trimmed.filter({ $0 == "/" }).count >= 2 {
+            let quoted = "'" + trimmed.replacingOccurrences(of: "'", with: "'\\''") + "'"
+            return PathQuickAction(
+                id: "path-shell-quote",
+                title: "终端安全转义",
+                resultText: quoted,
+                toastText: "已为含空格路径包裹 Shell 安全引号"
+            )
+        }
+
+        return nil
+    }
+
+    private static func validateCronField(_ field: String, min: Int, max: Int) -> Bool {
+        guard !field.isEmpty else { return false }
+        for part in field.split(separator: ",", omittingEmptySubsequences: false) {
+            let s = String(part)
+            guard !s.isEmpty else { return false }
+            let stepSplit = s.split(separator: "/", omittingEmptySubsequences: false)
+            guard stepSplit.count <= 2 else { return false }
+            if stepSplit.count == 2 {
+                guard let step = Int(stepSplit[1]), step >= 1, step <= max else { return false }
+            }
+            let base = String(stepSplit[0])
+            if base == "*" { continue }
+            let rangeSplit = base.split(separator: "-", omittingEmptySubsequences: false)
+            if rangeSplit.count == 1 {
+                guard let v = Int(rangeSplit[0]), v >= min, v <= max else { return false }
+            } else if rangeSplit.count == 2 {
+                guard let a = Int(rangeSplit[0]), let b = Int(rangeSplit[1]),
+                      a >= min, b <= max, a <= b else { return false }
+            } else {
+                return false
+            }
+        }
+        return true
+    }
+
+    private static func describeMonth(_ f: String) -> String {
+        if let m = Int(f) { return "\(m)月" }
+        if f.hasPrefix("*/") { return "每\(f.dropFirst(2))个月" }
+        return "\(f)月"
+    }
+
+    private static func describeDayOfMonth(_ f: String) -> String {
+        if let d = Int(f) { return "每月\(d)日" }
+        if f.hasPrefix("*/") { return "每\(f.dropFirst(2))天" }
+        return "每月\(f)日"
+    }
+
+    private static func describeDayOfWeek(_ f: String) -> String {
+        if f == "1-5" { return "工作日" }
+        if f == "0,6" || f == "6,0" || f == "6-7" { return "周末" }
+        let names = ["周日", "周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+        if let w = Int(f), (0...7).contains(w) { return "每\(names[w])" }
+        let mapped = f.split(separator: ",").map { sub -> String in
+            if let v = Int(sub), (0...7).contains(v) { return names[v] }
+            return String(sub)
+        }
+        return mapped.joined(separator: "/")
+    }
+
+    private static func describeTime(minField: String, hourField: String, hasDateScope: Bool) -> String {
+        let dayPrefix = hasDateScope ? "" : "每天 "
+        if minField == "*" && hourField == "*" {
+            return "每分钟"
+        }
+        if minField.hasPrefix("*/") && hourField == "*" {
+            return "每 \(minField.dropFirst(2)) 分钟"
+        }
+        if let m = Int(minField), hourField == "*" {
+            return m == 0 ? "每小时整点" : "每小时第 \(m) 分"
+        }
+        if let m = Int(minField), hourField.hasPrefix("*/") {
+            let padM = String(format: "%02d", m)
+            return "每 \(hourField.dropFirst(2)) 小时 (:\(padM))"
+        }
+        if let h = Int(hourField), let m = Int(minField) {
+            return String(format: "%@%02d:%02d", dayPrefix, h, m)
+        }
+        if let m = Int(minField), hourField.contains("-") && !hourField.contains("/") {
+            let parts = hourField.split(separator: "-")
+            if parts.count == 2, let h1 = Int(parts[0]), let h2 = Int(parts[1]) {
+                return String(format: "%@%02d:00–%02d:59 第%02d分", dayPrefix, h1, h2, m)
+            }
+        }
+        return "\(dayPrefix)\(hourField)时 \(minField)分"
     }
 }

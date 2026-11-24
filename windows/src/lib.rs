@@ -1884,4 +1884,72 @@ mod tests {
 
         let _ = fs::remove_dir_all(tmp_dir);
     }
+
+    #[test]
+    fn test_non_active_focus_preservation_oversized_clamp_cron_and_path_actions() {
+        use crate::engines::analyze_text_actions;
+        use crate::hotkey::{
+            classify_non_active_panel_key, should_restore_foreground_window, NonActiveKeyRoute,
+            MOD_CONTROL_BITS,
+        };
+        use crate::security::{
+            analyze_path_action, classify_sensitive_text, explain_cron_expression,
+            text_metrics_summary, SensitiveSecretKind,
+        };
+
+        // 1. 验证 Windows 无激活零失焦面板按键路由与焦点保持策略
+        assert_eq!(
+            classify_non_active_panel_key(0x28, 0, true, false, false),
+            NonActiveKeyRoute::DispatchPanelCommand
+        );
+        assert_eq!(
+            classify_non_active_panel_key(0x0D, 0, true, false, false),
+            NonActiveKeyRoute::DispatchPanelCommand
+        );
+        assert_eq!(
+            classify_non_active_panel_key(0x31, MOD_CONTROL_BITS, true, false, false),
+            NonActiveKeyRoute::DispatchPanelCommand
+        );
+        assert_eq!(
+            classify_non_active_panel_key(0x41, 0, true, false, false),
+            NonActiveKeyRoute::ActivateAndTypeChar('a')
+        );
+        assert!(!should_restore_foreground_window(0x10020, 0x10020));
+        assert!(should_restore_foreground_window(0x99999, 0x10020));
+
+        // 2. 验证超大文本 UTF-8 多字节汉字与 Emoji 边界截断零 panic
+        let clamped = ClipItem::clamp_oversized_text("微信搜索🚀测试文本".to_string(), 15);
+        assert!(clamped.len() <= 15);
+        assert_eq!(clamped, "微信搜索");
+
+        // 3. 验证新型密钥识别、速览 Token 标尺、Cron 表达式直译与跨平台路径动作
+        let fake_or = format!(
+            "{}{}",
+            "sk-or-v1-", "abcdef0123456789abcdef0123456789abcdef0123456789"
+        );
+        assert_eq!(
+            classify_sensitive_text(&fake_or),
+            Some(SensitiveSecretKind::ApiKey)
+        );
+        let fake_dbx = format!("{}{}", "dapi", "0123456789abcdef0123456789abcdef");
+        assert_eq!(
+            classify_sensitive_text(&fake_dbx),
+            Some(SensitiveSecretKind::ApiKey)
+        );
+
+        let metrics = text_metrics_summary("你好世界\nHello World");
+        assert!(metrics.contains("2行") && metrics.contains("tok"));
+
+        let (cron_short, cron_comment) = explain_cron_expression("*/15 9-18 * * 1-5").unwrap();
+        assert!(cron_short.contains("工作日") && cron_comment.starts_with("# "));
+        assert!(explain_cron_expression("1 2 3 4 5").is_none());
+
+        let (pid, _, pres, _) =
+            analyze_path_action(r"C:\Users\dev\my project\config.json").unwrap();
+        assert_eq!(pid, "path-win-to-slash");
+        assert_eq!(pres, "C:/Users/dev/my project/config.json");
+
+        let actions = analyze_text_actions("/Users/dev/My Secret Folder/a'b.txt", false);
+        assert!(actions.iter().any(|a| a.id == "path-shell-quote"));
+    }
 }

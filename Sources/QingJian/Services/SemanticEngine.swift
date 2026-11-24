@@ -584,6 +584,27 @@ enum SemanticEngine {
                 toastText: "已按原序剔除 \(dedup.removedCount) 行重复项，保留 \(dedup.remainingCount) 行"
             ))
         }
+        if !trimmed.contains("\n"), trimmed.utf8.count <= 512 {
+            if let cronDesc = CronAndPathHelper.explainCronExpression(trimmed) {
+                actions.append(TransformAction(
+                    id: "cron-explain",
+                    title: "Cron：\(cronDesc.shortSummary)",
+                    symbolName: "calendar.badge.clock",
+                    isSecurityAction: false,
+                    resultText: cronDesc.annotatedComment,
+                    toastText: "已复制 Cron 注释：\(cronDesc.shortSummary)"
+                ))
+            } else if let pathAct = CronAndPathHelper.analyzePathAction(trimmed) {
+                actions.append(TransformAction(
+                    id: pathAct.id,
+                    title: pathAct.title,
+                    symbolName: "folder.badge.gearshape",
+                    isSecurityAction: false,
+                    resultText: pathAct.resultText,
+                    toastText: pathAct.toastText
+                ))
+            }
+        }
 
         // 5. Unix 时间戳检测（秒级 10 位 / 毫秒级 13 位）
         if (trimmed.count == 10 || trimmed.count == 13),

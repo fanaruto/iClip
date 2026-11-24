@@ -1,19 +1,177 @@
-#if ICLIP_EDITION_FLOW
 import AppKit
+import Carbon.HIToolbox
 import SwiftUI
 import Combine
 
-/// 支持获取键盘焦点且不抢占空间切换的悬浮面板
+/// iClip 合成键盘事件专属标记魔数（"ICLP"），确保面板悬停时合成 ⌘V / ⌘C / Tab 零阻断穿透至宿主输入框
+let iClipSyntheticEventMagic: Int64 = 0x4943_4C50
+
+/// 支持按需获取键盘焦点且唤醒时绝不抢夺宿主窗口 Key Window / 输入框焦点的原生非激活悬浮面板
 final class KeyableFloatingPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
+    override var becomesKeyOnlyIfNeeded: Bool {
+        get { true }
+        set {}
+    }
 }
 
-/// 允许悬浮面板在非激活态（如「始终在前」跨应用对照时）首次鼠标点击直接穿透触发内部链接跳转与操作按钮
+/// 允许悬浮面板在非激活态首次鼠标点击直接触发内部卡片粘贴、胶囊转换与按钮操作，无需抢夺外部输入框焦点
 final class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
+/// 唤醒零失焦与顺手粘贴焦点保持策略
+enum PanelFocusPreservationPolicy {
+    /// 判断在非 Key 悬浮态下敲击的按键是否应自动激活顶部搜索框开始盲打搜索
+    static func shouldBeginSearchTyping(
+        keyCode: UInt16,
+        flags: NSEvent.ModifierFlags,
+        charactersIgnoringModifiers: String?,
+        showSettings: Bool,
+        showQuickLook: Bool
+    ) -> Bool {
+        guard !showSettings, !showQuickLook else { return false }
+        let clean = flags.intersection(.deviceIndependentFlagsMask)
+        if clean.contains(.command) || clean.contains(.control) || clean.contains(.option) {
+            return false
+        }
+        let reservedCodes: Set<UInt16> = [36, 48, 49, 51, 53, 76, 123, 124, 125, 126]
+        if reservedCodes.contains(keyCode) {
+            return false
+        }
+        guard let chars = charactersIgnoringModifiers, !chars.isEmpty else { return false }
+        for scalar in chars.unicodeScalars {
+            if scalar.value < 0x20 || (0xF700...0xF8FF).contains(scalar.value) || scalar.value == 0x7F {
+                return false
+            }
+        }
+        return true
+    }
+
+    /// 若宿主应用已处于 Active 状态（零失焦唤醒常态），不重复调用 activate()，避免重置微信等应用的搜索弹层焦点
+    static func shouldActivatePreviousApp(isPreviousAppActive: Bool) -> Bool {
+        !isPreviousAppActive
+    }
+
+    @MainActor
+    static func findEditableSearchTextField(in root: NSView?) -> NSTextField? {
+        guard let root, !root.isHidden, root.alphaValue > 0.01 else { return nil }
+        if let tf = root as? NSTextField, tf.isEditable, tf.isEnabled {
+            return tf
+        }
+        for sub in root.subviews {
+            if let found = findEditableSearchTextField(in: sub) {
+                return found
+            }
+        }
+        return nil
+    }
+}
+
+private func nonActivatingPanelEventTapCallback(
+    proxy: CGEventTapProxy,
+    type: CGEventType,
+    cgEvent: CGEvent,
+    userInfo: UnsafeMutableRawPointer?
+) -> Unmanaged<CGEvent>? {
+    guard let userInfo else {
+        return Unmanaged.passUnretained(cgEvent)
+    }
+    let tapController = Unmanaged<PanelNonActivatingTapController>.fromOpaque(userInfo).takeUnretainedValue()
+    if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+        MainActor.assumeIsolated {
+            tapController.reenableTapIfNeeded()
+        }
+        return Unmanaged.passUnretained(cgEvent)
+    }
+    if cgEvent.getIntegerValueField(.eventSourceUserData) == iClipSyntheticEventMagic {
+        return Unmanaged.passUnretained(cgEvent)
+    }
+    let consumed = MainActor.assumeIsolated {
+        tapController.dispatchInterceptedCGEvent(type: type, cgEvent: cgEvent)
+    }
+    return consumed ? nil : Unmanaged.passUnretained(cgEvent)
+}
+
+/// 仅在面板可见期间按需挂载的会话级键盘拦截与外部点击收起控制器（面板隐藏即彻底卸载，后台待机 0 开销）
+@MainActor
+final class PanelNonActivatingTapController {
+    private var tapPort: CFMachPort?
+    private var runLoopSource: CFRunLoopSource?
+    private var outsideMouseMonitor: Any?
+    private var onInterceptEvent: ((NSEvent) -> Bool)?
+
+    func start(
+        onInterceptEvent: @escaping (NSEvent) -> Bool,
+        onOutsideMouseDown: @escaping (NSPoint) -> Void
+    ) -> Bool {
+        stop()
+        self.onInterceptEvent = onInterceptEvent
+
+        outsideMouseMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        ) { _ in
+            let mouseLoc = NSEvent.mouseLocation
+            Task { @MainActor in
+                onOutsideMouseDown(mouseLoc)
+            }
+        }
+
+        let mask: CGEventMask =
+            (1 << CGEventType.keyDown.rawValue) |
+            (1 << CGEventType.flagsChanged.rawValue)
+        let refcon = Unmanaged.passUnretained(self).toOpaque()
+        guard let port = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: mask,
+            callback: nonActivatingPanelEventTapCallback,
+            userInfo: refcon
+        ), let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, port, 0) else {
+            return false
+        }
+        self.tapPort = port
+        self.runLoopSource = source
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        CGEvent.tapEnable(tap: port, enable: true)
+        return true
+    }
+
+    func stop() {
+        onInterceptEvent = nil
+        if let monitor = outsideMouseMonitor {
+            NSEvent.removeMonitor(monitor)
+            outsideMouseMonitor = nil
+        }
+        if let source = runLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+            runLoopSource = nil
+        }
+        if let port = tapPort {
+            CFMachPortInvalidate(port)
+            tapPort = nil
+        }
+    }
+
+    fileprivate func reenableTapIfNeeded() {
+        if let port = tapPort {
+            CGEvent.tapEnable(tap: port, enable: true)
+        }
+    }
+
+    fileprivate func dispatchInterceptedCGEvent(type: CGEventType, cgEvent: CGEvent) -> Bool {
+        guard (type == .keyDown || type == .flagsChanged),
+              let handler = onInterceptEvent,
+              let nsEvent = NSEvent(cgEvent: cgEvent) else {
+            return false
+        }
+        return handler(nsEvent)
+    }
+}
+
+#if ICLIP_EDITION_FLOW
 /// 悬浮窗控制器：使用苹果官方 WindowServer 级原生材质根容器（NSGlassEffectView / NSVisualEffectView）
 /// 彻底消除透明大画布阴影截断方框，保留系统原生连续圆角与柔和投影
 @MainActor
@@ -26,6 +184,8 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     private var rootView: ClipboardPopoverView!
     private var demoRunner: DemoShowcaseRunner?
     private var keyMonitor: Any?
+    private let nonActivatingTap = PanelNonActivatingTapController()
+    var statusItemScreenRectProvider: (() -> NSRect?)?
     private var recordingTapMachine = ModifierDoubleTapStateMachine(maxHoldDuration: 0.35, maxTapGap: 0.48)
     private var previousApp: NSRunningApplication?
     private var hideWorkItem: DispatchWorkItem?
@@ -79,7 +239,14 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
 
     private func handleDismissForPaste() {
         if store.alwaysOnTop {
-            previousApp?.activate()
+            panel.makeFirstResponder(nil)
+            if panel.isKeyWindow {
+                panel.resignKey()
+            }
+            if let app = previousApp,
+               PanelFocusPreservationPolicy.shouldActivatePreviousApp(isPreviousAppActive: app.isActive) {
+                app.activate()
+            }
         } else {
             hide(restoreFocus: true)
         }
@@ -260,9 +427,18 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
                 self?.lockDownPanelForSystemSleepOrLock()
             }
             .store(in: &cancellables)
+
+        Publishers.Merge(nav.$isEditingAlias, nav.$isQuickLookEditing)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] needsKey in
+                guard let self, needsKey, self.isVisible, !self.panel.isKeyWindow else { return }
+                self.panel.makeKey()
+            }
+            .store(in: &cancellables)
     }
 
     private func lockDownPanelForSystemSleepOrLock() {
+        removeKeyMonitor()
         DragFileExportHelper.wipeAllExports()
         ActionSparkController.shared.dismiss()
         CursorDropPodController.shared.dismiss()
@@ -277,6 +453,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         nav.selectedIndex = 0
         if panel?.isVisible == true {
             nav.isPresented = false
+            panel?.makeFirstResponder(nil)
             panel?.orderOut(nil)
             store.onPanelHidden()
         }
@@ -323,8 +500,11 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         return tv.selectedRange().length > 0
     }
 
-    /// 聚焦并全选顶部搜索框（⌘F），消除失焦状态下按 ⌘F 触发的系统报错音
+    /// 聚焦并全选顶部搜索框（⌘F），按需提升为非激活 Key Window
     private func focusAndSelectSearchField() {
+        if !panel.isKeyWindow {
+            panel.makeKey()
+        }
         nav.focusTrigger = UUID()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) { [weak self] in
             guard let tv = self?.panel?.firstResponder as? NSTextView else { return }
@@ -332,7 +512,33 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         }
     }
 
-    /// 弹出面板（鼠标旁直觉位置 + 原生窗口级轻柔滑入 + 内部卡片错峰浮现）
+    private func beginSearchTypingFromNonKeyPanel(_ event: NSEvent) {
+        panel.makeKey()
+        if let tf = PanelFocusPreservationPolicy.findEditableSearchTextField(in: hostingView) {
+            _ = panel.makeFirstResponder(tf)
+            if let retargeted = NSEvent.keyEvent(
+                with: .keyDown,
+                location: .zero,
+                modifierFlags: event.modifierFlags,
+                timestamp: event.timestamp,
+                windowNumber: panel.windowNumber,
+                context: nil,
+                characters: event.characters ?? "",
+                charactersIgnoringModifiers: event.charactersIgnoringModifiers ?? "",
+                isARepeat: event.isARepeat,
+                keyCode: event.keyCode
+            ) {
+                panel.sendEvent(retargeted)
+                return
+            }
+        }
+        if let chars = event.characters, !chars.isEmpty {
+            nav.searchText.append(chars)
+        }
+        nav.focusTrigger = UUID()
+    }
+
+    /// 弹出面板（零失焦非激活悬浮：不抢夺外部应用 Active / Key Window 与已 focus 输入框焦点）
     func show(anchorRect: NSRect? = nil) {
         ActionSparkController.shared.dismissImmediately()
         CursorDropPodController.shared.dismissImmediately()
@@ -354,11 +560,17 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         let (finalOrigin, entryDelta) = computePanelOrigin(anchorRect: anchorRect)
         let startOrigin = NSPoint(x: finalOrigin.x + entryDelta.x, y: finalOrigin.y + entryDelta.y)
 
+        panel.makeFirstResponder(nil)
         panel.setFrameOrigin(startOrigin)
         panel.alphaValue = 0
 
-        NSApp.activate(ignoringOtherApps: true)
-        panel.makeKeyAndOrderFront(nil)
+        let tapReady = installKeyMonitor()
+        if tapReady && !IsSecureEventInputEnabled() {
+            panel.orderFrontRegardless()
+        } else {
+            panel.makeKeyAndOrderFront(nil)
+            nav.focusTrigger = UUID()
+        }
         panel.invalidateShadow()
 
         NSAnimationContext.runAnimationGroup { ctx in
@@ -371,22 +583,26 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         DispatchQueue.main.async { [weak self] in
             self?.nav.isPresented = true
         }
-
-        installKeyMonitor()
     }
 
-    /// 隐藏面板（顺滑淡出并立即交还焦点给原应用以加速键入）
+    /// 隐藏面板（粘贴时 0ms 同步移出窗口栈并保护宿主原输入框焦点；普通收起时柔和淡出）
     func hide(restoreFocus: Bool) {
         guard panel.isVisible else { return }
         removeKeyMonitor()
         hideWorkItem?.cancel()
 
-        let appToRestore = restoreFocus ? previousApp : nil
         nav.isPresented = false
         store.onPanelHidden()
+        panel.makeFirstResponder(nil)
 
-        if let app = appToRestore {
-            app.activate()
+        if restoreFocus {
+            panel.orderOut(nil)
+            panel.alphaValue = 1
+            if let app = previousApp,
+               PanelFocusPreservationPolicy.shouldActivatePreviousApp(isPreviousAppActive: app.isActive) {
+                app.activate()
+            }
+            return
         }
 
         NSAnimationContext.runAnimationGroup { ctx in
@@ -473,7 +689,8 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
 
     // MARK: - 键盘快捷键流
 
-    private func installKeyMonitor() {
+    @discardableResult
+    private func installKeyMonitor() -> Bool {
         removeKeyMonitor()
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
             guard let self = self, self.isVisible else { return event }
@@ -483,6 +700,58 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             guard event.type == .keyDown else { return event }
             return self.handleKeyDown(event)
         }
+        return nonActivatingTap.start(
+            onInterceptEvent: { [weak self] event in
+                guard let self, self.isVisible else { return false }
+                return self.handleNonKeyPanelInterceptedEvent(event)
+            },
+            onOutsideMouseDown: { [weak self] mouseLoc in
+                guard let self, self.isVisible else { return }
+                if self.store.alwaysOnTop || self.nav.suppressAutoHide || self.nav.isRecordingHotKey || self.nav.isRecordingQueueHotKey {
+                    return
+                }
+                if let statusRect = self.statusItemScreenRectProvider?(),
+                   statusRect.insetBy(dx: -4, dy: -4).contains(mouseLoc) {
+                    return
+                }
+                let cardFrame = self.panel.frame.insetBy(dx: self.shadowBleed - 2, dy: self.shadowBleed - 2)
+                if !cardFrame.contains(mouseLoc) {
+                    self.hide(restoreFocus: false)
+                }
+            }
+        )
+    }
+
+    private func handleNonKeyPanelInterceptedEvent(_ event: NSEvent) -> Bool {
+        if panel.isKeyWindow {
+            return false
+        }
+        if nav.isRecordingHotKey || nav.isRecordingQueueHotKey {
+            _ = handleHotKeyRecording(event)
+            return true
+        }
+        guard event.type == .keyDown else { return false }
+        if handleKeyDown(event) == nil {
+            return true
+        }
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if event.keyCode == 51 && !flags.contains(.command) && !flags.contains(.option) && !flags.contains(.control) {
+            if !nav.searchText.isEmpty {
+                nav.searchText.removeLast()
+            }
+            return true
+        }
+        if PanelFocusPreservationPolicy.shouldBeginSearchTyping(
+            keyCode: event.keyCode,
+            flags: event.modifierFlags,
+            charactersIgnoringModifiers: event.charactersIgnoringModifiers,
+            showSettings: nav.showSettings,
+            showQuickLook: nav.showQuickLook
+        ) {
+            beginSearchTypingFromNonKeyPanel(event)
+            return true
+        }
+        return !flags.contains(.command) && !flags.contains(.control)
     }
 
     /// 录制自定义全局快捷键（支持「修饰键+主键」组合键，或连按两次 ⌘/⌥/⌃/⇧/Fn 单键双击；按 ESC 取消）
@@ -564,6 +833,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     }
 
     private func removeKeyMonitor() {
+        nonActivatingTap.stop()
         if let monitor = keyMonitor {
             NSEvent.removeMonitor(monitor)
             keyMonitor = nil
@@ -864,21 +1134,6 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     }
 }
 #else
-import AppKit
-import SwiftUI
-import Combine
-
-/// 支持获取键盘焦点且不抢占空间切换的悬浮面板
-final class KeyableFloatingPanel: NSPanel {
-    override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { false }
-}
-
-/// 允许悬浮面板在非激活态（如「始终在前」跨应用对照时）首次鼠标点击直接穿透触发内部链接跳转与操作按钮
-final class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-}
-
 /// 悬浮窗控制器：使用苹果官方 WindowServer 级原生材质根容器（NSGlassEffectView / NSVisualEffectView）
 /// 彻底消除透明大画布阴影截断方框，保留系统原生连续圆角与柔和投影
 @MainActor
@@ -891,6 +1146,8 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     private var rootView: ClipboardPopoverView!
     private var demoRunner: DemoShowcaseRunner?
     private var keyMonitor: Any?
+    private let nonActivatingTap = PanelNonActivatingTapController()
+    var statusItemScreenRectProvider: (() -> NSRect?)?
     private var recordingTapMachine = ModifierDoubleTapStateMachine(maxHoldDuration: 0.35, maxTapGap: 0.48)
     private var previousApp: NSRunningApplication?
     private var hideWorkItem: DispatchWorkItem?
@@ -944,7 +1201,14 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
 
     private func handleDismissForPaste() {
         if store.alwaysOnTop {
-            previousApp?.activate()
+            panel.makeFirstResponder(nil)
+            if panel.isKeyWindow {
+                panel.resignKey()
+            }
+            if let app = previousApp,
+               PanelFocusPreservationPolicy.shouldActivatePreviousApp(isPreviousAppActive: app.isActive) {
+                app.activate()
+            }
         } else {
             hide(restoreFocus: true)
         }
@@ -1125,9 +1389,18 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
                 self?.lockDownPanelForSystemSleepOrLock()
             }
             .store(in: &cancellables)
+
+        Publishers.Merge3(nav.$isEditingAlias, nav.$isQuickLookEditing, nav.$isCreatingTemplate)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] needsKey in
+                guard let self, needsKey, self.isVisible, !self.panel.isKeyWindow else { return }
+                self.panel.makeKey()
+            }
+            .store(in: &cancellables)
     }
 
     private func lockDownPanelForSystemSleepOrLock() {
+        removeKeyMonitor()
         DragFileExportHelper.wipeAllExports()
         ActionSparkController.shared.dismiss()
         CursorDropPodController.shared.dismiss()
@@ -1142,6 +1415,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         nav.selectedIndex = 0
         if panel?.isVisible == true {
             nav.isPresented = false
+            panel?.makeFirstResponder(nil)
             panel?.orderOut(nil)
             store.onPanelHidden()
         }
@@ -1188,8 +1462,11 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         return tv.selectedRange().length > 0
     }
 
-    /// 聚焦并全选顶部搜索框（⌘F），消除失焦状态下按 ⌘F 触发的系统报错音
+    /// 聚焦并全选顶部搜索框（⌘F），按需提升为非激活 Key Window
     private func focusAndSelectSearchField() {
+        if !panel.isKeyWindow {
+            panel.makeKey()
+        }
         nav.focusTrigger = UUID()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) { [weak self] in
             guard let tv = self?.panel?.firstResponder as? NSTextView else { return }
@@ -1197,7 +1474,33 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         }
     }
 
-    /// 弹出面板（鼠标旁直觉位置 + 原生窗口级轻柔滑入 + 内部卡片错峰浮现）
+    private func beginSearchTypingFromNonKeyPanel(_ event: NSEvent) {
+        panel.makeKey()
+        if let tf = PanelFocusPreservationPolicy.findEditableSearchTextField(in: hostingView) {
+            _ = panel.makeFirstResponder(tf)
+            if let retargeted = NSEvent.keyEvent(
+                with: .keyDown,
+                location: .zero,
+                modifierFlags: event.modifierFlags,
+                timestamp: event.timestamp,
+                windowNumber: panel.windowNumber,
+                context: nil,
+                characters: event.characters ?? "",
+                charactersIgnoringModifiers: event.charactersIgnoringModifiers ?? "",
+                isARepeat: event.isARepeat,
+                keyCode: event.keyCode
+            ) {
+                panel.sendEvent(retargeted)
+                return
+            }
+        }
+        if let chars = event.characters, !chars.isEmpty {
+            nav.searchText.append(chars)
+        }
+        nav.focusTrigger = UUID()
+    }
+
+    /// 弹出面板（零失焦非激活悬浮：不抢夺外部应用 Active / Key Window 与已 focus 输入框焦点）
     func show(anchorRect: NSRect? = nil) {
         ActionSparkController.shared.dismissImmediately()
         CursorDropPodController.shared.dismissImmediately()
@@ -1219,11 +1522,17 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         let (finalOrigin, entryDelta) = computePanelOrigin(anchorRect: anchorRect)
         let startOrigin = NSPoint(x: finalOrigin.x + entryDelta.x, y: finalOrigin.y + entryDelta.y)
 
+        panel.makeFirstResponder(nil)
         panel.setFrameOrigin(startOrigin)
         panel.alphaValue = 0
 
-        NSApp.activate(ignoringOtherApps: true)
-        panel.makeKeyAndOrderFront(nil)
+        let tapReady = installKeyMonitor()
+        if tapReady && !IsSecureEventInputEnabled() {
+            panel.orderFrontRegardless()
+        } else {
+            panel.makeKeyAndOrderFront(nil)
+            nav.focusTrigger = UUID()
+        }
         panel.invalidateShadow()
 
         NSAnimationContext.runAnimationGroup { ctx in
@@ -1236,22 +1545,26 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         DispatchQueue.main.async { [weak self] in
             self?.nav.isPresented = true
         }
-
-        installKeyMonitor()
     }
 
-    /// 隐藏面板（顺滑淡出并立即交还焦点给原应用以加速键入）
+    /// 隐藏面板（粘贴时 0ms 同步移出窗口栈并保护宿主原输入框焦点；普通收起时柔和淡出）
     func hide(restoreFocus: Bool) {
         guard panel.isVisible else { return }
         removeKeyMonitor()
         hideWorkItem?.cancel()
 
-        let appToRestore = restoreFocus ? previousApp : nil
         nav.isPresented = false
         store.onPanelHidden()
+        panel.makeFirstResponder(nil)
 
-        if let app = appToRestore {
-            app.activate()
+        if restoreFocus {
+            panel.orderOut(nil)
+            panel.alphaValue = 1
+            if let app = previousApp,
+               PanelFocusPreservationPolicy.shouldActivatePreviousApp(isPreviousAppActive: app.isActive) {
+                app.activate()
+            }
+            return
         }
 
         NSAnimationContext.runAnimationGroup { ctx in
@@ -1338,7 +1651,8 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
 
     // MARK: - 键盘快捷键流
 
-    private func installKeyMonitor() {
+    @discardableResult
+    private func installKeyMonitor() -> Bool {
         removeKeyMonitor()
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
             guard let self = self, self.isVisible else { return event }
@@ -1348,6 +1662,58 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             guard event.type == .keyDown else { return event }
             return self.handleKeyDown(event)
         }
+        return nonActivatingTap.start(
+            onInterceptEvent: { [weak self] event in
+                guard let self, self.isVisible else { return false }
+                return self.handleNonKeyPanelInterceptedEvent(event)
+            },
+            onOutsideMouseDown: { [weak self] mouseLoc in
+                guard let self, self.isVisible else { return }
+                if self.store.alwaysOnTop || self.nav.suppressAutoHide || self.nav.isRecordingHotKey {
+                    return
+                }
+                if let statusRect = self.statusItemScreenRectProvider?(),
+                   statusRect.insetBy(dx: -4, dy: -4).contains(mouseLoc) {
+                    return
+                }
+                let cardFrame = self.panel.frame.insetBy(dx: self.shadowBleed - 2, dy: self.shadowBleed - 2)
+                if !cardFrame.contains(mouseLoc) {
+                    self.hide(restoreFocus: false)
+                }
+            }
+        )
+    }
+
+    private func handleNonKeyPanelInterceptedEvent(_ event: NSEvent) -> Bool {
+        if panel.isKeyWindow {
+            return false
+        }
+        if nav.isRecordingHotKey {
+            _ = handleHotKeyRecording(event)
+            return true
+        }
+        guard event.type == .keyDown else { return false }
+        if handleKeyDown(event) == nil {
+            return true
+        }
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if event.keyCode == 51 && !flags.contains(.command) && !flags.contains(.option) && !flags.contains(.control) {
+            if !nav.searchText.isEmpty {
+                nav.searchText.removeLast()
+            }
+            return true
+        }
+        if PanelFocusPreservationPolicy.shouldBeginSearchTyping(
+            keyCode: event.keyCode,
+            flags: event.modifierFlags,
+            charactersIgnoringModifiers: event.charactersIgnoringModifiers,
+            showSettings: nav.showSettings,
+            showQuickLook: nav.showQuickLook
+        ) {
+            beginSearchTypingFromNonKeyPanel(event)
+            return true
+        }
+        return !flags.contains(.command) && !flags.contains(.control)
     }
 
     /// 录制自定义全局快捷键（支持「修饰键+主键」组合键，或连按两次 ⌘/⌥/⌃/⇧/Fn 单键双击；按 ESC 取消）
@@ -1415,6 +1781,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     }
 
     private func removeKeyMonitor() {
+        nonActivatingTap.stop()
         if let monitor = keyMonitor {
             NSEvent.removeMonitor(monitor)
             keyMonitor = nil

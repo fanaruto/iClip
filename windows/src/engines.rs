@@ -284,6 +284,30 @@ pub fn analyze_text_actions(raw: &str, minimal_mode: bool) -> Vec<QuickAction> {
             });
         }
     }
+    if actions.len() < 3 && !trimmed.contains('\n') && trimmed.len() <= 512 {
+        if let Some((cron_short, cron_comment)) = crate::security::explain_cron_expression(trimmed)
+        {
+            actions.push(QuickAction {
+                id: "cron-explain",
+                title: format!("Cron：{cron_short}"),
+                is_security: false,
+                result_text: cron_comment,
+                html_table_payload: None,
+                toast_text: format!("已复制 Cron 注释：{cron_short}"),
+            });
+        } else if let Some((act_id, act_title, act_res, act_toast)) =
+            crate::security::analyze_path_action(trimmed)
+        {
+            actions.push(QuickAction {
+                id: act_id,
+                title: act_title,
+                is_security: false,
+                result_text: act_res,
+                html_table_payload: None,
+                toast_text: act_toast,
+            });
+        }
+    }
     if actions.len() < 3 && raw.len() <= 65_536 && raw.contains('\n') {
         if let Some((dedup_txt, removed_cnt, remain_cnt)) =
             crate::security::deduplicate_list_lines(raw)
@@ -2005,6 +2029,18 @@ pub fn redact_secrets(text: &str) -> String {
 
     let rules: &[(&str, &str, &str)] = &[
         ("sk-", r"sk-[A-Za-z0-9_\-]{18,}", "sk-***REDACTED***"),
+        (
+            "glsa_",
+            r"\bglsa_[A-Za-z0-9_-]{24,}\b",
+            "glsa_***REDACTED***",
+        ),
+        (
+            "glc_",
+            r"\bglc_[A-Za-z0-9_=+-]{24,}\b",
+            "glc_***REDACTED***",
+        ),
+        ("dapi", r"\bdapi[a-fA-F0-9]{32}\b", "dapi***REDACTED***"),
+        ("re_", r"\bre_[A-Za-z0-9_]{20,}\b", "re_***REDACTED***"),
         (
             "_live_",
             r"\b(?:sk|rk)_live_[A-Za-z0-9]{16,}\b",
