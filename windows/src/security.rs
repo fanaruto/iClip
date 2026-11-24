@@ -468,8 +468,17 @@ pub fn materialize_temp_preview_image(images_dir: &Path, file_name: &str) -> Opt
         .to_string_lossy()
         .to_string();
     let plain = read_decrypted_image_from_dir(images_dir, &clean_name)?;
-    let preview_dir = std::env::temp_dir().join("iClipPreviewExports");
+    let preview_dir = if cfg!(test) {
+        images_dir.join(".iClipPreviewExports")
+    } else {
+        std::env::temp_dir().join("iClipPreviewExports")
+    };
     let _ = fs::create_dir_all(&preview_dir);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&preview_dir, fs::Permissions::from_mode(0o700));
+    }
     if let Ok(entries) = fs::read_dir(&preview_dir) {
         let now = std::time::SystemTime::now();
         for ent in entries.flatten() {
@@ -488,6 +497,11 @@ pub fn materialize_temp_preview_image(images_dir: &Path, file_name: &str) -> Opt
     }
     let out_path = preview_dir.join(clean_name);
     fs::write(&out_path, plain).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&out_path, fs::Permissions::from_mode(0o600));
+    }
     Some(out_path)
 }
 
@@ -501,9 +515,17 @@ pub fn purge_temp_preview_image(file_name: &str) {
     }
 }
 
-/// 锁屏、休眠、清空历史或进程退出时，全量擦除临时预览导出目录中的明文文件
+/// 启动、锁屏、休眠、清空历史或进程退出时，锁紧目录权限并全量擦除临时预览导出目录中的明文文件
 pub fn wipe_all_temp_previews() {
+    if cfg!(test) {
+        return;
+    }
     let preview_dir = std::env::temp_dir().join("iClipPreviewExports");
+    #[cfg(unix)]
+    if preview_dir.exists() {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&preview_dir, fs::Permissions::from_mode(0o700));
+    }
     if let Ok(entries) = fs::read_dir(&preview_dir) {
         for ent in entries.flatten() {
             let _ = fs::remove_file(ent.path());
@@ -884,16 +906,51 @@ pub fn classify_sensitive_text(raw: &str) -> Option<SensitiveSecretKind> {
     static BEARER_RE: OnceLock<Regex> = OnceLock::new();
 
     let api_re = API_RE.get_or_init(|| {
-        Regex::new(r"\b(?:sk-(?:proj-|ant-)?[A-Za-z0-9_-]{18,}|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}|whsec_[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{24,}|github_pat_[A-Za-z0-9_]{28,}|glpat-[A-Za-z0-9_-]{18,}|xox[baprs]-[A-Za-z0-9-]{18,}|AIzaSy[A-Za-z0-9_-]{31,}|hf_[A-Za-z0-9]{24,}|AKIA[0-9A-Z]{16}|LTAI[A-Za-z0-9]{12,24}|AKID[A-Za-z0-9]{13,32}|\d{8,10}:AA[A-Za-z0-9_-]{33}|npm_[A-Za-z0-9]{36}|pypi-[A-Za-z0-9_-]{40,}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,})\b").unwrap()
+        Regex::new(r"\b(?:sk-(?:proj-|ant-)?[A-Za-z0-9_-]{18,}|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}|whsec_[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{24,}|github_pat_[A-Za-z0-9_]{28,}|glpat-[A-Za-z0-9_-]{18,}|xox[baprs]-[A-Za-z0-9-]{18,}|AIzaSy[A-Za-z0-9_-]{31,}|hf_[A-Za-z0-9]{24,}|gsk_[A-Za-z0-9]{24,}|pplx-[A-Za-z0-9]{24,}|r8_[A-Za-z0-9]{24,}|ntn_[A-Za-z0-9]{24,}|secret_[A-Za-z0-9]{32,}|sbp_[a-fA-F0-9]{32,}|figd_[A-Za-z0-9_-]{24,}|lin_api_[A-Za-z0-9]{24,}|PMAK-[a-fA-F0-9]{24}-[a-fA-F0-9]{34}|dop_v1_[a-fA-F0-9]{64}|dckr_pat_[A-Za-z0-9_-]{20,}|hvs\.[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|LTAI[A-Za-z0-9]{12,24}|AKID[A-Za-z0-9]{13,32}|\d{8,10}:AA[A-Za-z0-9_-]{33}|npm_[A-Za-z0-9]{36}|pypi-[A-Za-z0-9_-]{40,}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,})\b").unwrap()
     });
-    if api_re.is_match(sample) {
+    const API_FAST_HINTS: &[&str] = &[
+        "sk-",
+        "_live_",
+        "_test_",
+        "whsec_",
+        "ghp_",
+        "gho_",
+        "ghu_",
+        "ghs_",
+        "ghr_",
+        "github_pat_",
+        "glpat-",
+        "xox",
+        "AIzaSy",
+        "hf_",
+        "gsk_",
+        "pplx-",
+        "r8_",
+        "ntn_",
+        "secret_",
+        "sbp_",
+        "figd_",
+        "lin_api_",
+        "PMAK-",
+        "dop_v1_",
+        "dckr_pat_",
+        "hvs.",
+        "AKIA",
+        "LTAI",
+        "AKID",
+        ":AA",
+        "npm_",
+        "pypi-",
+        "SG.",
+    ];
+    if API_FAST_HINTS.iter().any(|h| sample.contains(h)) && api_re.is_match(sample) {
         return Some(SensitiveSecretKind::ApiKey);
     }
 
     let jwt_re = JWT_RE.get_or_init(|| {
         Regex::new(r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b").unwrap()
     });
-    if jwt_re.is_match(sample) {
+    if sample.contains("eyJ") && jwt_re.is_match(sample) {
         return Some(SensitiveSecretKind::JwtToken);
     }
 
@@ -2485,4 +2542,352 @@ pub fn evaluate_secret_capsule_command(
     }
 
     None
+}
+
+// ============================================================================
+// 11. OWASP CWE-1236 电子表格公式注入护盾 & 纯内存双向 AI 替身沙盒（ReversiblePrivacyTwin）
+// ============================================================================
+
+/// 防御 Excel / WPS / Numbers / Google Sheets 公式与 DDE 命令注入（`=CMD|...`、`+HYPERLINK(...)`、`@SUM(...)`），
+/// 同时精准豁免合法负数、百分比与国际电话号码（如 `-128.50`、`-3.14%`、`+86-13800138000`），保持数值求和无损
+pub fn sanitize_spreadsheet_cell(raw: &str) -> String {
+    if raw.is_empty() || raw.starts_with('\'') {
+        return raw.to_string();
+    }
+    let trimmed_lead = raw.trim_start_matches(' ');
+    let Some(first) = trimmed_lead.chars().next() else {
+        return raw.to_string();
+    };
+    if matches!(first, '=' | '@' | '\t' | '\r') {
+        return format!("'{raw}");
+    }
+    if first == '+' || first == '-' {
+        let rest = &trimmed_lead[first.len_utf8()..];
+        let has_digit = rest.bytes().any(|b| b.is_ascii_digit());
+        let is_safe_numeric = has_digit
+            && rest
+                .chars()
+                .all(|ch| ch.is_ascii_digit() || matches!(ch, '.' | ',' | '%' | ' ' | '-'));
+        if !is_safe_numeric {
+            return format!("'{raw}");
+        }
+    }
+    raw.to_string()
+}
+
+struct TwinVaultState {
+    entries_by_token: std::collections::HashMap<String, (String, u64)>,
+    token_by_real: std::collections::HashMap<String, String>,
+    category_counters: std::collections::HashMap<&'static str, usize>,
+}
+
+impl TwinVaultState {
+    fn new() -> Self {
+        Self {
+            entries_by_token: std::collections::HashMap::new(),
+            token_by_real: std::collections::HashMap::new(),
+            category_counters: std::collections::HashMap::new(),
+        }
+    }
+
+    fn prune_expired(&mut self, now_secs: u64) {
+        let expired: Vec<String> = self
+            .entries_by_token
+            .iter()
+            .filter_map(|(k, (_, exp))| {
+                if *exp <= now_secs {
+                    Some(k.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for tok in expired {
+            if let Some((real_val, _)) = self.entries_by_token.remove(&tok) {
+                if self.token_by_real.get(&real_val) == Some(&tok) {
+                    self.token_by_real.remove(&real_val);
+                }
+            }
+        }
+    }
+
+    fn assign_token(&mut self, category: &'static str, real_val: &str, now_secs: u64) -> String {
+        const TTL_SECS: u64 = 1_800;
+        const MAX_ENTRIES: usize = 256;
+        if let Some(existing) = self.token_by_real.get(real_val).cloned() {
+            if let Some(entry) = self.entries_by_token.get_mut(&existing) {
+                entry.1 = now_secs + TTL_SECS;
+                return existing;
+            }
+        }
+        if self.entries_by_token.len() >= MAX_ENTRIES {
+            if let Some(oldest_tok) = self
+                .entries_by_token
+                .iter()
+                .min_by_key(|(_, (_, exp))| *exp)
+                .map(|(k, _)| k.clone())
+            {
+                if let Some((old_real, _)) = self.entries_by_token.remove(&oldest_tok) {
+                    self.token_by_real.remove(&old_real);
+                }
+            }
+        }
+        let next_idx = self.category_counters.entry(category).or_insert(0);
+        *next_idx += 1;
+        let token = format!("[ICLIP_{category}_{next_idx}]");
+        self.entries_by_token
+            .insert(token.clone(), (real_val.to_string(), now_secs + TTL_SECS));
+        self.token_by_real
+            .insert(real_val.to_string(), token.clone());
+        token
+    }
+}
+
+thread_local! {
+    static TWIN_VAULT: std::cell::RefCell<TwinVaultState> =
+        std::cell::RefCell::new(TwinVaultState::new());
+}
+
+/// 锁屏、休眠、安全清扫、清空未收藏或进程退出时瞬时清零全部纯内存 AI 替身映射
+pub fn wipe_privacy_twins() {
+    TWIN_VAULT.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        guard.entries_by_token.clear();
+        guard.token_by_real.clear();
+        guard.category_counters.clear();
+    });
+}
+
+fn replace_full_matches_with_twins(
+    input: &str,
+    re: &Regex,
+    category: &'static str,
+    state: &mut TwinVaultState,
+    now_secs: u64,
+    count: &mut usize,
+) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut last = 0usize;
+    for m in re.find_iter(input) {
+        let val = m.as_str();
+        if val.starts_with("[ICLIP_") {
+            continue;
+        }
+        out.push_str(&input[last..m.start()]);
+        let tok = state.assign_token(category, val, now_secs);
+        out.push_str(&tok);
+        last = m.end();
+        *count += 1;
+    }
+    out.push_str(&input[last..]);
+    out
+}
+
+fn replace_group2_matches_with_twins(
+    input: &str,
+    re: &Regex,
+    category: &'static str,
+    state: &mut TwinVaultState,
+    now_secs: u64,
+    count: &mut usize,
+) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut last = 0usize;
+    for caps in re.captures_iter(input) {
+        let Some(g2) = caps.get(2) else { continue };
+        let val = g2.as_str();
+        if val.starts_with("[ICLIP_")
+            || val.contains("***")
+            || val.to_ascii_lowercase().contains("redacted")
+        {
+            continue;
+        }
+        out.push_str(&input[last..g2.start()]);
+        let tok = state.assign_token(category, val, now_secs);
+        out.push_str(&tok);
+        last = g2.end();
+        *count += 1;
+    }
+    out.push_str(&input[last..]);
+    out
+}
+
+/// 将文本中的敏感凭据、口令、身份证、银行卡、内网 IP、邮箱与手机号替换为一致性编号替身（如 `[ICLIP_KEY_1]`、`[ICLIP_IP_1]`）
+pub fn mask_with_privacy_twins(raw: &str) -> Option<(String, usize)> {
+    if raw.is_empty() || raw.len() > 65_536 {
+        return None;
+    }
+    let now_secs = crate::model::now_unix_secs();
+    TWIN_VAULT.with(|cell| {
+        let mut state = cell.borrow_mut();
+        state.prune_expired(now_secs);
+
+        static PEM_RE: OnceLock<Regex> = OnceLock::new();
+        static KEY_RE: OnceLock<Regex> = OnceLock::new();
+        static URI_PW_RE: OnceLock<Regex> = OnceLock::new();
+        static ENV_BEARER_RE: OnceLock<Regex> = OnceLock::new();
+        static PRIV_IP_RE: OnceLock<Regex> = OnceLock::new();
+        static EMAIL_RE: OnceLock<Regex> = OnceLock::new();
+        static PHONE_RE: OnceLock<Regex> = OnceLock::new();
+
+        let pem_re = PEM_RE.get_or_init(|| {
+            Regex::new(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----").unwrap()
+        });
+        let key_re = KEY_RE.get_or_init(|| {
+            Regex::new(r"\b(?:AGE-SECRET-KEY-1[A-Z0-9]{50,}|eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}|sk-(?:proj-|ant-)?[A-Za-z0-9_-]{18,}|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}|whsec_[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{24,}|github_pat_[A-Za-z0-9_]{28,}|glpat-[A-Za-z0-9_-]{18,}|xox[baprs]-[A-Za-z0-9-]{18,}|AIzaSy[A-Za-z0-9_-]{31,}|hf_[A-Za-z0-9]{24,}|gsk_[A-Za-z0-9]{24,}|pplx-[A-Za-z0-9]{24,}|r8_[A-Za-z0-9]{24,}|ntn_[A-Za-z0-9]{24,}|secret_[A-Za-z0-9]{32,}|sbp_[a-fA-F0-9]{32,}|figd_[A-Za-z0-9_-]{24,}|lin_api_[A-Za-z0-9]{24,}|PMAK-[a-fA-F0-9]{24}-[a-fA-F0-9]{34}|dop_v1_[a-fA-F0-9]{64}|dckr_pat_[A-Za-z0-9_-]{20,}|hvs\.[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|LTAI[A-Za-z0-9]{12,24}|AKID[A-Za-z0-9]{13,32}|\d{8,10}:AA[A-Za-z0-9_-]{33}|npm_[A-Za-z0-9]{36}|pypi-[A-Za-z0-9_-]{40,}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,})\b").unwrap()
+        });
+        let uri_pw_re = URI_PW_RE.get_or_init(|| {
+            Regex::new(r"(?i)\b((?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp|https?)://[^:\s/@]+:)([^@\s/]{4,})(@)").unwrap()
+        });
+        let env_bearer_re = ENV_BEARER_RE.get_or_init(|| {
+            Regex::new(r##"(?im)((?:^\s*(?:export\s+)?[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY|AUTH_TOKEN|CLIENT_SECRET)[A-Z0-9_]*\s*[:=]\s*['"]?)|(?:\bBearer\s+))([^\s'"#\[\]]{6,})"##).unwrap()
+        });
+        let priv_ip_re = PRIV_IP_RE.get_or_init(|| {
+            Regex::new(r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3})\b").unwrap()
+        });
+        let email_re = EMAIL_RE.get_or_init(|| {
+            Regex::new(r"\b[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]+\.[A-Za-z]{2,18}\b").unwrap()
+        });
+        let phone_re = PHONE_RE.get_or_init(|| Regex::new(r"\b1[3-9]\d{9}\b").unwrap());
+
+        let mut out = raw.to_string();
+        let mut count = 0usize;
+
+        if out.contains("PRIVATE KEY") {
+            out = replace_full_matches_with_twins(
+                &out, pem_re, "KEY", &mut state, now_secs, &mut count,
+            );
+        }
+        out = replace_full_matches_with_twins(&out, key_re, "KEY", &mut state, now_secs, &mut count);
+        if out.contains("://") {
+            out = replace_group2_matches_with_twins(
+                &out, uri_pw_re, "SEC", &mut state, now_secs, &mut count,
+            );
+        }
+        if out.contains('=') || out.contains(':') || out.to_ascii_lowercase().contains("bearer ") {
+            out = replace_group2_matches_with_twins(
+                &out,
+                env_bearer_re,
+                "SEC",
+                &mut state,
+                now_secs,
+                &mut count,
+            );
+        }
+
+        if contains_verified_identity_or_card(&out) {
+            let bytes = out.as_bytes();
+            let mut rebuilt = String::with_capacity(out.len());
+            let mut last_copied = 0usize;
+            let mut i = 0usize;
+            while i < bytes.len() {
+                if bytes[i].is_ascii_digit() {
+                    let prev_alnum = i > 0 && bytes[i - 1].is_ascii_alphanumeric();
+                    let mut end = i + 1;
+                    while end < bytes.len()
+                        && (bytes[end].is_ascii_digit()
+                            || ((end - i) == 17 && (bytes[end] == b'X' || bytes[end] == b'x')))
+                    {
+                        end += 1;
+                    }
+                    let next_alnum = end < bytes.len() && bytes[end].is_ascii_alphanumeric();
+                    if !prev_alnum && !next_alnum {
+                        let tok_val = &out[i..end];
+                        if tok_val.len() == 18 && is_valid_chinese_id_card_18(tok_val) {
+                            rebuilt.push_str(&out[last_copied..i]);
+                            rebuilt.push_str(&state.assign_token("ID", tok_val, now_secs));
+                            last_copied = end;
+                            count += 1;
+                        } else if (15..=19).contains(&tok_val.len())
+                            && is_valid_bank_card_luhn(tok_val)
+                        {
+                            rebuilt.push_str(&out[last_copied..i]);
+                            rebuilt.push_str(&state.assign_token("CARD", tok_val, now_secs));
+                            last_copied = end;
+                            count += 1;
+                        }
+                    }
+                    i = end;
+                } else {
+                    i += 1;
+                }
+            }
+            rebuilt.push_str(&out[last_copied..]);
+            out = rebuilt;
+        }
+
+        if out.contains("10.") || out.contains("192.168.") || out.contains("172.") {
+            out = replace_full_matches_with_twins(
+                &out, priv_ip_re, "IP", &mut state, now_secs, &mut count,
+            );
+        }
+        if out.contains('@') {
+            out = replace_full_matches_with_twins(
+                &out, email_re, "EMAIL", &mut state, now_secs, &mut count,
+            );
+        }
+        if out.contains('1') {
+            let mut rebuilt = String::with_capacity(out.len());
+            let mut last = 0usize;
+            for m in phone_re.find_iter(&out) {
+                let prev_digit =
+                    m.start() > 0 && out.as_bytes()[m.start() - 1].is_ascii_alphanumeric();
+                let next_digit =
+                    m.end() < out.len() && out.as_bytes()[m.end()].is_ascii_alphanumeric();
+                if prev_digit || next_digit {
+                    continue;
+                }
+                rebuilt.push_str(&out[last..m.start()]);
+                rebuilt.push_str(&state.assign_token("PHONE", m.as_str(), now_secs));
+                last = m.end();
+                count += 1;
+            }
+            rebuilt.push_str(&out[last..]);
+            out = rebuilt;
+        }
+
+        if count == 0 || out == raw {
+            return None;
+        }
+        Some((out, count))
+    })
+}
+
+/// 检测剪贴文本或 AI 回复中是否含本会话有效 `[ICLIP_*_N]` 替身占位符，若有则一键无损回填真值
+pub fn inspect_restorable_privacy_twins(raw: &str) -> Option<(String, usize)> {
+    if !raw.contains("[ICLIP_") || raw.len() > 131_072 {
+        return None;
+    }
+    let now_secs = crate::model::now_unix_secs();
+    TWIN_VAULT.with(|cell| {
+        let mut state = cell.borrow_mut();
+        state.prune_expired(now_secs);
+        if state.entries_by_token.is_empty() {
+            return None;
+        }
+
+        static TWIN_TOK_RE: OnceLock<Regex> = OnceLock::new();
+        let re = TWIN_TOK_RE.get_or_init(|| {
+            Regex::new(r"\[ICLIP_(?:KEY|SEC|IP|EMAIL|PHONE|ID|CARD)_\d+\]").unwrap()
+        });
+
+        let mut out = String::with_capacity(raw.len());
+        let mut last = 0usize;
+        let mut restored = 0usize;
+        for m in re.find_iter(raw) {
+            let tok = m.as_str();
+            if let Some(entry) = state.entries_by_token.get_mut(tok) {
+                entry.1 = now_secs + 1_800;
+                out.push_str(&raw[last..m.start()]);
+                out.push_str(&entry.0);
+                last = m.end();
+                restored += 1;
+            }
+        }
+        out.push_str(&raw[last..]);
+        if restored == 0 || out == raw {
+            return None;
+        }
+        Some((out, restored))
+    })
 }

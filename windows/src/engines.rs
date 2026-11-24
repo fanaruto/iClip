@@ -24,6 +24,20 @@ pub fn analyze_text_actions(raw: &str, minimal_mode: bool) -> Vec<QuickAction> {
 
     let mut actions = Vec::new();
 
+    // 0.00 最高优双向 AI 替身回填：检测到 AI 回复中包含本会话有效 `[ICLIP_*_N]` 占位符时一键无损还原真值
+    if let Some((restored_text, restored_count)) =
+        crate::security::inspect_restorable_privacy_twins(raw)
+    {
+        actions.push(QuickAction {
+            id: "restore-privacy-twin",
+            title: format!("还原 {restored_count} 处真值"),
+            is_security: true,
+            result_text: restored_text,
+            html_table_payload: None,
+            toast_text: format!("已无损还原 {restored_count} 处脱敏真值（本机隔离 · 45s自动擦除）"),
+        });
+    }
+
     // 0.0 最高优安全护盾：剪贴板投毒（Bidi / ANSI 控制符劫持）与零宽幽灵字符净化
     if let Some(threat) = crate::security::inspect_clipboard_poison(inspect) {
         let cleaned = crate::security::sanitize_clipboard_poison(raw);
@@ -117,6 +131,16 @@ pub fn analyze_text_actions(raw: &str, minimal_mode: bool) -> Vec<QuickAction> {
                 toast_text: "已掩码敏感凭据与隐私并写入剪贴板".to_string(),
             });
         }
+        if let Some((twin_masked, twin_cnt)) = crate::security::mask_with_privacy_twins(raw) {
+            actions.push(QuickAction {
+                id: "redact-reversible-twin",
+                title: "AI 替身脱敏".to_string(),
+                is_security: true,
+                result_text: twin_masked,
+                html_table_payload: None,
+                toast_text: format!("已生成 {twin_cnt} 处可逆替身（复制 AI 回复可一键还原真值）"),
+            });
+        }
         if let Some(env_example) = crate::security::generate_env_example_template(raw) {
             actions.push(QuickAction {
                 id: "env-to-example",
@@ -173,6 +197,19 @@ pub fn analyze_text_actions(raw: &str, minimal_mode: bool) -> Vec<QuickAction> {
                     html_table_payload: None,
                     toast_text: "已掩码内网 IP / 邮箱 / 手机号".to_string(),
                 });
+                if let Some((twin_masked, twin_cnt)) = crate::security::mask_with_privacy_twins(raw)
+                {
+                    actions.push(QuickAction {
+                        id: "redact-reversible-twin",
+                        title: "AI 替身脱敏".to_string(),
+                        is_security: true,
+                        result_text: twin_masked,
+                        html_table_payload: None,
+                        toast_text: format!(
+                            "已生成 {twin_cnt} 处可逆替身（复制 AI 回复可一键还原真值）"
+                        ),
+                    });
+                }
             }
         }
 
@@ -902,7 +939,8 @@ pub fn to_html_table_fragment(tsv: &str) -> Option<String> {
         html.push_str("<tr>");
         let tag = if r_idx == 0 { "th" } else { "td" };
         for cell in row {
-            let escaped = cell
+            let safe_cell = crate::security::sanitize_spreadsheet_cell(cell);
+            let escaped = safe_cell
                 .replace('&', "&amp;")
                 .replace('<', "&lt;")
                 .replace('>', "&gt;");
@@ -919,22 +957,31 @@ pub fn analyze_table_bridge(raw: &str) -> Vec<QuickAction> {
         return Vec::new();
     }
 
-    // 1. Markdown Table -> Excel (TSV + CF_HTML) / CSV
+    // 1. Markdown Table -> Excel (TSV + CF_HTML) / CSV（内置 OWASP CWE-1236 公式注入护盾）
     if let Some(grid) = parse_markdown_table(raw) {
         let tsv: String = grid
             .iter()
-            .map(|r| r.join("\t"))
+            .map(|r| {
+                r.iter()
+                    .map(|c| {
+                        let flat = c.replace(['\t', '\n'], " ");
+                        crate::security::sanitize_spreadsheet_cell(&flat)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\t")
+            })
             .collect::<Vec<_>>()
             .join("\n");
         let csv: String = grid
             .iter()
             .map(|r| {
                 r.iter()
-                    .map(|cell| {
+                    .map(|raw_cell| {
+                        let cell = crate::security::sanitize_spreadsheet_cell(raw_cell);
                         if cell.contains(',') || cell.contains('"') || cell.contains('\n') {
                             format!("\"{}\"", cell.replace('"', "\"\""))
                         } else {
-                            cell.clone()
+                            cell
                         }
                     })
                     .collect::<Vec<_>>()
@@ -1814,6 +1861,43 @@ pub fn redact_secrets(text: &str) -> String {
             r"\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\b",
             "SG.***REDACTED***",
         ),
+        ("hf_", r"\bhf_[A-Za-z0-9]{24,}\b", "hf_***REDACTED***"),
+        ("gsk_", r"\bgsk_[A-Za-z0-9]{24,}\b", "gsk_***REDACTED***"),
+        ("pplx-", r"\bpplx-[A-Za-z0-9]{24,}\b", "pplx-***REDACTED***"),
+        ("r8_", r"\br8_[A-Za-z0-9]{24,}\b", "r8_***REDACTED***"),
+        ("ntn_", r"\bntn_[A-Za-z0-9]{24,}\b", "ntn_***REDACTED***"),
+        (
+            "secret_",
+            r"\bsecret_[A-Za-z0-9]{32,}\b",
+            "secret_***REDACTED***",
+        ),
+        ("sbp_", r"\bsbp_[a-fA-F0-9]{32,}\b", "sbp_***REDACTED***"),
+        (
+            "figd_",
+            r"\bfigd_[A-Za-z0-9_-]{24,}\b",
+            "figd_***REDACTED***",
+        ),
+        (
+            "lin_api_",
+            r"\blin_api_[A-Za-z0-9]{24,}\b",
+            "lin_api_***REDACTED***",
+        ),
+        (
+            "PMAK-",
+            r"\bPMAK-[a-fA-F0-9]{24}-[a-fA-F0-9]{34}\b",
+            "PMAK-***REDACTED***",
+        ),
+        (
+            "dop_v1_",
+            r"\bdop_v1_[a-fA-F0-9]{64}\b",
+            "dop_v1_***REDACTED***",
+        ),
+        (
+            "dckr_pat_",
+            r"\bdckr_pat_[A-Za-z0-9_-]{20,}\b",
+            "dckr_pat_***REDACTED***",
+        ),
+        ("hvs.", r"\bhvs\.[A-Za-z0-9_-]{20,}\b", "hvs.***REDACTED***"),
         (
             "eyJ",
             r"eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}",

@@ -568,6 +568,9 @@ final class ClipboardStore: ObservableObject {
         previewCache.totalCostLimit = 36 * 1024 * 1024
         fileIconCache.countLimit = 128
 
+        // 启动时立即将历史可能残留的 0755 拖拽临时目录收紧为 0700 并擦除上次异常退出残留的明文文件
+        DragFileExportHelper.wipeAllExports()
+
         adaptiveCancellable = AdaptiveIntelligenceEngine.shared.$revision
             .dropFirst()
             .receive(on: RunLoop.main)
@@ -909,6 +912,7 @@ final class ClipboardStore: ObservableObject {
             ignoreNextChangeCount = pasteboard.changeCount
             lastChangeCount = pasteboard.changeCount
         }
+        ReversiblePrivacyTwin.wipeAll()
         saveHistory()
         TactileFeedbackEngine.shared.perform(.magicTransform)
         showToast("已无痕清扫 \(removed.count) 条未收藏敏感记录")
@@ -1006,8 +1010,20 @@ final class ClipboardStore: ObservableObject {
     func stopMonitoring() {
         timer?.invalidate()
         timer = nil
+        lockDownEphemeralBuffers()
         DragFileExportHelper.wipeAllExports()
         saveHistory(immediate: true)
+    }
+
+    /// 锁屏、休眠或清扫时立即冲刷删除撤销栈、清空 AI 替身映射与动作缓存
+    func lockDownEphemeralBuffers() {
+        flushPendingUndoImages()
+        ReversiblePrivacyTwin.wipeAll()
+        #if !ICLIP_EDITION_FLOW
+        semanticCache.removeAllObjects()
+        #else
+        financeCache.removeAllObjects()
+        #endif
     }
 
     func onPanelShown(visibleItems: [ClipItem]) {
@@ -2323,13 +2339,18 @@ final class ClipboardStore: ObservableObject {
 
         if userInitiated {
             TactileFeedbackEngine.shared.perform(.deleteItem)
-            if removed.isBurnAfterPaste {
-                // 粘贴即焚机密手动删除时立即物理擦除，不进入 8s 内存撤销缓冲
+            let isSensitiveOrThreat = !removed.isPinned && (
+                removed.isBurnAfterPaste
+                || removed.detectedSensitiveKind != nil
+                || removed.detectedPoisonThreat != nil
+            )
+            if isSensitiveOrThreat {
+                // 未收藏敏感凭据、即焚机密与投毒项手动删除时立即物理粉碎，绝不滞留 8s 内存撤销栈
                 if !items.contains(where: { $0.contentHash == removed.contentHash }) {
                     AdaptiveIntelligenceEngine.shared.forgetContentHashes([removed.contentHash])
                 }
                 deleteImageFileIfNeeded(for: removed)
-                showToast("已彻底销毁即焚记录", duration: 2.8)
+                showToast(removed.isBurnAfterPaste ? "已彻底销毁即焚记录" : "已彻底擦除敏感记录（不留撤销缓存）", duration: 2.8)
                 return
             }
             stageDeletionUndoBuffer([removed])
@@ -2361,6 +2382,7 @@ final class ClipboardStore: ObservableObject {
             evictItemMemoryCaches(for: item)
         }
         DragFileExportHelper.wipeAllExports()
+        ReversiblePrivacyTwin.wipeAll()
         #if ICLIP_EDITION_FLOW
         let removedIDs = Set(toRemove.map(\.id))
         pasteQueueIDs.removeAll { removedIDs.contains($0) }
@@ -2369,8 +2391,31 @@ final class ClipboardStore: ObservableObject {
         items = items.filter { $0.isPinned || $0.isPendingTodo }
         saveHistory(allowEmptyBackup: true)
         TactileFeedbackEngine.shared.perform(.deleteItem)
-        stageDeletionUndoBuffer(toRemove)
-        showToast("已清空 \(toRemove.count) 条 · 按 ⌘Z 撤销", duration: 4.2)
+
+        // 敏感凭据、即焚与投毒项在清空未收藏时立即物理粉碎，仅普通记录进入 8s 撤销栈
+        let activeHashes = Set(items.map(\.contentHash))
+        var safeUndoBatch: [ClipItem] = []
+        var immediateShredHashes: Set<String> = []
+        for item in toRemove {
+            if item.isBurnAfterPaste || item.detectedSensitiveKind != nil || item.detectedPoisonThreat != nil {
+                if !activeHashes.contains(item.contentHash) {
+                    immediateShredHashes.insert(item.contentHash)
+                }
+                deleteImageFileIfNeeded(for: item)
+            } else {
+                safeUndoBatch.append(item)
+            }
+        }
+        if !immediateShredHashes.isEmpty {
+            AdaptiveIntelligenceEngine.shared.forgetContentHashes(immediateShredHashes)
+        }
+        if !safeUndoBatch.isEmpty {
+            stageDeletionUndoBuffer(safeUndoBatch)
+            showToast("已清空 \(toRemove.count) 条 · 普通记录可按 ⌘Z 撤销", duration: 4.2)
+        } else {
+            flushPendingUndoImages()
+            showToast("已彻底粉碎 \(toRemove.count) 条敏感记录", duration: 3.4)
+        }
     }
 
     /// 暂存被删条目并延迟 8 秒物理清理图片，支持手滑后按 ⌘Z 或点击胶囊零损原位恢复
@@ -2578,6 +2623,25 @@ final class ClipboardStore: ObservableObject {
         let isExternalAI = SensitiveCredentialVeil.isExternalAIOrChatApp(activeTargetAppName)
         let cacheKey = "\(item.contentHash)|\(item.sourceAppName ?? "")|\(isExternalAI ? "ext" : "std")" as NSString
         if let cached = semanticCache.object(forKey: cacheKey) {
+            if let raw = item.text, let restored = ReversiblePrivacyTwin.inspectRestorableTwins(in: raw) {
+                var live = cached.snapshot.actions
+                live.insert(
+                    TransformAction(
+                        id: "restore-privacy-twin",
+                        title: "还原 \(restored.restoredCount) 处真值",
+                        symbolName: "arrow.uturn.backward.circle.fill",
+                        isSecurityAction: true,
+                        resultText: restored.restoredText,
+                        toastText: "已无损还原 \(restored.restoredCount) 处脱敏真值（本机隔离 · 45s自动擦除）"
+                    ),
+                    at: 0
+                )
+                return SemanticSnapshot(
+                    primaryKind: cached.snapshot.primaryKind ?? .sensitiveSecret,
+                    parsedColorRGBA: cached.snapshot.parsedColorRGBA,
+                    actions: Array(live.prefix(3))
+                )
+            }
             return cached.snapshot
         }
         let analyzed = SemanticEngine.analyze(item)
@@ -2610,12 +2674,25 @@ final class ClipboardStore: ObservableObject {
             }
         }
 
-        // 兜底身份证/银行卡等高敏凭据的通用脱敏胶囊
+        // 兜底身份证/银行卡等高敏凭据的通用脱敏胶囊与可逆 AI 替身胶囊
         if let raw = item.text, item.detectedSensitiveKind != nil,
            !baseActions.contains(where: { $0.id.hasPrefix("redact-") }) {
             let redacted = SensitiveCredentialVeil.redactForExternalSharing(raw)
             if redacted != raw {
                 if resolvedKind == nil { resolvedKind = .sensitiveSecret }
+                if let twin = ReversiblePrivacyTwin.maskWithTwins(raw) {
+                    baseActions.insert(
+                        TransformAction(
+                            id: "redact-reversible-twin",
+                            title: "AI 替身脱敏",
+                            symbolName: "person.2.badge.key.fill",
+                            isSecurityAction: true,
+                            resultText: twin.maskedText,
+                            toastText: "已生成 \(twin.replacedCount) 处可逆替身（复制 AI 回复可一键还原真值）"
+                        ),
+                        at: 0
+                    )
+                }
                 baseActions.insert(
                     TransformAction(
                         id: "redact-secrets",
@@ -2677,6 +2754,25 @@ final class ClipboardStore: ObservableObject {
             )
         }
         semanticCache.setObject(SemanticSnapshotBox(personalized), forKey: cacheKey)
+        if let raw = item.text, let restored = ReversiblePrivacyTwin.inspectRestorableTwins(in: raw) {
+            var live = personalized.actions
+            live.insert(
+                TransformAction(
+                    id: "restore-privacy-twin",
+                    title: "还原 \(restored.restoredCount) 处真值",
+                    symbolName: "arrow.uturn.backward.circle.fill",
+                    isSecurityAction: true,
+                    resultText: restored.restoredText,
+                    toastText: "已无损还原 \(restored.restoredCount) 处脱敏真值（本机隔离 · 45s自动擦除）"
+                ),
+                at: 0
+            )
+            return SemanticSnapshot(
+                primaryKind: resolvedKind ?? .sensitiveSecret,
+                parsedColorRGBA: analyzed.parsedColorRGBA,
+                actions: Array(live.prefix(3))
+            )
+        }
         return personalized
     }
 
@@ -3152,12 +3248,14 @@ final class ClipboardStore: ObservableObject {
                 text: newText,
                 contentHash: newHash,
                 sourceAppName: existing.sourceAppName,
+                sourceAppBundleID: existing.sourceAppBundleID,
                 createdAt: existing.createdAt,
                 isPinned: existing.isPinned,
                 pinCategory: existing.pinCategory,
                 customAlias: existing.customAlias,
                 isTodoItem: existing.isTodoItem,
-                todoCompletedAt: existing.todoCompletedAt
+                todoCompletedAt: existing.todoCompletedAt,
+                burnAfterPaste: existing.isBurnAfterPaste
             )
 
         case .image:
@@ -3171,15 +3269,22 @@ final class ClipboardStore: ObservableObject {
         }
     }
 
-    /// 原位更新剪贴条目正文或实况文本（完整保留原 UUID、收藏状态、场景分类与备注别名）
+    /// 原位更新剪贴条目正文或实况文本（完整保留原 UUID、收藏状态、场景分类、备注别名与即焚属性，并擦除旧明文缓存与指纹）
     @discardableResult
     func updateItemText(_ newText: String, for item: ClipItem) -> Bool {
         guard let idx = items.firstIndex(where: { $0.id == item.id }) else { return false }
-        guard let updated = Self.updatedItem(from: items[idx], withNewText: newText) else {
+        let oldItem = items[idx]
+        guard let updated = Self.updatedItem(from: oldItem, withNewText: newText) else {
             showToast("内容不能为空")
             return false
         }
+        evictItemMemoryCaches(for: oldItem)
+        DragFileExportHelper.purgeExportedFiles(for: oldItem)
         items[idx] = updated
+        if oldItem.contentHash != updated.contentHash,
+           !items.contains(where: { $0.contentHash == oldItem.contentHash }) {
+            AdaptiveIntelligenceEngine.shared.forgetContentHashes([oldItem.contentHash])
+        }
         saveHistory()
         showToast(updated.type == .image ? "已更新图片实况文本" : "已原地保存微调内容")
         return true
@@ -3320,6 +3425,20 @@ final class ClipboardStore: ObservableObject {
         let isExternalAI = SensitiveCredentialVeil.isExternalAIOrChatApp(activeTargetAppName)
         let cacheKey = "\(item.contentHash)|\(item.sourceAppName ?? "")|\(isExternalAI ? "ext" : "std")" as NSString
         if let cached = financeCache.object(forKey: cacheKey) {
+            if let restored = ReversiblePrivacyTwin.inspectRestorableTwins(in: raw) {
+                var live = cached.actions
+                live.insert(
+                    FinanceQuickAction(
+                        id: "restore-privacy-twin",
+                        title: "还原 \(restored.restoredCount) 处真值",
+                        symbolName: "arrow.uturn.backward.circle.fill",
+                        resultText: restored.restoredText,
+                        toastText: "已无损还原 \(restored.restoredCount) 处脱敏真值（本机隔离 · 45s自动擦除）"
+                    ),
+                    at: 0
+                )
+                return live
+            }
             return cached.actions
         }
         var analyzed = MeetingAndEphemeralEngine.analyze(raw)
@@ -3350,6 +3469,18 @@ final class ClipboardStore: ObservableObject {
             }
             let redacted = SensitiveCredentialVeil.redactForExternalSharing(raw)
             if redacted != raw {
+                if let twin = ReversiblePrivacyTwin.maskWithTwins(raw) {
+                    analyzed.insert(
+                        FinanceQuickAction(
+                            id: "redact-reversible-twin",
+                            title: "AI 替身脱敏",
+                            symbolName: "person.2.badge.key.fill",
+                            resultText: twin.maskedText,
+                            toastText: "已生成 \(twin.replacedCount) 处可逆替身（复制 AI 回复可一键还原真值）"
+                        ),
+                        at: 0
+                    )
+                }
                 analyzed.insert(
                     FinanceQuickAction(
                         id: "redact-secrets",
@@ -3423,6 +3554,20 @@ final class ClipboardStore: ObservableObject {
             return ranked
         }
         financeCache.setObject(FinanceActionsBox(ranked), forKey: cacheKey)
+        if let restored = ReversiblePrivacyTwin.inspectRestorableTwins(in: raw) {
+            var live = ranked
+            live.insert(
+                FinanceQuickAction(
+                    id: "restore-privacy-twin",
+                    title: "还原 \(restored.restoredCount) 处真值",
+                    symbolName: "arrow.uturn.backward.circle.fill",
+                    resultText: restored.restoredText,
+                    toastText: "已无损还原 \(restored.restoredCount) 处脱敏真值（本机隔离 · 45s自动擦除）"
+                ),
+                at: 0
+            )
+            return live
+        }
         return ranked
     }
 

@@ -2556,4 +2556,91 @@ final class CoreFeatureTests: XCTestCase {
         let punyExtracted = try XCTUnwrap(URLTrackingCleaner.extractFirstCleanedWebURL(from: "请访问 https://xn--80ak6aa92e.com/security 升级"))
         XCTAssertEqual(FileAndLinkSecurityGuard.inspectLinkRisk(punyExtracted), .homographPhishing)
     }
+
+    // MARK: - 52. 双向 AI 替身沙盒、OWASP 表格公式注入护盾、即焚原位微调保留与 0700 临时件自愈测试
+
+    @MainActor
+    func testReversiblePrivacyTwinSpreadsheetInjectionShieldAndBurnEditPreservation() throws {
+        ReversiblePrivacyTwin.wipeAll()
+        defer { ReversiblePrivacyTwin.wipeAll() }
+
+        // 1. 验证 2026 新型 AI/SaaS 凭据（Groq / Notion / Docker PAT）识别与双向 AI 替身指代一致性
+        let groqKey = "gsk_" + "AbCdEfGh1234567890IjKlMnOpQrStUvWx"
+        let dockerPat = "dckr_pat_" + "ZyXwVuTsRqPoNmLkJiHgFeDcBa9876"
+        XCTAssertEqual(SensitiveCredentialVeil.classify(groqKey), .apiKey)
+        XCTAssertEqual(SensitiveCredentialVeil.classify(dockerPat), .apiKey)
+
+        let rawIncident = "主库 10.24.8.19 同步至从库 10.24.8.20 失败（重试 10.24.8.19 仍超时），Key=\(groqKey)，值班手机 13812345678，邮箱 ops@acme.cn"
+        let twinOut = try XCTUnwrap(ReversiblePrivacyTwin.maskWithTwins(rawIncident))
+        XCTAssertFalse(twinOut.maskedText.contains(groqKey))
+        XCTAssertFalse(twinOut.maskedText.contains("10.24.8.19"))
+        XCTAssertFalse(twinOut.maskedText.contains("13812345678"))
+        XCTAssertFalse(twinOut.maskedText.contains("ops@acme.cn"))
+        // 同一真实 IP `10.24.8.19` 出现两次必须映射为同一个 `[ICLIP_IP_1]`，而从库映射为 `[ICLIP_IP_2]`
+        let ip1Occurrences = twinOut.maskedText.components(separatedBy: "[ICLIP_IP_1]").count - 1
+        XCTAssertEqual(ip1Occurrences, 2)
+        XCTAssertTrue(twinOut.maskedText.contains("[ICLIP_IP_2]"))
+
+        // 模拟复制 AI 返回的修复脚本：微星标与还原引擎一键无损回填全部真值
+        let aiReply = "curl -H 'Authorization: Bearer [ICLIP_KEY_1]' http://[ICLIP_IP_1]:8080/failover?standby=[ICLIP_IP_2]&notify=[ICLIP_PHONE_1]"
+        let replyItem = ClipItem(type: .text, text: aiReply, contentHash: "text:aireply")
+        let spark = try XCTUnwrap(AdaptiveIntelligenceEngine.shared.evaluateSparkCandidate(for: replyItem, reuseCount: 1, minimalMode: false))
+        XCTAssertEqual(spark.actionID, "restore-privacy-twin")
+        let restored = try XCTUnwrap(ReversiblePrivacyTwin.inspectRestorableTwins(in: aiReply))
+        XCTAssertEqual(restored.restoredCount, 4)
+        XCTAssertEqual(
+            restored.restoredText,
+            "curl -H 'Authorization: Bearer \(groqKey)' http://10.24.8.19:8080/failover?standby=10.24.8.20&notify=13812345678"
+        )
+
+        // 锁屏/清扫擦除后，内存替身表立即归零
+        ReversiblePrivacyTwin.wipeAll()
+        XCTAssertNil(ReversiblePrivacyTwin.inspectRestorableTwins(in: aiReply))
+
+        // 2. 验证 OWASP CWE-1236 电子表格公式与 DDE 注入护盾（拦截危险公式且不破坏合法负数与电话）
+        XCTAssertEqual(TableBridgeEngine.sanitizeSpreadsheetCell("=CMD|' /C calc'!A0"), "'=CMD|' /C calc'!A0")
+        let riskyMD = """
+        | 字段 | 数值或载荷 |
+        | :--- | :--- |
+        | 恶意公式 | =IMPORTXML("https://evil.test","//a") |
+        | 超链外带 | +HYPERLINK("https://evil.test") |
+        | 正常亏损 | -128.50 |
+        | 环比跌幅 | -15.2% |
+        | 国际号码 | +86-13800138000 |
+        """
+        let tblActions = TableBridgeEngine.analyze(riskyMD)
+        let safeTSV = try XCTUnwrap(tblActions.first(where: { $0.id == "tbl-md-to-excel" })?.resultText)
+        XCTAssertTrue(safeTSV.contains("'=IMPORTXML(\"https://evil.test\",\"//a\")"))
+        XCTAssertTrue(safeTSV.contains("'+HYPERLINK(\"https://evil.test\")"))
+        XCTAssertTrue(safeTSV.contains("\t-128.50"))
+        XCTAssertFalse(safeTSV.contains("'-128.50"))
+        XCTAssertTrue(safeTSV.contains("\t-15.2%"))
+        XCTAssertTrue(safeTSV.contains("\t+86-13800138000"))
+
+        // 3. 验证粘贴即焚条目原位微调（`updatedItem`）严格保留 `isBurnAfterPaste` 与 `sourceAppBundleID`
+        let burnOrigin = ClipItem(
+            type: .text,
+            text: "root_pass_v1",
+            contentHash: "text:burn1",
+            sourceAppName: "1Password",
+            sourceAppBundleID: "com.1password.1password",
+            burnAfterPaste: true
+        )
+        let burnEdited = try XCTUnwrap(ClipboardStore.updatedItem(from: burnOrigin, withNewText: "root_pass_v2"))
+        XCTAssertTrue(burnEdited.isBurnAfterPaste)
+        XCTAssertEqual(burnEdited.sourceAppBundleID, "com.1password.1password")
+
+        // 4. 验证旧 0755 导出目录调用 `wipeAllExports` 后立即收紧为 `0700` 并清空残留明文文件
+        let fm = FileManager.default
+        let tmpExport = fm.temporaryDirectory.appendingPathComponent("iclip-perm-heal-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: tmpExport, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o755])
+        try Data("stale_secret".utf8).write(to: tmpExport.appendingPathComponent("leak.txt"))
+        DragFileExportHelper.wipeAllExports(exportDirectory: tmpExport)
+        let attrs = try fm.attributesOfItem(atPath: tmpExport.path)
+        let perm = (attrs[.posixPermissions] as? NSNumber)?.intValue ?? 0
+        XCTAssertEqual(perm & 0o777, 0o700)
+        let remaining = try fm.contentsOfDirectory(atPath: tmpExport.path)
+        XCTAssertTrue(remaining.isEmpty)
+        try? fm.removeItem(at: tmpExport)
+    }
 }

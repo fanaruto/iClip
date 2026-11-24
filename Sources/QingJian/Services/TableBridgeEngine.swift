@@ -155,10 +155,36 @@ enum TableBridgeEngine {
 
     // MARK: - 多格式输出生成器（TSV / HTML Table / CSV / Markdown / JSON）
 
+    /// 防御 OWASP CWE-1236 电子表格公式与 DDE 命令注入（如 `=CMD|...`、`+HYPERLINK(...)`、`@SUM(...)`），
+    /// 同时精准豁免合法负数、金额百分比与国际电话号码（如 `-128.50`、`-3.14%`、`+86-13800138000`），不破坏 Excel 数值求和
+    static func sanitizeSpreadsheetCell(_ raw: String) -> String {
+        guard !raw.isEmpty else { return raw }
+        if raw.hasPrefix("'") { return raw }
+        let trimmedLead = raw.drop(while: { $0 == " " })
+        guard let first = trimmedLead.first else { return raw }
+        if first == "=" || first == "@" || first == "\t" || first == "\r" {
+            return "'" + raw
+        }
+        if first == "+" || first == "-" {
+            let rest = trimmedLead.dropFirst()
+            let hasDigit = rest.contains(where: { $0 >= "0" && $0 <= "9" })
+            let isSafeNumericOrPhone = hasDigit && rest.allSatisfy { ch in
+                (ch >= "0" && ch <= "9") || ch == "." || ch == "," || ch == "%" || ch == " " || ch == "-"
+            }
+            if !isSafeNumericOrPhone {
+                return "'" + raw
+            }
+        }
+        return raw
+    }
+
     static func toTSV(_ grid: [[String]]) -> String {
         grid.map { row in
-            row.map { $0.replacingOccurrences(of: "\t", with: " ").replacingOccurrences(of: "\n", with: " ") }
-                .joined(separator: "\t")
+            row.map { cell in
+                let flat = cell.replacingOccurrences(of: "\t", with: " ").replacingOccurrences(of: "\n", with: " ")
+                return sanitizeSpreadsheetCell(flat)
+            }
+            .joined(separator: "\t")
         }.joined(separator: "\n")
     }
 
@@ -168,13 +194,13 @@ enum TableBridgeEngine {
         guard rows.count >= 2 else { return nil }
         var html = "<table><thead><tr>"
         for cell in rows[0] {
-            html += "<th>\(escapeHTML(cell))</th>"
+            html += "<th>\(escapeHTML(sanitizeSpreadsheetCell(cell)))</th>"
         }
         html += "</tr></thead><tbody>"
         for row in rows.dropFirst() {
             html += "<tr>"
             for cell in row {
-                html += "<td>\(escapeHTML(cell))</td>"
+                html += "<td>\(escapeHTML(sanitizeSpreadsheetCell(cell)))</td>"
             }
             html += "</tr>"
         }
@@ -184,7 +210,8 @@ enum TableBridgeEngine {
 
     static func toCSV(_ grid: [[String]]) -> String {
         grid.map { row in
-            row.map { cell -> String in
+            row.map { rawCell -> String in
+                let cell = sanitizeSpreadsheetCell(rawCell)
                 if cell.contains(",") || cell.contains("\"") || cell.contains("\n") {
                     let escaped = cell.replacingOccurrences(of: "\"", with: "\"\"")
                     return "\"\(escaped)\""

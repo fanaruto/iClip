@@ -420,6 +420,7 @@ pub fn run_windows_app() -> i32 {
         }
         MAIN_HWND_RAW.store(hwnd as isize, Ordering::SeqCst);
 
+        iclip_core::security::wipe_all_temp_previews();
         let store = ClipboardStore::new(ClipboardStore::default_app_data_dir());
         let sys_dark = query_windows_system_dark_mode();
         apply_dwm_glass_style(hwnd, sys_dark, store.config.blur_concentration_pct);
@@ -1524,6 +1525,8 @@ unsafe extern "system" fn wnd_proc(
                 iclip_core::security::wipe_all_temp_previews();
                 APP_STATE.with(|c| {
                     if let Some(st) = c.borrow_mut().as_mut() {
+                        st.store.lock_down_ephemeral_buffers();
+                        st.search_query.clear();
                         st.show_quick_look = false;
                         st.editing_alias_item_id = None;
                         st.alias_draft.clear();
@@ -1538,6 +1541,8 @@ unsafe extern "system" fn wnd_proc(
                 iclip_core::security::wipe_all_temp_previews();
                 APP_STATE.with(|c| {
                     if let Some(st) = c.borrow_mut().as_mut() {
+                        st.store.lock_down_ephemeral_buffers();
+                        st.search_query.clear();
                         st.show_quick_look = false;
                         st.editing_alias_item_id = None;
                         st.alias_draft.clear();
@@ -1826,6 +1831,7 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_DESTROY => {
             iclip_core::security::wipe_all_temp_previews();
+            iclip_core::security::wipe_privacy_twins();
             PostQuitMessage(0);
             0
         }

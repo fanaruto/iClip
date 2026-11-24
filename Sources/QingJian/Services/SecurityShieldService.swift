@@ -495,7 +495,7 @@ enum ClipboardPoisonGuard {
 /// 2. 离线微秒级高敏凭据嗅探与防肩窥圆点雾化遮罩（零布局抖动，选中/悬停即刻原位显影）
 enum SensitiveCredentialVeil {
     private static let apiKeyRegex = try! NSRegularExpression(
-        pattern: #"\b(?:sk-(?:proj-|ant-)?[A-Za-z0-9_-]{18,}|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}|whsec_[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{24,}|github_pat_[A-Za-z0-9_]{28,}|glpat-[A-Za-z0-9_-]{18,}|xox[baprs]-[A-Za-z0-9-]{18,}|AIzaSy[A-Za-z0-9_-]{31,}|hf_[A-Za-z0-9]{24,}|AKIA[0-9A-Z]{16}|LTAI[A-Za-z0-9]{12,24}|AKID[A-Za-z0-9]{13,32}|\d{8,10}:AA[A-Za-z0-9_-]{33}|npm_[A-Za-z0-9]{36}|pypi-[A-Za-z0-9_-]{40,}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,})\b"#
+        pattern: #"\b(?:sk-(?:proj-|ant-)?[A-Za-z0-9_-]{18,}|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}|whsec_[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{24,}|github_pat_[A-Za-z0-9_]{28,}|glpat-[A-Za-z0-9_-]{18,}|xox[baprs]-[A-Za-z0-9-]{18,}|AIzaSy[A-Za-z0-9_-]{31,}|hf_[A-Za-z0-9]{24,}|gsk_[A-Za-z0-9]{24,}|pplx-[A-Za-z0-9]{24,}|r8_[A-Za-z0-9]{24,}|ntn_[A-Za-z0-9]{24,}|secret_[A-Za-z0-9]{32,}|sbp_[a-fA-F0-9]{32,}|figd_[A-Za-z0-9_-]{24,}|lin_api_[A-Za-z0-9]{24,}|PMAK-[a-fA-F0-9]{24}-[a-fA-F0-9]{34}|dop_v1_[a-fA-F0-9]{64}|dckr_pat_[A-Za-z0-9_-]{20,}|hvs\.[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|LTAI[A-Za-z0-9]{12,24}|AKID[A-Za-z0-9]{13,32}|\d{8,10}:AA[A-Za-z0-9_-]{33}|npm_[A-Za-z0-9]{36}|pypi-[A-Za-z0-9_-]{40,}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,})\b"#
     )
     private static let wireGuardPrivateKeyRegex = try! NSRegularExpression(
         pattern: #"(?im)^(\s*(?:PrivateKey|PresharedKey)\s*=\s*)([A-Za-z0-9+/]{42,44}=)(\s*)$"#
@@ -574,8 +574,40 @@ enum SensitiveCredentialVeil {
         return false
     }
 
-    private static func hasRealEnvSecretAssignment(in sample: String, nsRange: NSRange) -> Bool {
+    private static let apiKeyFastHints: [String] = [
+        "sk-", "_live_", "_test_", "whsec_", "ghp_", "gho_", "ghu_", "ghs_", "ghr_",
+        "github_pat_", "glpat-", "xox", "AIzaSy", "hf_", "gsk_", "pplx-", "r8_",
+        "ntn_", "secret_", "sbp_", "figd_", "lin_api_", "PMAK-", "dop_v1_",
+        "dckr_pat_", "hvs.", "AKIA", "LTAI", "AKID", ":AA", "npm_", "pypi-", "SG."
+    ]
+
+    private static func fastHeadSlice(_ rawText: String, maxUTF8Bytes: Int = 2_048) -> String {
+        let utf8 = rawText.utf8
+        guard utf8.count > maxUTF8Bytes else { return rawText }
+        var idx = utf8.index(utf8.startIndex, offsetBy: maxUTF8Bytes)
+        while idx > utf8.startIndex && (utf8[idx] & 0b1100_0000) == 0b1000_0000 {
+            idx = utf8.index(before: idx)
+        }
+        return String(decoding: utf8[..<idx], as: UTF8.self)
+    }
+
+    private static func hasASCIIDigitRun(in sample: String, minLength: Int) -> Bool {
+        var run = 0
+        for b in sample.utf8 {
+            if b >= 48 && b <= 57 {
+                run += 1
+                if run >= minLength { return true }
+            } else {
+                run = 0
+            }
+        }
+        return false
+    }
+
+    private static func hasRealEnvSecretAssignment(in sample: String, lowerSample: String, nsRange: NSRange) -> Bool {
         guard sample.contains("=") || sample.contains(":") else { return false }
+        let envKeywords = ["password", "passwd", "secret", "api_key", "access_key", "private_key", "auth_token"]
+        guard envKeywords.contains(where: { lowerSample.contains($0) }) else { return false }
         for match in envSecretRegex.matches(in: sample, range: nsRange) {
             if match.numberOfRanges >= 3, let valRange = Range(match.range(at: 2), in: sample) {
                 let candidate = String(sample[valRange])
@@ -589,7 +621,8 @@ enum SensitiveCredentialVeil {
 
     static func isWebhookURL(_ rawText: String) -> Bool {
         guard !rawText.isEmpty else { return false }
-        let sample: String = rawText.utf8.count > 2_048 ? String(rawText.prefix(1_024)) : rawText
+        let sample = fastHeadSlice(rawText)
+        guard sample.contains("://") else { return false }
         let nsRange = NSRange(sample.startIndex..<sample.endIndex, in: sample)
         if webhookSecretRegex.firstMatch(in: sample, range: nsRange) != nil {
             return true
@@ -597,45 +630,62 @@ enum SensitiveCredentialVeil {
         return sample.lowercased().contains("oapi.dingtalk.com/robot/send")
     }
 
-    /// 仅扫描首 2,048 UTF-8 字节，2MB 超大文本耗时 < 0.03ms
+    /// 仅扫描首 2,048 UTF-8 字节并通过 O(1) 字节预筛跳过无关正则，2MB 超大文本耗时 < 0.01ms
     static func classify(_ rawText: String) -> SensitiveSecretKind? {
         guard !rawText.isEmpty else { return nil }
-        let sample: String = rawText.utf8.count > 2_048 ? String(rawText.prefix(1_024)) : rawText
+        let sample = fastHeadSlice(rawText)
         if sample.contains("-----BEGIN ") && (sample.contains("PRIVATE KEY-----") || sample.contains("PRIVATE KEY BLOCK-----")) {
             return .privateKey
         }
+        let hasScheme = sample.contains("://")
+        let hasColon = sample.contains(":")
+        let hasEquals = sample.contains("=")
         let nsRange = NSRange(sample.startIndex..<sample.endIndex, in: sample)
-        if ageSecretKeyRegex.firstMatch(in: sample, range: nsRange) != nil
-            || otpAuthUriRegex.firstMatch(in: sample, range: nsRange) != nil
-            || wireGuardPrivateKeyRegex.firstMatch(in: sample, range: nsRange) != nil {
+
+        if (sample.contains("AGE-SECRET-KEY-1") && ageSecretKeyRegex.firstMatch(in: sample, range: nsRange) != nil)
+            || (hasScheme && otpAuthUriRegex.firstMatch(in: sample, range: nsRange) != nil)
+            || (hasEquals && sample.contains("Key") && wireGuardPrivateKeyRegex.firstMatch(in: sample, range: nsRange) != nil) {
             return .privateKey
         }
-        if apiKeyRegex.firstMatch(in: sample, range: nsRange) != nil {
+        if apiKeyFastHints.contains(where: { sample.contains($0) }),
+           apiKeyRegex.firstMatch(in: sample, range: nsRange) != nil {
             return .apiKey
         }
-        if jwtRegex.firstMatch(in: sample, range: nsRange) != nil {
+        if sample.contains("eyJ"),
+           jwtRegex.firstMatch(in: sample, range: nsRange) != nil {
             return .jwtToken
         }
-        if connUriRegex.firstMatch(in: sample, range: nsRange) != nil
-            || bearerRegex.firstMatch(in: sample, range: nsRange) != nil
-            || urlQuerySecretRegex.firstMatch(in: sample, range: nsRange) != nil
-            || httpBasicAuthRegex.firstMatch(in: sample, range: nsRange) != nil
-            || webhookSecretRegex.firstMatch(in: sample, range: nsRange) != nil
-            || httpHeaderAuthCookieRegex.firstMatch(in: sample, range: nsRange) != nil
-            || httpBasicHeaderRegex.firstMatch(in: sample, range: nsRange) != nil
-            || jsonSecretFieldRegex.firstMatch(in: sample, range: nsRange) != nil
-            || wifiPasswordRegex.firstMatch(in: sample, range: nsRange) != nil
-            || hasRealEnvSecretAssignment(in: sample, nsRange: nsRange) {
-            return .connectionSecret
-        }
-        for match in idCardCandidateRegex.matches(in: sample, range: nsRange) {
-            if let r = Range(match.range, in: sample), isValidChineseIDCard18(String(sample[r])) {
-                return .personalIdentity
+
+        if hasScheme || hasColon || hasEquals || sample.contains("?") || sample.contains("Bearer") || sample.contains("bearer") {
+            let lowerSample = sample.lowercased()
+            if (hasScheme && (
+                connUriRegex.firstMatch(in: sample, range: nsRange) != nil
+                || httpBasicAuthRegex.firstMatch(in: sample, range: nsRange) != nil
+                || webhookSecretRegex.firstMatch(in: sample, range: nsRange) != nil
+            ))
+            || (lowerSample.contains("bearer") && bearerRegex.firstMatch(in: sample, range: nsRange) != nil)
+            || ((sample.contains("?") || sample.contains("&")) && urlQuerySecretRegex.firstMatch(in: sample, range: nsRange) != nil)
+            || (hasColon && (
+                httpHeaderAuthCookieRegex.firstMatch(in: sample, range: nsRange) != nil
+                || (lowerSample.contains("basic") && httpBasicHeaderRegex.firstMatch(in: sample, range: nsRange) != nil)
+                || (sample.contains("\"") && jsonSecretFieldRegex.firstMatch(in: sample, range: nsRange) != nil)
+                || (lowerSample.contains("wifi:") && wifiPasswordRegex.firstMatch(in: sample, range: nsRange) != nil)
+            ))
+            || hasRealEnvSecretAssignment(in: sample, lowerSample: lowerSample, nsRange: nsRange) {
+                return .connectionSecret
             }
         }
-        for match in bankCardCandidateRegex.matches(in: sample, range: nsRange) {
-            if let r = Range(match.range, in: sample), isValidBankCardLuhn(String(sample[r])) {
-                return .personalIdentity
+
+        if hasASCIIDigitRun(in: sample, minLength: 15) {
+            for match in idCardCandidateRegex.matches(in: sample, range: nsRange) {
+                if let r = Range(match.range, in: sample), isValidChineseIDCard18(String(sample[r])) {
+                    return .personalIdentity
+                }
+            }
+            for match in bankCardCandidateRegex.matches(in: sample, range: nsRange) {
+                if let r = Range(match.range, in: sample), isValidBankCardLuhn(String(sample[r])) {
+                    return .personalIdentity
+                }
             }
         }
         return nil
@@ -1911,14 +1961,21 @@ enum SecretCapsuleMessenger {
               let b64Range = Range(m.range(at: 1), in: rawEnvelope) else {
             return nil
         }
-        var std = String(rawEnvelope[b64Range])
+        let rawB64URL = String(rawEnvelope[b64Range])
+        var std = rawB64URL
             .replacingOccurrences(of: "-", with: "+")
             .replacingOccurrences(of: "_", with: "/")
         let rem = std.count % 4
         if rem > 0 {
             std.append(String(repeating: "=", count: 4 - rem))
         }
-        guard let cipherData = Data(base64Encoded: std),
+        guard let cipherData = Data(base64Encoded: std) else { return nil }
+        // RFC 4648 §3.5 规范性校验：拒绝末尾填充冗余比特被篡改的非规范 Base64URL 密文（消除密文延展性）
+        let canonical = cipherData.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        guard canonical == rawB64URL,
               let plainData = LocalVaultCrypto.openEncryptedArchive(cipherData, passphrase: pw),
               let plainStr = String(data: plainData, encoding: .utf8) else {
             return nil
@@ -1981,5 +2038,197 @@ enum SecretCapsuleMessenger {
         }
 
         return nil
+    }
+}
+
+/// 11. 离线纯内存双向 AI 替身沙盒（`ReversiblePrivacyTwin`：脱敏外发 AI 保持多实体指代关系，复制 AI 回复一键无损回填真值，锁屏/清扫/退出瞬时清零）
+enum ReversiblePrivacyTwin {
+    private struct Entry {
+        let token: String
+        let realValue: String
+        var expiresAtUptime: TimeInterval
+    }
+
+    private static let lock = NSLock()
+    private static let ttlSeconds: TimeInterval = 1_800 // 30 分钟滑动生存期，绝不落盘
+    private static let maxEntries = 256
+    private static var entriesByToken: [String: Entry] = [:]
+    private static var tokenByRealValue: [String: String] = [:]
+    private static var categoryCounters: [String: Int] = [:]
+
+    private static let twinTokenRegex = try! NSRegularExpression(
+        pattern: #"\[ICLIP_(?:KEY|SEC|IP|EMAIL|PHONE|ID|CARD)_\d+\]"#
+    )
+    private static let pemRegex = try! NSRegularExpression(
+        pattern: #"-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----"#
+    )
+    private static let standaloneSecretRegex = try! NSRegularExpression(
+        pattern: #"\b(?:AGE-SECRET-KEY-1[A-Z0-9]{50,}|eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}|sk-(?:proj-|ant-)?[A-Za-z0-9_-]{18,}|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}|whsec_[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{24,}|github_pat_[A-Za-z0-9_]{28,}|glpat-[A-Za-z0-9_-]{18,}|xox[baprs]-[A-Za-z0-9-]{18,}|AIzaSy[A-Za-z0-9_-]{31,}|hf_[A-Za-z0-9]{24,}|gsk_[A-Za-z0-9]{24,}|pplx-[A-Za-z0-9]{24,}|r8_[A-Za-z0-9]{24,}|ntn_[A-Za-z0-9]{24,}|secret_[A-Za-z0-9]{32,}|sbp_[a-fA-F0-9]{32,}|figd_[A-Za-z0-9_-]{24,}|lin_api_[A-Za-z0-9]{24,}|PMAK-[a-fA-F0-9]{24}-[a-fA-F0-9]{34}|dop_v1_[a-fA-F0-9]{64}|dckr_pat_[A-Za-z0-9_-]{20,}|hvs\.[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|LTAI[A-Za-z0-9]{12,24}|AKID[A-Za-z0-9]{13,32}|\d{8,10}:AA[A-Za-z0-9_-]{33}|npm_[A-Za-z0-9]{36}|pypi-[A-Za-z0-9_-]{40,}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,})\b"#
+    )
+    private static let uriPasswordGroupRegex = try! NSRegularExpression(
+        pattern: #"(?i)\b((?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp|https?)://[^:\s/@]+:)([^@\s/]{4,})(@)"#
+    )
+    private static let envOrBearerGroupRegex = try! NSRegularExpression(
+        pattern: ##"(?im)((?:^\s*(?:export\s+)?[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY|AUTH_TOKEN|CLIENT_SECRET)[A-Z0-9_]*\s*[:=]\s*['"]?)|(?:\bBearer\s+))([^\s'"#\[\]]{6,})"##
+    )
+    private static let privateIPv4Regex = try! NSRegularExpression(
+        pattern: #"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3})\b"#
+    )
+    private static let emailRegex = try! NSRegularExpression(
+        pattern: #"\b[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]+\.[A-Za-z]{2,18}\b"#
+    )
+    private static let cnPhoneRegex = try! NSRegularExpression(
+        pattern: #"(?<![0-9A-Za-z])1[3-9]\d{9}(?![0-9A-Za-z])"#
+    )
+    private static let idOrCardCandidateRegex = try! NSRegularExpression(
+        pattern: #"(?<![0-9A-Za-z])\d{15,19}[Xx]?(?![0-9A-Za-z])"#
+    )
+
+    /// 锁屏、休眠、安全清扫、清空未收藏或退出应用时瞬时清零全部内存替身映射
+    static func wipeAll() {
+        lock.lock()
+        entriesByToken.removeAll()
+        tokenByRealValue.removeAll()
+        categoryCounters.removeAll()
+        lock.unlock()
+    }
+
+    private static func pruneExpiredLocked(now: TimeInterval) {
+        let expiredTokens = entriesByToken.compactMap { k, v in
+            v.expiresAtUptime <= now ? k : nil
+        }
+        for tok in expiredTokens {
+            if let old = entriesByToken.removeValue(forKey: tok) {
+                if tokenByRealValue[old.realValue] == tok {
+                    tokenByRealValue.removeValue(forKey: old.realValue)
+                }
+            }
+        }
+    }
+
+    private static func assignTokenLocked(category: String, realValue: String, now: TimeInterval) -> String {
+        if let existing = tokenByRealValue[realValue], var entry = entriesByToken[existing] {
+            entry.expiresAtUptime = now + ttlSeconds
+            entriesByToken[existing] = entry
+            return existing
+        }
+        if entriesByToken.count >= maxEntries,
+           let oldest = entriesByToken.min(by: { $0.value.expiresAtUptime < $1.value.expiresAtUptime }) {
+            entriesByToken.removeValue(forKey: oldest.key)
+            tokenByRealValue.removeValue(forKey: oldest.value.realValue)
+        }
+        let nextIdx = (categoryCounters[category] ?? 0) + 1
+        categoryCounters[category] = nextIdx
+        let token = "[ICLIP_\(category)_\(nextIdx)]"
+        entriesByToken[token] = Entry(token: token, realValue: realValue, expiresAtUptime: now + ttlSeconds)
+        tokenByRealValue[realValue] = token
+        return token
+    }
+
+    /// 将文本中的敏感密钥、口令、身份证、银行卡、内网 IP、邮箱与手机号替换为一致性编号替身（如 `[ICLIP_KEY_1]`、`[ICLIP_IP_1]`）
+    static func maskWithTwins(_ rawText: String) -> (maskedText: String, replacedCount: Int)? {
+        guard !rawText.isEmpty, rawText.utf8.count <= 65_536 else { return nil }
+        let now = ProcessInfo.processInfo.systemUptime
+        lock.lock()
+        defer { lock.unlock() }
+        pruneExpiredLocked(now: now)
+
+        var out = rawText
+        var count = 0
+
+        func replaceFullMatches(regex: NSRegularExpression, category: String, validator: ((String) -> Bool)? = nil) {
+            let matches = regex.matches(in: out, range: NSRange(out.startIndex..<out.endIndex, in: out))
+            guard !matches.isEmpty else { return }
+            for m in matches.reversed() {
+                guard let r = Range(m.range, in: out) else { continue }
+                let val = String(out[r])
+                if val.hasPrefix("[ICLIP_") { continue }
+                if let validator, !validator(val) { continue }
+                let tok = assignTokenLocked(category: category, realValue: val, now: now)
+                out.replaceSubrange(r, with: tok)
+                count += 1
+            }
+        }
+
+        func replaceGroup2Matches(regex: NSRegularExpression, category: String) {
+            let matches = regex.matches(in: out, range: NSRange(out.startIndex..<out.endIndex, in: out))
+            guard !matches.isEmpty else { return }
+            for m in matches.reversed() where m.numberOfRanges >= 3 {
+                guard let r = Range(m.range(at: 2), in: out) else { continue }
+                let val = String(out[r])
+                if val.hasPrefix("[ICLIP_") || val.contains("***") || val.lowercased().contains("redacted") { continue }
+                let tok = assignTokenLocked(category: category, realValue: val, now: now)
+                out.replaceSubrange(r, with: tok)
+                count += 1
+            }
+        }
+
+        if out.contains("PRIVATE KEY") {
+            replaceFullMatches(regex: pemRegex, category: "KEY")
+        }
+        replaceFullMatches(regex: standaloneSecretRegex, category: "KEY")
+        if out.contains("://") {
+            replaceGroup2Matches(regex: uriPasswordGroupRegex, category: "SEC")
+        }
+        if out.contains("=") || out.contains(":") || out.lowercased().contains("bearer ") {
+            replaceGroup2Matches(regex: envOrBearerGroupRegex, category: "SEC")
+        }
+
+        // 身份证与银行卡（先于手机号避免长数字串被误切）
+        let idMatches = idOrCardCandidateRegex.matches(in: out, range: NSRange(out.startIndex..<out.endIndex, in: out))
+        for m in idMatches.reversed() {
+            guard let r = Range(m.range, in: out) else { continue }
+            let val = String(out[r])
+            if val.count == 18 && SensitiveCredentialVeil.isValidChineseIDCard18(val) {
+                let tok = assignTokenLocked(category: "ID", realValue: val, now: now)
+                out.replaceSubrange(r, with: tok)
+                count += 1
+            } else if (15...19).contains(val.count) && SensitiveCredentialVeil.isValidBankCardLuhn(val) {
+                let tok = assignTokenLocked(category: "CARD", realValue: val, now: now)
+                out.replaceSubrange(r, with: tok)
+                count += 1
+            }
+        }
+
+        if out.contains("10.") || out.contains("192.168.") || out.contains("172.") {
+            replaceFullMatches(regex: privateIPv4Regex, category: "IP")
+        }
+        if out.contains("@") {
+            replaceFullMatches(regex: emailRegex, category: "EMAIL")
+        }
+        if out.contains("1") {
+            replaceFullMatches(regex: cnPhoneRegex, category: "PHONE")
+        }
+
+        guard count > 0, out != rawText else { return nil }
+        return (out, count)
+    }
+
+    /// 检测 AI 回复或剪贴文本中是否包含本会话存活的 `[ICLIP_*_N]` 替身占位符，若有则无损还原全部真值
+    static func inspectRestorableTwins(in rawText: String) -> (restoredText: String, restoredCount: Int)? {
+        guard rawText.contains("[ICLIP_"), rawText.utf8.count <= 131_072 else { return nil }
+        let now = ProcessInfo.processInfo.systemUptime
+        lock.lock()
+        defer { lock.unlock() }
+        pruneExpiredLocked(now: now)
+        guard !entriesByToken.isEmpty else { return nil }
+
+        let matches = twinTokenRegex.matches(in: rawText, range: NSRange(rawText.startIndex..<rawText.endIndex, in: rawText))
+        guard !matches.isEmpty else { return nil }
+
+        var out = rawText
+        var restored = 0
+        for m in matches.reversed() {
+            guard let r = Range(m.range, in: out) else { continue }
+            let tok = String(out[r])
+            if var entry = entriesByToken[tok] {
+                entry.expiresAtUptime = now + ttlSeconds
+                entriesByToken[tok] = entry
+                out.replaceSubrange(r, with: entry.realValue)
+                restored += 1
+            }
+        }
+        guard restored > 0, out != rawText else { return nil }
+        return (out, restored)
     }
 }

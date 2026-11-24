@@ -1181,11 +1181,12 @@ enum DragFileExportHelper {
         }
     }
 
-    /// 锁屏、休眠、清空历史或退出应用时，全量擦除临时拖拽导出目录中的一切明文副本
+    /// 启动、锁屏、休眠、清空历史或退出应用时，锁紧 `0700` 目录权限并全量擦除临时拖拽导出目录中的一切明文副本
     static func wipeAllExports(exportDirectory: URL? = nil) {
         let fm = FileManager.default
         let dir = exportDirectory ?? fm.temporaryDirectory.appendingPathComponent("iClipDragExports", isDirectory: true)
         guard fm.fileExists(atPath: dir.path) else { return }
+        try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
         if let files = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) {
             for f in files {
                 try? fm.removeItem(at: f)

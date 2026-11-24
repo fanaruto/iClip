@@ -1225,7 +1225,12 @@ impl ClipboardStore {
             .items
             .iter()
             .find(|it| it.id == item_id)
-            .map(|it| it.is_burn_after_paste())
+            .map(|it| {
+                !it.is_pinned
+                    && (it.is_burn_after_paste()
+                        || it.detected_sensitive_kind().is_some()
+                        || it.detected_poison_threat().is_some())
+            })
             .unwrap_or(false);
         self.delete_by_id_with_undo(item_id, !skip_undo);
     }
@@ -1261,6 +1266,7 @@ impl ClipboardStore {
 
     pub fn clear_unpinned(&mut self) {
         crate::security::wipe_all_temp_previews();
+        crate::security::wipe_privacy_twins();
         let mut kept = Vec::new();
         let mut removed_batch = Vec::new();
         let mut purged_hashes = Vec::new();
@@ -1268,10 +1274,14 @@ impl ClipboardStore {
             if item.is_pinned || item.is_pending_todo() {
                 kept.push(item);
             } else {
+                let is_sensitive_or_threat = item.is_burn_after_paste()
+                    || item.detected_sensitive_kind().is_some()
+                    || item.detected_poison_threat().is_some();
                 let mut img_bytes = None;
                 if let Some(img) = &item.image_file_name {
+                    crate::security::purge_temp_preview_image(img);
                     let p = self.images_dir.join(img);
-                    if removed_batch.len() < 32 {
+                    if !is_sensitive_or_threat && removed_batch.len() < 32 {
                         img_bytes = fs::read(&p).ok();
                     }
                     let _ = fs::remove_file(p);
@@ -1280,7 +1290,9 @@ impl ClipboardStore {
                 self.pending_otp_expirations
                     .retain(|(id, _)| id != &item.id);
                 purged_hashes.push(item.content_hash.clone());
-                removed_batch.push((item, img_bytes));
+                if !is_sensitive_or_threat {
+                    removed_batch.push((item, img_bytes));
+                }
             }
         }
         self.items = kept;
@@ -1288,8 +1300,16 @@ impl ClipboardStore {
         self.forget_memory_hashes(&purged_hashes);
         if !removed_batch.is_empty() {
             self.push_undo_snapshot(removed_batch);
+        } else {
+            self.undo_stack.clear();
         }
         self.save_history();
+    }
+
+    /// 锁屏、休眠、安全清扫或退出应用时瞬时清零删除撤销栈与 AI 替身内存映射
+    pub fn lock_down_ephemeral_buffers(&mut self) {
+        self.undo_stack.clear();
+        crate::security::wipe_privacy_twins();
     }
 
     fn push_undo_snapshot(&mut self, entries: Vec<(ClipItem, Option<Vec<u8>>)>) {
@@ -1483,6 +1503,7 @@ impl ClipboardStore {
         for id in target_ids {
             self.delete_by_id_with_undo(&id, false);
         }
+        crate::security::wipe_privacy_twins();
         count
     }
 

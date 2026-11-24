@@ -121,6 +121,15 @@ final class ActionSparkController {
 
     private init() {}
 
+    /// 锁屏、休眠或主面板收起时立即静默关闭光标微星标并清空内存候选
+    func dismiss() {
+        dismissWorkItem?.cancel()
+        dismissWorkItem = nil
+        activeCandidate = nil
+        doubleCopyMachine.clearActiveOffer()
+        panel?.orderOut(nil)
+    }
+
     /// 在剪贴板捕获到相同哈希时优先判定是否命中「⌘C×2 原位智变」或「⌘C×3 无损还原」
     func handleIncomingCopy(contentHash: String, in store: ClipboardStore) -> DoubleCopySparkOutcome {
         let now = ProcessInfo.processInfo.systemUptime

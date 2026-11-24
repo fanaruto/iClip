@@ -312,6 +312,16 @@ enum SemanticEngine {
                         toastText: "已安全掩码敏感凭据并键入"
                     ))
                 }
+                if let twin = ReversiblePrivacyTwin.maskWithTwins(raw) {
+                    actions.append(TransformAction(
+                        id: "redact-reversible-twin",
+                        title: "AI 替身脱敏",
+                        symbolName: "person.2.badge.key.fill",
+                        isSecurityAction: true,
+                        resultText: twin.maskedText,
+                        toastText: "已生成 \(twin.replacedCount) 处可逆替身（复制 AI 回复可一键还原真值）"
+                    ))
+                }
                 if hasPII {
                     let deepRedacted = redactPIIAndPrivateIP(in: redacted)
                     if deepRedacted != redacted {
@@ -374,6 +384,16 @@ enum SemanticEngine {
                         resultText: deepRedacted,
                         toastText: "已掩码内网 IP / 邮箱 / 手机号并键入"
                     ))
+                    if let twin = ReversiblePrivacyTwin.maskWithTwins(raw) {
+                        actions.append(TransformAction(
+                            id: "redact-reversible-twin",
+                            title: "AI 替身脱敏",
+                            symbolName: "person.2.badge.key.fill",
+                            isSecurityAction: true,
+                            resultText: twin.maskedText,
+                            toastText: "已生成 \(twin.replacedCount) 处可逆替身（复制 AI 回复可一键还原真值）"
+                        ))
+                    }
                 }
             }
         }
