@@ -3720,6 +3720,18 @@ final class ClipboardStore: ObservableObject {
                     )
                 )
             }
+            let uniqueURLs = SmartFieldExtractor.extractUniqueCleanURLs(raw)
+            if uniqueURLs.count >= 2 {
+                analyzed.append(
+                    FinanceQuickAction(
+                        id: "extract-clean-urls",
+                        title: "提取 \(uniqueURLs.count) 条净链",
+                        symbolName: "link.badge.plus",
+                        resultText: uniqueURLs.joined(separator: "\n"),
+                        toastText: "已去重提取并净化 \(uniqueURLs.count) 条链接"
+                    )
+                )
+            }
         }
         let trimmedFlowRaw = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmedFlowRaw.lowercased().hasPrefix("curl ") || trimmedFlowRaw.lowercased().hasPrefix("curl\t"),

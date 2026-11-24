@@ -401,7 +401,23 @@ pub fn open_image_bytes(raw: &[u8], master_key: &[u8; 32]) -> Option<(Vec<u8>, b
 }
 
 fn data_dir_from_images_dir(images_dir: &Path) -> &Path {
-    images_dir.parent().unwrap_or(images_dir)
+    if images_dir.file_name().and_then(|n| n.to_str()) == Some("images") {
+        images_dir.parent().unwrap_or(images_dir)
+    } else {
+        images_dir
+    }
+}
+
+/// 生成 128-bit 操作系统密码学强随机十六进制标识符（用于防预测临时暂存目录等）
+pub fn random_hex_16() -> String {
+    let mut buf = [0u8; 32];
+    fill_os_csprng(&mut buf);
+    let mut out = String::with_capacity(32);
+    for b in &buf[..16] {
+        use std::fmt::Write;
+        let _ = write!(&mut out, "{b:02x}");
+    }
+    out
 }
 
 pub fn write_encrypted_image_to_dir(

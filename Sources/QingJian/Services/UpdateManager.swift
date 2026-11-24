@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import CryptoKit
 
 /// 基于 GitHub Releases 的角色感知多轨 OTA 更新与版本切换管理器
 /// - 同角色升级：极客开发版仅拉取 `iClip-Dev-macOS.zip`，心流办公版仅拉取 `iClip-Flow-macOS.zip`
@@ -16,6 +17,7 @@ final class UpdateManager: NSObject, ObservableObject {
         let isEditionSwitch: Bool
         let assetName: String
         let assetSize: Int64
+        let expectedSHA256: String?
         let downloadURL: URL
         let htmlURL: URL
     }
@@ -85,6 +87,7 @@ final class UpdateManager: NSObject, ObservableObject {
                 isEditionSwitch: true,
                 assetName: desiredEdition.expectedAssetName,
                 assetSize: size,
+                expectedSHA256: nil,
                 downloadURL: localArchive,
                 htmlURL: URL(string: "https://github.com/\(repoOwner)/\(repoName)")!
             )
@@ -135,6 +138,7 @@ final class UpdateManager: NSObject, ObservableObject {
                     }
                     // 跨角色切换：严格匹配目标角色专属安装包，禁止回退到其他角色的压缩包
                     guard let roleAsset = decoded.assets.first(where: { $0.name == expectedAsset }),
+                          Self.isSafeAssetFileName(roleAsset.name),
                           let downloadURL = URL(string: roleAsset.browserDownloadURL),
                           Self.isTrustedRemoteDownloadURL(downloadURL),
                           let htmlURL = URL(string: decoded.htmlURL) else {
@@ -150,6 +154,11 @@ final class UpdateManager: NSObject, ObservableObject {
                         isEditionSwitch: true,
                         assetName: roleAsset.name,
                         assetSize: roleAsset.size,
+                        expectedSHA256: Self.parseExpectedSHA256(
+                            assetDigest: roleAsset.digest,
+                            releaseBody: decoded.body,
+                            assetName: roleAsset.name
+                        ),
                         downloadURL: downloadURL,
                         htmlURL: htmlURL
                     )
@@ -166,6 +175,7 @@ final class UpdateManager: NSObject, ObservableObject {
                 // 优先下载当前角色专属包，仅在远端未分包时兼容通用包名
                 guard let asset = decoded.assets.first(where: { $0.name == expectedAsset })
                         ?? decoded.assets.first(where: { $0.name == legacyAssetName }),
+                      Self.isSafeAssetFileName(asset.name),
                       let downloadURL = URL(string: asset.browserDownloadURL),
                       Self.isTrustedRemoteDownloadURL(downloadURL),
                       let htmlURL = URL(string: decoded.htmlURL) else {
@@ -181,6 +191,11 @@ final class UpdateManager: NSObject, ObservableObject {
                     isEditionSwitch: false,
                     assetName: asset.name,
                     assetSize: asset.size,
+                    expectedSHA256: Self.parseExpectedSHA256(
+                        assetDigest: asset.digest,
+                        releaseBody: decoded.body,
+                        assetName: asset.name
+                    ),
                     downloadURL: downloadURL,
                     htmlURL: htmlURL
                 )
@@ -274,6 +289,15 @@ final class UpdateManager: NSObject, ObservableObject {
                    let actualSize = (try? fm.attributesOfItem(atPath: copiedZip.path)[.size] as? Int64),
                    actualSize != info.assetSize {
                     throw OTAError.corruptedDownloadSize
+                }
+
+                // 若 GitHub Release 元数据提供 SHA-256 摘要，强制逐字节核验密码学完整性（防御中间人或缓存污染）
+                if let expectedHex = info.expectedSHA256 {
+                    let zipData = try Data(contentsOf: copiedZip, options: .mappedIfSafe)
+                    let actualHex = SHA256.hash(data: zipData).map { String(format: "%02x", $0) }.joined()
+                    guard actualHex.caseInsensitiveCompare(expectedHex) == .orderedSame else {
+                        throw OTAError.sha256VerificationFailed
+                    }
                 }
 
                 // 使用系统 ditto 解压，完整保留开发者证书代码签名与辅助功能 TCC 信任链
@@ -456,8 +480,45 @@ final class UpdateManager: NSObject, ObservableObject {
         return false
     }
 
+    nonisolated static func isSafeAssetFileName(_ name: String) -> Bool {
+        guard !name.isEmpty, name.utf8.count <= 128, !name.contains("..") else { return false }
+        return name.utf8.allSatisfy { b in
+            (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122)
+                || b == 46 || b == 45 || b == 95
+        }
+    }
+
+    /// 优先提取 GitHub REST API 原生 `asset.digest`（`sha256:<64-hex>`），无则回退解析 Release Notes 校验表
+    nonisolated static func parseExpectedSHA256(
+        assetDigest: String?,
+        releaseBody: String?,
+        assetName: String
+    ) -> String? {
+        if let rawDigest = assetDigest?.trimmingCharacters(in: .whitespacesAndNewlines),
+           rawDigest.lowercased().hasPrefix("sha256:") {
+            let hex = String(rawDigest.dropFirst(7)).trimmingCharacters(in: .whitespacesAndNewlines)
+            if hex.utf8.count == 64, hex.utf8.allSatisfy({ ($0 >= 48 && $0 <= 57) || ($0 >= 65 && $0 <= 70) || ($0 >= 97 && $0 <= 102) }) {
+                return hex.lowercased()
+            }
+        }
+        guard let body = releaseBody, !body.isEmpty,
+              let hexRegex = try? NSRegularExpression(pattern: #"\b([0-9a-fA-F]{64})\b"#) else {
+            return nil
+        }
+        for line in body.components(separatedBy: .newlines) where line.contains(assetName) {
+            let r = NSRange(line.startIndex..<line.endIndex, in: line)
+            if let m = hexRegex.firstMatch(in: line, range: r),
+               let hr = Range(m.range(at: 1), in: line) {
+                return line[hr].lowercased()
+            }
+        }
+        return nil
+    }
+
     nonisolated static func isTrustedRemoteDownloadURL(_ url: URL) -> Bool {
         guard let scheme = url.scheme?.lowercased(), scheme == "https",
+              url.user == nil, url.password == nil,
+              (url.port == nil || url.port == 443),
               let host = url.host?.lowercased() else {
             return false
         }
@@ -466,6 +527,7 @@ final class UpdateManager: NSObject, ObservableObject {
             "api.github.com",
             "objects.githubusercontent.com",
             "release-assets.githubusercontent.com",
+            "github-releases.githubusercontent.com",
             "codeload.github.com",
             "app.webfooo.com"
         ]
@@ -505,6 +567,7 @@ final class UpdateManager: NSObject, ObservableObject {
 
     enum OTAError: LocalizedError {
         case corruptedDownloadSize
+        case sha256VerificationFailed
         case extractFailed
         case invalidAppBundle
         case signatureVerificationFailed
@@ -513,6 +576,7 @@ final class UpdateManager: NSObject, ObservableObject {
         var errorDescription: String? {
             switch self {
             case .corruptedDownloadSize: return "下载包体积与官方清单不一致，已拦截安装"
+            case .sha256VerificationFailed: return "下载包 SHA-256 校验未通过，已安全拦截替换"
             case .extractFailed: return "解压更新包失败"
             case .invalidAppBundle: return "更新包中未找到有效的应用文件"
             case .signatureVerificationFailed: return "更新包代码签名完整性校验未通过，已安全中止替换"
@@ -532,6 +596,17 @@ extension UpdateManager: URLSessionDownloadDelegate {
         totalBytesWritten: Int64,
         totalBytesExpectedToWrite: Int64
     ) {
+        // 硬性体积上限熔断（40 MB），阻断异常大响应流耗尽临时磁盘
+        if totalBytesWritten > 40 * 1024 * 1024 {
+            downloadTask.cancel()
+            Task { @MainActor in
+                self.activeSession?.invalidateAndCancel()
+                self.activeSession = nil
+                self.activeDownloadTask = nil
+                self.state = .failed("更新包超出安全体积上限，已中止下载")
+            }
+            return
+        }
         let expected = totalBytesExpectedToWrite > 0 ? totalBytesExpectedToWrite : 1
         let progress = min(max(Double(totalBytesWritten) / Double(expected), 0), 1)
         Task { @MainActor in
@@ -565,6 +640,27 @@ extension UpdateManager: URLSessionDownloadDelegate {
                 self.state = .failed("保存更新包失败")
             }
         }
+    }
+
+    /// 逐跳核验 HTTP 301/302/307/308 重定向目标域名，严禁跳出 HTTPS 可信白名单
+    nonisolated func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        guard let nextURL = request.url, Self.isTrustedRemoteDownloadURL(nextURL) else {
+            completionHandler(nil)
+            Task { @MainActor in
+                self.activeSession?.invalidateAndCancel()
+                self.activeSession = nil
+                self.activeDownloadTask = nil
+                self.state = .failed("重定向目标域名不在安全白名单内，已拦截")
+            }
+            return
+        }
+        completionHandler(request)
     }
 
     nonisolated func urlSession(
@@ -603,11 +699,13 @@ private struct GitHubReleaseDTO: Decodable {
 private struct GitHubAssetDTO: Decodable {
     let name: String
     let size: Int64
+    let digest: String?
     let browserDownloadURL: String
 
     enum CodingKeys: String, CodingKey {
         case name
         case size
+        case digest
         case browserDownloadURL = "browser_download_url"
     }
 }

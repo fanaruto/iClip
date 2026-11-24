@@ -7311,7 +7311,9 @@ fn layout_and_draw_settings_view(
         ed_w,
         ed_h,
         sf(9.5),
-        palette.cobalt.with_alpha(if st.is_dark_mode { 42 } else { 22 }),
+        palette
+            .cobalt
+            .with_alpha(if st.is_dark_mode { 42 } else { 22 }),
     );
     texts.push(TextDrawCmd {
         text: ed_badge.to_string(),
@@ -7437,9 +7439,13 @@ fn layout_and_draw_settings_view(
             ic_box,
             sf(10.0),
             if has_new {
-                palette.cobalt.with_alpha(if st.is_dark_mode { 56 } else { 28 })
+                palette
+                    .cobalt
+                    .with_alpha(if st.is_dark_mode { 56 } else { 28 })
             } else {
-                palette.emerald.with_alpha(if st.is_dark_mode { 44 } else { 22 })
+                palette
+                    .emerald
+                    .with_alpha(if st.is_dark_mode { 44 } else { 22 })
             },
         );
         canvas.draw_icon_refresh_update(
@@ -7468,7 +7474,9 @@ fn layout_and_draw_settings_view(
                 ob_h,
                 sf(14.0),
                 if btn_action.is_some() {
-                    palette.cobalt.with_alpha(if st.is_dark_mode { 38 } else { 18 })
+                    palette
+                        .cobalt
+                        .with_alpha(if st.is_dark_mode { 38 } else { 18 })
                 } else {
                     palette.chip_bg
                 },
@@ -7481,7 +7489,9 @@ fn layout_and_draw_settings_view(
                 sf(14.0),
                 sf(0.7),
                 if btn_action.is_some() {
-                    palette.cobalt.with_alpha(if st.is_dark_mode { 84 } else { 48 })
+                    palette
+                        .cobalt
+                        .with_alpha(if st.is_dark_mode { 84 } else { 48 })
                 } else {
                     palette.card_border
                 },
@@ -8583,9 +8593,10 @@ fn layout_and_draw_settings_view(
         let thumb_h = ((visible_h as f32 / total_content_h.max(1) as f32) * track_h_sb as f32)
             .round()
             .clamp(sf(34.0), (track_h_sb - s(16)) as f32) as i32;
-        let scroll_ratio = (st.settings_scroll_px as f32 / st.settings_max_scroll_px as f32)
-            .clamp(0.0, 1.0);
-        let thumb_y = view_top + s(4) + ((track_h_sb - thumb_h) as f32 * scroll_ratio).round() as i32;
+        let scroll_ratio =
+            (st.settings_scroll_px as f32 / st.settings_max_scroll_px as f32).clamp(0.0, 1.0);
+        let thumb_y =
+            view_top + s(4) + ((track_h_sb - thumb_h) as f32 * scroll_ratio).round() as i32;
         let sb_w = s(3);
         let sb_x = w - s(6);
         canvas.fill_round_rect(
@@ -8594,11 +8605,18 @@ fn layout_and_draw_settings_view(
             sb_w,
             thumb_h,
             sf(1.5),
-            palette.text_muted.with_alpha(if st.is_dark_mode { 115 } else { 95 }),
+            palette
+                .text_muted
+                .with_alpha(if st.is_dark_mode { 115 } else { 95 }),
         );
         if st.settings_scroll_px < st.settings_max_scroll_px - s(4) {
             let fade_h = s(18);
-            let fade_top = Color4::rgba(palette.window_bg.r, palette.window_bg.g, palette.window_bg.b, 0);
+            let fade_top = Color4::rgba(
+                palette.window_bg.r,
+                palette.window_bg.g,
+                palette.window_bg.b,
+                0,
+            );
             let fade_bot = Color4::rgba(
                 palette.window_bg.r,
                 palette.window_bg.g,
@@ -8669,22 +8687,21 @@ fn draw_grouped_toggle_row(
     canvas.draw_toggle_switch(sw_x, sw_y, sw_w, sw_h, is_on, accent);
 
     // 自动剥离全角括号快捷键（如「窗口始终在前（Ctrl+P）」），转为标题右侧精致等宽物理微键帽！
-    let (clean_title, shortcut_cap) = if let (Some(open), Some(close)) =
-        (title.find('（'), title.rfind('）'))
-    {
-        if close > open {
-            let inner = title[open + '（'.len_utf8()..close].trim();
-            if inner.is_ascii() && !inner.is_empty() {
-                (title[..open].trim(), Some(inner))
+    let (clean_title, shortcut_cap) =
+        if let (Some(open), Some(close)) = (title.find('（'), title.rfind('）')) {
+            if close > open {
+                let inner = title[open + '（'.len_utf8()..close].trim();
+                if inner.is_ascii() && !inner.is_empty() {
+                    (title[..open].trim(), Some(inner))
+                } else {
+                    (title, None)
+                }
             } else {
                 (title, None)
             }
         } else {
             (title, None)
-        }
-    } else {
-        (title, None)
-    };
+        };
 
     let title_left = x + s(14);
     let title_top = y + s(7);

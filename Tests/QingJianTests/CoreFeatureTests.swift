@@ -3020,5 +3020,33 @@ final class CoreFeatureTests: XCTestCase {
         let restored2 = try XCTUnwrap(ReversiblePrivacyTwin.inspectRestorableTwins(in: twinRes2.maskedText))
         XCTAssertEqual(restored2.restoredText, sshAndToken)
         ReversiblePrivacyTwin.wipeAll()
+
+        // 6. 第 23 轮自省：验证 OTA 原生 `sha256:` 摘要解析、URL userinfo/端口欺骗拦截与多链接段落「提取 N 条净链」
+        let sampleDigest = "af1c4fe04e28341be56315ba7a9a671c4f4d6afed4c2abed2f383f171687aedb"
+        XCTAssertEqual(
+            UpdateManager.parseExpectedSHA256(
+                assetDigest: "sha256:\(sampleDigest.uppercased())",
+                releaseBody: nil,
+                assetName: "iClip-Dev-macOS.zip"
+            ),
+            sampleDigest
+        )
+        XCTAssertTrue(UpdateManager.isSafeAssetFileName("iClip-Dev-macOS.zip"))
+        XCTAssertFalse(UpdateManager.isSafeAssetFileName("../evil.zip"))
+        XCTAssertTrue(UpdateManager.isTrustedRemoteDownloadURL(URL(string: "https://github-releases.githubusercontent.com/pkg.zip")!))
+        XCTAssertFalse(UpdateManager.isTrustedRemoteDownloadURL(URL(string: "https://github.com@evil.example.com/pkg.zip")!))
+        XCTAssertFalse(UpdateManager.isTrustedRemoteDownloadURL(URL(string: "https://app.webfooo.com:8443/pkg.zip")!))
+
+        let messyLinksNote = """
+        本周竞品与资料汇总：
+        1）官网地址 https://app.webfooo.com/iClip?utm_source=wechat&spm=1001.2026，建议收藏；
+        2）开源仓库（https://github.com/fanaruto/iClip?utm_medium=social）
+        3）重复贴一次 https://app.webfooo.com/iClip?utm_source=feishu 方便核对。
+        """
+        let cleanURLs = SmartFieldExtractor.extractUniqueCleanURLs(messyLinksNote)
+        XCTAssertEqual(cleanURLs, [
+            "https://app.webfooo.com/iClip",
+            "https://github.com/fanaruto/iClip"
+        ])
     }
 }

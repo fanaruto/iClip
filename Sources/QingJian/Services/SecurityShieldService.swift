@@ -2590,6 +2590,36 @@ enum SmartFieldExtractor {
         return ordered.count >= 2 ? ordered : []
     }
 
+    private static let multiURLExtractRegex = try! NSRegularExpression(
+        pattern: #"https?://[^\s<>"'()（）【】\[\]，。；！、`|]+"#,
+        options: [.caseInsensitive]
+    )
+
+    /// 从群聊通知、日报或参考资料段落中批量提取全部 HTTP(S) 链接，自动剥除营销追踪尾巴并按出现顺序去重（>= 2 条不同链接时触发）
+    static func extractUniqueCleanURLs(_ raw: String) -> [String] {
+        guard raw.utf8.count <= 32_768 else { return [] }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = trimmed.lowercased()
+        guard lower.contains("http://") || lower.contains("https://") else { return [] }
+        if lower.hasPrefix("curl ") || lower.hasPrefix("curl\t") || trimmed.hasPrefix("|") {
+            return []
+        }
+        let r = NSRange(raw.startIndex..<raw.endIndex, in: raw)
+        let trailingPunct = CharacterSet(charactersIn: ".,;:!?)']}>")
+        var seen = Set<String>()
+        var ordered: [String] = []
+        for m in multiURLExtractRegex.matches(in: raw, range: r) {
+            guard let rng = Range(m.range, in: raw) else { continue }
+            let candidate = String(raw[rng]).trimmingCharacters(in: trailingPunct)
+            guard candidate.count >= 10 else { continue }
+            let cleaned = URLTrackingCleaner.cleanTrackingURL(candidate) ?? candidate
+            if seen.insert(cleaned).inserted {
+                ordered.append(cleaned)
+            }
+        }
+        return ordered.count >= 2 ? ordered : []
+    }
+
     /// 离线智能解析中文收件地址/名片三要素（支持有标签与自然无标签格式，自动清洗手机号横杠与快递备注噪音）
     static func parseShippingContact(_ raw: String) -> ShippingContact? {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)

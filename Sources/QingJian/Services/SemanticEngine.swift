@@ -914,6 +914,19 @@ enum SemanticEngine {
                         toastText: "已去重净提 \(uniqueIPs.count) 个 IPv4 地址"
                     ))
                 }
+                let uniqueURLs = SmartFieldExtractor.extractUniqueCleanURLs(raw)
+                if uniqueURLs.count >= 2 {
+                    let joinedURLs = uniqueURLs.joined(separator: "\n")
+                    let hasSignedURL = SensitiveCredentialVeil.classify(joinedURLs) != nil
+                    actions.append(TransformAction(
+                        id: "extract-clean-urls",
+                        title: "提取 \(uniqueURLs.count) 条净链",
+                        symbolName: "link.badge.plus",
+                        isSecurityAction: hasSignedURL,
+                        resultText: joinedURLs,
+                        toastText: "已去重提取并净化 \(uniqueURLs.count) 条链接"
+                    ))
+                }
             }
         }
 

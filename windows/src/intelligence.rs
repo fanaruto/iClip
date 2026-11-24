@@ -1290,6 +1290,46 @@ pub fn extract_unique_ipv4s(raw: &str) -> Vec<String> {
     }
 }
 
+/// 从群聊通知、日报或参考资料段落中批量提取全部 HTTP(S) 链接，自动剥除营销追踪尾巴并按出现顺序去重（>= 2 条不同链接时触发）
+pub fn extract_unique_clean_urls(raw: &str) -> Vec<String> {
+    if raw.len() > 32_768 {
+        return Vec::new();
+    }
+    let trimmed = raw.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if (!lower.contains("http://") && !lower.contains("https://"))
+        || lower.starts_with("curl ")
+        || lower.starts_with("curl\t")
+        || trimmed.starts_with('|')
+    {
+        return Vec::new();
+    }
+    static MULTI_URL_RE: std::sync::OnceLock<regex_lite::Regex> = std::sync::OnceLock::new();
+    let re = MULTI_URL_RE.get_or_init(|| {
+        regex_lite::Regex::new(r#"https?://[^\s<>"'()（）【】\[\]，。；！、`|]+"#).unwrap()
+    });
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for m in re.find_iter(raw) {
+        let candidate = m
+            .as_str()
+            .trim_end_matches(&['.', ',', ';', ':', '!', '?', ')', '\'', ']', '}', '>'][..]);
+        if candidate.len() < 10 {
+            continue;
+        }
+        let cleaned =
+            crate::engines::clean_tracking_url(candidate).unwrap_or_else(|| candidate.to_string());
+        if seen.insert(cleaned.clone()) {
+            out.push(cleaned);
+        }
+    }
+    if out.len() >= 2 {
+        out
+    } else {
+        Vec::new()
+    }
+}
+
 pub fn parse_shipping_contact(raw: &str) -> Option<ShippingContact> {
     let trimmed = raw.trim();
     if trimmed.chars().count() < 14 || trimmed.len() > 1_200 {

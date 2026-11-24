@@ -480,6 +480,19 @@ pub fn analyze_text_actions(raw: &str, minimal_mode: bool) -> Vec<QuickAction> {
                     toast_text: format!("已去重净提 {} 个 IPv4 地址", ips.len()),
                 });
             }
+            let urls = crate::intelligence::extract_unique_clean_urls(raw);
+            if urls.len() >= 2 {
+                let joined_urls = urls.join("\n");
+                let has_signed = crate::security::classify_sensitive_text(&joined_urls).is_some();
+                actions.push(QuickAction {
+                    id: "extract-clean-urls",
+                    title: format!("提取 {} 条净链", urls.len()),
+                    is_security: has_signed,
+                    result_text: joined_urls,
+                    html_table_payload: None,
+                    toast_text: format!("已去重提取并净化 {} 条链接", urls.len()),
+                });
+            }
         }
     }
 

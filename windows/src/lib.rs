@@ -2092,5 +2092,28 @@ mod tests {
         let (restored_s, _) = crate::security::inspect_restorable_privacy_twins(&masked_s).unwrap();
         assert_eq!(restored_s, ssh_and_tok);
         crate::security::wipe_privacy_twins();
+
+        // 7. 第 23 轮自省：验证非标准图片目录不越界污染父级 `$TMPDIR/vault.dpapi` 及多链接段落「提取 N 条净链」
+        let isolated_img_dir = std::env::temp_dir().join(format!(
+            "iclip-isolated-img-{}-{}",
+            std::process::id(),
+            crate::security::random_hex_16()
+        ));
+        crate::security::write_encrypted_image_to_dir(&isolated_img_dir, "demo.png", b"pngbytes")
+            .unwrap();
+        assert!(isolated_img_dir.join("vault.dpapi").exists());
+        let _ = fs::remove_dir_all(&isolated_img_dir);
+
+        let note_links = "参考资料：1) https://app.webfooo.com/iClip?utm_source=wx，2) (https://github.com/fanaruto/iClip?spm=123.456) 3) https://app.webfooo.com/iClip?utm_medium=dup";
+        let extracted_urls = crate::intelligence::extract_unique_clean_urls(note_links);
+        assert_eq!(
+            extracted_urls,
+            vec![
+                "https://app.webfooo.com/iClip".to_string(),
+                "https://github.com/fanaruto/iClip".to_string()
+            ]
+        );
+        let note_acts = analyze_text_actions(note_links, false);
+        assert!(note_acts.iter().any(|a| a.id == "extract-clean-urls"));
     }
 }

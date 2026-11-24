@@ -165,7 +165,36 @@ struct GitHubReleaseDto {
 #[derive(Debug, Deserialize)]
 struct GitHubAssetDto {
     name: String,
+    #[serde(default)]
+    digest: Option<String>,
     browser_download_url: String,
+}
+
+/// 严格校验远端 Asset 文件名（仅允许 ASCII 字母数字与 `._-`，严禁路径穿越符或控制字符）
+pub fn is_safe_asset_filename(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && !name.contains("..")
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
+}
+
+/// 优先提取 GitHub REST API 原生 `asset.digest`（`sha256:<64-hex>`），无则从 Release Notes 校验表提取
+pub fn resolve_expected_sha256(
+    asset_digest: Option<&str>,
+    body: &str,
+    asset_name: &str,
+) -> Option<String> {
+    if let Some(raw) = asset_digest.map(str::trim) {
+        if raw.len() == 71 && raw[..7].eq_ignore_ascii_case("sha256:") {
+            let hex = &raw[7..];
+            if hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Some(hex.to_ascii_lowercase());
+            }
+        }
+    }
+    extract_expected_sha256(body, asset_name)
 }
 
 /// 从 Release Notes 校验表中提取目标包名对应的 64 位十六进制 SHA-256（若发布说明包含）
@@ -207,12 +236,16 @@ pub fn parse_github_release_json(
         })
         .ok_or_else(|| format!("最新发行版 v{version} 尚未包含 Windows 安装包（{preferred}）"))?;
 
+    if !is_safe_asset_filename(&matched.name) {
+        return Err("远端安装包文件名包含非法字符，已拦截".to_string());
+    }
     if !is_trusted_download_url(&matched.browser_download_url) {
         return Err("远端下载地址未通过可信域名白名单校验".to_string());
     }
 
     let primary_url = format!("{WEBFOOO_MIRROR_BASE}/{}", matched.name);
-    let expected_sha256 = extract_expected_sha256(&dto.body, &matched.name);
+    let expected_sha256 =
+        resolve_expected_sha256(matched.digest.as_deref(), &dto.body, &matched.name);
     let summary = dto
         .body
         .lines()
@@ -397,23 +430,24 @@ pub mod win_runtime {
                 return Err("等待更新服务器响应超时".to_string());
             }
 
-            // 对 302 重定向后的最终落点 URL 做二次可信白名单校验
-            let mut final_url_buf = vec![0u16; 1024];
+            // 对 302 重定向后的最终落点 URL 做强制 Fail-Closed 可信白名单校验（8192 UTF-16 兼容超长预签名 URL）
+            let mut final_url_buf = vec![0u16; 8192];
             let mut final_url_bytes = (final_url_buf.len() * 2) as u32;
             if WinHttpQueryOption(
                 h_req.0,
                 WINHTTP_OPTION_URL,
                 final_url_buf.as_mut_ptr() as *mut c_void,
                 &mut final_url_bytes,
-            ) != 0
+            ) == 0
             {
-                let u16_len = (final_url_bytes as usize / 2).min(final_url_buf.len());
-                let final_url = String::from_utf16_lossy(&final_url_buf[..u16_len])
-                    .trim_end_matches('\0')
-                    .to_string();
-                if !final_url.is_empty() && !is_trusted_download_url(&final_url) {
-                    return Err("重定向目标域名不在安全白名单内，已拦截".to_string());
-                }
+                return Err("无法核验最终下载源域名，已安全中止".to_string());
+            }
+            let u16_len = (final_url_bytes as usize / 2).min(final_url_buf.len());
+            let final_url = String::from_utf16_lossy(&final_url_buf[..u16_len])
+                .trim_end_matches('\0')
+                .to_string();
+            if final_url.is_empty() || !is_trusted_download_url(&final_url) {
+                return Err("重定向目标域名不在安全白名单内，已拦截".to_string());
             }
 
             let mut status_code: u32 = 0;
@@ -449,6 +483,9 @@ pub mod win_runtime {
                 0
             };
 
+            if total_bytes > 26 * 1024 * 1024 {
+                return Err("远端安装包响应体积超出安全上限，已拦截".to_string());
+            }
             let mut out: Vec<u8> = Vec::with_capacity((total_bytes as usize).min(4 * 1024 * 1024));
             let mut chunk = vec![0u8; 32 * 1024];
             loop {
@@ -560,11 +597,9 @@ pub mod win_runtime {
             .ok_or_else(|| "无法解析安装目录".to_string())?;
 
         let stage_dir = std::env::temp_dir().join(format!(
-            "iclip-ota-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis())
-                .unwrap_or(0)
+            "iclip-ota-{}-{}",
+            std::process::id(),
+            crate::security::random_hex_16()
         ));
         let _ = fs::create_dir_all(&stage_dir);
         let zip_path = stage_dir.join("update.zip");
@@ -593,6 +628,12 @@ pub mod win_runtime {
         }
 
         let unpacked_exe = unpack_dir.join("iClip.exe");
+        if let Ok(meta) = fs::symlink_metadata(&unpacked_exe) {
+            if meta.file_type().is_symlink() {
+                let _ = fs::remove_dir_all(&stage_dir);
+                return Err("拒绝解压包含符号链接的异常更新包".to_string());
+            }
+        }
         let exe_bytes = fs::read(&unpacked_exe).map_err(|_| {
             let _ = fs::remove_dir_all(&stage_dir);
             "更新包内未找到 iClip.exe".to_string()
@@ -691,6 +732,25 @@ mod tests {
 
         let parsed_flow = parse_github_release_json(release_json.as_bytes(), "flow").unwrap();
         assert_eq!(parsed_flow.asset_name, "iClip-Flow-Windows-x64.zip");
+
+        let native_digest_sha = "11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff";
+        let digest_json = format!(
+            r###"{{
+                "tag_name": "v2.9.0",
+                "body": "无手写校验表",
+                "assets": [
+                    {{"name": "iClip-Dev-Windows-x64.zip", "digest": "sha256:{native_digest_sha}", "browser_download_url": "https://github.com/fanaruto/iClip/releases/download/v2.9.0/iClip-Dev-Windows-x64.zip"}}
+                ]
+            }}"###
+        );
+        let parsed_digest = parse_github_release_json(digest_json.as_bytes(), "dev").unwrap();
+        assert_eq!(
+            parsed_digest.expected_sha256.as_deref(),
+            Some(native_digest_sha)
+        );
+        assert!(is_safe_asset_filename("iClip-Dev-Windows-x64.zip"));
+        assert!(!is_safe_asset_filename("../evil.zip"));
+        assert!(!is_safe_asset_filename("bad/name.zip"));
 
         let mut fake_zip = vec![0u8; 80 * 1024];
         fake_zip[0..4].copy_from_slice(&[0x50, 0x4B, 0x03, 0x04]);
