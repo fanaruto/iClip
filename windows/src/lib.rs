@@ -2826,4 +2826,41 @@ mod tests {
             NonActiveKeyRoute::PassThrough
         );
     }
+
+    #[test]
+    fn test_win_html_single_image_extraction_and_placeholder_detection() {
+        use crate::security::{
+            extract_single_image_src_from_html, is_chat_image_placeholder_text, HtmlImageSrc,
+        };
+
+        assert!(is_chat_image_placeholder_text(""));
+        assert!(is_chat_image_placeholder_text("  [图片]\r\n"));
+        assert!(is_chat_image_placeholder_text("\u{FFFC} [Image] "));
+        assert!(is_chat_image_placeholder_text("[图像]"));
+        assert!(!is_chat_image_placeholder_text("[图片] 发票汇总见附件"));
+
+        let b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+        let inline_html = format!("<img class=\"emoji\" src=\"e.png\"><img src=\"data:image/png;base64,{b64}\">");
+        match extract_single_image_src_from_html(&inline_html) {
+            Some(HtmlImageSrc::InlineBytes(bytes)) => assert!(bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47])),
+            other => panic!("unexpected inline parse: {other:?}"),
+        }
+
+        let win_file_html = "<img src='file:///C:/WeChat%20Files/Temp/a%20b.jpg?w=800&amp;h=600' />";
+        assert_eq!(
+            extract_single_image_src_from_html(win_file_html),
+            Some(HtmlImageSrc::LocalFilePath(r"C:\WeChat Files\Temp\a b.jpg".to_string()))
+        );
+        assert_eq!(
+            extract_single_image_src_from_html("<img src=\"file://localhost/D:/Lark/img1.png\" />"),
+            Some(HtmlImageSrc::LocalFilePath(r"D:\Lark\img1.png".to_string()))
+        );
+        assert!(extract_single_image_src_from_html("<img src=\"https://evil.example.com/a.png\" />").is_none());
+        assert!(extract_single_image_src_from_html("<img src=\"file://fileserver/share/secret.png\" />").is_none());
+        assert!(extract_single_image_src_from_html("<img src=\"file://中文中文/a.png\" />").is_none());
+        assert!(extract_single_image_src_from_html("<img src=\"file:///%5Cevil.example.com/share/a.png\" />").is_none());
+        assert!(extract_single_image_src_from_html(r#"<img src="file:///\\evil.example.com\share\a.png" />"#).is_none());
+        assert!(extract_single_image_src_from_html(r#"<img src="file://localhost/\evil.example.com/share/a.png" />"#).is_none());
+        assert!(extract_single_image_src_from_html("<img src=\"file:///etc/passwd\" />").is_none());
+    }
 }

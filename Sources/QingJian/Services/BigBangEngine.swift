@@ -469,6 +469,26 @@ enum BigBangTokenizer {
         return chipRect.insetBy(dx: -padX, dy: -padY)
     }
 
+    /// 限制大图预览缩放后的二维平移偏移，确保图片边缘不脱离视口产生黑边
+    static func clampedImagePanOffset(
+        offset: CGSize,
+        imageSize: CGSize,
+        zoomScale: CGFloat,
+        viewportSize: CGSize
+    ) -> CGSize {
+        guard zoomScale > 1.001,
+              imageSize.width > 0, imageSize.height > 0,
+              viewportSize.width > 0, viewportSize.height > 0 else {
+            return .zero
+        }
+        let maxPanX = max(0, (imageSize.width * zoomScale - viewportSize.width) * 0.5)
+        let maxPanY = max(0, (imageSize.height * zoomScale - viewportSize.height) * 0.5)
+        return CGSize(
+            width: min(maxPanX, max(-maxPanX, offset.width)),
+            height: min(maxPanY, max(-maxPanY, offset.height))
+        )
+    }
+
     /// 按字素簇（Character）边界安全截取不超过 `maxUTF16` 码元的前缀，杜绝 emoji/CRLF 截断归零
     static func utf16Prefix(_ text: String, maxUTF16: Int) -> String {
         guard maxUTF16 > 0 else { return "" }

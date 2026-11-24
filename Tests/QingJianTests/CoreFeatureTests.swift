@@ -4113,4 +4113,56 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertTrue(wideHit.contains(CGPoint(x: wideDisplay.minX - scaledMarginX, y: wideDisplay.midY)))
         XCTAssertTrue(wideHit.contains(CGPoint(x: wideDisplay.maxX + scaledMarginX, y: wideDisplay.midY)))
     }
+
+    func testHTMLSingleImageAsyncExtractionAndStageImageZoomPanClamp() {
+        let onePxPNGB64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+        let inlineHTML = "<img src=\"emoji_smile.png\" /><img src='data:image/png;base64,\(onePxPNGB64)' />"
+        guard case .inlineData(let decoded)? = ClipboardStore.extractSingleHTMLImageSource(inlineHTML) else {
+            XCTFail("Expected inline data extraction from Feishu/rich HTML")
+            return
+        }
+        XCTAssertTrue(ClipboardStore.isPNGMagic(decoded))
+
+        let cleanLocalHTML = "<img src=\"file://localhost/Users/demo/WeChat%20Files/%E8%81%8A%E5%A4%A9%E6%88%AA%E5%9B%BE.png?t=1&amp;v=2\" />"
+        XCTAssertEqual(
+            ClipboardStore.extractSingleHTMLImageSource(cleanLocalHTML),
+            .localFilePath("/Users/demo/WeChat Files/聊天截图.png")
+        )
+        XCTAssertEqual(
+            ClipboardStore.extractSingleHTMLImageSource("<img src=\"file:///Users/demo/中文 截图.png\" />"),
+            .localFilePath("/Users/demo/中文 截图.png")
+        )
+        XCTAssertNil(ClipboardStore.extractSingleHTMLImageSource("<img src=\"file://evil-host/share/leak.png\" />"))
+        XCTAssertNil(ClipboardStore.extractSingleHTMLImageSource("<img src=\"file:///%5Cevil-host/share/leak.png\" />"))
+        XCTAssertNil(ClipboardStore.extractSingleHTMLImageSource("<img src=\"https://cdn.example.com/a.png\" />"))
+        XCTAssertNil(ClipboardStore.extractSingleHTMLImageSource("<img src=\"data:image/png;base64,\(onePxPNGB64)\" /><img src=\"data:image/png;base64,\(onePxPNGB64)\" />"))
+
+        // 大屏纯图缩放平移夹紧：1.0x 强制归零；2.0x 严格对齐左右/上下边界不拖出黑边；小图放大未超视口则对应轴归零
+        XCTAssertEqual(
+            BigBangTokenizer.clampedImagePanOffset(
+                offset: CGSize(width: 80, height: -40),
+                imageSize: CGSize(width: 600, height: 400),
+                zoomScale: 1.0,
+                viewportSize: CGSize(width: 600, height: 400)
+            ),
+            .zero
+        )
+        let clamped2x = BigBangTokenizer.clampedImagePanOffset(
+            offset: CGSize(width: 999, height: -999),
+            imageSize: CGSize(width: 600, height: 400),
+            zoomScale: 2.0,
+            viewportSize: CGSize(width: 600, height: 400)
+        )
+        XCTAssertEqual(clamped2x.width, 300, accuracy: 0.01)
+        XCTAssertEqual(clamped2x.height, -200, accuracy: 0.01)
+
+        let portrait2x = BigBangTokenizer.clampedImagePanOffset(
+            offset: CGSize(width: 120, height: 500),
+            imageSize: CGSize(width: 180, height: 400),
+            zoomScale: 2.0,
+            viewportSize: CGSize(width: 600, height: 400)
+        )
+        XCTAssertEqual(portrait2x.width, 0, accuracy: 0.01)
+        XCTAssertEqual(portrait2x.height, 200, accuracy: 0.01)
+    }
 }

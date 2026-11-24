@@ -2341,9 +2341,198 @@ pub fn should_promote_single_clipboard_file_to_image(
         ext.as_str(),
         "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "tif" | "tiff" | "pic" | "image"
     ) {
-        return true;
+        return true
     }
     ext.is_empty() && has_bitmap_on_clipboard
+}
+
+/// 识别聊天/网页富文本复制图片时附带的空文本或「[图片]」占位符
+pub fn is_chat_image_placeholder_text(text: &str) -> bool {
+    let cleaned = text.replace('\u{FFFC}', "");
+    let t = cleaned.trim();
+    t.is_empty() || t == "[图片]" || t == "[图像]" || t.eq_ignore_ascii_case("[image]")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HtmlImageSrc {
+    InlineBytes(Vec<u8>),
+    LocalFilePath(String),
+}
+
+fn looks_like_raster_image_bytes(data: &[u8]) -> bool {
+    if data.len() < 12 {
+        return false;
+    }
+    if data.starts_with(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) {
+        return true;
+    }
+    if data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF {
+        return true;
+    }
+    if data.starts_with(b"GIF8") {
+        return true;
+    }
+    if data.starts_with(b"RIFF") && &data[8..12] == b"WEBP" {
+        return true;
+    }
+    data[0] == b'B' && data[1] == b'M'
+}
+
+fn ascii_find_ignore_case(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+    if needle.is_empty() || from + needle.len() > haystack.len() {
+        return None;
+    }
+    (from..=haystack.len() - needle.len())
+        .find(|&i| haystack[i..i + needle.len()].eq_ignore_ascii_case(needle))
+}
+
+fn percent_decode_utf8(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (
+                (bytes[i + 1] as char).to_digit(16),
+                (bytes[i + 2] as char).to_digit(16),
+            ) {
+                out.push(((h << 4) | l) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn extract_single_img_src_attr(html: &str) -> Option<String> {
+    let bytes = html.as_bytes();
+    let mut cursor = 0usize;
+    let mut candidate_srcs: Vec<String> = Vec::new();
+    while let Some(img_pos) = ascii_find_ignore_case(bytes, b"<img", cursor) {
+        let tag_end = bytes[img_pos..]
+            .iter()
+            .position(|&b| b == b'>')
+            .map(|rel| img_pos + rel)
+            .unwrap_or(bytes.len());
+        let tag_str = std::str::from_utf8(&bytes[img_pos..tag_end]).ok()?;
+        cursor = (tag_end + 1).min(bytes.len());
+
+        let tag_bytes = tag_str.as_bytes();
+        if ascii_find_ignore_case(tag_bytes, b"emoji", 0).is_some()
+            || ascii_find_ignore_case(tag_bytes, b"avatar", 0).is_some()
+        {
+            continue;
+        }
+        let Some(src_pos) = ascii_find_ignore_case(tag_bytes, b"src=", 0) else {
+            continue;
+        };
+        let after_src = tag_str[src_pos + 4..].trim_start();
+        let mut chars = after_src.chars();
+        let Some(quote) = chars.next() else { continue };
+        if quote != '"' && quote != '\'' {
+            continue;
+        }
+        let rest_after_quote = &after_src[quote.len_utf8()..];
+        let Some(end_q) = rest_after_quote.find(quote) else {
+            continue;
+        };
+        let raw_src = rest_after_quote[..end_q]
+            .replace("&amp;", "&")
+            .replace("&#38;", "&")
+            .trim()
+            .to_string();
+        if !raw_src.is_empty() {
+            candidate_srcs.push(raw_src);
+        }
+        if candidate_srcs.len() > 1 {
+            return None;
+        }
+    }
+    if candidate_srcs.len() == 1 {
+        candidate_srcs.into_iter().next()
+    } else {
+        None
+    }
+}
+
+/// 轻量预判 `CF_HTML` 是否可能包含唯一有效的 `data:image/;base64` 或本地 `file://` 图片源（零 Base64 解码开销）
+pub fn may_contain_single_html_image_src(html: &str) -> bool {
+    let Some(src_val) = extract_single_img_src_attr(html) else {
+        return false;
+    };
+    let sb = src_val.as_bytes();
+    if sb.get(..11).is_some_and(|p| p.eq_ignore_ascii_case(b"data:image/")) {
+        return src_val
+            .find(',')
+            .is_some_and(|comma| ascii_find_ignore_case(&sb[..comma], b";base64", 0).is_some());
+    }
+    if sb.get(..7).is_some_and(|p| p.eq_ignore_ascii_case(b"file://")) {
+        let after_scheme = &sb[7..];
+        return after_scheme.starts_with(b"/")
+            || after_scheme.get(..10).is_some_and(|p| p.eq_ignore_ascii_case(b"localhost/"));
+    }
+    false
+}
+
+/// 从飞书/微信/浏览器富文本 HTML 提取唯一有效单图源（过滤 emoji/avatar，支持 data URI 与严格本机盘符 `file://` 路径，严禁多字节越界、UNC/SMB 与 http 外联）
+pub fn extract_single_image_src_from_html(html: &str) -> Option<HtmlImageSrc> {
+    use base64::{engine::general_purpose::STANDARD as B64_STD, Engine as _};
+
+    let src_val = extract_single_img_src_attr(html)?;
+    let sb = src_val.as_bytes();
+    if sb.get(..11).is_some_and(|p| p.eq_ignore_ascii_case(b"data:image/")) {
+        let comma_idx = src_val.find(',')?;
+        let meta = &sb[..comma_idx];
+        if ascii_find_ignore_case(meta, b";base64", 0).is_none() {
+            return None;
+        }
+        let b64: String = src_val[comma_idx + 1..]
+            .chars()
+            .filter(|c| *c != '\r' && *c != '\n' && *c != ' ')
+            .collect();
+        if b64.is_empty() || b64.len() > 32 * 1024 * 1024 {
+            return None;
+        }
+        let decoded = B64_STD.decode(b64.as_bytes()).ok()?;
+        if !looks_like_raster_image_bytes(&decoded) {
+            return None;
+        }
+        return Some(HtmlImageSrc::InlineBytes(decoded));
+    }
+
+    if sb.get(..7).is_some_and(|p| p.eq_ignore_ascii_case(b"file://")) {
+        let after_scheme = &src_val[7..];
+        let ab = after_scheme.as_bytes();
+        let rel = if ab.starts_with(b"/") {
+            after_scheme
+        } else if ab.get(..10).is_some_and(|p| p.eq_ignore_ascii_case(b"localhost/")) {
+            &after_scheme[9..]
+        } else {
+            return None;
+        };
+        let without_query = rel.split(&['?', '#'][..]).next().unwrap_or(rel);
+        let decoded = percent_decode_utf8(without_query);
+        if decoded.is_empty() || decoded.contains('\0') {
+            return None;
+        }
+        // 统一将 `/` 转为 `\`，仅放行严格 Windows 盘符绝对路径 `\X:\...`，彻底封死 `/\evil`、`\\evil`、`\\?\`、无盘符根路径
+        let norm = decoded.replace('/', "\\");
+        let nb = norm.as_bytes();
+        if nb.len() >= 4
+            && nb[0] == b'\\'
+            && nb[1].is_ascii_alphabetic()
+            && nb[2] == b':'
+            && nb[3] == b'\\'
+        {
+            return Some(HtmlImageSrc::LocalFilePath(norm[1..].to_string()));
+        }
+        return None;
+    }
+
+    None
 }
 
 fn parse_delimited_rows(input: &str, delimiter: char) -> Vec<Vec<String>> {

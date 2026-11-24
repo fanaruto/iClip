@@ -595,6 +595,7 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
         private var downPointInWindow: NSPoint = .zero
         private var lastReportedProgress: CGFloat = 0
         private var maxStageTransition: CGFloat = 0
+        private var deepPopResetEpoch: UInt64 = 0
 
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
@@ -662,6 +663,7 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
         }
 
         private func resetPressState() {
+            deepPopResetEpoch &+= 1
             if isMouseDownInside || lastReportedProgress != 0 || maxStageTransition != 0 {
                 isMouseDownInside = false
                 didFireDeepPress = false
@@ -702,6 +704,7 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
 
                 guard !inTrailingActionZone && !inBottomChipZone && !inLeadingControlZone else { return }
 
+                deepPopResetEpoch &+= 1
                 isMouseDownInside = true
                 didFireDeepPress = false
                 lastReportedProgress = 0
@@ -749,6 +752,8 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
         }
 
         private func triggerDeepPop() {
+            deepPopResetEpoch &+= 1
+            let epoch = deepPopResetEpoch
             didFireDeepPress = true
             lastReportedProgress = 1.0
             let currentID = coordinator?.itemID
@@ -760,8 +765,9 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
             }
             coordinator?.onPressStateChange(2, 1.0)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) { [weak self] in
-                self?.lastReportedProgress = 0
-                self?.coordinator?.onPressStateChange(0, 0)
+                guard let self, self.deepPopResetEpoch == epoch else { return }
+                self.lastReportedProgress = 0
+                self.coordinator?.onPressStateChange(0, 0)
             }
             coordinator?.onDeepPressTrigger()
         }
@@ -966,6 +972,7 @@ struct AppleTVPhysicalCardModifier: ViewModifier {
                                     )
                             }
                         }
+                        .drawingGroup()
                     }
                     .allowsHitTesting(false)
                 }
@@ -981,6 +988,9 @@ struct AppleTVPhysicalCardModifier: ViewModifier {
                     onPressStateChange: { stage, progress in
                         if pressStage != stage {
                             pressStage = stage
+                        }
+                        if stage == 2 && internalPointerNorm != .zero {
+                            internalPointerNorm = .zero
                         }
                         if abs(pressureProgress - progress) >= 0.02 || progress == 0 || progress == 1 {
                             pressureProgress = progress

@@ -1117,13 +1117,14 @@ final class ClipboardStore: ObservableObject {
         let sourceApp = frontApp?.localizedName
         let effectiveBundleID = sourcePB ?? frontBundleID
 
-        // 1. 优先提取内存图像流（PNG / JPEG / WebP / HEIC / GIF / TIFF，或飞书/富文本单图 HTML <img src="data:/file:">）
+        // 1. 优先提取内存图像流（PNG / JPEG / WebP / HEIC / GIF / TIFF，或飞书/富文本 HTML <img src="data:/file:">）
         let rawTextProbe = pasteboard.string(forType: .string)
-        let inMemoryImageData = Self.extractBestInMemoryImageData(
+        let extractedHTMLOrMemory = Self.extractBestInMemoryImageOrHTMLFile(
             from: pasteboard,
             types: types,
             plainText: rawTextProbe
         )
+        let inMemoryImageData = extractedHTMLOrMemory.inMemoryData
 
         // 2. 本地文件 URL（智能区分 Finder 复制普通文件/文件夹 vs 微信/飞书/企微/QQ/钉钉复制聊天图片，后台异步解码零卡顿且不污染系统剪贴板）
         let copiedFileNSURLs = Self.extractDroppedFileNSURLs(from: pasteboard)
@@ -1157,6 +1158,19 @@ final class ClipboardStore: ObservableObject {
                 ingestFilePathsRecord(paths: paths, sourceApp: sourceApp, effectiveBundleID: effectiveBundleID)
                 return
             }
+        }
+
+        // 2.5 仅通过 HTML <img src="file:///..."> 携带本地路径的富文本复制：主线程 0 磁盘 I/O，全量检查与解码均交由后台线程执行
+        if inMemoryImageData == nil, let htmlImgPath = extractedHTMLOrMemory.htmlFilePath {
+            handleAsyncSingleFileImageOrFallback(
+                nsURL: URL(fileURLWithPath: htmlImgPath) as NSURL,
+                path: htmlImgPath,
+                inMemoryFallbackData: nil,
+                sourceApp: sourceApp,
+                effectiveBundleID: effectiveBundleID,
+                fallbackToFileRecordWhenMissing: false
+            )
+            return
         }
 
         // 3. 内存图片（截图 / 飞书 / 网页图片 / WebP / JPEG / GIF / HEIC / HTML 内联单图）
@@ -1670,12 +1684,27 @@ final class ClipboardStore: ObservableObject {
         path: String,
         inMemoryFallbackData: Data?,
         sourceApp: String?,
-        effectiveBundleID: String?
+        effectiveBundleID: String?,
+        fallbackToFileRecordWhenMissing: Bool = true
     ) {
         Task.detached(priority: .userInitiated) { [weak self] in
+            let fm = FileManager.default
+            if !fallbackToFileRecordWhenMissing {
+                if let attrs = try? fm.attributesOfItem(atPath: path),
+                   (attrs[.type] as? FileAttributeType) == .typeSymbolicLink {
+                    return
+                }
+                var isDir: ObjCBool = false
+                if fm.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue {
+                    return
+                }
+            }
+
             let ext = (path as NSString).pathExtension.lowercased()
             let chatApp = Self.detectProtectedChatContainerAppName(path: path, bundleID: effectiveBundleID)
-            switch Self.readScopedFileData(from: nsURL) {
+            let scopedResult = Self.readScopedFileData(from: nsURL)
+            var wasPermissionDenied = false
+            switch scopedResult {
             case .success(let fileData):
                 if (Self.supportedImageExtensions.contains(ext) || Self.looksLikeRasterImage(fileData)),
                    ImageStudioEngine.hasSafeImageDimensions(in: fileData),
@@ -1694,7 +1723,11 @@ final class ClipboardStore: ObservableObject {
                     return
                 }
 
-            case .permissionDenied, .failed:
+            case .permissionDenied:
+                wasPermissionDenied = true
+                fallthrough
+
+            case .failed:
                 // 仅当明确来自受保护聊天容器或明确为图片扩展名（且非目录）时，才允许回退内存位图自救，杜绝把普通文件夹图标存成图片
                 if (chatApp != nil || Self.supportedImageExtensions.contains(ext)),
                    let memData = inMemoryFallbackData,
@@ -1711,7 +1744,8 @@ final class ClipboardStore: ObservableObject {
                 }
             }
 
-            let isBlockedChat = (chatApp != nil) && !FileManager.default.isReadableFile(atPath: path)
+            let isBlockedChat = (chatApp != nil) && wasPermissionDenied
+            guard isBlockedChat || fallbackToFileRecordWhenMissing else { return }
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 if isBlockedChat, let chatApp {
@@ -1808,11 +1842,16 @@ final class ClipboardStore: ObservableObject {
         return nil
     }
 
-    nonisolated static func extractBestInMemoryImageData(
+    enum HTMLImageSource: Equatable {
+        case inlineData(Data)
+        case localFilePath(String)
+    }
+
+    nonisolated static func extractBestInMemoryImageOrHTMLFile(
         from pb: NSPasteboard,
         types: [NSPasteboard.PasteboardType],
         plainText: String?
-    ) -> Data? {
+    ) -> (inMemoryData: Data?, htmlFilePath: String?) {
         let directTypes: [NSPasteboard.PasteboardType] = [
             .png,
             jpegPasteboardType,
@@ -1824,7 +1863,7 @@ final class ClipboardStore: ObservableObject {
         ]
         for t in directTypes where types.contains(t) {
             if let data = pb.data(forType: t), !data.isEmpty, data.count <= 48 * 1024 * 1024 {
-                return data
+                return (data, nil)
             }
         }
 
@@ -1838,13 +1877,18 @@ final class ClipboardStore: ObservableObject {
         if isImagePlaceholderOnly, types.contains(.html),
            let html = pb.string(forType: .html),
            html.utf8.count <= 32 * 1024 * 1024,
-           let extracted = extractSingleImageBytesFromHTML(html) {
-            return extracted
+           let src = extractSingleHTMLImageSource(html) {
+            switch src {
+            case .inlineData(let data):
+                return (data, nil)
+            case .localFilePath(let path):
+                return (nil, path)
+            }
         }
-        return nil
+        return (nil, nil)
     }
 
-    nonisolated static func extractSingleImageBytesFromHTML(_ html: String) -> Data? {
+    nonisolated static func extractSingleHTMLImageSource(_ html: String) -> HTMLImageSource? {
         var searchCursor = html.startIndex
         var candidateSrcs: [String] = []
         while let imgStart = html.range(of: "<img", options: [.caseInsensitive], range: searchCursor..<html.endIndex) {
@@ -1863,9 +1907,12 @@ final class ClipboardStore: ObservableObject {
             guard let quote = afterSrc.first, (quote == "\"" || quote == "'") else { continue }
             let body = afterSrc.dropFirst()
             guard let endQuote = body.firstIndex(of: quote) else { continue }
-            let srcVal = String(body[..<endQuote]).trimmingCharacters(in: .whitespacesAndNewlines)
-            if !srcVal.isEmpty {
-                candidateSrcs.append(srcVal)
+            let rawSrc = String(body[..<endQuote])
+                .replacingOccurrences(of: "&amp;", with: "&")
+                .replacingOccurrences(of: "&#38;", with: "&")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !rawSrc.isEmpty {
+                candidateSrcs.append(rawSrc)
             }
             if candidateSrcs.count > 1 { return nil }
         }
@@ -1885,13 +1932,47 @@ final class ClipboardStore: ObservableObject {
                   ImageStudioEngine.hasSafeImageDimensions(in: decoded) else {
                 return nil
             }
-            return decoded
+            return .inlineData(decoded)
         }
 
-        if srcValue.lowercased().hasPrefix("file://"),
-           let fileURL = URL(string: srcValue),
-           fileURL.isFileURL {
-            let filePath = fileURL.path
+        if srcValue.lowercased().hasPrefix("file://") {
+            let afterScheme = String(srcValue.dropFirst("file://".count))
+            let parsedLocalPath: String? = {
+                if let url = URL(string: srcValue), url.isFileURL {
+                    let host = (url.host ?? "").lowercased()
+                    guard host.isEmpty || host == "localhost" else { return nil }
+                    let p = url.path
+                    return p.isEmpty ? nil : p
+                }
+                let rawPath: String
+                if afterScheme.hasPrefix("/") {
+                    rawPath = afterScheme
+                } else if afterScheme.lowercased().hasPrefix("localhost/") {
+                    rawPath = String(afterScheme.dropFirst("localhost".count))
+                } else {
+                    return nil
+                }
+                let withoutQuery = rawPath.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? rawPath
+                let decoded = withoutQuery.removingPercentEncoding ?? withoutQuery
+                return decoded.hasPrefix("/") ? decoded : nil
+            }()
+            if let cleanPath = parsedLocalPath,
+               !cleanPath.isEmpty,
+               cleanPath.hasPrefix("/"),
+               !cleanPath.hasPrefix("//"),
+               !cleanPath.contains("\\") {
+                return .localFilePath(cleanPath)
+            }
+        }
+        return nil
+    }
+
+    nonisolated static func extractSingleImageBytesFromHTML(_ html: String) -> Data? {
+        guard let src = extractSingleHTMLImageSource(html) else { return nil }
+        switch src {
+        case .inlineData(let data):
+            return data
+        case .localFilePath(let filePath):
             guard !filePath.isEmpty else { return nil }
             let fm = FileManager.default
             if let attrs = try? fm.attributesOfItem(atPath: filePath),
@@ -1903,8 +1984,8 @@ final class ClipboardStore: ObservableObject {
                ImageStudioEngine.hasSafeImageDimensions(in: data) {
                 return data
             }
+            return nil
         }
-        return nil
     }
 
     private func ingestCapturedImageData(

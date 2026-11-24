@@ -990,6 +990,22 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
                 bb.commitPrimaryPaste()
                 return nil
             }
+            let zoomBaseFlags = flags.intersection([.command, .option, .control, .shift])
+            if bb.activeModeIsImage && !bb.isImageBigBangActive {
+                if (zoomBaseFlags == .command || zoomBaseFlags == [.command, .shift])
+                    && (event.keyCode == 24 || event.keyCode == 69) {
+                    bb.zoomInImage()
+                    return nil
+                }
+                if zoomBaseFlags == .command && (event.keyCode == 27 || event.keyCode == 78) {
+                    bb.zoomOutImage()
+                    return nil
+                }
+                if zoomBaseFlags == .command && (event.keyCode == 29 || event.keyCode == 82) {
+                    bb.resetImageZoom()
+                    return nil
+                }
+            }
             if flags.contains(.command) || flags.contains(.control) {
                 return event
             }

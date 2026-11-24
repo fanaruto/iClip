@@ -2526,19 +2526,20 @@ unsafe fn simulate_ctrl_c() {
 }
 
 unsafe fn handle_clipboard_update(hwnd: HWND) {
-    let should_skip = APP_STATE.with(|cell| {
+    let (should_skip, cf_html_fmt) = APP_STATE.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(st) = borrow.as_mut() else {
-            return true;
+            return (true, 0);
         };
+        let html_fmt = st.cf_html_format;
         if st.ignore_next_clipboard_seq {
             st.ignore_next_clipboard_seq = false;
-            return true;
+            return (true, html_fmt);
         }
         let _ = st.store.check_auto_resume_pause(now_unix_secs());
         if st.store.is_paused {
             st.pending_append_capture = false;
-            return true;
+            return (true, html_fmt);
         }
         if (st.cf_exclude_monitor != 0
             && IsClipboardFormatAvailable(st.cf_exclude_monitor) != FALSE)
@@ -2551,9 +2552,9 @@ unsafe fn handle_clipboard_update(hwnd: HWND) {
                 st.scrub_expected_seq_num = GetClipboardSequenceNumber();
                 SetTimer(hwnd, TIMER_ID_CONCEALED_SCRUB, 60_000, None);
             }
-            return true;
+            return (true, html_fmt);
         }
-        false
+        (false, html_fmt)
     });
     if should_skip {
         return;
@@ -2691,7 +2692,16 @@ unsafe fn handle_clipboard_update(hwnd: HWND) {
 
     if IsClipboardFormatAvailable(CF_UNICODETEXT_ID) != FALSE {
         if let Some(mut raw_text) = read_unicode_text_from_clipboard(hwnd) {
-            if !raw_text.trim().is_empty() {
+            let is_placeholder = iclip_core::security::is_chat_image_placeholder_text(&raw_text);
+            if is_placeholder && !has_dib && cf_html_fmt != 0 && IsClipboardFormatAvailable(cf_html_fmt) != FALSE {
+                if let Some(cf_html) = read_cf_html_from_clipboard(hwnd, cf_html_fmt) {
+                    if iclip_core::security::may_contain_single_html_image_src(&cf_html) {
+                        dispatch_html_image_from_cf_html(hwnd, cf_html, source_app);
+                        return;
+                    }
+                }
+            }
+            if !(is_placeholder && has_dib) && !raw_text.trim().is_empty() {
                 let mut rewrite_clipboard_text: Option<String> = None;
                 let mut rewrite_scrub_ms: Option<u32> = None;
                 let mut feedback_toast: Option<String> = None;
@@ -2886,6 +2896,15 @@ unsafe fn handle_clipboard_update(hwnd: HWND) {
                 }
             });
             let _ = InvalidateRect(hwnd, null(), FALSE);
+            return;
+        }
+    }
+
+    if cf_html_fmt != 0 && IsClipboardFormatAvailable(cf_html_fmt) != FALSE {
+        if let Some(cf_html) = read_cf_html_from_clipboard(hwnd, cf_html_fmt) {
+            if iclip_core::security::may_contain_single_html_image_src(&cf_html) {
+                dispatch_html_image_from_cf_html(hwnd, cf_html, source_app);
+            }
         }
     }
 }
@@ -3143,6 +3162,88 @@ unsafe fn read_files_from_clipboard(hwnd: HWND) -> Option<Vec<String>> {
     }
     let _ = CloseClipboard();
     Some(paths)
+}
+
+unsafe fn read_cf_html_from_clipboard(hwnd: HWND, cf_html_fmt: u32) -> Option<String> {
+    if cf_html_fmt == 0 || OpenClipboard(hwnd) == FALSE {
+        return None;
+    }
+    let handle = GetClipboardData(cf_html_fmt);
+    if handle.is_null() {
+        let _ = CloseClipboard();
+        return None;
+    }
+    let ptr = GlobalLock(handle) as *const u8;
+    let byte_len = GlobalSize(handle);
+    let out = if !ptr.is_null() && byte_len > 0 {
+        let capped = byte_len.min(32 * 1024 * 1024);
+        let raw = std::slice::from_raw_parts(ptr, capped);
+        let nul_len = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+        let txt = String::from_utf8_lossy(&raw[..nul_len]).into_owned();
+        if txt.is_empty() { None } else { Some(txt) }
+    } else {
+        None
+    };
+    let _ = GlobalUnlock(handle);
+    let _ = CloseClipboard();
+    out
+}
+
+fn try_decode_chat_image_to_png(raw_bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
+    let dyn_img = image::load_from_memory(raw_bytes).ok()?;
+    let (pw, ph) = (dyn_img.width(), dyn_img.height());
+    if pw == 0 || ph == 0 || pw > 12_000 || ph > 12_000 || (pw as u64) * (ph as u64) > 67_108_864 {
+        return None;
+    }
+    let rgba = dyn_img.to_rgba8();
+    let mut png_bytes = Vec::new();
+    PngEncoder::new(&mut png_bytes)
+        .write_image(&rgba, pw, ph, ColorType::Rgba8.into())
+        .ok()?;
+    Some((png_bytes, pw, ph))
+}
+
+unsafe fn dispatch_html_image_from_cf_html(
+    hwnd: HWND,
+    cf_html: String,
+    source_app: Option<String>,
+) {
+    let target_hwnd = hwnd as isize;
+    std::thread::spawn(move || {
+        let Some(src) = iclip_core::security::extract_single_image_src_from_html(&cf_html) else {
+            return;
+        };
+        let decoded = match src {
+            iclip_core::security::HtmlImageSrc::InlineBytes(bytes) => {
+                try_decode_chat_image_to_png(&bytes)
+            }
+            iclip_core::security::HtmlImageSrc::LocalFilePath(path_str) => {
+                if let Ok(meta) = std::fs::symlink_metadata(&path_str) {
+                    if meta.file_type().is_file() && meta.len() > 0 && meta.len() <= 32 * 1024 * 1024
+                    {
+                        std::fs::read(&path_str)
+                            .ok()
+                            .and_then(|bytes| try_decode_chat_image_to_png(&bytes))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+        };
+        if let Some((png_bytes, pw, ph)) = decoded {
+            if let Ok(mut q) = PENDING_ASYNC_CHAT_IMAGES.lock() {
+                q.push(AsyncChatClipResult::Image(png_bytes, pw, ph, source_app));
+            }
+            let h_ptr = target_hwnd as HWND;
+            if !h_ptr.is_null() {
+                unsafe {
+                    let _ = PostMessageW(h_ptr, WM_APP_ASYNC_CHAT_IMAGE, 0, 0);
+                }
+            }
+        }
+    });
 }
 
 unsafe fn read_dib_as_png_from_clipboard(hwnd: HWND) -> Option<(Vec<u8>, u32, u32)> {
@@ -12496,7 +12597,6 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
                     st.ql_stage_ocr_selected = tokens
                         .into_iter()
                         .filter(|t| !t.is_line_break)
-                        .take(140)
                         .map(|t| t.id)
                         .collect();
                     return 2;
@@ -12540,6 +12640,119 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
         if sel_target == 1 {
             let _ = InvalidateRect(hwnd, null(), FALSE);
             return;
+        }
+    }
+
+    if ctrl_down && !alt_down && !shift_down && vk == 0x43 {
+        enum CtrlCCopyOutcome {
+            DirectText { text: String, toast: String },
+            Item { idx: usize, toast: Option<String> },
+            Skip,
+        }
+        let outcome = APP_STATE.with(|c| {
+            let b = c.borrow();
+            let Some(st) = b.as_ref() else {
+                return CtrlCCopyOutcome::Skip;
+            };
+            if st.ql_stage_visible {
+                if st.ql_stage_big_bang {
+                    if let Some(ocr) = st.ql_stage_ocr_text.as_ref().filter(|s| !s.is_empty()) {
+                        let tokens = tokenize_big_bang(ocr, st.big_bang_granularity);
+                        let sel = assemble_big_bang_selection(&tokens, &st.ql_stage_ocr_selected);
+                        let had_sel = !sel.is_empty();
+                        let payload = if had_sel { sel } else { ocr.clone() };
+                        let toast = if had_sel {
+                            format!("已复制图中大爆炸文字（{}字）", payload.chars().count())
+                        } else {
+                            "已复制图中全部 OCR 文字".to_string()
+                        };
+                        return CtrlCCopyOutcome::DirectText {
+                            text: payload,
+                            toast,
+                        };
+                    }
+                }
+                let filtered = st.store.filtered_indices_ext(
+                    st.selected_tab,
+                    st.selected_pin_category,
+                    &st.search_query,
+                    st.active_target_app_name.as_deref(),
+                );
+                if let Some(&idx) = filtered.get(st.selected_visible_pos) {
+                    return CtrlCCopyOutcome::Item {
+                        idx,
+                        toast: Some("✓ 已复制原图到剪贴板".to_string()),
+                    };
+                }
+                return CtrlCCopyOutcome::Skip;
+            }
+            if st.show_quick_look {
+                let filtered = st.store.filtered_indices_ext(
+                    st.selected_tab,
+                    st.selected_pin_category,
+                    &st.search_query,
+                    st.active_target_app_name.as_deref(),
+                );
+                if let Some(&idx) = filtered.get(st.selected_visible_pos) {
+                    if st.quick_look_tab == 0 {
+                        let item = &st.store.items[idx];
+                        let full_src = item
+                            .text
+                            .clone()
+                            .or_else(|| item.file_paths.as_ref().map(|p| p.join("\n")))
+                            .unwrap_or_default();
+                        if !full_src.is_empty() {
+                            let bounded: String = full_src.chars().take(2400).collect();
+                            let tokens = tokenize_big_bang(&bounded, st.big_bang_granularity);
+                            let assembled =
+                                assemble_big_bang_selection(&tokens, &st.big_bang_selected_ids);
+                            let had_sel = !assembled.is_empty();
+                            let payload = if had_sel { assembled } else { full_src };
+                            let toast = if had_sel {
+                                format!("已复制大爆炸所选（{}字）", payload.chars().count())
+                            } else {
+                                "已复制全部文本".to_string()
+                            };
+                            return CtrlCCopyOutcome::DirectText {
+                                text: payload,
+                                toast,
+                            };
+                        }
+                    }
+                    return CtrlCCopyOutcome::Item {
+                        idx,
+                        toast: Some("✓ 已复制到剪贴板".to_string()),
+                    };
+                }
+                return CtrlCCopyOutcome::Skip;
+            }
+            if st.view_mode != ActiveViewMode::MainList {
+                return CtrlCCopyOutcome::Skip;
+            }
+            let filtered = st.store.filtered_indices_ext(
+                st.selected_tab,
+                st.selected_pin_category,
+                &st.search_query,
+                st.active_target_app_name.as_deref(),
+            );
+            if let Some(&idx) = filtered.get(st.selected_visible_pos) {
+                return CtrlCCopyOutcome::Item { idx, toast: None };
+            }
+            CtrlCCopyOutcome::Skip
+        });
+        match outcome {
+            CtrlCCopyOutcome::DirectText { text, toast } => {
+                copy_direct_text_to_clipboard(hwnd, &text, toast);
+                return;
+            }
+            CtrlCCopyOutcome::Item { idx, toast } => {
+                copy_only_item_in_place(hwnd, idx);
+                if let Some(msg) = toast {
+                    set_toast(hwnd, msg);
+                }
+                return;
+            }
+            CtrlCCopyOutcome::Skip => {}
         }
     }
 
@@ -14075,6 +14288,30 @@ unsafe fn handle_ql_stage_wnd_proc(
                         let _ = InvalidateRect(main_h, null(), FALSE);
                     }
                 }
+                Some(HitAction::SelectAllBigBang) => {
+                    APP_STATE.with(|c| {
+                        if let Some(st) = c.borrow_mut().as_mut() {
+                            if let Some(ocr) = st.ql_stage_ocr_text.as_ref() {
+                                let tokens = tokenize_big_bang(ocr, st.big_bang_granularity);
+                                st.ql_stage_ocr_selected = tokens
+                                    .into_iter()
+                                    .filter(|t| !t.is_line_break)
+                                    .map(|t| t.id)
+                                    .collect();
+                            }
+                        }
+                    });
+                    let _ = InvalidateRect(hwnd, null(), FALSE);
+                }
+                Some(HitAction::ClearBigBangSelection) => {
+                    APP_STATE.with(|c| {
+                        if let Some(st) = c.borrow_mut().as_mut() {
+                            st.ql_stage_ocr_selected.clear();
+                            st.ql_stage_sweep_target = None;
+                        }
+                    });
+                    let _ = InvalidateRect(hwnd, null(), FALSE);
+                }
                 Some(HitAction::ToggleBigBangToken(id)) => {
                     APP_STATE.with(|c| {
                         if let Some(st) = c.borrow_mut().as_mut() {
@@ -14454,29 +14691,35 @@ unsafe fn handle_ql_stage_wnd_proc(
                             );
 
                             if st.ql_stage_big_bang {
+                                let stage_x = s(18);
+                                let stage_y = s(42);
+                                let stage_w = avail_w;
+                                let stage_h = avail_h;
                                 canvas.fill_round_rect(
-                                    draw_x,
-                                    draw_y,
-                                    draw_w,
-                                    draw_h,
+                                    stage_x,
+                                    stage_y,
+                                    stage_w,
+                                    stage_h,
                                     sf(12.0),
-                                    Color4::rgba(10, 14, 24, 178),
+                                    Color4::rgba(10, 14, 24, 184),
                                 );
-                                if let Some(ref ocr) = st.ql_stage_ocr_text {
+                                if let Some(ref ocr) =
+                                    st.ql_stage_ocr_text.as_ref().filter(|t| !t.trim().is_empty())
+                                {
                                     let tokens = tokenize_big_bang(ocr, st.big_bang_granularity);
-                                    let mut tx = draw_x + s(14);
-                                    let mut ty = draw_y + s(14);
+                                    let mut tx = stage_x + s(14);
+                                    let mut ty = stage_y + s(14);
                                     let ch = s(24);
-                                    let max_cx = draw_x + draw_w - s(14);
-                                    let max_cy = draw_y + draw_h - s(44);
+                                    let max_cx = stage_x + stage_w - s(14);
+                                    let max_cy = stage_y + stage_h - s(44);
                                     let is_line_mode =
                                         st.big_bang_granularity == BigBangGranularity::Line;
-                                    let full_line_w = (draw_w - s(28)).max(s(24));
+                                    let full_line_w = (stage_w - s(28)).max(s(24));
                                     let mut shown = 0usize;
                                     for tok in tokens.iter() {
                                         if tok.is_line_break {
-                                            if tx > draw_x + s(14) {
-                                                tx = draw_x + s(14);
+                                            if tx > stage_x + s(14) {
+                                                tx = stage_x + s(14);
                                                 ty += ch + s(6);
                                             }
                                             continue;
@@ -14491,9 +14734,9 @@ unsafe fn handle_ql_stage_wnd_proc(
                                             (estimate_text_px(&tok.text, sf(12.0)) + s(16))
                                                 .clamp(s(24), full_line_w)
                                         };
-                                        if !is_line_mode && tx > draw_x + s(14) && tx + cw > max_cx
+                                        if !is_line_mode && tx > stage_x + s(14) && tx + cw > max_cx
                                         {
-                                            tx = draw_x + s(14);
+                                            tx = stage_x + s(14);
                                             ty += ch + s(6);
                                         }
                                         if ty + ch > max_cy {
@@ -14548,19 +14791,66 @@ unsafe fn handle_ql_stage_wnd_proc(
                                             action: HitAction::ToggleBigBangToken(tok.id),
                                         });
                                         if is_line_mode {
-                                            tx = draw_x + s(14);
+                                            tx = stage_x + s(14);
                                             ty += ch + s(6);
                                         } else {
                                             tx += cw + s(6);
                                         }
                                     }
 
-                                    let pb_w = s(94);
-                                    let cb_w = s(74);
-                                    let by = draw_y + draw_h - s(34);
+                                    let sel_cnt = st.ql_stage_ocr_selected.len();
+                                    let paste_label = if sel_cnt > 0 {
+                                        format!("贴入所选({sel_cnt})")
+                                    } else {
+                                        "键入全文".to_string()
+                                    };
+                                    let copy_label = if sel_cnt > 0 {
+                                        "复制所选"
+                                    } else {
+                                        "复制全文"
+                                    };
+                                    let toggle_label = if sel_cnt > 0 { "清空" } else { "全选" };
+                                    let toggle_act = if sel_cnt > 0 {
+                                        HitAction::ClearBigBangSelection
+                                    } else {
+                                        HitAction::SelectAllBigBang
+                                    };
+
+                                    let pb_w = s(98);
+                                    let cb_w = s(76);
+                                    let tb_w = s(64);
+                                    let by = stage_y + stage_h - s(34);
                                     let bh = s(24);
-                                    let px = draw_x + draw_w - s(12) - pb_w;
+                                    let px = stage_x + stage_w - s(12) - pb_w;
                                     let cx_ocr = px - s(6) - cb_w;
+                                    let tx_all = cx_ocr - s(6) - tb_w;
+
+                                    canvas.fill_round_rect(
+                                        tx_all,
+                                        by,
+                                        tb_w,
+                                        bh,
+                                        sf(12.0),
+                                        Color4::rgba(255, 255, 255, 38),
+                                    );
+                                    let trc_all = RECT {
+                                        left: tx_all,
+                                        top: by,
+                                        right: tx_all + tb_w,
+                                        bottom: by + bh,
+                                    };
+                                    texts.push(TextDrawCmd {
+                                        text: toggle_label.to_string(),
+                                        rect: trc_all,
+                                        color: Color4::rgb(255, 255, 255),
+                                        font_kind: FontKind::BadgeBold,
+                                        flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                                    });
+                                    st.ql_stage_hit_regions.push(HitRegion {
+                                        rect: trc_all,
+                                        interactive_cursor: true,
+                                        action: toggle_act,
+                                    });
 
                                     canvas.fill_round_rect(
                                         cx_ocr,
@@ -14577,7 +14867,7 @@ unsafe fn handle_ql_stage_wnd_proc(
                                         bottom: by + bh,
                                     };
                                     texts.push(TextDrawCmd {
-                                        text: "复制所选".to_string(),
+                                        text: copy_label.to_string(),
                                         rect: crc,
                                         color: Color4::rgb(255, 255, 255),
                                         font_kind: FontKind::BadgeBold,
@@ -14597,7 +14887,7 @@ unsafe fn handle_ql_stage_wnd_proc(
                                         bottom: by + bh,
                                     };
                                     texts.push(TextDrawCmd {
-                                        text: "贴入所选".to_string(),
+                                        text: paste_label,
                                         rect: prc,
                                         color: Color4::rgb(255, 255, 255),
                                         font_kind: FontKind::BadgeBold,
@@ -14612,10 +14902,10 @@ unsafe fn handle_ql_stage_wnd_proc(
                                     texts.push(TextDrawCmd {
                                         text: "该图片暂无本地 OCR 文字 · 按 Enter 可直接贴入原图".to_string(),
                                         rect: RECT {
-                                            left: draw_x + s(16),
-                                            top: draw_y,
-                                            right: draw_x + draw_w - s(16),
-                                            bottom: draw_y + draw_h,
+                                            left: stage_x + s(16),
+                                            top: stage_y,
+                                            right: stage_x + stage_w - s(16),
+                                            bottom: stage_y + stage_h,
                                         },
                                         color: Color4::rgb(255, 255, 255),
                                         font_kind: FontKind::Body,
@@ -14625,7 +14915,11 @@ unsafe fn handle_ql_stage_wnd_proc(
                             }
 
                             texts.push(TextDrawCmd {
-                                text: "Space / Esc / 点空白处关闭 · O 大爆炸选字 · 方向键切图 · Enter 直贴原图".to_string(),
+                                text: if st.ql_stage_big_bang {
+                                    "点选或横扫词块 · G 切粒度 · Ctrl+A 全选 · Ctrl+C 复制 · Enter 贴入 · O 返回纯图"
+                                } else {
+                                    "Space / Esc / 点空白处关闭 · O 大爆炸选字 · Ctrl+C 复制 · 方向键切图 · Enter 直贴原图"
+                                }.to_string(),
                                 rect: RECT {
                                     left: s(16),
                                     top: h - s(30),
@@ -14634,7 +14928,7 @@ unsafe fn handle_ql_stage_wnd_proc(
                                 },
                                 color: palette.text_muted,
                                 font_kind: FontKind::Meta,
-                                flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                                flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                             });
                         }
                         composite_texts_premultiplied_alpha(mem_dc, &mut canvas, &texts, scale, None);
