@@ -1109,6 +1109,18 @@ pub fn analyze_document_typography(raw: &str) -> Vec<QuickAction> {
         }
     }
 
+    if let Some(punct_cleaned) = normalize_width_and_cjk_punctuation(trimmed) {
+        let polished = apply_pangu_spacing(&punct_cleaned);
+        actions.push(QuickAction {
+            id: "doc-normalize-punct",
+            title: "全半角与标点精排".to_string(),
+            is_security: false,
+            result_text: polished,
+            html_table_payload: None,
+            toast_text: "已规整全角字母数字、中西文标点与中英间距".to_string(),
+        });
+    }
+
     let non_empty_lines: Vec<&str> = trimmed
         .lines()
         .map(str::trim)
@@ -1162,6 +1174,167 @@ pub fn analyze_document_typography(raw: &str) -> Vec<QuickAction> {
     }
 
     actions
+}
+
+pub fn normalize_width_and_cjk_punctuation(raw: &str) -> Option<String> {
+    if raw.is_empty() || raw.len() > 32_768 {
+        return None;
+    }
+    let mut fix_count = 0usize;
+
+    const FW_TECH: &[u32] = &[
+        0xFF03, 0xFF04, 0xFF05, 0xFF06, 0xFF0B, 0xFF0D, 0xFF0F, 0xFF1D, 0xFF20,
+    ];
+    let mut stage1 = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        let v = ch as u32;
+        if ((0xFF10..=0xFF19).contains(&v)
+            || (0xFF21..=0xFF3A).contains(&v)
+            || (0xFF41..=0xFF5A).contains(&v)
+            || FW_TECH.contains(&v))
+            && char::from_u32(v - 0xFEE0).is_some()
+        {
+            stage1.push(char::from_u32(v - 0xFEE0).unwrap());
+            fix_count += 1;
+        } else if v == 0x3000 {
+            stage1.push(' ');
+            fix_count += 1;
+        } else {
+            stage1.push(ch);
+        }
+    }
+
+    let mut work: Vec<char> = stage1.chars().collect();
+    let n = work.len();
+    if n == 0 {
+        return None;
+    }
+
+    let mut in_url = vec![false; n];
+    let mut idx = 0usize;
+    while idx < n {
+        if idx + 7 <= n {
+            let s7: String = work[idx..(idx + 7)]
+                .iter()
+                .collect::<String>()
+                .to_ascii_lowercase();
+            let s8: String = if idx + 8 <= n {
+                work[idx..(idx + 8)]
+                    .iter()
+                    .collect::<String>()
+                    .to_ascii_lowercase()
+            } else {
+                String::new()
+            };
+            if s7 == "http://" || s8 == "https://" {
+                while idx < n && !work[idx].is_whitespace() {
+                    in_url[idx] = true;
+                    idx += 1;
+                }
+                continue;
+            }
+        }
+        idx += 1;
+    }
+
+    let is_han =
+        |c: Option<char>| -> bool { c.is_some_and(|ch| (0x4E00..=0x9FFF).contains(&(ch as u32))) };
+
+    let mut open_stack: Vec<usize> = Vec::new();
+    for i in 0..n {
+        if in_url[i] {
+            continue;
+        }
+        if work[i] == '(' {
+            open_stack.push(i);
+        } else if work[i] == ')' {
+            if let Some(open_idx) = open_stack.pop() {
+                let is_func = open_idx > 0 && {
+                    let pc = work[open_idx - 1];
+                    pc.is_ascii_alphanumeric() || pc == '_'
+                };
+                let inner = &work[(open_idx + 1)..i];
+                if !is_func && !inner.contains(&'\n') && inner.iter().any(|&c| is_han(Some(c))) {
+                    work[open_idx] = '（';
+                    work[i] = '）';
+                    fix_count += 1;
+                }
+            }
+        }
+    }
+
+    let mut out: Vec<char> = Vec::with_capacity(n);
+    let mut i = 0usize;
+    while i < n {
+        let ch = work[i];
+        if in_url[i] {
+            out.push(ch);
+            i += 1;
+            continue;
+        }
+        let prev_non_space = out.iter().rev().copied().find(|&c| c != ' ' && c != '\t');
+        let next_non_space = {
+            let mut k = i + 1;
+            while k < n && (work[k] == ' ' || work[k] == '\t') {
+                k += 1;
+            }
+            work.get(k).copied()
+        };
+
+        let replaced = match ch {
+            ',' if is_han(prev_non_space) || is_han(next_non_space) => Some('，'),
+            ';' if is_han(prev_non_space) || is_han(next_non_space) => Some('；'),
+            '?' if is_han(prev_non_space) || is_han(next_non_space) => Some('？'),
+            '!' if (is_han(prev_non_space) || is_han(next_non_space))
+                && next_non_space != Some('=') =>
+            {
+                Some('！')
+            }
+            ':' if is_han(prev_non_space)
+                && next_non_space != Some('/')
+                && !next_non_space.is_some_and(|c| c.is_ascii_digit()) =>
+            {
+                Some('：')
+            }
+            '.' => {
+                let next_imm = work.get(i + 1).copied();
+                let is_dec_or_ext = next_imm.is_some_and(|c| c.is_ascii_alphanumeric());
+                if is_han(prev_non_space)
+                    && !is_dec_or_ext
+                    && (next_non_space.is_none()
+                        || next_non_space == Some('\n')
+                        || is_han(next_non_space))
+                {
+                    Some('。')
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+
+        if let Some(rep) = replaced {
+            if out.last() == Some(&' ') && is_han(prev_non_space) {
+                out.pop();
+            }
+            out.push(rep);
+            fix_count += 1;
+            if i + 1 < n && work[i + 1] == ' ' {
+                i += 2;
+                continue;
+            }
+        } else {
+            out.push(ch);
+        }
+        i += 1;
+    }
+
+    let final_str: String = out.into_iter().collect();
+    if fix_count >= 2 && final_str != raw {
+        Some(final_str)
+    } else {
+        None
+    }
 }
 
 pub fn looks_like_markdown_document(raw: &str) -> bool {

@@ -2392,5 +2392,28 @@ mod tests {
                 .plain_value,
             "0b101010"
         );
+
+        // 13. 第 29 轮自省：验证内嵌 `\0` 空字节截断欺骗检测剥离（CWE-158）与 OCR/公文「全半角与标点精排」（保护 3.14 小数与 URL）
+        let null_poison = "echo safe\0evil";
+        assert!(crate::security::inspect_clipboard_poison(null_poison).is_some());
+        assert!(!crate::security::sanitize_clipboard_poison(null_poison).contains('\0'));
+        let null_esc = r"safe\u0000\u4e2d\u6587";
+        let (dec_null, _, _) = crate::security::decode_escaped_text(null_esc).unwrap();
+        assert!(!dec_null.contains('\0'));
+        assert!(dec_null.contains("中文"));
+
+        let messy_ocr =
+            "２０２６年Ｑ４季度营收突破１２８０万元,同比增长3.14%(初稿)!详见https://app.webfooo.com/iClip.";
+        let ocr_acts = analyze_text_actions(messy_ocr, false);
+        let punct_act = ocr_acts
+            .iter()
+            .find(|a| a.id == "doc-normalize-punct")
+            .unwrap();
+        assert!(punct_act
+            .result_text
+            .contains("2026 年 Q4 季度营收突破 1280 万元，同比增长 3.14%（初稿）！"));
+        assert!(punct_act
+            .result_text
+            .contains("https://app.webfooo.com/iClip."));
     }
 }

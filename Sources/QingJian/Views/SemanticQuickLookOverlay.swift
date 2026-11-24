@@ -430,10 +430,16 @@ enum QuickLookTabBuilder {
         }
         #endif
 
-        // 历史文本/链接条目自动挂载「与最新剪贴 #1 行级差异比对」标签页（支持 ⌥Space 一键直达）
+        // 历史文本/链接条目自动挂载「与最新剪贴 #1 行级差异比对」标签页（严格隔离粘贴即焚机密与 ICLPMSG1 密文信封防旁路泄露）
         if !store.minimalModeEnabled,
            (item.type == .text || item.type == .link),
-           let latestItem = store.items.first(where: { $0.type == .text || $0.type == .link }),
+           !item.isBurnAfterPaste,
+           !SecretCapsuleMessenger.containsCapsule(item.text),
+           let latestItem = store.items.first(where: {
+               ($0.type == .text || $0.type == .link)
+                   && !$0.isBurnAfterPaste
+                   && !SecretCapsuleMessenger.containsCapsule($0.text)
+           }),
            latestItem.id != item.id,
            let latestText = latestItem.text,
            let diff = ClipboardDiffEngine.computeDiff(older: rawText, newer: latestText) {

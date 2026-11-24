@@ -484,10 +484,14 @@ struct ClipboardPopoverView: View {
                         let activeTabID = currentTabs.indices.contains(nav.quickLookTabIndex) ? currentTabs[nav.quickLookTabIndex].id : nil
                         let latestSensitiveDiff: Bool = {
                             guard activeTabID == QuickLookTabItem.diffLatestTabID,
-                                  let latest = store.items.first(where: { $0.type == .text || $0.type == .link }) else {
+                                  let latest = store.items.first(where: {
+                                      ($0.type == .text || $0.type == .link)
+                                          && !$0.isBurnAfterPaste
+                                          && !SecretCapsuleMessenger.containsCapsule($0.text)
+                                  }) else {
                                 return false
                             }
-                            return latest.isBurnAfterPaste || latest.detectedSensitiveKind != nil
+                            return latest.detectedSensitiveKind != nil
                         }()
                         nav.isQuickLookEditing = false
                         nav.showQuickLook = false
@@ -3476,10 +3480,14 @@ struct ClipboardPopoverView: View {
                         let activeTabID = currentTabs.indices.contains(nav.quickLookTabIndex) ? currentTabs[nav.quickLookTabIndex].id : nil
                         let latestSensitiveDiff: Bool = {
                             guard activeTabID == QuickLookTabItem.diffLatestTabID,
-                                  let latest = store.items.first(where: { $0.type == .text || $0.type == .link }) else {
+                                  let latest = store.items.first(where: {
+                                      ($0.type == .text || $0.type == .link)
+                                          && !$0.isBurnAfterPaste
+                                          && !SecretCapsuleMessenger.containsCapsule($0.text)
+                                  }) else {
                                 return false
                             }
-                            return latest.isBurnAfterPaste || latest.detectedSensitiveKind != nil
+                            return latest.detectedSensitiveKind != nil
                         }()
                         nav.isQuickLookEditing = false
                         nav.showQuickLook = false

@@ -3208,5 +3208,20 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertEqual(InstantMathEvaluator.evaluate("0xff")?.plainValue, "255")
         XCTAssertEqual(InstantMathEvaluator.evaluate("255 to hex")?.plainValue, "0xFF")
         XCTAssertEqual(InstantMathEvaluator.evaluate("42 to bin")?.plainValue, "0b101010")
+
+        // 12. 第 29 轮自省：验证内嵌 `\0` 空字节截断欺骗检测剥离（CWE-158）与 OCR/公文「全半角与标点精排」（保护 3.14 小数与 URL）
+        let nullPoison = "echo safe\u{0000}evil"
+        XCTAssertNotNil(ClipboardPoisonGuard.inspect(nullPoison))
+        XCTAssertFalse(ClipboardPoisonGuard.sanitize(nullPoison).contains("\u{0000}"))
+        let nullEscaped = #"safe\u0000\u4e2d\u6587"#
+        let decNull = try XCTUnwrap(UniversalEscapeDecoder.decodeIfApplicable(nullEscaped))
+        XCTAssertFalse(decNull.decodedText.contains("\u{0000}"))
+        XCTAssertTrue(decNull.decodedText.contains("中文"))
+
+        let messyOCR = "２０２６年Ｑ４季度营收突破１２８０万元,同比增长3.14%(初稿)!详见https://app.webfooo.com/iClip."
+        let punctActs = DocumentTypographyEngine.analyze(messyOCR)
+        let punctAct = try XCTUnwrap(punctActs.first(where: { $0.id == "doc-normalize-punct" }))
+        XCTAssertTrue(punctAct.resultText.contains("2026 年 Q4 季度营收突破 1280 万元，同比增长 3.14%（初稿）！"))
+        XCTAssertTrue(punctAct.resultText.contains("https://app.webfooo.com/iClip."))
     }
 }

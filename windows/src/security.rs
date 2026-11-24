@@ -722,7 +722,14 @@ pub fn inspect_clipboard_poison(raw: &str) -> Option<PoisonThreatKind> {
 
     for (idx, &ch) in chars.iter().enumerate() {
         let v = ch as u32;
-        if is_bidi_override_char(ch) || v == 0x001B || v == 0x009B || v == 0x0008 || v == 0x0007 {
+        if is_bidi_override_char(ch)
+            || v == 0x0000
+            || v == 0x007F
+            || v == 0x001B
+            || v == 0x009B
+            || v == 0x0008
+            || v == 0x0007
+        {
             high_risk += 1;
         } else if v == 0x000D {
             if let Some(&next_ch) = chars.get(idx + 1) {

@@ -438,7 +438,7 @@ enum ClipboardPoisonGuard {
         let scalars = Array(sample.unicodeScalars)
         for idx in scalars.indices {
             let v = scalars[idx].value
-            if isBidiOverrideScalar(v) || v == 0x001B || v == 0x009B || v == 0x0008 || v == 0x0007 {
+            if isBidiOverrideScalar(v) || v == 0x0000 || v == 0x007F || v == 0x001B || v == 0x009B || v == 0x0008 || v == 0x0007 {
                 highRiskCount += 1
             } else if v == 0x000D {
                 // `\r` 后紧跟的若非 `\n` 且后面还有可见字符，属于终端同行覆盖回显欺骗（`evil \r safe`）

@@ -9098,16 +9098,42 @@ fn layout_and_draw_quick_look_overlay(
     let body_bottom = my + mh - s(32);
 
     if st.quick_look_diff_mode {
-        let cur_txt = item.text.as_deref().unwrap_or("");
-        let older_txt = st
-            .store
-            .items
-            .iter()
-            .enumerate()
-            .find(|(idx, it)| *idx != store_idx && it.text.is_some())
-            .and_then(|(_, it)| it.text.as_deref())
-            .unwrap_or("");
-        let diff = compute_clipboard_diff(older_txt, cur_txt);
+        let cur_isolated = item.is_burn_after_paste()
+            || iclip_core::security::contains_secret_capsule(item.text.as_deref());
+        let cur_txt = if cur_isolated {
+            ""
+        } else {
+            item.text.as_deref().unwrap_or("")
+        };
+        let older_txt = if cur_isolated {
+            ""
+        } else {
+            st.store
+                .items
+                .iter()
+                .enumerate()
+                .find(|(idx, it)| {
+                    *idx != store_idx
+                        && it.text.is_some()
+                        && !it.is_burn_after_paste()
+                        && !iclip_core::security::contains_secret_capsule(it.text.as_deref())
+                })
+                .and_then(|(_, it)| it.text.as_deref())
+                .unwrap_or("")
+        };
+        let diff = if cur_isolated {
+            iclip_core::intelligence::ClipboardDiffSummary {
+                added_count: 0,
+                removed_count: 0,
+                json_semantically_equal: false,
+                lines: vec![iclip_core::intelligence::DiffLine {
+                    kind: DiffLineKind::Unchanged,
+                    text: "粘贴即焚或密文信封已开启跨卡隔离保护，不参与差异比对".to_string(),
+                }],
+            }
+        } else {
+            compute_clipboard_diff(older_txt, cur_txt)
+        };
 
         texts.push(TextDrawCmd {
             text: format!("对比上一条文本记录：{}", diff.badge_title()),

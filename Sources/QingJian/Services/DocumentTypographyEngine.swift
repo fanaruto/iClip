@@ -52,6 +52,18 @@ enum DocumentTypographyEngine {
             ))
         }
 
+        // 0.5 OCR / 旧文档「全半角与中西文标点精排」（自动还原 `２０２６` 全角数字字母并修正汉字旁半角 `,!():` 标点，保护小数与 URL）
+        if let punctCleaned = normalizeWidthAndCJKPunctuation(trimmed) {
+            let polished = containsUnspacedCJKAndLatin(punctCleaned) ? applyPanguSpacing(punctCleaned) : punctCleaned
+            actions.append(FinanceQuickAction(
+                id: "doc-normalize-punct",
+                title: "全半角与标点精排",
+                symbolName: "textformat.abc.dottedunderline",
+                resultText: polished,
+                toastText: "已规整全角字母数字、中西文标点与中英间距"
+            ))
+        }
+
         // 1. PDF 硬折行愈合检测（排除 Markdown 文档避免误缝标题）
         if actions.isEmpty && looksLikeBrokenPDFParagraphs(rawText) {
             let healed = healPDFLineBreaks(rawText)
@@ -418,5 +430,142 @@ enum DocumentTypographyEngine {
                 || (v >= 0x3000 && v <= 0x303F)     // 中文标点
                 || (v >= 0xFF00 && v <= 0xFFEF)     // 全角字符
         }
+    }
+
+    /// 将全角 ASCII 字母/数字/算术符号还原为半角，并将汉字两侧误用的半角英文标点精准规整为标准中文标点（严格保护 URL、小数 `3.14` 与时间 `18:30`）
+    static func normalizeWidthAndCJKPunctuation(_ raw: String) -> String? {
+        guard !raw.isEmpty, raw.utf8.count <= 32_768 else { return nil }
+        var fixCount = 0
+
+        // Step 1: 全角 ASCII 字母/数字与常见技术符号 -> 半角
+        let fullwidthTechSymbols: Set<UInt32> = [
+            0xFF03, 0xFF04, 0xFF05, 0xFF06, 0xFF0B, 0xFF0D, 0xFF0F, 0xFF1D, 0xFF20
+        ]
+        var halfConverted = String.UnicodeScalarView()
+        halfConverted.reserveCapacity(raw.unicodeScalars.count)
+        for sc in raw.unicodeScalars {
+            let v = sc.value
+            if (v >= 0xFF10 && v <= 0xFF19)
+                || (v >= 0xFF21 && v <= 0xFF3A)
+                || (v >= 0xFF41 && v <= 0xFF5A)
+                || fullwidthTechSymbols.contains(v),
+               let mapped = UnicodeScalar(v - 0xFEE0) {
+                halfConverted.append(mapped)
+                fixCount += 1
+            } else if v == 0x3000 {
+                halfConverted.append(UnicodeScalar(0x0020)!)
+                fixCount += 1
+            } else {
+                halfConverted.append(sc)
+            }
+        }
+
+        let stage1 = String(halfConverted)
+        let chars = Array(stage1)
+        let n = chars.count
+        guard n > 0 else { return nil }
+
+        // 标记 URL 区间，防止误改 URL 中的符号
+        var inURL = Array(repeating: false, count: n)
+        var idx = 0
+        while idx < n {
+            if idx + 7 < n {
+                let prefix7 = String(chars[idx..<(idx + 7)]).lowercased()
+                let prefix8 = (idx + 8 <= n) ? String(chars[idx..<(idx + 8)]).lowercased() : ""
+                if prefix7 == "http://" || prefix8 == "https://" {
+                    while idx < n && !chars[idx].isWhitespace {
+                        inURL[idx] = true
+                        idx += 1
+                    }
+                    continue
+                }
+            }
+            idx += 1
+        }
+
+        func isHan(_ c: Character?) -> Bool {
+            guard let c else { return false }
+            return c.unicodeScalars.contains { $0.value >= 0x4E00 && $0.value <= 0x9FFF }
+        }
+
+        // Step 2: 规整成对半角括号 `(...)`（当括号内含汉字且非函数调用标识符时转为 `（...）`）
+        var work = chars
+        var openStack: [Int] = []
+        for i in 0..<n where !inURL[i] {
+            if work[i] == "(" {
+                openStack.append(i)
+            } else if work[i] == ")", let openIdx = openStack.popLast() {
+                let prevChar: Character? = openIdx > 0 ? work[openIdx - 1] : nil
+                let isFuncCall = prevChar.map { ($0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_")) } ?? false
+                let innerSlice = work[(openIdx + 1)..<i]
+                if !isFuncCall && !innerSlice.contains("\n") && innerSlice.contains(where: { isHan($0) }) {
+                    work[openIdx] = "（"
+                    work[i] = "）"
+                    fixCount += 1
+                }
+            }
+        }
+
+        // Step 3: 规整紧邻汉字的 `,` `;` `?` `!` `:` `.`
+        var out: [Character] = []
+        out.reserveCapacity(n)
+        var i = 0
+        while i < n {
+            let ch = work[i]
+            if inURL[i] {
+                out.append(ch)
+                i += 1
+                continue
+            }
+            let prevNonSpace: Character? = out.last(where: { $0 != " " && $0 != "\t" })
+            let nextNonSpace: Character? = {
+                var k = i + 1
+                while k < n && (work[k] == " " || work[k] == "\t") { k += 1 }
+                return k < n ? work[k] : nil
+            }()
+
+            var replaced: Character? = nil
+            switch ch {
+            case ",":
+                if isHan(prevNonSpace) || isHan(nextNonSpace) { replaced = "，" }
+            case ";":
+                if isHan(prevNonSpace) || isHan(nextNonSpace) { replaced = "；" }
+            case "?":
+                if isHan(prevNonSpace) || isHan(nextNonSpace) { replaced = "？" }
+            case "!":
+                if (isHan(prevNonSpace) || isHan(nextNonSpace)) && nextNonSpace != "=" { replaced = "！" }
+            case ":":
+                if isHan(prevNonSpace) && nextNonSpace != "/" && !(nextNonSpace?.isNumber ?? false) {
+                    replaced = "："
+                }
+            case ".":
+                let nextImmediate: Character? = (i + 1 < n) ? work[i + 1] : nil
+                let isDecimalOrExt = (nextImmediate?.isASCII == true) && (nextImmediate?.isLetter == true || nextImmediate?.isNumber == true)
+                if isHan(prevNonSpace) && !isDecimalOrExt && (nextNonSpace == nil || nextNonSpace == "\n" || isHan(nextNonSpace)) {
+                    replaced = "。"
+                }
+            default:
+                break
+            }
+
+            if let rep = replaced {
+                if out.last == " " && isHan(prevNonSpace) {
+                    out.removeLast()
+                }
+                out.append(rep)
+                fixCount += 1
+                if i + 1 < n && work[i + 1] == " " {
+                    i += 2
+                    continue
+                }
+            } else {
+                out.append(ch)
+            }
+            i += 1
+        }
+
+        let finalStr = String(out)
+        guard fixCount >= 2, finalStr != raw else { return nil }
+        return finalStr
     }
 }
