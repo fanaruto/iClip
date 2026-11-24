@@ -145,6 +145,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         switchRoleItem.target = self
         menu.addItem(switchRoleItem)
 
+        let onboardingItem = NSMenuItem(title: "查看新手与新功能引导...", action: #selector(menuShowOnboardingHighlights), keyEquivalent: "")
+        onboardingItem.target = self
+        menu.addItem(onboardingItem)
+
         let store = ClipboardStore.shared
         if !store.minimalModeEnabled {
             let pendingCount = store.pendingTodoCount
@@ -242,6 +246,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         showFromStatusItem()
         panelController.nav.showSettings = true
         UpdateManager.shared.checkForUpdates(targetEdition: ClipboardStore.shared.targetRoleEdition, silent: false)
+    }
+
+    @objc private func menuShowOnboardingHighlights() {
+        panelController.nav.showSettings = false
+        showFromStatusItem()
+        InteractivePlaygroundController.shared.showHighlights()
     }
 
     @objc private func menuToggleAlwaysOnTop() {

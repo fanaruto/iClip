@@ -2186,8 +2186,27 @@ struct ClipboardPopoverView: View {
                     }
                 }
 
-                // 按需展开的键盘快捷键速查表（默认折叠，告别长列表刷屏）
+                // 按需查看的新手引导与键盘快捷键速查表（默认折叠，告别长列表刷屏）
                 settingsGroup(title: "帮助") {
+                    Button {
+                        nav.showSettings = false
+                        playground.showHighlights()
+                    } label: {
+                        HStack {
+                            Text("查看新手与新功能引导")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(.primary)
+                            Spacer()
+                            Image(systemName: "sparkles")
+                                .font(.system(size: 11.5, weight: .semibold))
+                                .foregroundStyle(Color.accentColor)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+
+                    Divider().opacity(0.35)
+
                     Button {
                         withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
                             showShortcutReference.toggle()
@@ -4995,8 +5014,27 @@ struct ClipboardPopoverView: View {
                     }
                 }
 
-                // 按需展开的键盘快捷键速查表（默认折叠，告别长列表刷屏）
+                // 按需查看的新手引导与键盘快捷键速查表（默认折叠，告别长列表刷屏）
                 settingsGroup(title: "帮助") {
+                    Button {
+                        nav.showSettings = false
+                        playground.showHighlights()
+                    } label: {
+                        HStack {
+                            Text("查看新手与新功能引导")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(.primary)
+                            Spacer()
+                            Image(systemName: "sparkles")
+                                .font(.system(size: 11.5, weight: .semibold))
+                                .foregroundStyle(Color.accentColor)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+
+                    Divider().opacity(0.35)
+
                     Button {
                         withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
                             showShortcutReference.toggle()

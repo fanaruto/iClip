@@ -852,10 +852,10 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         }
 
         if InteractivePlaygroundController.shared.isActive, !nav.showSettings {
-            if event.keyCode == 53 || event.keyCode == 36 || event.keyCode == 76 {
+            if event.keyCode == 53 || event.keyCode == 36 || event.keyCode == 76 || event.keyCode == 49 || (flags == .command && event.keyCode == 13) {
                 InteractivePlaygroundController.shared.dismiss(in: store)
-                return nil
             }
+            return nil
         }
 
         // QuickLook 原位微调编辑态：放行全部原生文本编辑键，支持 ESC 退出、⌘↵ 直贴、⌘S 存回原条目
@@ -1812,10 +1812,10 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         }
 
         if InteractivePlaygroundController.shared.isActive, !nav.showSettings {
-            if event.keyCode == 53 || event.keyCode == 36 || event.keyCode == 76 {
+            if event.keyCode == 53 || event.keyCode == 36 || event.keyCode == 76 || event.keyCode == 49 || (flags == .command && event.keyCode == 13) {
                 InteractivePlaygroundController.shared.dismiss(in: store)
-                return nil
             }
+            return nil
         }
 
         // QuickLook 原位微调编辑态：放行全部原生文本编辑键，支持 ESC 退出、⌘↵ 直贴、⌘S 存回原条目

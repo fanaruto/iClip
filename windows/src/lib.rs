@@ -2037,5 +2037,10 @@ mod tests {
             .result_text
             .contains("☐ 官网 点击访问 (https://app.webfooo.com/iClip)"));
         assert!(strip_act.result_text.contains("2 * 3 * 4 = 24"));
+
+        // 5. 验证 v2.7 新手与新功能引导 4 大核心亮点配置与默认首次弹出状态
+        assert_eq!(crate::store::CORE_HIGHLIGHTS_V27.len(), 4);
+        assert_eq!(crate::store::CORE_HIGHLIGHTS_V27[0].0, "唤醒零失焦直贴");
+        assert!(!crate::store::StoreConfig::default().has_seen_highlights_v27);
     }
 }

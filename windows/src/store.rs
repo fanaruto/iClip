@@ -110,7 +110,28 @@ pub struct StoreConfig {
     pub blur_concentration_pct: u8,
     #[serde(default = "default_max_history")]
     pub max_history_count: usize,
+    #[serde(default)]
+    pub has_seen_highlights_v27: bool,
 }
+
+pub const CORE_HIGHLIGHTS_V27: [(&str, &str); 4] = [
+    (
+        "唤醒零失焦直贴",
+        "在搜索框或弹层内呼出不丢原焦点，按 Enter 瞬间顺手键入当前位置。",
+    ),
+    (
+        "零信任隐私护盾",
+        "全库硬件加密与投屏自动隐身，密钥默认圆点遮罩，Shift+Enter 一键 AI 替身脱敏。",
+    ),
+    (
+        "剪贴即待办与净文",
+        "Ctrl+T 一键转待办；AI 回复一键褪去 Markdown 符号，表格直粘 Excel 分列。",
+    ),
+    (
+        "自由流转与极简开关",
+        "Tab 秒切分类，方向键二维选图，按 Ctrl+E 随时切回极简纯净模式。",
+    ),
+];
 
 impl Default for StoreConfig {
     fn default() -> Self {
@@ -140,6 +161,7 @@ impl Default for StoreConfig {
             glass_appearance: GlassAppearance::Tinted,
             blur_concentration_pct: 38,
             max_history_count: 200,
+            has_seen_highlights_v27: false,
         }
     }
 }

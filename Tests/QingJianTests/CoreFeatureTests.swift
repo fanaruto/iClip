@@ -570,6 +570,8 @@ final class CoreFeatureTests: XCTestCase {
     @MainActor
     func testCoreHighlightsShowAndDismiss() {
         let ctrl = InteractivePlaygroundController.shared
+        XCTAssertEqual(InteractivePlaygroundController.coreHighlights.count, 4)
+        XCTAssertEqual(InteractivePlaygroundController.coreHighlights.first?.title, "唤醒零失焦直贴")
         ctrl.showHighlights()
         XCTAssertTrue(ctrl.isActive)
         ctrl.dismiss()

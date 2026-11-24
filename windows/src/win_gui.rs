@@ -245,6 +245,8 @@ enum HitAction {
     ImportArchive,
     ClearUnpinnedHistory,
     TogglePauseCapture,
+    ShowHighlightsOverlay,
+    DismissHighlightsOverlay,
     ToggleShortcutRef,
     QuitApp,
 }
@@ -286,6 +288,7 @@ struct WinAppState {
     hotkey_conflict_error: Option<String>,
     hotkey_recording_hint: Option<String>,
     show_quick_look: bool,
+    show_highlights_overlay: bool,
     quick_look_diff_mode: bool,
     quick_look_scroll: usize,
     editing_alias_item_id: Option<String>,
@@ -431,6 +434,7 @@ pub fn run_windows_app() -> i32 {
 
         iclip_core::security::wipe_all_temp_previews();
         let store = ClipboardStore::new(ClipboardStore::default_app_data_dir());
+        let init_highlights = !store.config.has_seen_highlights_v27;
         let sys_dark = query_windows_system_dark_mode();
         apply_dwm_glass_style(hwnd, sys_dark, store.config.blur_concentration_pct);
         apply_screen_capture_shield(hwnd, store.config.screen_share_privacy);
@@ -476,6 +480,7 @@ pub fn run_windows_app() -> i32 {
                 hotkey_conflict_error: None,
                 hotkey_recording_hint: None,
                 show_quick_look: false,
+                show_highlights_overlay: init_highlights,
                 quick_look_diff_mode: false,
                 quick_look_scroll: 0,
                 editing_alias_item_id: None,
@@ -631,6 +636,7 @@ pub fn run_windows_self_test() -> Result<(), String> {
             hotkey_conflict_error: None,
             hotkey_recording_hint: None,
             show_quick_look: false,
+            show_highlights_overlay: false,
             quick_look_diff_mode: false,
             quick_look_scroll: 0,
             editing_alias_item_id: None,
@@ -3657,7 +3663,17 @@ unsafe fn render_panel_frame_dib(
     // 再叠加悬浮 Toast 灵动胶囊或原位速览浮层（确保浮层遮罩自然压暗下层正文！）
     {
         let mut canvas = PixelCanvas::new(dib_pixels, w, h);
-        if st.show_quick_look {
+        if st.show_highlights_overlay && st.view_mode == ActiveViewMode::MainList {
+            layout_and_draw_highlights_overlay(
+                &mut canvas,
+                &mut overlay_texts,
+                w,
+                h,
+                scale,
+                &palette,
+                st,
+            );
+        } else if st.show_quick_look {
             layout_and_draw_quick_look_overlay(
                 &mut canvas,
                 &mut overlay_texts,
@@ -7374,9 +7390,9 @@ fn layout_and_draw_settings_view(
         ("快速键入前 9 条", "Ctrl + 1 ~ 9".to_string()),
     ];
     let g5_h = if st.show_shortcut_ref {
-        s(38) + (sc_list.len() as i32) * s(28) + s(6)
+        s(76) + (sc_list.len() as i32) * s(28) + s(6)
     } else {
-        s(38)
+        s(76)
     };
     if visible_block(y, g5_h) {
         canvas.fill_round_rect(pad, y, content_w, g5_h, sf(14.0), palette.group_fill);
@@ -7390,7 +7406,7 @@ fn layout_and_draw_settings_view(
             palette.group_stroke,
         );
         texts.push(TextDrawCmd {
-            text: "键盘快捷键速查".to_string(),
+            text: "查看新手与新功能引导".to_string(),
             rect: RECT {
                 left: pad + s(12),
                 top: y,
@@ -7401,13 +7417,13 @@ fn layout_and_draw_settings_view(
             font_kind: FontKind::CardTitle,
             flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE,
         });
-        canvas.draw_icon_chevron_ud(
+        canvas.draw_icon_star(
             (w - pad - s(18)) as f32,
             (y + s(19)) as f32,
-            sf(11.0),
-            sf(1.5),
-            palette.text_secondary,
-            st.show_shortcut_ref,
+            sf(12.0),
+            sf(1.35),
+            palette.cobalt,
+            true,
         );
         st.hit_regions.push(HitRegion {
             rect: RECT {
@@ -7417,11 +7433,51 @@ fn layout_and_draw_settings_view(
                 bottom: y + s(38),
             },
             interactive_cursor: true,
+            action: HitAction::ShowHighlightsOverlay,
+        });
+
+        let ky = y + s(38);
+        canvas.draw_line(
+            (pad + s(12)) as f32,
+            ky as f32,
+            (w - pad - s(12)) as f32,
+            ky as f32,
+            sf(0.7),
+            palette.divider,
+        );
+        texts.push(TextDrawCmd {
+            text: "键盘快捷键速查".to_string(),
+            rect: RECT {
+                left: pad + s(12),
+                top: ky,
+                right: w - pad - s(36),
+                bottom: ky + s(38),
+            },
+            color: palette.text_primary,
+            font_kind: FontKind::CardTitle,
+            flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        });
+        canvas.draw_icon_chevron_ud(
+            (w - pad - s(18)) as f32,
+            (ky + s(19)) as f32,
+            sf(11.0),
+            sf(1.5),
+            palette.text_secondary,
+            st.show_shortcut_ref,
+        );
+        st.hit_regions.push(HitRegion {
+            rect: RECT {
+                left: pad,
+                top: ky,
+                right: w - pad,
+                bottom: ky + s(38),
+            },
+            interactive_cursor: true,
             action: HitAction::ToggleShortcutRef,
         });
 
         if st.show_shortcut_ref {
-            let mut sy = y + s(38);
+            let mut sy = ky + s(38);
             for (desc, key_str) in sc_list {
                 canvas.draw_line(
                     (pad + s(12)) as f32,
@@ -8020,6 +8076,180 @@ fn layout_and_draw_quick_look_overlay(
         color: palette.text_muted,
         font_kind: FontKind::Meta,
         flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+    });
+}
+
+fn layout_and_draw_highlights_overlay(
+    canvas: &mut PixelCanvas,
+    texts: &mut Vec<TextDrawCmd>,
+    w: i32,
+    h: i32,
+    scale: f32,
+    palette: &GlassPalette,
+    st: &mut WinAppState,
+) {
+    let s = |v: i32| ((v as f32) * scale).round() as i32;
+    let sf = |v: f32| v * scale;
+
+    st.hit_regions.clear();
+    canvas.fill_round_rect(
+        0,
+        0,
+        w,
+        h,
+        sf(18.0),
+        if st.is_dark_mode {
+            Color4::rgba(8, 10, 14, 152)
+        } else {
+            Color4::rgba(15, 23, 42, 72)
+        },
+    );
+
+    let mw = s(364).min(w - s(24));
+    let mh = s(386).min(h - s(36));
+    let mx = (w - mw) / 2;
+    let my = (h - mh) / 2;
+
+    canvas.fill_soft_shadow(
+        mx,
+        my + s(6),
+        mw,
+        mh,
+        sf(20.0),
+        sf(18.0),
+        Color4::rgba(0, 0, 0, if st.is_dark_mode { 98 } else { 42 }),
+    );
+    let modal_bg = if st.is_dark_mode {
+        Color4::rgba(26, 29, 38, 250)
+    } else {
+        Color4::rgba(250, 252, 255, 252)
+    };
+    canvas.fill_round_rect(mx, my, mw, mh, sf(20.0), modal_bg);
+
+    texts.push(TextDrawCmd {
+        text: "欢迎使用 iClip 2.7".to_string(),
+        rect: RECT {
+            left: mx + s(22),
+            top: my + s(20),
+            right: mx + mw - s(22),
+            bottom: my + s(46),
+        },
+        color: palette.text_primary,
+        font_kind: FontKind::Title,
+        flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    });
+    texts.push(TextDrawCmd {
+        text: "轻如无物，一呼即贴 · 按 Enter 立即开始".to_string(),
+        rect: RECT {
+            left: mx + s(22),
+            top: my + s(46),
+            right: mx + mw - s(22),
+            bottom: my + s(66),
+        },
+        color: palette.text_secondary,
+        font_kind: FontKind::Meta,
+        flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    });
+
+    let tints = [
+        Color4::rgb(30, 94, 255),
+        Color4::rgb(20, 158, 115),
+        Color4::rgb(56, 122, 245),
+        Color4::rgb(40, 143, 133),
+    ];
+
+    let mut ry = my + s(78);
+    for (idx, (title, detail)) in iclip_core::store::CORE_HIGHLIGHTS_V27.iter().enumerate() {
+        let bx = mx + s(22);
+        let by = ry + s(2);
+        let bsz = s(32);
+        let tint = tints[idx];
+        canvas.fill_round_rect(
+            bx,
+            by,
+            bsz,
+            bsz,
+            sf(9.0),
+            tint.with_alpha(if st.is_dark_mode { 56 } else { 34 }),
+        );
+        let icx = (bx + bsz / 2) as f32;
+        let icy = (by + bsz / 2) as f32;
+        match idx {
+            0 => canvas.draw_icon_bolt(icx, icy, sf(14.0), sf(1.5), tint),
+            1 => canvas.draw_icon_check_circle(
+                icx,
+                icy,
+                sf(15.0),
+                sf(1.5),
+                tint,
+                true,
+                Color4::rgb(255, 255, 255),
+            ),
+            2 => canvas.draw_icon_clipboard(icx, icy, sf(14.0), sf(1.5), tint),
+            _ => canvas.draw_icon_leaf(icx, icy, sf(14.0), sf(1.5), tint),
+        }
+
+        texts.push(TextDrawCmd {
+            text: (*title).to_string(),
+            rect: RECT {
+                left: bx + bsz + s(11),
+                top: ry,
+                right: mx + mw - s(20),
+                bottom: ry + s(20),
+            },
+            color: palette.text_primary,
+            font_kind: FontKind::CardTitle,
+            flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        });
+        texts.push(TextDrawCmd {
+            text: (*detail).to_string(),
+            rect: RECT {
+                left: bx + bsz + s(11),
+                top: ry + s(20),
+                right: mx + mw - s(20),
+                bottom: ry + s(54),
+            },
+            color: palette.text_secondary,
+            font_kind: FontKind::Meta,
+            flags: DT_LEFT | DT_WORDBREAK,
+        });
+        ry += s(60);
+    }
+
+    let btn_x = mx + s(22);
+    let btn_w = mw - s(44);
+    let btn_h = s(36);
+    let btn_y = my + mh - btn_h - s(18);
+    canvas.fill_round_rect(
+        btn_x,
+        btn_y,
+        btn_w,
+        btn_h,
+        sf(18.0),
+        Color4::rgb(30, 94, 255),
+    );
+    texts.push(TextDrawCmd {
+        text: "开始使用".to_string(),
+        rect: RECT {
+            left: btn_x,
+            top: btn_y,
+            right: btn_x + btn_w,
+            bottom: btn_y + btn_h,
+        },
+        color: Color4::rgb(255, 255, 255),
+        font_kind: FontKind::CardTitle,
+        flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+    });
+
+    st.hit_regions.push(HitRegion {
+        rect: RECT {
+            left: 0,
+            top: 0,
+            right: w,
+            bottom: h,
+        },
+        interactive_cursor: true,
+        action: HitAction::DismissHighlightsOverlay,
     });
 }
 
@@ -8624,6 +8854,27 @@ unsafe fn handle_left_click(hwnd: HWND, x: i32, y: i32, is_double: bool) {
                 },
             );
         }
+        HitAction::ShowHighlightsOverlay => {
+            APP_STATE.with(|c| {
+                if let Some(st) = c.borrow_mut().as_mut() {
+                    st.view_mode = ActiveViewMode::MainList;
+                    st.show_highlights_overlay = true;
+                }
+            });
+            let _ = InvalidateRect(hwnd, null(), FALSE);
+        }
+        HitAction::DismissHighlightsOverlay => {
+            APP_STATE.with(|c| {
+                if let Some(st) = c.borrow_mut().as_mut() {
+                    st.show_highlights_overlay = false;
+                    if !st.store.config.has_seen_highlights_v27 {
+                        st.store.config.has_seen_highlights_v27 = true;
+                        st.store.save_config();
+                    }
+                }
+            });
+            let _ = InvalidateRect(hwnd, null(), FALSE);
+        }
         HitAction::ToggleShortcutRef => {
             APP_STATE.with(|c| {
                 if let Some(st) = c.borrow_mut().as_mut() {
@@ -8883,6 +9134,30 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32) {
         } else if vk == VK_RETURN as u32 {
             save_current_alias_draft(hwnd);
         }
+        return;
+    }
+
+    let dismissed_highlights = APP_STATE.with(|c| {
+        let mut b = c.borrow_mut();
+        let Some(st) = b.as_mut() else { return false };
+        if st.show_highlights_overlay && st.view_mode == ActiveViewMode::MainList {
+            if vk == VK_ESCAPE as u32
+                || vk == VK_RETURN as u32
+                || vk == VK_SPACE as u32
+                || (ctrl_down && !alt_down && !shift_down && vk == 0x57)
+            {
+                st.show_highlights_overlay = false;
+                if !st.store.config.has_seen_highlights_v27 {
+                    st.store.config.has_seen_highlights_v27 = true;
+                    st.store.save_config();
+                }
+            }
+            return true;
+        }
+        false
+    });
+    if dismissed_highlights {
+        let _ = InvalidateRect(hwnd, null(), FALSE);
         return;
     }
 
