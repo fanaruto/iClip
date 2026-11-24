@@ -760,13 +760,17 @@ pub fn run_windows_self_test() -> Result<(), String> {
             Some(Color4::rgb(226, 234, 246)),
         )?;
         let settings_hits = state.hit_regions.len();
-        if settings_hits < 10 {
+        let has_ota_btn = state
+            .hit_regions
+            .iter()
+            .any(|h| matches!(h.action, HitAction::CheckForUpdates));
+        if settings_hits < 8 || !has_ota_btn {
             ReleaseDC(hwnd, screen_dc);
             let _ = RemoveClipboardFormatListener(hwnd);
             DestroyWindow(hwnd);
             let _ = std::fs::remove_dir_all(&tmp_dir);
             return Err(format!(
-                "Expected settings hit regions >= 10, got {settings_hits}"
+                "Expected settings hit regions >= 8 with OTA button, got {settings_hits} (has_ota={has_ota_btn})"
             ));
         }
         if let Some(dir) = &snap_dir {
