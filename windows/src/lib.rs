@@ -1776,4 +1776,58 @@ mod tests {
 
         let _ = fs::remove_dir_all(tmp_dir);
     }
+
+    #[test]
+    fn test_curl_safe_repro_sanitizer_jsonc_strict_cleaner_and_inline_curl_cred_veil() {
+        use crate::engines::analyze_text_actions;
+        use crate::security::{
+            classify_sensitive_text, clean_jsonc_to_strict_json, sanitize_curl_for_repro,
+            SensitiveSecretKind,
+        };
+
+        // 1. 验证 Chrome `Copy as cURL` 剥除浏览器噪音头并替换 Cookie / Authorization 为安全占位符
+        let fake_jwt = format!(
+            "{}{}{}",
+            "eyJhbGciOiJIUzI1NiJ9.",
+            "eyJzdWIiOiJ1c2VyOTkifQ.",
+            "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+        );
+        let dirty_curl = format!(
+            "curl 'https://api.example.com/v1/orders?page=1&utm_source=chrome' \\\n  -H 'sec-ch-ua: \"Chromium\";v=\"128\"' \\\n  -H 'sec-fetch-site: same-origin' \\\n  -H 'user-agent: Mozilla/5.0' \\\n  -H 'accept: application/json' \\\n  -H 'authorization: Bearer {fake_jwt}' \\\n  -b 'sid=real_session_secret_8899' \\\n  --compressed"
+        );
+        let (clean_curl, red_cnt, noise_cnt) = sanitize_curl_for_repro(&dirty_curl).unwrap();
+        assert!(red_cnt >= 2);
+        assert!(noise_cnt >= 3);
+        assert!(!clean_curl.contains(&fake_jwt));
+        assert!(!clean_curl.contains("real_session_secret_8899"));
+        assert!(!clean_curl.contains("sec-ch-ua"));
+        assert!(clean_curl.contains("Bearer $AUTH_TOKEN"));
+        assert!(clean_curl.contains("$REDACTED_COOKIE"));
+        assert!(clean_curl.contains("https://api.example.com/v1/orders?page=1"));
+
+        let curl_actions = analyze_text_actions(&dirty_curl, false);
+        assert!(curl_actions.iter().any(|a| a.id == "curl-safe-repro"));
+
+        let basic_curl = format!(
+            "{}{}",
+            "curl -u admin:", "ProdPass#2026 https://corp.local/ping"
+        );
+        assert_eq!(
+            classify_sensitive_text(&basic_curl),
+            Some(SensitiveSecretKind::ConnectionSecret)
+        );
+        assert!(!redact_secrets(&basic_curl).contains("ProdPass#2026"));
+
+        // 2. 验证带注释与尾随逗号的 JSONC 精准净化为标准合法 JSON（保护字符串内部 `https://` 与 `/*`）
+        let raw_jsonc = "// 网关配置\n{\n  \"endpoint\": \"https://api.example.com/v1/*keep*/\", // 行尾注释\n  /* 块注释 */\n  \"timeoutMs\": 3000,\n  \"features\": [\"auth\", \"retry\",],\n}";
+        let strict_json = clean_jsonc_to_strict_json(raw_jsonc).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&strict_json).unwrap();
+        assert_eq!(
+            parsed["endpoint"].as_str(),
+            Some("https://api.example.com/v1/*keep*/")
+        );
+        assert_eq!(parsed["timeoutMs"].as_i64(), Some(3000));
+        assert_eq!(parsed["features"].as_array().unwrap().len(), 2);
+        assert!(clean_jsonc_to_strict_json(r#"{"ok": true}"#).is_none());
+    }
 }

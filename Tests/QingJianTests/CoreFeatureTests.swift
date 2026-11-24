@@ -2773,4 +2773,55 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertNil(ClipboardStore.shared.lastImportedDragPNGData)
         XCTAssertNil(ClipboardStore.shared.lastImportedDragPreviewCGImage)
     }
+
+    // MARK: - 55. cURL 安全复现瘦身、容错 JSONC 净化与 `curl -u/-b` 凭据脱敏测试
+
+    @MainActor
+    func testCurlSafeReproductionSanitizerJSONCCleanerAndInlineCurlCredentialVeil() throws {
+        // 1. 验证 Chrome `Copy as cURL` 剥除浏览器指纹噪音头并将 Cookie / Authorization / -u 替换为安全占位符
+        let fakeBearer = "eyJhbGciOiJIUzI1NiJ9." + "eyJzdWIiOiJ1c2VyOTkifQ." + "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+        let dirtyCurl = """
+        curl 'https://api.example.com/v1/orders?page=1&utm_source=chrome' \\
+          -H 'sec-ch-ua: "Chromium";v="128"' \\
+          -H 'sec-fetch-site: same-origin' \\
+          -H 'user-agent: Mozilla/5.0' \\
+          -H 'accept: application/json' \\
+          -H 'authorization: Bearer \(fakeBearer)' \\
+          -b 'sid=real_session_secret_8899' \\
+          --compressed
+        """
+        let curlRes = try XCTUnwrap(CurlAndJSONCSanitizer.sanitizeCurlForReproduction(dirtyCurl))
+        XCTAssertGreaterThanOrEqual(curlRes.redactedSecrets, 2)
+        XCTAssertGreaterThanOrEqual(curlRes.removedNoiseHeaders, 3)
+        XCTAssertFalse(curlRes.cleanedCurl.contains(fakeBearer))
+        XCTAssertFalse(curlRes.cleanedCurl.contains("real_session_secret_8899"))
+        XCTAssertFalse(curlRes.cleanedCurl.contains("sec-ch-ua"))
+        XCTAssertTrue(curlRes.cleanedCurl.contains("Bearer $AUTH_TOKEN"))
+        XCTAssertTrue(curlRes.cleanedCurl.contains("$REDACTED_COOKIE"))
+        XCTAssertTrue(curlRes.cleanedCurl.contains("https://api.example.com/v1/orders?page=1"))
+
+        // 验证 `curl -u user:pass` 内联账密敏感分类与掩码
+        let basicCurl = "curl -u admin:" + "ProdPass#2026 https://internal.corp/health"
+        XCTAssertEqual(SensitiveCredentialVeil.classify(basicCurl), .connectionSecret)
+        XCTAssertFalse(SensitiveCredentialVeil.redactForExternalSharing(basicCurl).contains("ProdPass#2026"))
+
+        // 2. 验证带 `//`、`/* */` 注释与尾随逗号的 JSONC 精准净化为标准合法 JSON（且严格保护字符串内 `https://` 不被误剥）
+        let rawJSONC = """
+        // 服务网关配置
+        {
+          "endpoint": "https://api.example.com/v1/*keep*/", // 字符串内双斜杠与块注释符必须完整保留
+          /* 超时毫秒数 */
+          "timeoutMs": 3000,
+          "features": ["auth", "retry",],
+        }
+        """
+        let strictJSON = try XCTUnwrap(CurlAndJSONCSanitizer.cleanJSONCToStrictJSON(rawJSONC))
+        let parsedObj = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(strictJSON.utf8)) as? [String: Any])
+        XCTAssertEqual(parsedObj["endpoint"] as? String, "https://api.example.com/v1/*keep*/")
+        XCTAssertEqual(parsedObj["timeoutMs"] as? Int, 3000)
+        XCTAssertEqual(parsedObj["features"] as? [String], ["auth", "retry"])
+
+        // 原本已是合法 JSON 的不触发 JSONC 净化
+        XCTAssertNil(CurlAndJSONCSanitizer.cleanJSONCToStrictJSON(#"{"ok": true}"#))
+    }
 }

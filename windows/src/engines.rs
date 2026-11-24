@@ -184,7 +184,62 @@ pub fn analyze_text_actions(raw: &str, minimal_mode: bool) -> Vec<QuickAction> {
         }
     }
 
-    // 0.85 双角色共享：公域外发去鉴权净链 & 营销追踪参数净链
+    // 0.85 双角色共享：cURL 安全复现瘦身、容错 JSONC 净化、公域去鉴权净链 & 营销追踪净链
+    if trimmed
+        .as_bytes()
+        .get(..5)
+        .map(|s| s.eq_ignore_ascii_case(b"curl ") || s.eq_ignore_ascii_case(b"curl\t"))
+        .unwrap_or(false)
+    {
+        if let Some((clean_curl, red_cnt, noise_cnt)) =
+            crate::security::sanitize_curl_for_repro(raw)
+        {
+            let is_sec = red_cnt > 0;
+            let insert_idx = if actions.first().map(|a| a.id) == Some("restore-privacy-twin") {
+                1.min(actions.len())
+            } else {
+                actions
+                    .iter()
+                    .take_while(|a| a.id == "redact-secrets" || a.id == "redact-reversible-twin")
+                    .count()
+                    .min(actions.len())
+            };
+            actions.insert(
+                insert_idx,
+                QuickAction {
+                    id: if is_sec {
+                        "curl-safe-repro"
+                    } else {
+                        "curl-slim-clean"
+                    },
+                    title: if is_sec {
+                        "安全复现 cURL".to_string()
+                    } else {
+                        "精简纯净 cURL".to_string()
+                    },
+                    is_security: is_sec,
+                    result_text: clean_curl,
+                    html_table_payload: None,
+                    toast_text: if is_sec {
+                        format!("已脱敏 {red_cnt} 处凭据并剥除 {noise_cnt} 个浏览器噪音头")
+                    } else {
+                        format!("已剥除 {noise_cnt} 个浏览器指纹噪音头")
+                    },
+                },
+            );
+        }
+    } else if raw.len() <= 65_536 {
+        if let Some(strict_json) = crate::security::clean_jsonc_to_strict_json(raw) {
+            actions.push(QuickAction {
+                id: "jsonc-clean-strict",
+                title: "净化为标准 JSON".to_string(),
+                is_security: false,
+                result_text: strict_json,
+                html_table_payload: None,
+                toast_text: "已剥除注释与尾随逗号，转为标准合法 JSON".to_string(),
+            });
+        }
+    }
     if !trimmed.contains('\n') && trimmed.len() <= 4096 {
         if let Some(public_url) = sanitize_url_for_public_share(trimmed) {
             actions.insert(
@@ -2002,6 +2057,11 @@ pub fn redact_secrets(text: &str) -> String {
             "Bearer",
             r"(?i)(Bearer\s+)[A-Za-z0-9\-._~+/]{20,}=*",
             "${1}***REDACTED***",
+        ),
+        (
+            "curl",
+            r##"(?i)(\bcurl\b[\s\S]{0,600}?\s(?:-u|--user|-b|--cookie)\s+['"]?)([^'"\s]{6,})(['"]?)"##,
+            "${1}***REDACTED***${3}",
         ),
         (
             "://",

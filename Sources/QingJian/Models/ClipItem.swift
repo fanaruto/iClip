@@ -1034,6 +1034,8 @@ enum URLReadableHelper {
 /// 剪贴板拖拽即成文件（Drag-Out File Materialization）智能类型推断与可读命名引擎
 enum DragFileExportHelper {
     private static let illegalFilenameChars = CharacterSet(charactersIn: "/:\\\"*?<>|\r\n\t\0")
+    private static let sweepLock = NSLock()
+    private static var activeSweepWorkItem: DispatchWorkItem?
     private static let timestampFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "yyyyMMdd-HHmmss"
@@ -1131,7 +1133,13 @@ enum DragFileExportHelper {
         let dir = exportDirectory ?? fm.temporaryDirectory.appendingPathComponent("iClipDragExports", isDirectory: true)
         try? fm.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
-        pruneStaleExports(in: dir)
+        pruneStaleExports(in: dir, maxAgeSeconds: 60)
+
+        let isDefaultExportDir = (exportDirectory == nil)
+        let isSensitiveOrBurn = item.isBurnAfterPaste || item.detectedSensitiveKind != nil
+        if isDefaultExportDir {
+            scheduleActiveExportSweep(afterSeconds: isSensitiveOrBurn ? 20.0 : 65.0)
+        }
 
         switch item.type {
         case .image:
@@ -1224,7 +1232,19 @@ enum DragFileExportHelper {
         return joined.isEmpty ? nil : joined
     }
 
-    private static func pruneStaleExports(in directory: URL) {
+    private static func scheduleActiveExportSweep(afterSeconds delay: TimeInterval) {
+        sweepLock.lock()
+        activeSweepWorkItem?.cancel()
+        let work = DispatchWorkItem {
+            let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iClipDragExports", isDirectory: true)
+            pruneStaleExports(in: dir, maxAgeSeconds: max(15, delay - 2))
+        }
+        activeSweepWorkItem = work
+        sweepLock.unlock()
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private static func pruneStaleExports(in directory: URL, maxAgeSeconds: TimeInterval = 60) {
         let fm = FileManager.default
         guard let files = try? fm.contentsOfDirectory(
             at: directory,
@@ -1234,7 +1254,7 @@ enum DragFileExportHelper {
         let now = Date()
         for f in files {
             if let mod = (try? f.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate,
-               now.timeIntervalSince(mod) > 600 {
+               now.timeIntervalSince(mod) > maxAgeSeconds {
                 try? fm.removeItem(at: f)
             }
         }

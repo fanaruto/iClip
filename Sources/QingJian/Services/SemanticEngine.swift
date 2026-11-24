@@ -398,9 +398,22 @@ enum SemanticEngine {
             }
         }
 
-        // 2. cURL 命令识别与提取 URL / 转 JS fetch()
+        // 2. cURL 命令识别与安全复现瘦身 / 提取 URL / 转 JS fetch()
         if trimmed.lowercased().hasPrefix("curl ") || trimmed.lowercased().hasPrefix("curl\t") {
             if primaryKind == nil { primaryKind = .curlCommand }
+            if let sanitizedCurl = CurlAndJSONCSanitizer.sanitizeCurlForReproduction(raw) {
+                let isSec = sanitizedCurl.redactedSecrets > 0
+                actions.append(TransformAction(
+                    id: isSec ? "curl-safe-repro" : "curl-slim-clean",
+                    title: isSec ? "安全复现 cURL" : "精简纯净 cURL",
+                    symbolName: isSec ? "checkmark.shield" : "sparkles",
+                    isSecurityAction: isSec,
+                    resultText: sanitizedCurl.cleanedCurl,
+                    toastText: isSec
+                        ? "已脱敏 \(sanitizedCurl.redactedSecrets) 处凭据并剥除 \(sanitizedCurl.removedNoiseHeaders) 个浏览器噪音头"
+                        : "已剥除 \(sanitizedCurl.removedNoiseHeaders) 个浏览器指纹噪音头"
+                ))
+            }
             if let extractedURL = extractURLFromCurl(raw) {
                 actions.append(TransformAction(
                     id: "curl-url",
@@ -534,6 +547,17 @@ enum SemanticEngine {
                     ))
                 }
             }
+        } else if raw.utf8.count <= 65_536,
+                  let strictJSON = CurlAndJSONCSanitizer.cleanJSONCToStrictJSON(raw) {
+            if primaryKind == nil { primaryKind = .json }
+            actions.append(TransformAction(
+                id: "jsonc-clean-strict",
+                title: "净化为标准 JSON",
+                symbolName: "curlybraces.square",
+                isSecurityAction: false,
+                resultText: strictJSON,
+                toastText: "已剥除注释与尾随逗号，转为标准合法 JSON"
+            ))
         }
 
         // 5. Unix 时间戳检测（秒级 10 位 / 毫秒级 13 位）

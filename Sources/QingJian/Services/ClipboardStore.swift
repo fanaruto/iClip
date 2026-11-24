@@ -1609,12 +1609,20 @@ final class ClipboardStore: ObservableObject {
                 return false
             }
 
+            let paths = cleanURLs.compactMap { $0.path }
+            let isSensitiveFiles = FileAndLinkSecurityGuard.classifyFilePaths(paths) != nil
             pasteboard.clearContents()
             pasteboard.writeObjects(cleanURLs)
-            ignoreNextChangeCount = pasteboard.changeCount
-            lastChangeCount = pasteboard.changeCount
+            if isSensitiveFiles {
+                PasteboardPrivacyStandards.applyLocalOnlyConcealedProtection(to: pasteboard)
+            }
+            let writtenCount = pasteboard.changeCount
+            ignoreNextChangeCount = writtenCount
+            lastChangeCount = writtenCount
+            if isSensitiveFiles {
+                scheduleConcealedPasteboardScrubIfNeeded(capturedChangeCount: writtenCount, delaySeconds: 45.0)
+            }
 
-            let paths = cleanURLs.compactMap { $0.path }
             let hash = Self.sha256(paths.joined(separator: "\n"))
             let item = ClipItem(
                 type: .file,
@@ -2157,10 +2165,20 @@ final class ClipboardStore: ObservableObject {
     func copyPlainPathOrText(_ item: ClipItem) {
         if item.type == .image, let url = imageURL(for: item) {
             let exportPath = (DragFileExportHelper.materializeExportFile(for: item, sourceImageURL: url)?.url ?? url).path
+            let isSens = item.detectedSensitiveKind != nil || item.isBurnAfterPaste
             pasteboard.clearContents()
             pasteboard.setString(exportPath, forType: .string)
-            ignoreNextChangeCount = pasteboard.changeCount
-            lastChangeCount = pasteboard.changeCount
+            if isSens {
+                PasteboardPrivacyStandards.applyLocalOnlyConcealedProtection(to: pasteboard)
+            }
+            let written = pasteboard.changeCount
+            ignoreNextChangeCount = written
+            lastChangeCount = written
+            if item.isBurnAfterPaste {
+                scheduleBurnAfterPasteIfNeeded(for: item, delaySeconds: 5.0)
+            } else if isSens && !item.isPinned {
+                scheduleConcealedPasteboardScrubIfNeeded(capturedChangeCount: written, delaySeconds: 45.0)
+            }
             TactileFeedbackEngine.shared.performNavigationStepHaptic()
             showToast("已复制图片可读本地路径")
             return
@@ -3033,11 +3051,10 @@ final class ClipboardStore: ObservableObject {
         if copyToClipboard {
             pasteboard.clearContents()
             pasteboard.setString(cleanedBody, forType: .string)
-            if isLink {
+            if isLink && SensitiveCredentialVeil.classify(cleanedBody) == nil {
                 pasteboard.setString(cleanedBody, forType: .URL)
             }
-            ignoreNextChangeCount = pasteboard.changeCount
-            lastChangeCount = pasteboard.changeCount
+            commitOutboundPasteboardGuard(for: cleanedBody, forceProtected: false, isPinnedSource: false)
         }
 
         if let existingIdx = items.firstIndex(where: { $0.contentHash == contentHash }) {
@@ -3234,7 +3251,8 @@ final class ClipboardStore: ObservableObject {
         commitOutboundPasteboardGuard(
             for: text,
             forceProtected: sourceItem.isBurnAfterPaste,
-            isPinnedSource: sourceItem.isPinned
+            isPinnedSource: sourceItem.isPinned,
+            scrubDelay: sourceItem.isBurnAfterPaste ? 5.0 : 45.0
         )
 
         if shouldAutoPaste {
@@ -3248,6 +3266,7 @@ final class ClipboardStore: ObservableObject {
 
         TactileFeedbackEngine.shared.perform(.magicTransform)
         onBeforePaste?()
+        scheduleBurnAfterPasteIfNeeded(for: sourceItem, delaySeconds: 5.0)
         scheduleOTPAutoExpireIfNeeded(for: sourceItem)
 
         refreshAccessibilityStatus()
@@ -3583,6 +3602,35 @@ final class ClipboardStore: ObservableObject {
                 )
             }
         }
+        let trimmedFlowRaw = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedFlowRaw.lowercased().hasPrefix("curl ") || trimmedFlowRaw.lowercased().hasPrefix("curl\t"),
+           let sanitizedCurl = CurlAndJSONCSanitizer.sanitizeCurlForReproduction(raw) {
+            let isSec = sanitizedCurl.redactedSecrets > 0
+            analyzed.insert(
+                FinanceQuickAction(
+                    id: isSec ? "curl-safe-repro" : "curl-slim-clean",
+                    title: isSec ? "安全复现 cURL" : "精简纯净 cURL",
+                    symbolName: isSec ? "checkmark.shield" : "sparkles",
+                    resultText: sanitizedCurl.cleanedCurl,
+                    toastText: isSec
+                        ? "已脱敏 \(sanitizedCurl.redactedSecrets) 处凭据并剥除 \(sanitizedCurl.removedNoiseHeaders) 个浏览器噪音头"
+                        : "已剥除 \(sanitizedCurl.removedNoiseHeaders) 个浏览器指纹噪音头"
+                ),
+                at: 0
+            )
+        } else if raw.utf8.count <= 65_536,
+                  let strictJSON = CurlAndJSONCSanitizer.cleanJSONCToStrictJSON(raw) {
+            analyzed.insert(
+                FinanceQuickAction(
+                    id: "jsonc-clean-strict",
+                    title: "净化为标准 JSON",
+                    symbolName: "curlybraces.square",
+                    resultText: strictJSON,
+                    toastText: "已剥除注释与尾随逗号，转为标准合法 JSON"
+                ),
+                at: 0
+            )
+        }
         if !raw.contains("\n"),
            let publicURL = URLTrackingCleaner.sanitizeURLForPublicShare(raw.trimmingCharacters(in: .whitespacesAndNewlines)) {
             analyzed.insert(
@@ -3750,7 +3798,8 @@ final class ClipboardStore: ObservableObject {
         commitOutboundPasteboardGuard(
             for: action.resultText,
             forceProtected: item.isBurnAfterPaste,
-            isPinnedSource: item.isPinned
+            isPinnedSource: item.isPinned,
+            scrubDelay: item.isBurnAfterPaste ? 5.0 : 45.0
         )
 
         if shouldAutoPaste {
@@ -3764,6 +3813,7 @@ final class ClipboardStore: ObservableObject {
 
         TactileFeedbackEngine.shared.perform(.magicTransform)
         onBeforePaste?()
+        scheduleBurnAfterPasteIfNeeded(for: item, delaySeconds: 5.0)
         scheduleOTPAutoExpireIfNeeded(for: item)
         refreshAccessibilityStatus()
         if shouldAutoPaste && autoPasteEnabled && isAccessibilityGranted {
@@ -4081,7 +4131,7 @@ final class ClipboardStore: ObservableObject {
                 AdaptiveIntelligenceEngine.shared.recordActionUsed(actionID: "img-qrcode", categoryKey: "qrcode", sourceApp: item.sourceAppName)
                 recordTargetAppPasteIfAppropriate(for: item)
             }
-            commitPlainStringPaste(existingQR, isQRCode: true, shouldAutoPaste: shouldAutoPaste, onBeforePaste: onBeforePaste)
+            commitPlainStringPaste(existingQR, sourceItem: item, isQRCode: true, shouldAutoPaste: shouldAutoPaste, onBeforePaste: onBeforePaste)
             return
         }
 
@@ -4090,7 +4140,7 @@ final class ClipboardStore: ObservableObject {
             recordTargetAppPasteIfAppropriate(for: item)
         }
         if let existingOCR = item.ocrText?.trimmingCharacters(in: .whitespacesAndNewlines), !existingOCR.isEmpty {
-            commitPlainStringPaste(existingOCR, isQRCode: false, shouldAutoPaste: shouldAutoPaste, onBeforePaste: onBeforePaste)
+            commitPlainStringPaste(existingOCR, sourceItem: item, isQRCode: false, shouldAutoPaste: shouldAutoPaste, onBeforePaste: onBeforePaste)
             return
         }
 
@@ -4112,7 +4162,7 @@ final class ClipboardStore: ObservableObject {
                     self.items[idx].qrCodePayload = qr
                     self.saveHistory()
                 }
-                self.commitPlainStringPaste(qr, isQRCode: true, shouldAutoPaste: shouldAutoPaste, onBeforePaste: onBeforePaste)
+                self.commitPlainStringPaste(qr, sourceItem: item, isQRCode: true, shouldAutoPaste: shouldAutoPaste, onBeforePaste: onBeforePaste)
                 return
             }
 
@@ -4126,7 +4176,7 @@ final class ClipboardStore: ObservableObject {
                 self.items[idx].ocrText = recognized
                 self.saveHistory()
             }
-            self.commitPlainStringPaste(recognized, isQRCode: false, shouldAutoPaste: shouldAutoPaste, onBeforePaste: onBeforePaste)
+            self.commitPlainStringPaste(recognized, sourceItem: item, isQRCode: false, shouldAutoPaste: shouldAutoPaste, onBeforePaste: onBeforePaste)
         }
     }
 
@@ -4144,14 +4194,15 @@ final class ClipboardStore: ObservableObject {
         onAfterOpenExternalURL?()
     }
 
-    private func commitPlainStringPaste(_ text: String, isQRCode: Bool, shouldAutoPaste: Bool, onBeforePaste: (() -> Void)?) {
+    private func commitPlainStringPaste(_ text: String, sourceItem: ClipItem, isQRCode: Bool, shouldAutoPaste: Bool, onBeforePaste: (() -> Void)?) {
         let isExternalAI = SensitiveCredentialVeil.isExternalAIOrChatApp(activeTargetAppName)
         // 若图中二维码是 2FA TOTP 绑定码且目标窗口不是外部 AI/聊天工具，直接离线现算当前 6 位动态码无痕键入（绝不将根密钥贴入网页登录框）
         if isQRCode && !isExternalAI, let totp = TOTPAuthenticator.evaluate(uri: text) {
+            scheduleBurnAfterPasteIfNeeded(for: sourceItem, delaySeconds: 5.0)
             pasteEphemeralSecret(
                 totp.code,
                 toast: "已从二维码算出 2FA 动态码 \(totp.formattedCode)（剩 \(totp.remainingSeconds)s · 30s 后擦除）",
-                scrubDelaySeconds: 30.0,
+                scrubDelaySeconds: sourceItem.isBurnAfterPaste ? 5.0 : 30.0,
                 shouldAutoPaste: shouldAutoPaste,
                 onBeforePaste: onBeforePaste
             )
@@ -4164,10 +4215,16 @@ final class ClipboardStore: ObservableObject {
 
         pasteboard.clearContents()
         pasteboard.setString(finalOut, forType: .string)
-        if isQRCode && !didRedact && Self.isValidWebURL(finalOut) && SensitiveCredentialVeil.classify(finalOut) == nil {
+        if isQRCode && !didRedact && !sourceItem.isBurnAfterPaste && Self.isValidWebURL(finalOut) && SensitiveCredentialVeil.classify(finalOut) == nil {
             pasteboard.setString(finalOut, forType: .URL)
         }
-        commitOutboundPasteboardGuard(for: finalOut, forceProtected: false, isPinnedSource: false)
+        commitOutboundPasteboardGuard(
+            for: finalOut,
+            forceProtected: sourceItem.isBurnAfterPaste,
+            isPinnedSource: sourceItem.isPinned,
+            scrubDelay: sourceItem.isBurnAfterPaste ? 5.0 : 45.0
+        )
+        scheduleBurnAfterPasteIfNeeded(for: sourceItem, delaySeconds: 5.0)
 
         onBeforePaste?()
         refreshAccessibilityStatus()

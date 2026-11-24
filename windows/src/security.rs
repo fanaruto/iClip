@@ -486,7 +486,7 @@ pub fn materialize_temp_preview_image(images_dir: &Path, file_name: &str) -> Opt
                 if let Ok(modified) = meta.modified() {
                     if now
                         .duration_since(modified)
-                        .map(|d| d.as_secs() > 600)
+                        .map(|d| d.as_secs() > 60)
                         .unwrap_or(false)
                     {
                         let _ = fs::remove_file(ent.path());
@@ -1008,8 +1008,14 @@ pub fn classify_sensitive_text(raw: &str) -> Option<SensitiveSecretKind> {
     let jdbc_re = JDBC_PW_RE.get_or_init(|| {
         Regex::new(r##"(?i)jdbc:[a-z0-9+:-]+://[^\s'"]*?(?:[?&;]|user=[^&\s;]+[?&;])password=[^&\s;'"]{4,}"##).unwrap()
     });
+    static CURL_CRED_RE: OnceLock<Regex> = OnceLock::new();
+    let curl_cred_re = CURL_CRED_RE.get_or_init(|| {
+        Regex::new(r##"(?i)\bcurl\b[\s\S]{0,600}?\s(?:-u|--user|-b|--cookie)\s+['"]?[^'"\s]{6,}"##)
+            .unwrap()
+    });
     if conn_re.is_match(sample)
         || bearer_re.is_match(sample)
+        || (sample.to_ascii_lowercase().contains("curl") && curl_cred_re.is_match(sample))
         || url_q_re.is_match(sample)
         || basic_re.is_match(sample)
         || (sample.to_ascii_lowercase().contains("jdbc:") && jdbc_re.is_match(sample))
@@ -3096,4 +3102,416 @@ pub fn inspect_restorable_privacy_twins(raw: &str) -> Option<(String, usize)> {
         }
         Some((out, restored))
     })
+}
+
+// ============================================================================
+// 13. cURL 安全复现瘦身与容错 JSONC（注释 + 尾随逗号）一键净化引擎
+// ============================================================================
+
+pub fn sanitize_curl_for_repro(raw: &str) -> Option<(String, usize, usize)> {
+    let trimmed = raw.trim();
+    if !(12..=32_768).contains(&trimmed.len()) {
+        return None;
+    }
+    if !trimmed
+        .as_bytes()
+        .get(..5)
+        .map(|s| s.eq_ignore_ascii_case(b"curl ") || s.eq_ignore_ascii_case(b"curl\t"))
+        .unwrap_or(false)
+    {
+        return None;
+    }
+
+    static CONT_RE: OnceLock<Regex> = OnceLock::new();
+    let cont_re = CONT_RE.get_or_init(|| Regex::new(r"\\\r?\n\s*").unwrap());
+    let joined = cont_re.replace_all(trimmed, " ");
+    let tokens = tokenize_shell_words(&joined);
+    if tokens.len() < 2 {
+        return None;
+    }
+
+    const BROWSER_NOISE_HEADERS: &[&str] = &[
+        "sec-ch-ua",
+        "sec-ch-ua-mobile",
+        "sec-ch-ua-platform",
+        "sec-ch-ua-arch",
+        "sec-ch-ua-bitness",
+        "sec-ch-ua-full-version",
+        "sec-ch-ua-full-version-list",
+        "sec-ch-ua-model",
+        "sec-fetch-dest",
+        "sec-fetch-mode",
+        "sec-fetch-site",
+        "sec-fetch-user",
+        "upgrade-insecure-requests",
+        "priority",
+        "dnt",
+        "pragma",
+        "cache-control",
+        "accept-language",
+        "accept-encoding",
+        "user-agent",
+        "connection",
+        "keep-alive",
+        "if-none-match",
+        "if-modified-since",
+    ];
+
+    let mut method: Option<String> = None;
+    let mut target_url: Option<String> = None;
+    let mut kept_headers: Vec<String> = Vec::new();
+    let mut extra_flags: Vec<String> = Vec::new();
+    let mut body_args: Vec<(String, String)> = Vec::new();
+    let mut redacted_count = 0usize;
+    let mut removed_noise_count = 0usize;
+
+    let mut idx = 1usize;
+    while idx < tokens.len() {
+        let tok = tokens[idx].as_str();
+        match tok {
+            "-X" | "--request" if idx + 1 < tokens.len() => {
+                method = Some(tokens[idx + 1].to_ascii_uppercase());
+                idx += 2;
+                continue;
+            }
+            "-H" | "--header" if idx + 1 < tokens.len() => {
+                let hdr = &tokens[idx + 1];
+                if let Some((name_raw, val_raw)) = hdr.split_once(':') {
+                    let name_orig = name_raw.trim();
+                    let name_lower = name_orig.to_ascii_lowercase();
+                    let val_orig = val_raw.trim();
+
+                    if BROWSER_NOISE_HEADERS.contains(&name_lower.as_str())
+                        || name_lower.starts_with("sec-ch-")
+                        || name_lower.starts_with("sec-fetch-")
+                    {
+                        removed_noise_count += 1;
+                    } else if val_orig.contains("[ICLIP_") {
+                        kept_headers.push(format!("{name_orig}: {val_orig}"));
+                    } else if name_lower == "authorization" || name_lower == "proxy-authorization" {
+                        let v_lower = val_orig.to_ascii_lowercase();
+                        if v_lower.starts_with("bearer ") {
+                            kept_headers.push(format!("{name_orig}: Bearer $AUTH_TOKEN"));
+                        } else if v_lower.starts_with("basic ") {
+                            kept_headers.push(format!("{name_orig}: Basic $BASIC_AUTH"));
+                        } else {
+                            kept_headers.push(format!("{name_orig}: $AUTH_TOKEN"));
+                        }
+                        if !val_orig.contains('$') && !val_orig.contains("REDACTED") {
+                            redacted_count += 1;
+                        }
+                    } else if name_lower == "cookie" || name_lower == "set-cookie" {
+                        kept_headers.push(format!("{name_orig}: $REDACTED_COOKIE"));
+                        if !val_orig.contains('$') && !val_orig.contains("REDACTED") {
+                            redacted_count += 1;
+                        }
+                    } else if matches!(
+                        name_lower.as_str(),
+                        "x-api-key"
+                            | "api-key"
+                            | "apikey"
+                            | "x-auth-token"
+                            | "x-csrf-token"
+                            | "x-xsrf-token"
+                            | "x-access-token"
+                    ) {
+                        kept_headers.push(format!("{name_orig}: $API_KEY"));
+                        if !val_orig.contains('$') && !val_orig.contains("REDACTED") {
+                            redacted_count += 1;
+                        }
+                    } else {
+                        let safe_val = crate::engines::redact_secrets(val_orig);
+                        if safe_val != val_orig {
+                            redacted_count += 1;
+                        }
+                        kept_headers.push(format!("{name_orig}: {safe_val}"));
+                    }
+                } else {
+                    kept_headers.push(hdr.clone());
+                }
+                idx += 2;
+                continue;
+            }
+            "-b" | "--cookie" if idx + 1 < tokens.len() => {
+                let v = &tokens[idx + 1];
+                extra_flags.push(format!("-b {}", shell_single_quote("$REDACTED_COOKIE")));
+                if !v.contains('$') && !v.contains("REDACTED") {
+                    redacted_count += 1;
+                }
+                idx += 2;
+                continue;
+            }
+            "-u" | "--user" if idx + 1 < tokens.len() => {
+                let v = &tokens[idx + 1];
+                extra_flags.push(format!("-u {}", shell_single_quote("$API_USER:$API_PASS")));
+                if !v.contains('$') && !v.contains("REDACTED") {
+                    redacted_count += 1;
+                }
+                idx += 2;
+                continue;
+            }
+            "-d" | "--data" | "--data-raw" | "--data-binary" | "--data-urlencode" | "--json"
+                if idx + 1 < tokens.len() =>
+            {
+                let raw_body = &tokens[idx + 1];
+                let safe_body = crate::engines::redact_secrets(raw_body);
+                if &safe_body != raw_body {
+                    redacted_count += 1;
+                }
+                body_args.push((tok.to_string(), safe_body));
+                idx += 2;
+                continue;
+            }
+            "--compressed" => {
+                removed_noise_count += 1;
+                idx += 1;
+                continue;
+            }
+            "-L" | "--location" | "-k" | "--insecure" => {
+                extra_flags.push(tok.to_string());
+                idx += 1;
+                continue;
+            }
+            _ => {
+                let lower_tok = tok.to_ascii_lowercase();
+                if (lower_tok.starts_with("http://") || lower_tok.starts_with("https://"))
+                    && target_url.is_none()
+                {
+                    target_url = Some(tok.to_string());
+                }
+                idx += 1;
+            }
+        }
+    }
+
+    let raw_url = target_url?;
+    let safe_url = if let Some(pub_clean) = crate::engines::sanitize_url_for_public_share(&raw_url)
+    {
+        redacted_count += 1;
+        pub_clean
+    } else {
+        let red = crate::engines::redact_secrets(&raw_url);
+        if red != raw_url {
+            redacted_count += 1;
+        }
+        crate::engines::clean_tracking_url(&red).unwrap_or(red)
+    };
+
+    if redacted_count == 0 && removed_noise_count < 2 {
+        return None;
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+    let mut first = "curl".to_string();
+    if let Some(m) = &method {
+        if m != "GET" || !body_args.is_empty() {
+            first.push_str(&format!(" -X {m}"));
+        }
+    }
+    for fl in &extra_flags {
+        if matches!(fl.as_str(), "-L" | "--location" | "-k" | "--insecure") {
+            first.push(' ');
+            first.push_str(fl);
+        }
+    }
+    first.push(' ');
+    first.push_str(&shell_single_quote(&safe_url));
+    lines.push(first);
+
+    for fl in &extra_flags {
+        if !matches!(fl.as_str(), "-L" | "--location" | "-k" | "--insecure") {
+            lines.push(format!("  {fl}"));
+        }
+    }
+    for hdr in &kept_headers {
+        lines.push(format!("  -H {}", shell_single_quote(hdr)));
+    }
+    for (flag, payload) in &body_args {
+        lines.push(format!("  {flag} {}", shell_single_quote(payload)));
+    }
+
+    let rebuilt = lines.join(" \\\n");
+    if rebuilt == trimmed {
+        None
+    } else {
+        Some((rebuilt, redacted_count, removed_noise_count))
+    }
+}
+
+/// 字符串字面量感知的容错 JSONC（支持 `//` 单行注释、`/* */` 块注释与对象/数组尾随逗号）转标准合法缩进 JSON
+pub fn clean_jsonc_to_strict_json(raw: &str) -> Option<String> {
+    if !(4..=65_536).contains(&raw.len()) {
+        return None;
+    }
+    let trimmed = raw.trim();
+    if !trimmed.contains('{') && !trimmed.contains('[') {
+        return None;
+    }
+    if serde_json::from_str::<Value>(trimmed).is_ok() {
+        return None;
+    }
+
+    let no_comments = strip_comments_outside_strings(trimmed);
+    let nc_trimmed = no_comments.trim();
+    if !((nc_trimmed.starts_with('{') && nc_trimmed.ends_with('}'))
+        || (nc_trimmed.starts_with('[') && nc_trimmed.ends_with(']')))
+    {
+        return None;
+    }
+
+    let strict_candidate = strip_trailing_commas_outside_strings(nc_trimmed);
+    let val = serde_json::from_str::<Value>(&strict_candidate).ok()?;
+    if !val.is_object() && !val.is_array() {
+        return None;
+    }
+    serde_json::to_string_pretty(&val).ok()
+}
+
+fn strip_comments_outside_strings(input: &str) -> String {
+    let chars: Vec<char> = input.chars().collect();
+    let n = chars.len();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0usize;
+    let mut in_str = false;
+    let mut escaped = false;
+
+    while i < n {
+        let ch = chars[i];
+        if in_str {
+            out.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_str = false;
+            }
+            i += 1;
+            continue;
+        }
+        if ch == '"' {
+            in_str = true;
+            out.push(ch);
+            i += 1;
+            continue;
+        }
+        if ch == '/' && i + 1 < n {
+            if chars[i + 1] == '/' {
+                i += 2;
+                while i < n && chars[i] != '\n' {
+                    i += 1;
+                }
+                continue;
+            } else if chars[i + 1] == '*' {
+                i += 2;
+                while i + 1 < n && !(chars[i] == '*' && chars[i + 1] == '/') {
+                    i += 1;
+                }
+                i += 2;
+                continue;
+            }
+        }
+        out.push(ch);
+        i += 1;
+    }
+    out
+}
+
+fn strip_trailing_commas_outside_strings(input: &str) -> String {
+    let chars: Vec<char> = input.chars().collect();
+    let n = chars.len();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0usize;
+    let mut in_str = false;
+    let mut escaped = false;
+
+    while i < n {
+        let ch = chars[i];
+        if in_str {
+            out.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_str = false;
+            }
+            i += 1;
+            continue;
+        }
+        if ch == '"' {
+            in_str = true;
+            out.push(ch);
+            i += 1;
+            continue;
+        }
+        if ch == ',' {
+            let mut look = i + 1;
+            while look < n && chars[look].is_whitespace() {
+                look += 1;
+            }
+            if look < n && (chars[look] == '}' || chars[look] == ']') {
+                i += 1;
+                continue;
+            }
+        }
+        out.push(ch);
+        i += 1;
+    }
+    out
+}
+
+fn tokenize_shell_words(cmd: &str) -> Vec<String> {
+    let mut tokens: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+
+    for ch in cmd.chars() {
+        if escaped {
+            cur.push(ch);
+            escaped = false;
+            continue;
+        }
+        if in_single {
+            if ch == '\'' {
+                in_single = false;
+            } else {
+                cur.push(ch);
+            }
+            continue;
+        }
+        if in_double {
+            if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_double = false;
+            } else {
+                cur.push(ch);
+            }
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+        } else if ch == '\'' {
+            in_single = true;
+        } else if ch == '"' {
+            in_double = true;
+        } else if ch.is_whitespace() {
+            if !cur.is_empty() {
+                tokens.push(std::mem::take(&mut cur));
+            }
+        } else {
+            cur.push(ch);
+        }
+    }
+    if !cur.is_empty() {
+        tokens.push(cur);
+    }
+    tokens
+}
+
+fn shell_single_quote(val: &str) -> String {
+    format!("'{}'", val.replace('\'', "'\\''"))
 }

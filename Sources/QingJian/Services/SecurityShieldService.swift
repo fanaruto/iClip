@@ -548,6 +548,9 @@ enum SensitiveCredentialVeil {
     private static let httpBasicHeaderRegex = try! NSRegularExpression(
         pattern: #"(?i)(\b(?:authorization|proxy-authorization)\s*:\s*basic\s+)([A-Za-z0-9+/=]{8,})"#
     )
+    private static let curlInlineCredentialRegex = try! NSRegularExpression(
+        pattern: ##"(?i)(\bcurl\b[\s\S]{0,600}?\s(?:-u|--user|-b|--cookie)\s+['"]?)([^'"\s]{6,})(['"]?)"##
+    )
     private static let jsonSecretFieldRegex = try! NSRegularExpression(
         pattern: ##"(?i)("(?:password|passwd|secret|client_secret|api_key|apikey|access_token|refresh_token|id_token|session_token|private_key)"\s*:\s*")([^"\r\n]{6,})(")"##
     )
@@ -678,6 +681,7 @@ enum SensitiveCredentialVeil {
                 || (lowerSample.contains("jdbc:") && jdbcPasswordRegex.firstMatch(in: sample, range: nsRange) != nil)
             ))
             || (lowerSample.contains("bearer") && bearerRegex.firstMatch(in: sample, range: nsRange) != nil)
+            || (lowerSample.contains("curl") && curlInlineCredentialRegex.firstMatch(in: sample, range: nsRange) != nil)
             || ((sample.contains("?") || sample.contains("&")) && urlQuerySecretRegex.firstMatch(in: sample, range: nsRange) != nil)
             || (hasColon && (
                 httpHeaderAuthCookieRegex.firstMatch(in: sample, range: nsRange) != nil
@@ -883,6 +887,13 @@ enum SensitiveCredentialVeil {
             range: NSRange(out.startIndex..<out.endIndex, in: out),
             withTemplate: "Bearer ***REDACTED***"
         )
+        if out.lowercased().contains("curl") {
+            out = curlInlineCredentialRegex.stringByReplacingMatches(
+                in: out,
+                range: NSRange(out.startIndex..<out.endIndex, in: out),
+                withTemplate: "$1***REDACTED***$3"
+            )
+        }
         if out.contains("=") || out.contains(":") {
             out = wireGuardPrivateKeyRegex.stringByReplacingMatches(
                 in: out,
@@ -2603,5 +2614,381 @@ enum SmartFieldExtractor {
 
         guard let address = foundAddress, address.count >= 6 else { return nil }
         return ShippingContact(recipientName: foundName, cleanPhone: cleanPhone, cleanAddress: address)
+    }
+}
+
+
+// MARK: - 13. cURL 安全复现瘦身与容错 JSONC（注释 + 尾随逗号）一键净化引擎
+
+enum CurlAndJSONCSanitizer {
+    struct SanitizedCurlResult: Equatable {
+        let cleanedCurl: String
+        let redactedSecrets: Int
+        let removedNoiseHeaders: Int
+    }
+
+    private static let browserNoiseHeaders: Set<String> = [
+        "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform", "sec-ch-ua-arch",
+        "sec-ch-ua-bitness", "sec-ch-ua-full-version", "sec-ch-ua-full-version-list", "sec-ch-ua-model",
+        "sec-fetch-dest", "sec-fetch-mode", "sec-fetch-site", "sec-fetch-user",
+        "upgrade-insecure-requests", "priority", "dnt", "pragma", "cache-control",
+        "accept-language", "accept-encoding", "user-agent", "connection", "keep-alive",
+        "if-none-match", "if-modified-since"
+    ]
+
+    /// 解析 `Copy as cURL` 命令：剥除浏览器指纹噪音头，并将 Cookie / Authorization / API Key / Basic Auth 替换为安全环境变量占位符
+    static func sanitizeCurlForReproduction(_ raw: String) -> SanitizedCurlResult? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.utf8.count >= 12,
+              trimmed.utf8.count <= 32_768,
+              (trimmed.lowercased().hasPrefix("curl ") || trimmed.lowercased().hasPrefix("curl\t")) else {
+            return nil
+        }
+
+        let joined = trimmed.replacingOccurrences(of: #"\\\r?\n\s*"#, with: " ", options: .regularExpression)
+        let tokens = tokenizeShellWords(joined)
+        guard tokens.count >= 2 else { return nil }
+
+        var method: String?
+        var targetURL: String?
+        var keptHeaders: [String] = []
+        var extraFlags: [String] = []
+        var bodyArgs: [(flag: String, payload: String)] = []
+        var redactedCount = 0
+        var removedNoiseCount = 0
+
+        var idx = 1
+        while idx < tokens.count {
+            let tok = tokens[idx]
+            switch tok {
+            case "-X", "--request":
+                if idx + 1 < tokens.count {
+                    method = tokens[idx + 1].uppercased()
+                    idx += 2
+                    continue
+                }
+            case "-H", "--header":
+                if idx + 1 < tokens.count {
+                    let hdr = tokens[idx + 1]
+                    if let colon = hdr.firstIndex(of: ":") {
+                        let nameOrig = String(hdr[..<colon]).trimmingCharacters(in: .whitespaces)
+                        let nameLower = nameOrig.lowercased()
+                        let valOrig = String(hdr[hdr.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+
+                        if browserNoiseHeaders.contains(nameLower) || nameLower.hasPrefix("sec-ch-") || nameLower.hasPrefix("sec-fetch-") {
+                            removedNoiseCount += 1
+                        } else if valOrig.contains("[ICLIP_") {
+                            keptHeaders.append("\(nameOrig): \(valOrig)")
+                        } else if nameLower == "authorization" || nameLower == "proxy-authorization" {
+                            if valOrig.lowercased().hasPrefix("bearer ") {
+                                keptHeaders.append("\(nameOrig): Bearer $AUTH_TOKEN")
+                            } else if valOrig.lowercased().hasPrefix("basic ") {
+                                keptHeaders.append("\(nameOrig): Basic $BASIC_AUTH")
+                            } else {
+                                keptHeaders.append("\(nameOrig): $AUTH_TOKEN")
+                            }
+                            if !valOrig.contains("$") && !valOrig.contains("REDACTED") {
+                                redactedCount += 1
+                            }
+                        } else if nameLower == "cookie" || nameLower == "set-cookie" {
+                            keptHeaders.append("\(nameOrig): $REDACTED_COOKIE")
+                            if !valOrig.contains("$") && !valOrig.contains("REDACTED") {
+                                redactedCount += 1
+                            }
+                        } else if ["x-api-key", "api-key", "apikey", "x-auth-token", "x-csrf-token", "x-xsrf-token", "x-access-token"].contains(nameLower) {
+                            keptHeaders.append("\(nameOrig): $API_KEY")
+                            if !valOrig.contains("$") && !valOrig.contains("REDACTED") {
+                                redactedCount += 1
+                            }
+                        } else {
+                            let safeVal = SensitiveCredentialVeil.redactForExternalSharing(valOrig)
+                            if safeVal != valOrig { redactedCount += 1 }
+                            keptHeaders.append("\(nameOrig): \(safeVal)")
+                        }
+                    } else {
+                        keptHeaders.append(hdr)
+                    }
+                    idx += 2
+                    continue
+                }
+            case "-b", "--cookie":
+                if idx + 1 < tokens.count {
+                    let v = tokens[idx + 1]
+                    extraFlags.append("-b \(shellSingleQuote("$REDACTED_COOKIE"))")
+                    if !v.contains("$") && !v.contains("REDACTED") {
+                        redactedCount += 1
+                    }
+                    idx += 2
+                    continue
+                }
+            case "-u", "--user":
+                if idx + 1 < tokens.count {
+                    let v = tokens[idx + 1]
+                    extraFlags.append("-u \(shellSingleQuote("$API_USER:$API_PASS"))")
+                    if !v.contains("$") && !v.contains("REDACTED") {
+                        redactedCount += 1
+                    }
+                    idx += 2
+                    continue
+                }
+            case "-d", "--data", "--data-raw", "--data-binary", "--data-urlencode", "--json":
+                if idx + 1 < tokens.count {
+                    let rawBody = tokens[idx + 1]
+                    let safeBody = SensitiveCredentialVeil.redactForExternalSharing(rawBody)
+                    if safeBody != rawBody { redactedCount += 1 }
+                    bodyArgs.append((tok, safeBody))
+                    idx += 2
+                    continue
+                }
+            case "--compressed", "-s", "--silent", "-L", "--location", "-k", "--insecure":
+                if tok == "-L" || tok == "--location" || tok == "-k" || tok == "--insecure" {
+                    extraFlags.append(tok)
+                } else if tok == "--compressed" {
+                    removedNoiseCount += 1
+                }
+                idx += 1
+                continue
+            default:
+                if (tok.lowercased().hasPrefix("http://") || tok.lowercased().hasPrefix("https://")), targetURL == nil {
+                    targetURL = tok
+                    idx += 1
+                    continue
+                }
+            }
+            idx += 1
+        }
+
+        guard let rawURL = targetURL else { return nil }
+        let safeURL: String
+        if let publicClean = URLTrackingCleaner.sanitizeURLForPublicShare(rawURL) {
+            safeURL = publicClean
+            redactedCount += 1
+        } else {
+            let redURL = SensitiveCredentialVeil.redactForExternalSharing(rawURL)
+            if redURL != rawURL { redactedCount += 1 }
+            safeURL = URLTrackingCleaner.cleanTrackingURL(redURL) ?? redURL
+        }
+
+        guard redactedCount > 0 || removedNoiseCount >= 2 else { return nil }
+
+        var parts: [String] = []
+        var firstLine = "curl"
+        if let m = method, m != "GET" || !bodyArgs.isEmpty {
+            firstLine += " -X \(m)"
+        }
+        for fl in extraFlags where fl == "-L" || fl == "--location" || fl == "-k" || fl == "--insecure" {
+            firstLine += " \(fl)"
+        }
+        firstLine += " \(shellSingleQuote(safeURL))"
+        parts.append(firstLine)
+
+        for fl in extraFlags where !(fl == "-L" || fl == "--location" || fl == "-k" || fl == "--insecure") {
+            parts.append("  \(fl)")
+        }
+        for hdr in keptHeaders {
+            parts.append("  -H \(shellSingleQuote(hdr))")
+        }
+        for b in bodyArgs {
+            parts.append("  \(b.flag) \(shellSingleQuote(b.payload))")
+        }
+
+        let rebuilt = parts.joined(separator: " \\\n")
+        guard rebuilt != trimmed else { return nil }
+        return SanitizedCurlResult(
+            cleanedCurl: rebuilt,
+            redactedSecrets: redactedCount,
+            removedNoiseHeaders: removedNoiseCount
+        )
+    }
+
+    /// 字符串字面量感知的容错 JSONC（支持 `//` 单行注释、`/* */` 块注释与对象/数组尾随逗号）转标准合法缩进 JSON
+    static func cleanJSONCToStrictJSON(_ raw: String) -> String? {
+        guard raw.utf8.count >= 4, raw.utf8.count <= 65_536 else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.contains("{") || trimmed.contains("[") else { return nil }
+
+        // 若原本已是合法标准 JSON，交由常规 JSON 格式化/压缩处理
+        if let origData = trimmed.data(using: .utf8),
+           (try? JSONSerialization.jsonObject(with: origData, options: [])) != nil {
+            return nil
+        }
+
+        let noComments = stripCommentsOutsideStrings(trimmed).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard (noComments.hasPrefix("{") && noComments.hasSuffix("}"))
+                || (noComments.hasPrefix("[") && noComments.hasSuffix("]")) else {
+            return nil
+        }
+
+        let strictCandidate = stripTrailingCommasOutsideStrings(noComments)
+        guard let data = strictCandidate.data(using: .utf8),
+              let jsonObj = try? JSONSerialization.jsonObject(with: data, options: []),
+              (jsonObj is [String: Any] || jsonObj is [Any]),
+              let prettyData = try? JSONSerialization.data(
+                  withJSONObject: jsonObj,
+                  options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+              ),
+              let prettyStr = String(data: prettyData, encoding: .utf8) else {
+            return nil
+        }
+        return prettyStr
+    }
+
+    private static func stripCommentsOutsideStrings(_ input: String) -> String {
+        let chars = Array(input)
+        let n = chars.count
+        var out: [Character] = []
+        out.reserveCapacity(n)
+        var i = 0
+        var inString = false
+        var escaped = false
+
+        while i < n {
+            let ch = chars[i]
+            if inString {
+                out.append(ch)
+                if escaped {
+                    escaped = false
+                } else if ch == "\\" {
+                    escaped = true
+                } else if ch == "\"" {
+                    inString = false
+                }
+                i += 1
+                continue
+            }
+
+            if ch == "\"" {
+                inString = true
+                out.append(ch)
+                i += 1
+                continue
+            }
+
+            if ch == "/" && i + 1 < n {
+                let next = chars[i + 1]
+                if next == "/" {
+                    i += 2
+                    while i < n && chars[i] != "\n" {
+                        i += 1
+                    }
+                    continue
+                } else if next == "*" {
+                    i += 2
+                    while i + 1 < n && !(chars[i] == "*" && chars[i + 1] == "/") {
+                        i += 1
+                    }
+                    i += 2
+                    continue
+                }
+            }
+
+            out.append(ch)
+            i += 1
+        }
+        return String(out)
+    }
+
+    private static func stripTrailingCommasOutsideStrings(_ input: String) -> String {
+        let chars = Array(input)
+        let n = chars.count
+        var out: [Character] = []
+        out.reserveCapacity(n)
+        var i = 0
+        var inString = false
+        var escaped = false
+
+        while i < n {
+            let ch = chars[i]
+            if inString {
+                out.append(ch)
+                if escaped {
+                    escaped = false
+                } else if ch == "\\" {
+                    escaped = true
+                } else if ch == "\"" {
+                    inString = false
+                }
+                i += 1
+                continue
+            }
+
+            if ch == "\"" {
+                inString = true
+                out.append(ch)
+                i += 1
+                continue
+            }
+
+            if ch == "," {
+                var lookahead = i + 1
+                while lookahead < n && chars[lookahead].isWhitespace {
+                    lookahead += 1
+                }
+                if lookahead < n && (chars[lookahead] == "}" || chars[lookahead] == "]") {
+                    i += 1
+                    continue
+                }
+            }
+
+            out.append(ch)
+            i += 1
+        }
+        return String(out)
+    }
+
+    private static func tokenizeShellWords(_ cmd: String) -> [String] {
+        var tokens: [String] = []
+        var cur = ""
+        var inSingle = false
+        var inDouble = false
+        var escaped = false
+
+        for ch in cmd {
+            if escaped {
+                cur.append(ch)
+                escaped = false
+                continue
+            }
+            if inSingle {
+                if ch == "'" {
+                    inSingle = false
+                } else {
+                    cur.append(ch)
+                }
+                continue
+            }
+            if inDouble {
+                if ch == "\\" {
+                    escaped = true
+                } else if ch == "\"" {
+                    inDouble = false
+                } else {
+                    cur.append(ch)
+                }
+                continue
+            }
+            if ch == "\\" {
+                escaped = true
+            } else if ch == "'" {
+                inSingle = true
+            } else if ch == "\"" {
+                inDouble = true
+            } else if ch.isWhitespace {
+                if !cur.isEmpty {
+                    tokens.append(cur)
+                    cur = ""
+                }
+            } else {
+                cur.append(ch)
+            }
+        }
+        if !cur.isEmpty {
+            tokens.append(cur)
+        }
+        return tokens
+    }
+
+    private static func shellSingleQuote(_ val: String) -> String {
+        "'" + val.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 }

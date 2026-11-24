@@ -1493,6 +1493,7 @@ unsafe fn hide_panel(hwnd: HWND, restore_focus: bool) {
     if was_recording {
         reload_global_hotkeys_and_hooks(hwnd);
     }
+    iclip_core::security::wipe_all_temp_previews();
     ShowWindow(hwnd, SW_HIDE);
     if restore_focus && !target_fg.is_null() && IsWindow(target_fg) != FALSE {
         let _ = SetForegroundWindow(target_fg);
@@ -3117,19 +3118,21 @@ unsafe fn commit_quick_action(hwnd: HWND, item_idx: usize, action: &QuickAction)
             .unwrap_or((WinClipboardLocalOnlyGuard::default(), false))
     });
     let _ = write_text_and_html_to_clipboard_ext(hwnd, &action.result_text, html_pair, out_guard);
-    if scrub_45s {
+    if scrub_45s || source_burn {
         let seq = GetClipboardSequenceNumber();
         APP_STATE.with(|c| {
             if let Some(st) = c.borrow_mut().as_mut() {
                 st.scrub_expected_seq_num = seq;
             }
         });
-        SetTimer(hwnd, TIMER_ID_CONCEALED_SCRUB, 45_000, None);
+        let scrub_ms = if source_burn { 5_000 } else { 45_000 };
+        SetTimer(hwnd, TIMER_ID_CONCEALED_SCRUB, scrub_ms, None);
     }
 
     if let Some(id) = item_id {
         APP_STATE.with(|c| {
             if let Some(st) = c.borrow_mut().as_mut() {
+                let _ = st.store.schedule_burn_after_paste_if_needed(&id, 5);
                 st.store.schedule_otp_expire_if_needed(&id, 30);
             }
         });
@@ -8177,12 +8180,33 @@ unsafe fn handle_left_click(hwnd: HWND, x: i32, y: i32, is_double: bool) {
             let exported = APP_STATE.with(|c| {
                 let mut b = c.borrow_mut();
                 let st = b.as_mut()?;
-                let pair = st.store.format_todos_as_markdown()?;
+                let (md, cnt) = st.store.format_todos_as_markdown()?;
+                let has_sens_todo = st.store.items.iter().any(|it| {
+                    it.is_todo()
+                        && (it.detected_sensitive_kind().is_some() || it.is_burn_after_paste())
+                }) || iclip_core::security::classify_sensitive_text(&md)
+                    .is_some();
+                let guard = WinClipboardLocalOnlyGuard {
+                    block_cloud_and_history: has_sens_todo,
+                    cf_excl: st.cf_exclude_monitor,
+                    cf_can_hist: st.cf_can_include_history,
+                    cf_can_cloud: st.cf_can_upload_cloud,
+                };
+                let need_scrub = has_sens_todo && st.store.config.auto_clear_concealed_clipboard;
                 st.ignore_next_clipboard_seq = true;
-                Some(pair)
+                Some((md, cnt, guard, need_scrub))
             });
-            if let Some((md, cnt)) = exported {
-                let _ = write_text_and_html_to_clipboard(hwnd, &md, None);
+            if let Some((md, cnt, guard, need_scrub)) = exported {
+                let _ = write_text_and_html_to_clipboard_ext(hwnd, &md, None, guard);
+                if need_scrub {
+                    let seq = GetClipboardSequenceNumber();
+                    APP_STATE.with(|c| {
+                        if let Some(st) = c.borrow_mut().as_mut() {
+                            st.scrub_expected_seq_num = seq;
+                        }
+                    });
+                    SetTimer(hwnd, TIMER_ID_CONCEALED_SCRUB, 45_000, None);
+                }
                 set_toast(hwnd, format!("✓ 已复制 {cnt} 条 Markdown 待办清单"));
             }
         }
