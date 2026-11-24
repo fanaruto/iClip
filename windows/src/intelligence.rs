@@ -1107,3 +1107,301 @@ pub fn format_relative_time(item_secs: u64) -> String {
         format!("{} 天前", diff / 86_400)
     }
 }
+
+// ============================================================================
+// 8. 最小够用结构化净提与收件名片一键拆入连填引擎（SmartFieldExtractor）
+// ============================================================================
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShippingContact {
+    pub recipient_name: Option<String>,
+    pub clean_phone: String,
+    pub clean_address: String,
+}
+
+impl ShippingContact {
+    pub fn clean_card_text(&self) -> String {
+        if let Some(name) = &self.recipient_name {
+            if !name.is_empty() {
+                return format!("{name}\n{}\n{}", self.clean_phone, self.clean_address);
+            }
+        }
+        format!("{}\n{}", self.clean_phone, self.clean_address)
+    }
+
+    pub fn queue_fields(&self) -> Vec<String> {
+        if let Some(name) = &self.recipient_name {
+            if !name.is_empty() {
+                return vec![
+                    name.clone(),
+                    self.clean_phone.clone(),
+                    self.clean_address.clone(),
+                ];
+            }
+        }
+        vec![self.clean_phone.clone(), self.clean_address.clone()]
+    }
+}
+
+pub fn has_chinese_address(raw: &str) -> bool {
+    let sample = crate::model::safe_utf8_prefix(raw, 2048);
+    if sample.contains("收货地址") || sample.contains("收件地址") || sample.contains("详细地址")
+    {
+        return true;
+    }
+    const REGIONS: &[&str] = &["省", "市", "自治区", "特别行政区", "区", "县", "旗"];
+    const STREETS: &[&str] = &[
+        "路", "街", "道", "巷", "号", "弄", "室", "楼", "层", "栋", "幢", "单元", "大厦", "广场",
+        "中心", "园", "苑", "小区", "村", "镇",
+    ];
+    REGIONS.iter().any(|r| sample.contains(r)) && STREETS.iter().any(|s| sample.contains(s))
+}
+
+pub fn has_mainland_phone(raw: &str) -> bool {
+    if !raw.contains('1') {
+        return false;
+    }
+    let sample = crate::model::safe_utf8_prefix(raw, 2048);
+    static PHONE_FMT_RE: std::sync::OnceLock<regex_lite::Regex> = std::sync::OnceLock::new();
+    let re = PHONE_FMT_RE.get_or_init(|| {
+        regex_lite::Regex::new(r"(?:\+?86[\s-]*)?(1[3-9]\d[\s-]?\d{4}[\s-]?\d{4})").unwrap()
+    });
+    for m in re.find_iter(sample) {
+        let prev_alnum = m.start() > 0 && sample.as_bytes()[m.start() - 1].is_ascii_alphanumeric();
+        let next_alnum =
+            m.end() < sample.len() && sample.as_bytes()[m.end()].is_ascii_alphanumeric();
+        if !prev_alnum && !next_alnum {
+            return true;
+        }
+    }
+    false
+}
+
+pub fn has_email_address(raw: &str) -> bool {
+    if !raw.contains('@') {
+        return false;
+    }
+    let sample = crate::model::safe_utf8_prefix(raw, 2048);
+    static EMAIL_RE: std::sync::OnceLock<regex_lite::Regex> = std::sync::OnceLock::new();
+    let re = EMAIL_RE.get_or_init(|| {
+        regex_lite::Regex::new(r"\b[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]+\.[A-Za-z]{2,18}\b")
+            .unwrap()
+    });
+    re.is_match(sample)
+}
+
+pub fn has_ipv4_address(raw: &str) -> bool {
+    if !raw.contains('.') {
+        return false;
+    }
+    let sample = crate::model::safe_utf8_prefix(raw, 2048);
+    static IPV4_RE: std::sync::OnceLock<regex_lite::Regex> = std::sync::OnceLock::new();
+    let re = IPV4_RE.get_or_init(|| {
+        regex_lite::Regex::new(
+            r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b",
+        )
+        .unwrap()
+    });
+    re.is_match(sample)
+}
+
+pub fn extract_normalized_single_phone(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.len() < 11 || trimmed.len() > 240 {
+        return None;
+    }
+    static PHONE_FMT_RE: std::sync::OnceLock<regex_lite::Regex> = std::sync::OnceLock::new();
+    let re = PHONE_FMT_RE.get_or_init(|| {
+        regex_lite::Regex::new(r"(?:\+?86[\s-]*)?(1[3-9]\d[\s-]?\d{4}[\s-]?\d{4})").unwrap()
+    });
+    let mut found: Option<String> = None;
+    for caps in re.captures_iter(trimmed) {
+        let m0 = caps.get(0)?;
+        let prev_alnum =
+            m0.start() > 0 && trimmed.as_bytes()[m0.start() - 1].is_ascii_alphanumeric();
+        let next_alnum =
+            m0.end() < trimmed.len() && trimmed.as_bytes()[m0.end()].is_ascii_alphanumeric();
+        if prev_alnum || next_alnum {
+            continue;
+        }
+        if found.is_some() {
+            return None;
+        }
+        let g1 = caps.get(1)?.as_str();
+        let digits: String = g1.chars().filter(|c| c.is_ascii_digit()).collect();
+        if digits.len() == 11 {
+            found = Some(digits);
+        }
+    }
+    let digits = found?;
+    if digits == trimmed {
+        return None;
+    }
+    Some(digits)
+}
+
+pub fn extract_unique_emails(raw: &str) -> Vec<String> {
+    if !raw.contains('@') || raw.len() > 32_768 {
+        return Vec::new();
+    }
+    static EMAIL_RE: std::sync::OnceLock<regex_lite::Regex> = std::sync::OnceLock::new();
+    let re = EMAIL_RE.get_or_init(|| {
+        regex_lite::Regex::new(r"\b[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]+\.[A-Za-z]{2,18}\b")
+            .unwrap()
+    });
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for m in re.find_iter(raw) {
+        let mail = m.as_str();
+        if seen.insert(mail.to_ascii_lowercase()) {
+            out.push(mail.to_string());
+        }
+    }
+    if out.len() >= 2 {
+        out
+    } else {
+        Vec::new()
+    }
+}
+
+pub fn extract_unique_ipv4s(raw: &str) -> Vec<String> {
+    if !raw.contains('.') || raw.len() > 32_768 {
+        return Vec::new();
+    }
+    static IPV4_RE: std::sync::OnceLock<regex_lite::Regex> = std::sync::OnceLock::new();
+    let re = IPV4_RE.get_or_init(|| {
+        regex_lite::Regex::new(
+            r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b",
+        )
+        .unwrap()
+    });
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for m in re.find_iter(raw) {
+        let ip = m.as_str();
+        if seen.insert(ip.to_string()) {
+            out.push(ip.to_string());
+        }
+    }
+    if out.len() >= 2 {
+        out
+    } else {
+        Vec::new()
+    }
+}
+
+pub fn parse_shipping_contact(raw: &str) -> Option<ShippingContact> {
+    let trimmed = raw.trim();
+    if trimmed.chars().count() < 14 || trimmed.len() > 1_200 {
+        return None;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if trimmed.starts_with('{') || trimmed.starts_with('|') || lower.starts_with("curl ") {
+        return None;
+    }
+    if trimmed.lines().count() > 8 || !has_chinese_address(trimmed) {
+        return None;
+    }
+
+    static URL_STRIP_RE: std::sync::OnceLock<regex_lite::Regex> = std::sync::OnceLock::new();
+    static REMARK_RE: std::sync::OnceLock<regex_lite::Regex> = std::sync::OnceLock::new();
+    static PHONE_FMT_RE: std::sync::OnceLock<regex_lite::Regex> = std::sync::OnceLock::new();
+    static POLITE_RE: std::sync::OnceLock<regex_lite::Regex> = std::sync::OnceLock::new();
+    static LABEL_RE: std::sync::OnceLock<regex_lite::Regex> = std::sync::OnceLock::new();
+
+    let url_re =
+        URL_STRIP_RE.get_or_init(|| regex_lite::Regex::new(r"https?://[^\s，,）)]+").unwrap());
+    let remark_re = REMARK_RE.get_or_init(|| {
+        regex_lite::Regex::new(
+            r"[（(][^）)\n]{0,24}(?:顺丰|到付|寄付|包邮|圆通|中通|韵达|申通|极兔|京东|快递|勿电|丰巢|谢谢|麻烦|加急)[^）)\n]{0,24}[）)]",
+        )
+        .unwrap()
+    });
+    let phone_re = PHONE_FMT_RE.get_or_init(|| {
+        regex_lite::Regex::new(r"(?:\+?86[\s-]*)?(1[3-9]\d[\s-]?\d{4}[\s-]?\d{4})").unwrap()
+    });
+    let polite_re = POLITE_RE.get_or_init(|| {
+        regex_lite::Regex::new(
+            r"^(?:亲|你好|您好|麻烦|帮我|请)?(?:帮我)?(?:发|寄)?(?:一下|个)?(?:顺丰|快递|样品|包裹)?\s*[:：，,\s]+",
+        )
+        .unwrap()
+    });
+    let label_re = LABEL_RE.get_or_init(|| {
+        regex_lite::Regex::new(
+            r"(?:收件人|收货人|联系人|姓名|联系电话|手机号码|手机号|电话|手机|收货地址|详细地址|寄件地址|收件地址|地址)\s*[:：]\s*",
+        )
+        .unwrap()
+    });
+
+    let mut working = url_re.replace_all(trimmed, " ").into_owned();
+    working = remark_re.replace_all(&working, " ").into_owned();
+
+    let mut matched_span: Option<(usize, usize, String)> = None;
+    for caps in phone_re.captures_iter(&working) {
+        let Some(m0) = caps.get(0) else { continue };
+        let prev_alnum =
+            m0.start() > 0 && working.as_bytes()[m0.start() - 1].is_ascii_alphanumeric();
+        let next_alnum =
+            m0.end() < working.len() && working.as_bytes()[m0.end()].is_ascii_alphanumeric();
+        if prev_alnum || next_alnum {
+            continue;
+        }
+        let Some(g1) = caps.get(1) else { continue };
+        let digits: String = g1.as_str().chars().filter(|c| c.is_ascii_digit()).collect();
+        if digits.len() == 11 {
+            matched_span = Some((m0.start(), m0.end(), digits));
+            break;
+        }
+    }
+    let (p_start, p_end, clean_phone) = matched_span?;
+    working.replace_range(p_start..p_end, "\n");
+    working = polite_re.replace(&working, "").into_owned();
+    working = label_re.replace_all(&working, "\n").into_owned();
+
+    let mut tokens: Vec<String> = Vec::new();
+    for seg in working.split(['\n', ',', '，', ';', '；', '|']) {
+        let s = seg.trim();
+        if s.is_empty() {
+            continue;
+        }
+        if has_chinese_address(s) && s.contains(' ') {
+            let parts: Vec<&str> = s.split_whitespace().collect();
+            if parts.len() >= 2 {
+                let first_len = parts[0].chars().count();
+                if (2..=6).contains(&first_len) && !has_chinese_address(parts[0]) {
+                    tokens.push(parts[0].to_string());
+                    tokens.push(parts[1..].join(""));
+                    continue;
+                }
+            }
+        }
+        tokens.push(s.to_string());
+    }
+
+    let mut found_addr: Option<String> = None;
+    let mut found_name: Option<String> = None;
+    for tok in tokens {
+        let c = tok
+            .trim_matches(['：', ':', '，', ',', '。', '.', '、', '-', '—', ' '])
+            .to_string();
+        if c.is_empty() {
+            continue;
+        }
+        let ch_cnt = c.chars().count();
+        if found_addr.is_none() && (has_chinese_address(&c) || ch_cnt >= 9) {
+            found_addr = Some(c);
+        } else if found_name.is_none()
+            && (2..=12).contains(&ch_cnt)
+            && !c.chars().all(|ch| ch.is_ascii_digit())
+        {
+            found_name = Some(c);
+        }
+    }
+
+    let clean_address = found_addr.filter(|a| a.chars().count() >= 6)?;
+    Some(ShippingContact {
+        recipient_name: found_name,
+        clean_phone,
+        clean_address,
+    })
+}

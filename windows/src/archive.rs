@@ -325,22 +325,68 @@ pub fn merge_archive_data_full(
                 saved_image_name = Some(file_name);
             }
 
+            if entry.kind == ClipContentType::File {
+                if let Some(paths) = &entry.file_paths {
+                    let has_traversal = paths.iter().any(|p| p.contains(".."));
+                    if has_traversal
+                        || crate::security::classify_sensitive_file_paths(paths).is_some()
+                    {
+                        continue;
+                    }
+                }
+            }
+
+            let sanitized_text = entry.text.as_ref().map(|raw_t| {
+                if matches!(
+                    crate::security::inspect_clipboard_poison(raw_t),
+                    Some(crate::security::PoisonThreatKind::PastejackingOrBidi(_))
+                ) {
+                    let clean = crate::security::sanitize_clipboard_poison(raw_t);
+                    if clean.is_empty() {
+                        raw_t.clone()
+                    } else {
+                        clean
+                    }
+                } else {
+                    raw_t.clone()
+                }
+            });
+            let sanitized_alias = entry.custom_alias.as_ref().map(|raw_a| {
+                if matches!(
+                    crate::security::inspect_clipboard_poison(raw_a),
+                    Some(crate::security::PoisonThreatKind::PastejackingOrBidi(_))
+                ) {
+                    crate::security::sanitize_clipboard_poison(raw_a)
+                } else {
+                    raw_a.clone()
+                }
+            });
+            let effective_hash = if sanitized_text.as_deref() != entry.text.as_deref() {
+                if let Some(clean_t) = &sanitized_text {
+                    ClipItem::new_text(clean_t.clone(), None).content_hash
+                } else {
+                    entry.content_hash.clone()
+                }
+            } else {
+                entry.content_hash.clone()
+            };
+
             let restored = ClipItem {
-                id: generate_pseudo_uuid(&entry.content_hash),
+                id: generate_pseudo_uuid(&effective_hash),
                 kind: entry.kind,
-                text: entry.text.clone(),
+                text: sanitized_text,
                 image_file_name: saved_image_name,
                 image_width: entry.image_width,
                 image_height: entry.image_height,
                 ocr_text: entry.ocr_text.clone(),
                 ocr_checked: entry.ocr_text.as_ref().map(|_| true),
                 file_paths: entry.file_paths.clone(),
-                content_hash: entry.content_hash.clone(),
+                content_hash: effective_hash,
                 source_app_name: entry.source_app_name.clone(),
                 created_unix_secs: iso8601_to_unix_secs(&entry.created_at),
                 is_pinned: true,
                 pin_category: entry.pin_category,
-                custom_alias: entry.custom_alias.clone(),
+                custom_alias: sanitized_alias,
                 is_todo_item: entry.is_todo_item,
                 todo_completed_unix_secs: None,
                 burn_after_paste: None,
@@ -369,12 +415,35 @@ fn merge_external_candidates(
     let mut updated_existing = 0usize;
 
     for cand in candidates {
-        let trimmed = cand.text.trim();
+        let safe_body = if matches!(
+            crate::security::inspect_clipboard_poison(&cand.text),
+            Some(crate::security::PoisonThreatKind::PastejackingOrBidi(_))
+        ) {
+            let clean = crate::security::sanitize_clipboard_poison(&cand.text);
+            if clean.is_empty() {
+                cand.text.clone()
+            } else {
+                clean
+            }
+        } else {
+            cand.text.clone()
+        };
+        let safe_alias = cand.alias.as_ref().map(|raw_a| {
+            if matches!(
+                crate::security::inspect_clipboard_poison(raw_a),
+                Some(crate::security::PoisonThreatKind::PastejackingOrBidi(_))
+            ) {
+                crate::security::sanitize_clipboard_poison(raw_a)
+            } else {
+                raw_a.clone()
+            }
+        });
+        let trimmed = safe_body.trim();
         if trimmed.is_empty() {
             continue;
         }
-        let mut temp_item = ClipItem::new_text(cand.text.clone(), Some(cand.source_label.clone()));
-        let inferred_cat = PinCategory::infer(cand.alias.as_deref(), Some(&cand.text));
+        let mut temp_item = ClipItem::new_text(safe_body.clone(), Some(cand.source_label.clone()));
+        let inferred_cat = PinCategory::infer(safe_alias.as_deref(), Some(&safe_body));
 
         if let Some(existing) = working
             .iter_mut()
@@ -391,7 +460,7 @@ fn merge_external_candidates(
                 .map(|s| s.trim().is_empty())
                 .unwrap_or(true);
             if alias_empty {
-                if let Some(al) = &cand.alias {
+                if let Some(al) = &safe_alias {
                     existing.custom_alias = Some(al.clone());
                     changed = true;
                 }
@@ -405,7 +474,7 @@ fn merge_external_candidates(
             }
         } else {
             temp_item.is_pinned = true;
-            temp_item.custom_alias = cand.alias.clone();
+            temp_item.custom_alias = safe_alias;
             temp_item.pin_category = inferred_cat;
             working.push(temp_item);
             imported_new += 1;

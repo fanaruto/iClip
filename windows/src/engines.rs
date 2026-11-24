@@ -296,6 +296,68 @@ pub fn analyze_text_actions(raw: &str, minimal_mode: bool) -> Vec<QuickAction> {
         actions.extend(analyze_document_typography(raw));
     }
 
+    // 最小够用结构化净提与收件名片一键拆入连填队列（双角色共享）
+    if actions.len() < 3 && raw.len() <= 16_384 && !is_otp_message(raw) {
+        if let Some(shipping) = crate::intelligence::parse_shipping_contact(raw) {
+            actions.insert(
+                0,
+                QuickAction {
+                    id: "contact-clean-card",
+                    title: "净提收件卡".to_string(),
+                    is_security: false,
+                    result_text: shipping.clean_card_text(),
+                    html_table_payload: None,
+                    toast_text: "已剥离闲聊噪音提纯标准收件信息".to_string(),
+                },
+            );
+            actions.insert(
+                0,
+                QuickAction {
+                    id: "contact-split-queue",
+                    title: "拆入连填(名→号→址)".to_string(),
+                    is_security: false,
+                    result_text: shipping.clean_card_text(),
+                    html_table_payload: None,
+                    toast_text: "已拆入顺序队列（连按 Ctrl+Alt+V 依次填入姓名/手机/地址）"
+                        .to_string(),
+                },
+            );
+        } else {
+            if let Some(clean_phone) = crate::intelligence::extract_normalized_single_phone(raw) {
+                actions.push(QuickAction {
+                    id: "extract-clean-phone",
+                    title: format!("纯手机号 {clean_phone}"),
+                    is_security: false,
+                    result_text: clean_phone.clone(),
+                    html_table_payload: None,
+                    toast_text: format!("已提取 11 位纯数字手机号 {clean_phone}"),
+                });
+            }
+            let emails = crate::intelligence::extract_unique_emails(raw);
+            if emails.len() >= 2 {
+                actions.push(QuickAction {
+                    id: "extract-unique-emails",
+                    title: format!("提取 {} 个邮箱", emails.len()),
+                    is_security: false,
+                    result_text: emails.join("\n"),
+                    html_table_payload: None,
+                    toast_text: format!("已去重净提 {} 个邮箱地址", emails.len()),
+                });
+            }
+            let ips = crate::intelligence::extract_unique_ipv4s(raw);
+            if ips.len() >= 2 {
+                actions.push(QuickAction {
+                    id: "extract-unique-ips",
+                    title: format!("提取 {} 个 IP", ips.len()),
+                    is_security: false,
+                    result_text: ips.join("\n"),
+                    html_table_payload: None,
+                    toast_text: format!("已去重净提 {} 个 IPv4 地址", ips.len()),
+                });
+            }
+        }
+    }
+
     #[cfg(feature = "dev")]
     if actions.is_empty() {
         // Dev 5: Base64 解码
@@ -1790,6 +1852,27 @@ pub fn redact_secrets(text: &str) -> String {
                 "-----BEGIN PRIVATE KEY-----\n[REDACTED_BY_iCLIP]\n-----END PRIVATE KEY-----",
             )
             .into_owned();
+    }
+    if out.contains("PuTTY-User-Key-File-") {
+        let ppk_re =
+            Regex::new(r"PuTTY-User-Key-File-[23]:[\s\S]*?Private-MAC:\s*[0-9a-fA-F]+").unwrap();
+        out = ppk_re
+            .replace_all(&out, "PuTTY-User-Key-File-3: [REDACTED_BY_iCLIP]")
+            .into_owned();
+    }
+    if out.contains("client-key-data") {
+        let kube_re =
+            Regex::new(r"(?im)^(\s*client-key-data\s*:\s*)([A-Za-z0-9+/=]{32,})(\s*)$").unwrap();
+        out = kube_re
+            .replace_all(&out, "${1}***KUBE_KEY_REDACTED***${3}")
+            .into_owned();
+    }
+    if out.to_ascii_lowercase().contains("jdbc:") {
+        let jdbc_re = Regex::new(
+            r##"(?i)(jdbc:[a-z0-9+:-]+://[^\s'"]*?(?:[?&;]|user=[^&\s;]+[?&;])password=)([^&\s;'"]{4,})"##,
+        )
+        .unwrap();
+        out = jdbc_re.replace_all(&out, "${1}***REDACTED***").into_owned();
     }
     if out.contains("AGE-SECRET-KEY-1") {
         let age_re = Regex::new(r"\bAGE-SECRET-KEY-1[A-Z0-9]{50,}\b").unwrap();

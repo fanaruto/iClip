@@ -500,6 +500,15 @@ enum SensitiveCredentialVeil {
     private static let wireGuardPrivateKeyRegex = try! NSRegularExpression(
         pattern: #"(?im)^(\s*(?:PrivateKey|PresharedKey)\s*=\s*)([A-Za-z0-9+/]{42,44}=)(\s*)$"#
     )
+    private static let puttyPrivateKeyRegex = try! NSRegularExpression(
+        pattern: #"PuTTY-User-Key-File-[23]:[\s\S]*?Private-MAC:\s*[0-9a-fA-F]+"#
+    )
+    private static let kubeClientKeyRegex = try! NSRegularExpression(
+        pattern: #"(?im)^(\s*client-key-data\s*:\s*)([A-Za-z0-9+/=]{32,})(\s*)$"#
+    )
+    private static let jdbcPasswordRegex = try! NSRegularExpression(
+        pattern: #"(?i)(jdbc:[a-z0-9+:-]+://[^\s'"]*?(?:[?&;]|user=[^&\s;]+[?&;])password=)([^&\s;'"]{4,})"#
+    )
     private static let jwtRegex = try! NSRegularExpression(
         pattern: #"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"#
     )
@@ -637,6 +646,9 @@ enum SensitiveCredentialVeil {
         if sample.contains("-----BEGIN ") && (sample.contains("PRIVATE KEY-----") || sample.contains("PRIVATE KEY BLOCK-----")) {
             return .privateKey
         }
+        if sample.contains("PuTTY-User-Key-File-") {
+            return .privateKey
+        }
         let hasScheme = sample.contains("://")
         let hasColon = sample.contains(":")
         let hasEquals = sample.contains("=")
@@ -644,7 +656,8 @@ enum SensitiveCredentialVeil {
 
         if (sample.contains("AGE-SECRET-KEY-1") && ageSecretKeyRegex.firstMatch(in: sample, range: nsRange) != nil)
             || (hasScheme && otpAuthUriRegex.firstMatch(in: sample, range: nsRange) != nil)
-            || (hasEquals && sample.contains("Key") && wireGuardPrivateKeyRegex.firstMatch(in: sample, range: nsRange) != nil) {
+            || (hasEquals && sample.contains("Key") && wireGuardPrivateKeyRegex.firstMatch(in: sample, range: nsRange) != nil)
+            || (hasColon && sample.contains("client-key-data") && kubeClientKeyRegex.firstMatch(in: sample, range: nsRange) != nil) {
             return .privateKey
         }
         if apiKeyFastHints.contains(where: { sample.contains($0) }),
@@ -662,6 +675,7 @@ enum SensitiveCredentialVeil {
                 connUriRegex.firstMatch(in: sample, range: nsRange) != nil
                 || httpBasicAuthRegex.firstMatch(in: sample, range: nsRange) != nil
                 || webhookSecretRegex.firstMatch(in: sample, range: nsRange) != nil
+                || (lowerSample.contains("jdbc:") && jdbcPasswordRegex.firstMatch(in: sample, range: nsRange) != nil)
             ))
             || (lowerSample.contains("bearer") && bearerRegex.firstMatch(in: sample, range: nsRange) != nil)
             || ((sample.contains("?") || sample.contains("&")) && urlQuerySecretRegex.firstMatch(in: sample, range: nsRange) != nil)
@@ -772,6 +786,30 @@ enum SensitiveCredentialVeil {
                 in: out,
                 range: r,
                 withTemplate: "-----BEGIN PRIVATE KEY-----\n[REDACTED_BY_iCLIP]\n-----END PRIVATE KEY-----"
+            )
+        }
+        if out.contains("PuTTY-User-Key-File-") {
+            let r = NSRange(out.startIndex..<out.endIndex, in: out)
+            out = puttyPrivateKeyRegex.stringByReplacingMatches(
+                in: out,
+                range: r,
+                withTemplate: "PuTTY-User-Key-File-3: [REDACTED_BY_iCLIP]"
+            )
+        }
+        if out.contains("client-key-data") {
+            let r = NSRange(out.startIndex..<out.endIndex, in: out)
+            out = kubeClientKeyRegex.stringByReplacingMatches(
+                in: out,
+                range: r,
+                withTemplate: "$1***KUBE_KEY_REDACTED***$3"
+            )
+        }
+        if out.lowercased().contains("jdbc:") {
+            let r = NSRange(out.startIndex..<out.endIndex, in: out)
+            out = jdbcPasswordRegex.stringByReplacingMatches(
+                in: out,
+                range: r,
+                withTemplate: "$1***REDACTED***"
             )
         }
         out = ageSecretKeyRegex.stringByReplacingMatches(
@@ -2230,5 +2268,205 @@ enum ReversiblePrivacyTwin {
         }
         guard restored > 0, out != rawText else { return nil }
         return (out, restored)
+    }
+}
+
+
+/// 12. 最小够用净提与收件名片一键拆入连填引擎（`SmartFieldExtractor`：自动剥离闲聊噪音提纯手机/地址/邮箱/IP，支持一键拆入 FIFO 顺序连填队列）
+enum SmartFieldExtractor {
+    struct ShippingContact: Equatable {
+        let recipientName: String?
+        let cleanPhone: String
+        let cleanAddress: String
+
+        var cleanCardText: String {
+            if let name = recipientName, !name.isEmpty {
+                return "\(name)\n\(cleanPhone)\n\(cleanAddress)"
+            }
+            return "\(cleanPhone)\n\(cleanAddress)"
+        }
+
+        var queueFields: [String] {
+            if let name = recipientName, !name.isEmpty {
+                return [name, cleanPhone, cleanAddress]
+            }
+            return [cleanPhone, cleanAddress]
+        }
+    }
+
+    private static let formattedPhoneRegex = try! NSRegularExpression(
+        pattern: #"(?<![0-9A-Za-z])(?:\+?86[\s-]*)?(1[3-9]\d[\s-]?\d{4}[\s-]?\d{4})(?![0-9A-Za-z])"#
+    )
+    private static let emailExtractRegex = try! NSRegularExpression(
+        pattern: #"\b[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]+\.[A-Za-z]{2,18}\b"#
+    )
+    private static let ipv4ExtractRegex = try! NSRegularExpression(
+        pattern: #"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b"#
+    )
+    private static let logisticsRemarkRegex = try! NSRegularExpression(
+        pattern: #"[（(][^）)\n]{0,24}(?:顺丰|到付|寄付|包邮|圆通|中通|韵达|申通|极兔|京东|快递|勿电|丰巢|谢谢|麻烦|加急)[^）)\n]{0,24}[）)]"#
+    )
+    private static let labelStripRegex = try! NSRegularExpression(
+        pattern: #"(?:收件人|收货人|联系人|姓名|联系电话|手机号码|手机号|电话|手机|收货地址|详细地址|寄件地址|收件地址|地址)\s*[:：]\s*"#
+    )
+    private static let politePrefixRegex = try! NSRegularExpression(
+        pattern: #"^(?:亲|你好|您好|麻烦|帮我|请)?(?:帮我)?(?:发|寄)?(?:一下|个)?(?:顺丰|快递|样品|包裹)?\s*[:：，,\s]+"#
+    )
+
+    private static let regionMarkers = ["省", "市", "自治区", "特别行政区", "区", "县", "旗"]
+    private static let streetMarkers = ["路", "街", "道", "巷", "号", "弄", "室", "楼", "层", "栋", "幢", "单元", "大厦", "广场", "中心", "园", "苑", "小区", "村", "镇"]
+
+    static func hasChineseAddress(_ raw: String) -> Bool {
+        let sample = raw.utf8.count > 2_048 ? String(raw.prefix(1_024)) : raw
+        if sample.contains("收货地址") || sample.contains("收件地址") || sample.contains("详细地址") {
+            return true
+        }
+        return regionMarkers.contains(where: { sample.contains($0) })
+            && streetMarkers.contains(where: { sample.contains($0) })
+    }
+
+    static func hasMainlandPhone(_ raw: String) -> Bool {
+        guard raw.contains("1") else { return false }
+        let sample = raw.utf8.count > 2_048 ? String(raw.prefix(1_024)) : raw
+        let r = NSRange(sample.startIndex..<sample.endIndex, in: sample)
+        return formattedPhoneRegex.firstMatch(in: sample, range: r) != nil
+    }
+
+    static func hasEmail(_ raw: String) -> Bool {
+        guard raw.contains("@") else { return false }
+        let sample = raw.utf8.count > 2_048 ? String(raw.prefix(1_024)) : raw
+        let r = NSRange(sample.startIndex..<sample.endIndex, in: sample)
+        return emailExtractRegex.firstMatch(in: sample, range: r) != nil
+    }
+
+    static func hasIPv4(_ raw: String) -> Bool {
+        guard raw.contains(".") else { return false }
+        let sample = raw.utf8.count > 2_048 ? String(raw.prefix(1_024)) : raw
+        let r = NSRange(sample.startIndex..<sample.endIndex, in: sample)
+        return ipv4ExtractRegex.firstMatch(in: sample, range: r) != nil
+    }
+
+    /// 提取并提纯单条带横杠/空格/`+86`/标签前缀的 11 位大陆手机号（若原文本已是纯 11 位数字则返回 nil）
+    static func extractNormalizedSinglePhone(_ raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count >= 11, trimmed.utf8.count <= 240 else { return nil }
+        let r = NSRange(trimmed.startIndex..<trimmed.endIndex, in: trimmed)
+        let matches = formattedPhoneRegex.matches(in: trimmed, range: r)
+        guard matches.count == 1,
+              let g1 = Range(matches[0].range(at: 1), in: trimmed) else {
+            return nil
+        }
+        let digits = trimmed[g1].filter { $0 >= "0" && $0 <= "9" }
+        guard digits.count == 11, digits != trimmed else { return nil }
+        return digits
+    }
+
+    /// 批量去重提取杂乱文本中的全部邮箱（>= 2 个不同邮箱时触发）
+    static func extractUniqueEmails(_ raw: String) -> [String] {
+        guard raw.contains("@"), raw.utf8.count <= 32_768 else { return [] }
+        let r = NSRange(raw.startIndex..<raw.endIndex, in: raw)
+        var seen = Set<String>()
+        var ordered: [String] = []
+        for m in emailExtractRegex.matches(in: raw, range: r) {
+            if let rng = Range(m.range, in: raw) {
+                let mail = String(raw[rng])
+                let key = mail.lowercased()
+                if seen.insert(key).inserted {
+                    ordered.append(mail)
+                }
+            }
+        }
+        return ordered.count >= 2 ? ordered : []
+    }
+
+    /// 批量去重提取杂乱日志/告警中的全部 IPv4 地址（>= 2 个不同 IP 时触发）
+    static func extractUniqueIPv4s(_ raw: String) -> [String] {
+        guard raw.contains("."), raw.utf8.count <= 32_768 else { return [] }
+        let r = NSRange(raw.startIndex..<raw.endIndex, in: raw)
+        var seen = Set<String>()
+        var ordered: [String] = []
+        for m in ipv4ExtractRegex.matches(in: raw, range: r) {
+            if let rng = Range(m.range, in: raw) {
+                let ip = String(raw[rng])
+                if seen.insert(ip).inserted {
+                    ordered.append(ip)
+                }
+            }
+        }
+        return ordered.count >= 2 ? ordered : []
+    }
+
+    /// 离线智能解析中文收件地址/名片三要素（支持有标签与自然无标签格式，自动清洗手机号横杠与快递备注噪音）
+    static func parseShippingContact(_ raw: String) -> ShippingContact? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count >= 14, trimmed.utf8.count <= 1_200 else { return nil }
+        let lower = trimmed.lowercased()
+        if trimmed.hasPrefix("{") || trimmed.hasPrefix("|") || lower.hasPrefix("curl ") || lower.contains("http://") || lower.contains("https://") {
+            // 若含链接则先剥离链接再解析，防止后台 URL 混入收件地址（最小够用防泄密）
+        }
+        let lines = trimmed.components(separatedBy: .newlines)
+        guard lines.count <= 8, hasChineseAddress(trimmed) else { return nil }
+
+        // 剥离任何混入的 HTTP(S) 链接与物流括号备注
+        var working = trimmed.replacingOccurrences(of: #"https?://[^\s，,）)]+"#, with: " ", options: .regularExpression)
+        working = logisticsRemarkRegex.stringByReplacingMatches(
+            in: working,
+            range: NSRange(working.startIndex..<working.endIndex, in: working),
+            withTemplate: " "
+        )
+
+        let fullRange = NSRange(working.startIndex..<working.endIndex, in: working)
+        guard let phoneMatch = formattedPhoneRegex.firstMatch(in: working, range: fullRange),
+              let fullPhoneRange = Range(phoneMatch.range, in: working),
+              let corePhoneRange = Range(phoneMatch.range(at: 1), in: working) else {
+            return nil
+        }
+        let cleanPhone = working[corePhoneRange].filter { $0 >= "0" && $0 <= "9" }
+        guard cleanPhone.count == 11 else { return nil }
+
+        working.replaceSubrange(fullPhoneRange, with: "\n")
+        working = politePrefixRegex.stringByReplacingMatches(
+            in: working,
+            range: NSRange(working.startIndex..<working.endIndex, in: working),
+            withTemplate: ""
+        )
+        working = labelStripRegex.stringByReplacingMatches(
+            in: working,
+            range: NSRange(working.startIndex..<working.endIndex, in: working),
+            withTemplate: "\n"
+        )
+
+        let rawSegments = working
+            .components(separatedBy: CharacterSet(charactersIn: "\n,，;；|"))
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        var tokens: [String] = []
+        for seg in rawSegments {
+            if hasChineseAddress(seg), seg.contains(" ") {
+                let parts = seg.split(whereSeparator: \.isWhitespace).map(String.init)
+                if parts.count >= 2, let first = parts.first, first.count >= 2, first.count <= 6, !hasChineseAddress(first) {
+                    tokens.append(first)
+                    tokens.append(parts.dropFirst().joined())
+                    continue
+                }
+            }
+            tokens.append(seg)
+        }
+
+        var foundAddress: String?
+        var foundName: String?
+        for tok in tokens {
+            let cleanedTok = tok.trimmingCharacters(in: CharacterSet(charactersIn: "：:，,。.、-— "))
+            guard !cleanedTok.isEmpty else { continue }
+            if foundAddress == nil && (hasChineseAddress(cleanedTok) || cleanedTok.count >= 9) {
+                foundAddress = cleanedTok
+            } else if foundName == nil && cleanedTok.count >= 2 && cleanedTok.count <= 12 && !cleanedTok.allSatisfy(\.isNumber) {
+                foundName = cleanedTok
+            }
+        }
+
+        guard let address = foundAddress, address.count >= 6 else { return nil }
+        return ShippingContact(recipientName: foundName, cleanPhone: cleanPhone, cleanAddress: address)
     }
 }

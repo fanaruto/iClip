@@ -2643,4 +2643,60 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertTrue(remaining.isEmpty)
         try? fm.removeItem(at: tmpExport)
     }
+
+    // MARK: - 53. 收件名片净提与连填拆解、导入供应链投毒净化、含敏截图打码微星标与 PuTTY/Kube/JDBC 凭据测试
+
+    @MainActor
+    func testSmartFieldExtractorImportPoisonGuardSensitiveImageSparkAndKubeJdbcSecrets() throws {
+        // 1. 验证收件信息无标签自然混排提纯（自动剥离顺丰备注、清洗横杠手机号并滤除混入的后台 URL）
+        let rawWeChatOrder = "麻烦发顺丰：林晓明 139-2888-6699 广东省深圳市南山区科苑南路3009号中国储能大厦18楼（顺丰到付谢谢） https://admin.internal/order?id=88"
+        let shipping = try XCTUnwrap(SmartFieldExtractor.parseShippingContact(rawWeChatOrder))
+        XCTAssertEqual(shipping.recipientName, "林晓明")
+        XCTAssertEqual(shipping.cleanPhone, "13928886699")
+        XCTAssertEqual(shipping.cleanAddress, "广东省深圳市南山区科苑南路3009号中国储能大厦18楼")
+        XCTAssertEqual(shipping.queueFields, ["林晓明", "13928886699", "广东省深圳市南山区科苑南路3009号中国储能大厦18楼"])
+        XCTAssertFalse(shipping.cleanCardText.contains("admin.internal"))
+
+        let orderItem = ClipItem(type: .text, text: rawWeChatOrder, contentHash: "text:order1")
+        XCTAssertTrue(orderItem.matches(query: "@地址"))
+        XCTAssertTrue(orderItem.matches(query: "@手机"))
+
+        // 验证多邮箱与多 IP 去重净提
+        let messyMail = "抄送：Alice@corp.com, bob@corp.com；退信 alice@corp.com，节点 10.0.1.8 -> 192.168.1.9 -> 10.0.1.8"
+        XCTAssertEqual(SmartFieldExtractor.extractUniqueEmails(messyMail), ["Alice@corp.com", "bob@corp.com"])
+        XCTAssertEqual(SmartFieldExtractor.extractUniqueIPv4s(messyMail), ["10.0.1.8", "192.168.1.9"])
+        let mailItem = ClipItem(type: .text, text: messyMail, contentHash: "text:mail1")
+        XCTAssertTrue(mailItem.matches(query: "@邮箱"))
+        XCTAssertTrue(mailItem.matches(query: "@ip"))
+
+        // 2. 验证外部 Raycast 常用语包导入时自动剥离 Trojan Source Bidi 伪装符（供应链防投毒）与 `imageURL` 防目录穿越
+        let poisonedRaycast = """
+        [{"name":"Deploy\u{202E}cek","text":"kubectl get pods \u{202E}evil"}]
+        """
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("iclip-iter13-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+        let merged = try ArchiveBackupService.mergeArchiveData(Data(poisonedRaycast.utf8), into: [], imagesDirectoryURL: tmpDir, fileExtensionHint: "json")
+        XCTAssertEqual(merged.mergedItems.count, 1)
+        XCTAssertFalse(merged.mergedItems[0].text?.contains("\u{202E}") ?? true)
+        XCTAssertFalse(merged.mergedItems[0].customAlias?.contains("\u{202E}") ?? true)
+
+        let traversalImg = ClipItem(type: .image, imageFileName: "../../etc/passwd", contentHash: "img:trav")
+        XCTAssertNil(ClipboardStore.shared.imageURL(for: traversalImg))
+
+        // 3. 验证含敏截图光标微星标优先弹出 `img-privacy-mosaic`（截图隐私打码）而非样机
+        let sensShot = ClipItem(type: .image, imageFileName: "id.png", ocrText: "联系人手机 13812345678", ocrChecked: true, contentHash: "img:idshot")
+        if let spark = AdaptiveIntelligenceEngine.shared.evaluateSparkCandidate(for: sensShot, reuseCount: 1, minimalMode: false) {
+            XCTAssertEqual(spark.actionID, "img-privacy-mosaic")
+        }
+
+        // 4. 验证 PuTTY 私钥、Kubernetes `client-key-data` 与 JDBC 密码连接串识别脱敏
+        let kubeYaml = "  client-key-data: LS0tLS1CRUdJTiBSU0EgUFJJVkFURSBLRVktLS0tLQ=="
+        let jdbcUrl = "jdbc:mysql://db.prod.local:3306/app?user=admin&password=" + "UltraSecretDbPass99"
+        let puttyKey = "PuTTY-User-Key-File-3: ssh-ed25519\nPrivate-Lines: 1\nabcd\nPrivate-MAC: 0011223344"
+        XCTAssertEqual(SensitiveCredentialVeil.classify(kubeYaml), .privateKey)
+        XCTAssertEqual(SensitiveCredentialVeil.classify(puttyKey), .privateKey)
+        XCTAssertEqual(SensitiveCredentialVeil.classify(jdbcUrl), .connectionSecret)
+        XCTAssertFalse(SensitiveCredentialVeil.redactForExternalSharing(jdbcUrl).contains("UltraSecretDbPass99"))
+        XCTAssertTrue(SensitiveCredentialVeil.redactForExternalSharing(kubeYaml).contains("***KUBE_KEY_REDACTED***"))
+    }
 }

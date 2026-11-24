@@ -778,6 +778,62 @@ enum SemanticEngine {
             }
         }
 
+        // 9. 最小够用结构化净提：中文收件名片提纯、带分隔符手机号清洗及多邮箱/多 IP 去重提取
+        if !isLargePayload && primaryKind != .ephemeralOTP && primaryKind != .json && primaryKind != .curlCommand {
+            if let shipping = SmartFieldExtractor.parseShippingContact(raw) {
+                actions.append(TransformAction(
+                    id: "contact-clean-card",
+                    title: "净提收件卡",
+                    symbolName: "shippingbox",
+                    isSecurityAction: false,
+                    resultText: shipping.cleanCardText,
+                    toastText: "已剥离闲聊噪音提纯标准收件信息"
+                ))
+                actions.append(TransformAction(
+                    id: "extract-clean-phone",
+                    title: "纯手机号 \(shipping.cleanPhone)",
+                    symbolName: "phone.fill",
+                    isSecurityAction: false,
+                    resultText: shipping.cleanPhone,
+                    toastText: "已提取 11 位纯数字手机号 \(shipping.cleanPhone)"
+                ))
+            } else {
+                if let cleanPhone = SmartFieldExtractor.extractNormalizedSinglePhone(raw),
+                   !MeetingAndEphemeralEngine.isOTPMessage(raw) {
+                    actions.append(TransformAction(
+                        id: "extract-clean-phone",
+                        title: "纯手机号 \(cleanPhone)",
+                        symbolName: "phone.fill",
+                        isSecurityAction: false,
+                        resultText: cleanPhone,
+                        toastText: "已清洗分隔符并提取纯手机号 \(cleanPhone)"
+                    ))
+                }
+                let uniqueEmails = SmartFieldExtractor.extractUniqueEmails(raw)
+                if uniqueEmails.count >= 2 {
+                    actions.append(TransformAction(
+                        id: "extract-unique-emails",
+                        title: "提取 \(uniqueEmails.count) 个邮箱",
+                        symbolName: "envelope.fill",
+                        isSecurityAction: false,
+                        resultText: uniqueEmails.joined(separator: "\n"),
+                        toastText: "已去重净提 \(uniqueEmails.count) 个邮箱地址"
+                    ))
+                }
+                let uniqueIPs = SmartFieldExtractor.extractUniqueIPv4s(raw)
+                if uniqueIPs.count >= 2 {
+                    actions.append(TransformAction(
+                        id: "extract-unique-ips",
+                        title: "提取 \(uniqueIPs.count) 个 IP",
+                        symbolName: "network",
+                        isSecurityAction: false,
+                        resultText: uniqueIPs.joined(separator: "\n"),
+                        toastText: "已去重净提 \(uniqueIPs.count) 个 IPv4 地址"
+                    ))
+                }
+            }
+        }
+
         // 单行中英混排粘连排版美化兜底
         if primaryKind == nil && !trimmed.contains("\n") && raw.utf8.count <= 8_192 {
             let docActions = DocumentTypographyEngine.analyze(raw)

@@ -1596,4 +1596,105 @@ mod tests {
         assert!(!store.has_active_undo(crate::model::now_unix_secs()));
         let _ = fs::remove_dir_all(tmp_dir);
     }
+
+    #[test]
+    fn test_smart_field_extractor_queue_split_import_poison_guard_and_kube_jdbc_secrets() {
+        use crate::intelligence::{
+            extract_unique_emails, extract_unique_ipv4s, parse_shipping_contact,
+        };
+        use crate::security::{classify_sensitive_text, SensitiveSecretKind};
+
+        // 1. 验证收件名片自然混排提纯与一键拆入 FIFO 顺序连填队列
+        let wechat_order = "麻烦发顺丰：林晓明 139-2888-6699 广东省深圳市南山区科苑南路3009号中国储能大厦18楼（顺丰到付谢谢） https://admin.internal/order?id=88";
+        let shipping = parse_shipping_contact(wechat_order).unwrap();
+        assert_eq!(shipping.recipient_name.as_deref(), Some("林晓明"));
+        assert_eq!(shipping.clean_phone, "13928886699");
+        assert_eq!(
+            shipping.clean_address,
+            "广东省深圳市南山区科苑南路3009号中国储能大厦18楼"
+        );
+        assert!(!shipping.clean_card_text().contains("admin.internal"));
+
+        let order_item = ClipItem::new_text(wechat_order.to_string(), None);
+        assert!(order_item.matches_query("@地址"));
+        assert!(order_item.matches_query("@手机"));
+
+        let messy_mail =
+            "抄送：Alice@corp.com, bob@corp.com；退信 alice@corp.com，节点 10.0.1.8 -> 192.168.1.9 -> 10.0.1.8";
+        assert_eq!(
+            extract_unique_emails(messy_mail),
+            vec!["Alice@corp.com".to_string(), "bob@corp.com".to_string()]
+        );
+        assert_eq!(
+            extract_unique_ipv4s(messy_mail),
+            vec!["10.0.1.8".to_string(), "192.168.1.9".to_string()]
+        );
+        let mail_item = ClipItem::new_text(messy_mail.to_string(), None);
+        assert!(mail_item.matches_query("@邮箱"));
+        assert!(mail_item.matches_query("@ip"));
+
+        // 2. 验证拆入连填队列与外部常用语包导入自动剥离 Trojan Bidi 毒字符
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "iclip-iter13-test-{}-{}",
+            std::process::id(),
+            crate::model::now_unix_secs()
+        ));
+        let mut store = ClipboardStore::new(tmp_dir.clone());
+        let q_len = store.enqueue_contact_fields_for_sequential_paste(&shipping.queue_fields());
+        assert_eq!(q_len, 3);
+        assert_eq!(
+            store.dequeue_next_item().unwrap().text.as_deref(),
+            Some("林晓明")
+        );
+        assert_eq!(
+            store.dequeue_next_item().unwrap().text.as_deref(),
+            Some("13928886699")
+        );
+        assert_eq!(
+            store.dequeue_next_item().unwrap().text.as_deref(),
+            Some("广东省深圳市南山区科苑南路3009号中国储能大厦18楼")
+        );
+
+        let poisoned_raycast =
+            "[{\"name\":\"Deploy\\u202ecek\",\"text\":\"kubectl get pods \\u202eevil\"}]";
+        let (merged, _) = crate::archive::merge_archive_data_with_hint(
+            poisoned_raycast.as_bytes(),
+            &[],
+            &store.images_dir,
+            Some("json"),
+        )
+        .unwrap();
+        assert_eq!(merged.len(), 1);
+        assert!(!merged[0].text.as_deref().unwrap().contains('\u{202e}'));
+        assert!(!merged[0]
+            .custom_alias
+            .as_deref()
+            .unwrap()
+            .contains('\u{202e}'));
+
+        // 3. 验证 PuTTY 私钥、Kubernetes `client-key-data` 与 JDBC 连接串识别脱敏
+        let kube_yaml = "  client-key-data: LS0tLS1CRUdJTiBSU0EgUFJJVkFURSBLRVktLS0tLQ==";
+        let jdbc_url = format!(
+            "{}{}",
+            "jdbc:mysql://db.prod.local:3306/app?user=admin&password=", "UltraSecretDbPass99"
+        );
+        let putty_key =
+            "PuTTY-User-Key-File-3: ssh-ed25519\nPrivate-Lines: 1\nabcd\nPrivate-MAC: 0011223344";
+        assert_eq!(
+            classify_sensitive_text(kube_yaml),
+            Some(SensitiveSecretKind::PrivateKey)
+        );
+        assert_eq!(
+            classify_sensitive_text(putty_key),
+            Some(SensitiveSecretKind::PrivateKey)
+        );
+        assert_eq!(
+            classify_sensitive_text(&jdbc_url),
+            Some(SensitiveSecretKind::ConnectionSecret)
+        );
+        assert!(!redact_secrets(&jdbc_url).contains("UltraSecretDbPass99"));
+        assert!(redact_secrets(kube_yaml).contains("***KUBE_KEY_REDACTED***"));
+
+        let _ = fs::remove_dir_all(tmp_dir);
+    }
 }

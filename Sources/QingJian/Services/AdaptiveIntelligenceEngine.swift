@@ -91,6 +91,7 @@ struct AdaptiveSparkCandidate: Equatable {
         case replaceClipboardText(text: String, htmlTable: String?, toast: String)
         case compressImage(itemID: UUID)
         case mockupImage(itemID: UUID)
+        case privacyMosaicImage(itemID: UUID)
         case extractImageOCR(itemID: UUID)
         case pinFrequentItem(itemID: UUID)
         case markAsTodo(itemID: UUID)
@@ -646,6 +647,25 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
             }
 
             let cat = "image"
+            let hasImageSecretsOrPII: Bool = {
+                if item.detectedSensitiveKind != nil { return true }
+                if let ocr = item.ocrText, !ocr.isEmpty {
+                    return SmartFieldExtractor.hasMainlandPhone(ocr) || SmartFieldExtractor.hasEmail(ocr)
+                }
+                return false
+            }()
+            if hasImageSecretsOrPII, !isCategoryCoolingDown("security") {
+                return AdaptiveSparkCandidate(
+                    actionID: "img-privacy-mosaic",
+                    categoryKey: "security",
+                    sourceApp: item.sourceAppName,
+                    symbolName: "eye.trianglebadge.exclamationmark",
+                    shortTitle: "截图隐私打码",
+                    badgeHint: "防泄密",
+                    promotableRule: nil,
+                    payload: .privacyMosaicImage(itemID: item.id)
+                )
+            }
             guard !isCategoryCoolingDown(cat) else { return nil }
 
             struct ImgOption {
@@ -1241,7 +1261,8 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
         if actionID.hasPrefix("bill-") { return "bill" }
         if actionID.hasPrefix("doc-") { return "typography" }
         if actionID.hasPrefix("tbl-") { return "table" }
-        if actionID.hasPrefix("redact-") || actionID == "restore-privacy-twin" { return "security" }
+        if actionID.hasPrefix("redact-") || actionID == "restore-privacy-twin" || actionID == "img-privacy-mosaic" { return "security" }
+        if actionID.hasPrefix("contact-") || actionID.hasPrefix("extract-unique-") || actionID == "extract-clean-phone" { return "extract_field" }
         if actionID == "strip-rich-style" { return "rich_text" }
         if actionID == "img-qrcode" { return "qrcode" }
         if actionID.hasPrefix("img-") { return "image" }

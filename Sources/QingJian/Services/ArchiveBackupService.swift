@@ -318,21 +318,52 @@ enum ArchiveBackupService {
                     }
                 }
 
+                if entry.type == .file {
+                    if let paths = entry.filePaths {
+                        let hasTraversal = paths.contains { $0.contains("..") }
+                        if hasTraversal || FileAndLinkSecurityGuard.classifyFilePaths(paths) != nil {
+                            // 拒绝跨机归档注入含 `..` 路径穿越或指向私钥/凭据的敏感本地路径
+                            continue
+                        }
+                    }
+                }
+
+                let sanitizedEntryText: String? = entry.text.map { rawText in
+                    if case .pastejackingOrBidi = ClipboardPoisonGuard.inspect(rawText) {
+                        let clean = ClipboardPoisonGuard.sanitize(rawText)
+                        return clean.isEmpty ? rawText : clean
+                    }
+                    return rawText
+                }
+                let sanitizedEntryAlias: String? = entry.customAlias.map { rawAlias in
+                    if case .pastejackingOrBidi = ClipboardPoisonGuard.inspect(rawAlias) {
+                        return ClipboardPoisonGuard.sanitize(rawAlias)
+                    }
+                    return rawAlias
+                }
+                let effectiveHash: String = {
+                    if let cleanText = sanitizedEntryText, cleanText != entry.text {
+                        let digest = SHA256.hash(data: Data(cleanText.utf8)).map { String(format: "%02x", $0) }.joined()
+                        return "\(entry.type == .link ? "link" : "text"):\(digest)"
+                    }
+                    return entry.contentHash
+                }()
+
                 let restored = ClipItem(
                     type: entry.type,
-                    text: entry.text,
+                    text: sanitizedEntryText,
                     imageFileName: savedImageName,
                     imageWidth: entry.imageWidth,
                     imageHeight: entry.imageHeight,
                     ocrText: entry.ocrText,
                     ocrChecked: (entry.ocrText != nil) ? true : nil,
                     filePaths: entry.filePaths,
-                    contentHash: entry.contentHash,
+                    contentHash: effectiveHash,
                     sourceAppName: entry.sourceAppName,
                     createdAt: entry.createdAt,
                     isPinned: true,
                     pinCategory: entry.pinCategory,
-                    customAlias: entry.customAlias,
+                    customAlias: sanitizedEntryAlias,
                     isTodoItem: entry.isTodoItem
                 )
                 working.append(restored)
@@ -359,12 +390,25 @@ enum ArchiveBackupService {
         var updatedExisting = 0
 
         for cand in candidates {
-            let trimmed = cand.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let safeBody: String = {
+                if case .pastejackingOrBidi = ClipboardPoisonGuard.inspect(cand.text) {
+                    let clean = ClipboardPoisonGuard.sanitize(cand.text)
+                    return clean.isEmpty ? cand.text : clean
+                }
+                return cand.text
+            }()
+            let safeAlias: String? = cand.alias.map { rawAlias in
+                if case .pastejackingOrBidi = ClipboardPoisonGuard.inspect(rawAlias) {
+                    return ClipboardPoisonGuard.sanitize(rawAlias)
+                }
+                return rawAlias
+            }
+            let trimmed = safeBody.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { continue }
             let isLink = trimmed.lowercased().hasPrefix("http://") || trimmed.lowercased().hasPrefix("https://")
-            let hash = SHA256.hash(data: Data(cand.text.utf8)).map { String(format: "%02x", $0) }.joined()
+            let hash = SHA256.hash(data: Data(safeBody.utf8)).map { String(format: "%02x", $0) }.joined()
             let contentHash = "\(isLink ? "link" : "text"):\(hash)"
-            let inferredCat = PinCategory.infer(alias: cand.alias, text: cand.text)
+            let inferredCat = PinCategory.infer(alias: safeAlias, text: safeBody)
 
             if let idx = working.firstIndex(where: { $0.contentHash == contentHash }) {
                 var cur = working[idx]
@@ -374,7 +418,7 @@ enum ArchiveBackupService {
                     changed = true
                 }
                 if (cur.customAlias?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true),
-                   let alias = cand.alias, !alias.isEmpty {
+                   let alias = safeAlias, !alias.isEmpty {
                     cur.customAlias = alias
                     changed = true
                 }
@@ -389,13 +433,13 @@ enum ArchiveBackupService {
             } else {
                 let newItem = ClipItem(
                     type: isLink ? .link : .text,
-                    text: cand.text,
+                    text: safeBody,
                     contentHash: contentHash,
                     sourceAppName: cand.sourceLabel,
                     createdAt: cand.createdAt ?? Date(),
                     isPinned: true,
                     pinCategory: inferredCat,
-                    customAlias: cand.alias
+                    customAlias: safeAlias
                 )
                 working.append(newItem)
                 importedNew += 1

@@ -616,6 +616,49 @@ impl ClipItem {
             "密文" | "@密文" | "@locked" | "iclpmsg1" => {
                 return crate::security::contains_secret_capsule(self.text.as_deref());
             }
+            "@地址" | "@收件" | "@收货" => {
+                return self
+                    .text
+                    .as_deref()
+                    .map(crate::intelligence::has_chinese_address)
+                    .unwrap_or(false);
+            }
+            "@手机" | "@电话" | "@phone" => {
+                return self
+                    .text
+                    .as_deref()
+                    .map(crate::intelligence::has_mainland_phone)
+                    .unwrap_or(false)
+                    || self
+                        .ocr_text
+                        .as_deref()
+                        .map(crate::intelligence::has_mainland_phone)
+                        .unwrap_or(false);
+            }
+            "@邮箱" | "@email" => {
+                return self
+                    .text
+                    .as_deref()
+                    .map(crate::intelligence::has_email_address)
+                    .unwrap_or(false)
+                    || self
+                        .ocr_text
+                        .as_deref()
+                        .map(crate::intelligence::has_email_address)
+                        .unwrap_or(false);
+            }
+            "@ip" => {
+                return self
+                    .text
+                    .as_deref()
+                    .map(crate::intelligence::has_ipv4_address)
+                    .unwrap_or(false)
+                    || self
+                        .ocr_text
+                        .as_deref()
+                        .map(crate::intelligence::has_ipv4_address)
+                        .unwrap_or(false);
+            }
             "风险" | "@风险" | "@毒" | "@poison" | "poison" => {
                 return self.detected_poison_threat().is_some()
                     || self.detected_link_risk().is_some()

@@ -687,6 +687,12 @@ final class ClipboardStore: ObservableObject {
                 pasteAppleMockupImage(for: target, shouldAutoPaste: false, onBeforePaste: nil)
             }
 
+        case .privacyMosaicImage(let itemID):
+            if let target = items.first(where: { $0.id == itemID }) {
+                TactileFeedbackEngine.shared.perform(.magicTransform)
+                pastePrivacyRedactedImage(for: target, shouldAutoPaste: false, onBeforePaste: nil)
+            }
+
         case .extractImageOCR(let itemID):
             if let target = items.first(where: { $0.id == itemID }) {
                 TactileFeedbackEngine.shared.perform(.magicTransform)
@@ -3454,6 +3460,65 @@ final class ClipboardStore: ObservableObject {
         if analyzed.isEmpty {
             analyzed = DocumentTypographyEngine.analyze(raw)
         }
+        if let shipping = SmartFieldExtractor.parseShippingContact(raw) {
+            analyzed.insert(
+                FinanceQuickAction(
+                    id: "contact-clean-card",
+                    title: "净提收件卡",
+                    symbolName: "shippingbox",
+                    resultText: shipping.cleanCardText,
+                    toastText: "已剥离闲聊噪音提纯标准收件信息"
+                ),
+                at: 0
+            )
+            analyzed.insert(
+                FinanceQuickAction(
+                    id: "contact-split-queue",
+                    title: "拆入连填(名→号→址)",
+                    symbolName: "list.number",
+                    resultText: shipping.cleanCardText,
+                    toastText: "已拆入顺序队列（连按 ⌃⌥V 依次填入姓名/手机/地址）"
+                ),
+                at: 0
+            )
+        } else if analyzed.count < 3 {
+            if let cleanPhone = SmartFieldExtractor.extractNormalizedSinglePhone(raw),
+               !MeetingAndEphemeralEngine.isOTPMessage(raw) {
+                analyzed.append(
+                    FinanceQuickAction(
+                        id: "extract-clean-phone",
+                        title: "纯手机号 \(cleanPhone)",
+                        symbolName: "phone.fill",
+                        resultText: cleanPhone,
+                        toastText: "已提取纯手机号 \(cleanPhone)"
+                    )
+                )
+            }
+            let uniqueEmails = SmartFieldExtractor.extractUniqueEmails(raw)
+            if uniqueEmails.count >= 2 {
+                analyzed.append(
+                    FinanceQuickAction(
+                        id: "extract-unique-emails",
+                        title: "提取 \(uniqueEmails.count) 个邮箱",
+                        symbolName: "envelope.fill",
+                        resultText: uniqueEmails.joined(separator: "\n"),
+                        toastText: "已去重净提 \(uniqueEmails.count) 个邮箱"
+                    )
+                )
+            }
+            let uniqueIPs = SmartFieldExtractor.extractUniqueIPv4s(raw)
+            if uniqueIPs.count >= 2 {
+                analyzed.append(
+                    FinanceQuickAction(
+                        id: "extract-unique-ips",
+                        title: "提取 \(uniqueIPs.count) 个 IP",
+                        symbolName: "network",
+                        resultText: uniqueIPs.joined(separator: "\n"),
+                        toastText: "已去重净提 \(uniqueIPs.count) 个 IP"
+                    )
+                )
+            }
+        }
         if item.detectedSensitiveKind != nil {
             if let envExample = EnvTemplateSanitizer.generateExampleTemplate(from: raw) {
                 analyzed.insert(
@@ -3585,6 +3650,10 @@ final class ClipboardStore: ObservableObject {
             _ = splitChecklistIntoTodos(from: item)
             return
         }
+        if action.id == "contact-split-queue", let raw = item.text, let shipping = SmartFieldExtractor.parseShippingContact(raw) {
+            enqueueContactFieldsForSequentialPaste(shipping.queueFields)
+            return
+        }
         if action.id == "totp-live-code", let raw = item.text, let fresh = TOTPAuthenticator.evaluate(uri: raw) {
             pasteEphemeralSecret(
                 fresh.code,
@@ -3670,6 +3739,36 @@ final class ClipboardStore: ObservableObject {
     func clearPasteQueue() {
         pasteQueueIDs.removeAll()
         showToast("已清空顺序粘贴队列")
+    }
+
+    /// 将收件名片拆出的 `[姓名, 11位纯手机号, 详细地址]` 按序注入 FIFO 连填队列，支持连按 ⌃⌥V 依次填入表单
+    func enqueueContactFieldsForSequentialPaste(_ fields: [String]) {
+        let valid = fields.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        guard !valid.isEmpty else { return }
+        pasteQueueIDs.removeAll()
+        var queuedIDs: [UUID] = []
+        let baseDate = Date()
+        for (offset, fieldText) in valid.enumerated() {
+            let hash = "text:\(Self.sha256(fieldText))"
+            if let existing = items.first(where: { $0.contentHash == hash }) {
+                queuedIDs.append(existing.id)
+            } else {
+                let entry = ClipItem(
+                    type: .text,
+                    text: fieldText,
+                    contentHash: hash,
+                    sourceAppName: "收件连填",
+                    createdAt: baseDate.addingTimeInterval(Double(valid.count - offset) * 0.001)
+                )
+                items.insert(entry, at: 0)
+                queuedIDs.append(entry.id)
+            }
+        }
+        items = sortItems(items)
+        pasteQueueIDs = queuedIDs
+        saveHistory()
+        TactileFeedbackEngine.shared.perform(.queueToggle(added: true))
+        showToast("已拆入连填队列（共 \(queuedIDs.count) 项 · 连按 ⌃⌥V 依次填入表单）", duration: 3.4)
     }
 
     func dequeueAndPasteNext(showGlobalHUD: Bool = false, onBeforePaste: (() -> Void)? = nil) {
@@ -4027,8 +4126,7 @@ final class ClipboardStore: ObservableObject {
                 if let nsImg = NSImage(data: result.data), let tiff = nsImg.tiffRepresentation {
                     self.pasteboard.setData(tiff, forType: .tiff)
                 }
-                self.ignoreNextChangeCount = self.pasteboard.changeCount
-                self.lastChangeCount = self.pasteboard.changeCount
+                self.applyImageOutboundPasteboardGuard(for: item, shouldAutoPaste: shouldAutoPaste)
 
                 onBeforePaste?()
                 self.refreshAccessibilityStatus()
@@ -4066,8 +4164,7 @@ final class ClipboardStore: ObservableObject {
                 guard let self else { return }
                 self.pasteboard.clearContents()
                 self.pasteboard.setData(result.data, forType: .png)
-                self.ignoreNextChangeCount = self.pasteboard.changeCount
-                self.lastChangeCount = self.pasteboard.changeCount
+                self.applyImageOutboundPasteboardGuard(for: item, shouldAutoPaste: shouldAutoPaste)
 
                 onBeforePaste?()
                 self.refreshAccessibilityStatus()
@@ -4154,8 +4251,7 @@ final class ClipboardStore: ObservableObject {
                 guard let self else { return }
                 self.pasteboard.clearContents()
                 self.pasteboard.setData(clean.data, forType: .png)
-                self.ignoreNextChangeCount = self.pasteboard.changeCount
-                self.lastChangeCount = self.pasteboard.changeCount
+                self.applyImageOutboundPasteboardGuard(for: item, shouldAutoPaste: shouldAutoPaste)
 
                 TactileFeedbackEngine.shared.perform(.magicTransform)
                 onBeforePaste?()
@@ -4170,9 +4266,29 @@ final class ClipboardStore: ObservableObject {
         }
     }
 
+    /// 图片二级写回剪贴板出口门卫：若原截图含高敏凭据或粘贴即焚属性，注入 `LocalOnly` 阻断云广播并联动 45s 擦除或 5s 即焚
+    private func applyImageOutboundPasteboardGuard(for item: ClipItem, shouldAutoPaste: Bool) {
+        let isSensitive = item.detectedSensitiveKind != nil || item.isBurnAfterPaste
+        if isSensitive {
+            PasteboardPrivacyStandards.applyLocalOnlyConcealedProtection(to: pasteboard)
+        }
+        let written = pasteboard.changeCount
+        ignoreNextChangeCount = written
+        lastChangeCount = written
+        if shouldAutoPaste && item.isBurnAfterPaste {
+            scheduleBurnAfterPasteIfNeeded(for: item)
+        } else if isSensitive && !item.isPinned {
+            scheduleConcealedPasteboardScrubIfNeeded(capturedChangeCount: written, delaySeconds: 45.0)
+        }
+    }
+
     func imageURL(for item: ClipItem) -> URL? {
-        guard let name = item.imageFileName else { return nil }
-        return imagesDirectoryURL.appendingPathComponent(name)
+        guard let rawName = item.imageFileName else { return nil }
+        let safeName = (rawName as NSString).lastPathComponent
+        guard !safeName.isEmpty, safeName != ".", safeName != "..", safeName == rawName else {
+            return nil
+        }
+        return imagesDirectoryURL.appendingPathComponent(safeName)
     }
 
     func cachedThumbnail(for item: ClipItem) -> NSImage? {

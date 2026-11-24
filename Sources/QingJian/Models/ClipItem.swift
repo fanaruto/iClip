@@ -628,6 +628,20 @@ enum EpisodicQueryMatcher {
             return item.detectedSensitiveKind != nil || item.isBurnAfterPaste
         case "密文", "@密文", "@locked", "iclpmsg1":
             return SecretCapsuleMessenger.containsCapsule(item.text)
+        case "@地址", "@收件", "@收货":
+            return item.text.map(SmartFieldExtractor.hasChineseAddress) ?? false
+        case "@手机", "@电话", "@phone":
+            if let t = item.text, SmartFieldExtractor.hasMainlandPhone(t) { return true }
+            if let ocr = item.ocrText, SmartFieldExtractor.hasMainlandPhone(ocr) { return true }
+            return false
+        case "@邮箱", "@email":
+            if let t = item.text, SmartFieldExtractor.hasEmail(t) { return true }
+            if let ocr = item.ocrText, SmartFieldExtractor.hasEmail(ocr) { return true }
+            return false
+        case "@ip":
+            if let t = item.text, SmartFieldExtractor.hasIPv4(t) { return true }
+            if let ocr = item.ocrText, SmartFieldExtractor.hasIPv4(ocr) { return true }
+            return false
         case "风险", "@风险", "@毒", "@poison", "poison":
             return item.detectedPoisonThreat != nil || item.detectedLinkRisk != nil
         case "即焚", "@即焚", "@burn", "burn":

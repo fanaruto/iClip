@@ -1568,6 +1568,31 @@ impl ClipboardStore {
         None
     }
 
+    /// 将收件名片拆出的 `[姓名, 11位纯手机号, 详细地址]` 按序注入 FIFO 顺序连填队列
+    pub fn enqueue_contact_fields_for_sequential_paste(&mut self, fields: &[String]) -> usize {
+        let valid: Vec<String> = fields
+            .iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if valid.is_empty() {
+            return 0;
+        }
+        self.paste_queue_ids.clear();
+        self.queue_mode_active = true;
+        let mut ids = Vec::with_capacity(valid.len());
+        for f in valid {
+            let id = self.insert_or_promote(ClipItem::new_text(f, Some("收件连填".to_string())));
+            ids.push(id);
+        }
+        self.paste_queue_ids.clear();
+        for id in ids {
+            self.paste_queue_ids.push_back(id);
+        }
+        self.save_history();
+        self.paste_queue_ids.len()
+    }
+
     pub fn pinned_count(&self) -> usize {
         self.items.iter().filter(|it| it.is_pinned).count()
     }
@@ -1605,6 +1630,11 @@ impl ClipboardStore {
                 (plain_data, false)
             };
         fs::write(dest, &final_bytes).map_err(|_| ArchiveBackupError::InvalidArchiveFormat)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(dest, fs::Permissions::from_mode(0o600));
+        }
         Ok((self.pinned_count(), encrypted))
     }
 

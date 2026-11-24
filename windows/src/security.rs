@@ -888,6 +888,9 @@ pub fn classify_sensitive_text(raw: &str) -> Option<SensitiveSecretKind> {
     {
         return Some(SensitiveSecretKind::PrivateKey);
     }
+    if sample.contains("PuTTY-User-Key-File-") {
+        return Some(SensitiveSecretKind::PrivateKey);
+    }
 
     static AGE_KEY_RE: OnceLock<Regex> = OnceLock::new();
     let age_re =
@@ -896,7 +899,15 @@ pub fn classify_sensitive_text(raw: &str) -> Option<SensitiveSecretKind> {
     let wg_re = WG_PRIV_RE.get_or_init(|| {
         Regex::new(r"(?im)^\s*(?:PrivateKey|PresharedKey)\s*=\s*[A-Za-z0-9+/]{42,44}=\s*$").unwrap()
     });
-    if age_re.is_match(sample) || is_otpauth_uri(sample) || wg_re.is_match(sample) {
+    static KUBE_KEY_RE: OnceLock<Regex> = OnceLock::new();
+    let kube_re = KUBE_KEY_RE.get_or_init(|| {
+        Regex::new(r"(?im)^\s*client-key-data\s*:\s*[A-Za-z0-9+/=]{32,}\s*$").unwrap()
+    });
+    if (sample.contains("AGE-SECRET-KEY-1") && age_re.is_match(sample))
+        || is_otpauth_uri(sample)
+        || (sample.contains("Key") && wg_re.is_match(sample))
+        || (sample.contains("client-key-data") && kube_re.is_match(sample))
+    {
         return Some(SensitiveSecretKind::PrivateKey);
     }
 
@@ -993,10 +1004,15 @@ pub fn classify_sensitive_text(raw: &str) -> Option<SensitiveSecretKind> {
     static WIFI_PW_RE: OnceLock<Regex> = OnceLock::new();
     let wifi_re =
         WIFI_PW_RE.get_or_init(|| Regex::new(r"(?i)WIFI:(?:[^;\r\n]*;)*?P:[^;\r\n]{4,};").unwrap());
+    static JDBC_PW_RE: OnceLock<Regex> = OnceLock::new();
+    let jdbc_re = JDBC_PW_RE.get_or_init(|| {
+        Regex::new(r##"(?i)jdbc:[a-z0-9+:-]+://[^\s'"]*?(?:[?&;]|user=[^&\s;]+[?&;])password=[^&\s;'"]{4,}"##).unwrap()
+    });
     if conn_re.is_match(sample)
         || bearer_re.is_match(sample)
         || url_q_re.is_match(sample)
         || basic_re.is_match(sample)
+        || (sample.to_ascii_lowercase().contains("jdbc:") && jdbc_re.is_match(sample))
         || is_webhook_url(sample)
         || http_hdr_re.is_match(sample)
         || http_basic_hdr_re.is_match(sample)

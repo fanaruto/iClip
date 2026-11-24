@@ -2050,7 +2050,9 @@ unsafe fn handle_clipboard_update(hwnd: HWND) {
                                     analyze_text_actions(&raw_text, false),
                                 )
                                 .into_iter()
-                                .filter(|a| a.id != "todo-split-checklist")
+                                .filter(|a| {
+                                    a.id != "todo-split-checklist" && a.id != "contact-split-queue"
+                                })
                                 .collect();
                             if let Some(top_act) = acts.first() {
                                 if top_act.id == "totp-live-code" {
@@ -3025,6 +3027,28 @@ unsafe fn commit_quick_action(hwnd: HWND, item_idx: usize, action: &QuickAction)
             });
             if created > 0 {
                 set_toast(hwnd, format!("✓ 已拆解为 {created} 条待办（Alt+2 查看）"));
+            }
+        }
+        return;
+    }
+
+    if action.id == "contact-split-queue" {
+        if let Some(id) = item_id {
+            let queued = APP_STATE.with(|c| {
+                let mut b = c.borrow_mut();
+                let st = b.as_mut()?;
+                let raw = st.store.items.iter().find(|it| it.id == id)?.text.clone()?;
+                let shipping = iclip_core::intelligence::parse_shipping_contact(&raw)?;
+                Some(
+                    st.store
+                        .enqueue_contact_fields_for_sequential_paste(&shipping.queue_fields()),
+                )
+            });
+            if let Some(cnt) = queued.filter(|&n| n > 0) {
+                set_toast(
+                    hwnd,
+                    format!("✓ 已拆入连填队列（共 {cnt} 项 · 连按 Ctrl+Alt+V 填入）"),
+                );
             }
         }
         return;
@@ -8509,11 +8533,24 @@ unsafe fn save_current_alias_draft(hwnd: HWND) {
 unsafe fn apply_image_studio_transform(hwnd: HWND, store_idx: usize, to_jpeg: bool) {
     let mut img_path = None;
     let mut auto_paste = true;
+    let mut privacy_guard = WinClipboardLocalOnlyGuard::default();
+    let mut item_id_opt: Option<String> = None;
+    let mut is_pinned = false;
+    let mut is_sensitive = false;
     APP_STATE.with(|c| {
         if let Some(st) = c.borrow_mut().as_mut() {
             auto_paste = st.store.config.auto_paste_enabled;
             st.ignore_next_clipboard_seq = true;
             if let Some(it) = st.store.items.get(store_idx) {
+                item_id_opt = Some(it.id.clone());
+                is_pinned = it.is_pinned;
+                is_sensitive = it.detected_sensitive_kind().is_some() || it.is_burn_after_paste();
+                privacy_guard = WinClipboardLocalOnlyGuard {
+                    block_cloud_and_history: is_sensitive,
+                    cf_excl: st.cf_exclude_monitor,
+                    cf_can_hist: st.cf_can_include_history,
+                    cf_can_cloud: st.cf_can_upload_cloud,
+                };
                 if let Some(f) = &it.image_file_name {
                     img_path = Some(st.store.images_dir.join(f));
                 }
@@ -8534,7 +8571,31 @@ unsafe fn apply_image_studio_transform(hwnd: HWND, store_idx: usize, to_jpeg: bo
         render_mockup_frame_png(&raw_png, 36).map(|(b, _, _)| b)
     };
     if let Some(bytes) = transformed {
-        let _ = write_image_bytes_to_clipboard(hwnd, &bytes);
+        let _ = write_image_bytes_to_clipboard_ext(hwnd, &bytes, privacy_guard);
+        let mut scrub_ms: Option<u32> = None;
+        APP_STATE.with(|c| {
+            if let Some(st) = c.borrow_mut().as_mut() {
+                if let Some(id) = &item_id_opt {
+                    if st.store.schedule_burn_after_paste_if_needed(id, 5) {
+                        scrub_ms = Some(5_000);
+                    } else if is_sensitive
+                        && !is_pinned
+                        && st.store.config.auto_clear_concealed_clipboard
+                    {
+                        scrub_ms = Some(45_000);
+                    }
+                }
+            }
+        });
+        if let Some(delay_ms) = scrub_ms {
+            let seq = GetClipboardSequenceNumber();
+            APP_STATE.with(|c| {
+                if let Some(st) = c.borrow_mut().as_mut() {
+                    st.scrub_expected_seq_num = seq;
+                }
+            });
+            SetTimer(hwnd, TIMER_ID_CONCEALED_SCRUB, delay_ms, None);
+        }
         hide_panel(hwnd, true);
         if auto_paste {
             std::thread::sleep(std::time::Duration::from_millis(35));
