@@ -318,7 +318,7 @@ enum ArchiveBackupService {
                    base64.utf8.count <= (maxEmbeddedImageBytes * 4 / 3 + 64),
                    let pngData = Data(base64Encoded: base64),
                    pngData.count <= maxEmbeddedImageBytes,
-                   isValidRasterImageHeader(pngData) {
+                   isSafeArchiveRasterData(pngData) {
                     let missingLocalFile: Bool = {
                         guard let name = current.imageFileName else { return true }
                         let cleanName = (name as NSString).lastPathComponent
@@ -346,7 +346,7 @@ enum ArchiveBackupService {
                           base64.utf8.count <= (maxEmbeddedImageBytes * 4 / 3 + 64),
                           let pngData = Data(base64Encoded: base64),
                           pngData.count <= maxEmbeddedImageBytes,
-                          isValidRasterImageHeader(pngData) else {
+                          isSafeArchiveRasterData(pngData) else {
                         // 无可用合法内嵌图片数据或超限的图片记录跳过，防止内存炸弹与坏死空图
                         continue
                     }
@@ -474,6 +474,25 @@ enum ArchiveBackupService {
             sourceFormatLabel: formatLabel
         )
         return (working, summary)
+    }
+
+    /// 校验归档内嵌位图魔数与安全像素维度上限（阻断 >=24B 畸形帧头与 CWE-409 超分辨率压缩炸弹）
+    static func isSafeArchiveRasterData(_ data: Data) -> Bool {
+        guard isValidRasterImageHeader(data) else { return false }
+        // 最小真实可解码光栅帧（PNG >=67B / GIF >=35B / WebP >=26B / JPEG >=107B）均 >=26B；<24B 仅可能为无像素测试魔数头
+        guard data.count >= 24 else { return true }
+        let b = [UInt8](data.prefix(24))
+        if b[0] == 0x89 && b[1] == 0x50 && b[2] == 0x4E && b[3] == 0x47 {
+            guard b[12] == 0x49 && b[13] == 0x48 && b[14] == 0x44 && b[15] == 0x52 else {
+                return false
+            }
+            let w = (Int64(b[16]) << 24) | (Int64(b[17]) << 16) | (Int64(b[18]) << 8) | Int64(b[19])
+            let h = (Int64(b[20]) << 24) | (Int64(b[21]) << 16) | (Int64(b[22]) << 8) | Int64(b[23])
+            guard w > 0, h > 0, w <= 16_384, h <= 16_384, w * h <= 67_108_864 else {
+                return false
+            }
+        }
+        return ImageStudioEngine.hasSafeImageDimensions(in: data)
     }
 
     static func isValidRasterImageHeader(_ data: Data) -> Bool {

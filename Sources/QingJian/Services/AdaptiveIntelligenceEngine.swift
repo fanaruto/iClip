@@ -199,19 +199,50 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
     /// 递增版本号：用于通知外部缓存（如语义动作排序缓存）按需失效刷新
     @Published private(set) var revision: Int = 0
 
+    private final class PersistenceGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var closed = false
+
+        func close() {
+            lock.lock()
+            closed = true
+            lock.unlock()
+        }
+
+        func performIfOpen(requireCustomDir: Bool, dirPath: String, _ body: () -> Void) {
+            lock.lock()
+            defer { lock.unlock() }
+            if requireCustomDir {
+                guard !closed, FileManager.default.fileExists(atPath: dirPath) else { return }
+            }
+            body()
+        }
+    }
+
     private var state: AdaptiveBrainState
     private let brainFileURL: URL
     private let suggestionsFileURL: URL
+    private let isCustomDirectory: Bool
+    private let persistenceGate = PersistenceGate()
     private var saveWorkItem: DispatchWorkItem?
     private let ioQueue = DispatchQueue(label: "com.qingjian.adaptive.io", qos: .utility)
+
+    deinit {
+        saveWorkItem?.cancel()
+        if isCustomDirectory {
+            persistenceGate.close()
+        }
+    }
 
     init(customDirectoryURL: URL? = nil) {
         let baseDir: URL
         if let customDirectoryURL {
             baseDir = customDirectoryURL
+            self.isCustomDirectory = true
         } else {
             let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             baseDir = appSupport.appendingPathComponent("QingJian", isDirectory: true)
+            self.isCustomDirectory = false
         }
         try? FileManager.default.createDirectory(
             at: baseDir,
@@ -798,7 +829,8 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
         }
         #if !ICLIP_EDITION_FLOW
         let snap = SemanticEngine.analyze(item)
-        let ranked = rankActions(snap.actions, idOf: \.id, sourceApp: item.sourceAppName)
+        let sparkEligible = snap.actions.filter { $0.id != "query-to-json" && $0.id != "json-to-query" }
+        let ranked = rankActions(sparkEligible, idOf: \.id, sourceApp: item.sourceAppName)
         if let top = ranked.first {
             let cat = Self.categoryKey(forActionID: top.id)
             guard !isCategoryCoolingDown(cat) else { return nil }
@@ -1271,6 +1303,7 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
         if actionID.hasPrefix("comp-") { return "compliance" }
         if actionID == "clean-url" { return "url_tracking" }
         if actionID == "extract-share-url" { return "share_url" }
+        if actionID == "query-to-json" || actionID == "json-to-query" { return "url_query" }
         return actionID
     }
 
@@ -1348,11 +1381,16 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
         saveWorkItem?.cancel()
         let snapshot = self.state
         let url = self.brainFileURL
+        let customDir = self.isCustomDirectory
+        let gate = self.persistenceGate
+        let parentPath = url.deletingLastPathComponent().path
         let work = DispatchWorkItem { [ioQueue] in
             ioQueue.async {
-                if let data = try? JSONEncoder().encode(snapshot) {
-                    let payload = LocalVaultCrypto.sealSnapshotData(data) ?? data
-                    try? LocalVaultCrypto.writeProtectedFile(payload, to: url)
+                gate.performIfOpen(requireCustomDir: customDir, dirPath: parentPath) {
+                    if let data = try? JSONEncoder().encode(snapshot) {
+                        let payload = LocalVaultCrypto.sealSnapshotData(data) ?? data
+                        try? LocalVaultCrypto.writeProtectedFile(payload, to: url)
+                    }
                 }
             }
         }
@@ -1363,13 +1401,18 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
     private func saveSuggestions() {
         let snapshot = self.suggestions
         let url = self.suggestionsFileURL
+        let customDir = self.isCustomDirectory
+        let gate = self.persistenceGate
+        let parentPath = url.deletingLastPathComponent().path
         ioQueue.async {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            encoder.dateEncodingStrategy = .iso8601
-            if let data = try? encoder.encode(snapshot) {
-                let payload = LocalVaultCrypto.sealSnapshotData(data) ?? data
-                try? LocalVaultCrypto.writeProtectedFile(payload, to: url)
+            gate.performIfOpen(requireCustomDir: customDir, dirPath: parentPath) {
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                encoder.dateEncodingStrategy = .iso8601
+                if let data = try? encoder.encode(snapshot) {
+                    let payload = LocalVaultCrypto.sealSnapshotData(data) ?? data
+                    try? LocalVaultCrypto.writeProtectedFile(payload, to: url)
+                }
             }
         }
     }

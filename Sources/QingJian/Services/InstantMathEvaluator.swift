@@ -39,6 +39,11 @@ enum InstantMathEvaluator {
             return bizRes
         }
 
+        // 0.6 检测离线色彩制式互转（`#1E5EFF` / `rgb(...)` / `hsl(...)`）与 WCAG 2.1 无障碍对比度直算（`#FFFFFF vs #1E5EFF`）
+        if let colorRes = evaluateColorAndContrastExpression(input, hasLeadingEquals: hasLeadingEquals, latestClipboardText: latestClipboardText) {
+            return colorRes
+        }
+
         // 1. 离线全能单位换算（存储 B/KB/MB/GB/TB、时长 ms/s/min/h/d、温度 C/F、重量长度 kg/lb、cm/in、km/mi）
         if let unitRes = evaluateUnitConversion(input, hasLeadingEquals: hasLeadingEquals) {
             return unitRes
@@ -823,6 +828,9 @@ enum InstantMathEvaluator {
         pattern: #"^(?:0x([0-9a-fA-F]{2,16})|0b([01]{4,63})|(\d{1,19})\s+(?:to|in|->|=>|转)\s*(hex|bin|binary|dec))$"#,
         options: [.caseInsensitive]
     )
+    private static let invoiceTaxRegex = try! NSRegularExpression(
+        pattern: #"^(?:[¥￥$]?\s*(\d[\d,]*(?:\.\d+)?)\s*)?(含税|价税分离|去税|除税|加税|不含税|税前)\s*(?:(\d{1,2}(?:\.\d{1,2})?)\s*[%％]?)?$"#
+    )
 
     private static func evaluateBusinessAndRadixExpression(
         _ input: String,
@@ -830,6 +838,81 @@ enum InstantMathEvaluator {
     ) -> InstantMathResult? {
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
         let fullRange = NSRange(trimmed.startIndex..<trimmed.endIndex, in: trimmed)
+
+        // 0. 零尾差发票价税分离 & 加税开票直算：`12800 含税 6%`、`1130 含税`（默认 13%）、`10000 加税 6%` 或剪贴板免重敲 `含税 6%`
+        if let tm = invoiceTaxRegex.firstMatch(in: trimmed, range: fullRange),
+           let modeR = Range(tm.range(at: 2), in: trimmed) {
+            let modeStr = String(trimmed[modeR])
+            let taxPct: Double
+            if tm.range(at: 3).location != NSNotFound,
+               let rateR = Range(tm.range(at: 3), in: trimmed),
+               let parsedRate = Double(trimmed[rateR]) {
+                taxPct = parsedRate
+            } else {
+                taxPct = 13.0
+            }
+            guard taxPct > 0.0 && taxPct <= 50.0 else { return nil }
+
+            let baseAmount: Double
+            if tm.range(at: 1).location != NSNotFound,
+               let amtR = Range(tm.range(at: 1), in: trimmed) {
+                guard let v = Double(trimmed[amtR].replacingOccurrences(of: ",", with: "")), v > 0 else { return nil }
+                baseAmount = v
+            } else if let ctx = extractCleanClipboardNumber(from: latestClipboardText),
+                      let v = Double(ctx.plainNumeric), v > 0 {
+                baseAmount = v
+            } else {
+                return nil
+            }
+
+            let rate = taxPct / 100.0
+            let rateLabel = formatCleanDouble(taxPct) + "%"
+            let isInclusive = (modeStr == "含税" || modeStr == "价税分离" || modeStr == "去税" || modeStr == "除税")
+
+            let primaryCents: Int64
+            let taxCents: Int64
+            let exprTitle: String
+            let richSummary: String
+
+            let totalInputCents = Int64((baseAmount * 100.0).rounded())
+            if isInclusive {
+                let netCents = Int64((Double(totalInputCents) / (1.0 + rate)).rounded())
+                let diffTaxCents = totalInputCents - netCents
+                primaryCents = netCents
+                taxCents = diffTaxCents
+                let netStr = formatCleanDouble(Double(netCents) / 100.0)
+                let taxStr = formatCleanDouble(Double(diffTaxCents) / 100.0)
+                exprTitle = "\(formatCleanDouble(baseAmount)) 含\(rateLabel)税拆分"
+                richSummary = "不含税 \(netStr) · 税额 \(taxStr)（\(rateLabel)）"
+            } else {
+                let grossCents = Int64((Double(totalInputCents) * (1.0 + rate)).rounded())
+                let addedTaxCents = grossCents - totalInputCents
+                primaryCents = grossCents
+                taxCents = addedTaxCents
+                let grossStr = formatCleanDouble(Double(grossCents) / 100.0)
+                let taxStr = formatCleanDouble(Double(addedTaxCents) / 100.0)
+                exprTitle = "\(formatCleanDouble(baseAmount)) +\(rateLabel)税"
+                richSummary = "含税 \(grossStr) · 税额 \(taxStr)（\(rateLabel)）"
+            }
+            _ = taxCents
+
+            let primaryVal = Double(primaryCents) / 100.0
+            let plainOut = formatCleanDouble(primaryVal)
+            let parts = plainOut.split(separator: ".", omittingEmptySubsequences: false)
+            let intDigits = parts.first.map(String.init) ?? "0"
+            let fracDigits = parts.count > 1 ? String(parts[1]) : nil
+            let rmb = intDigits.count <= 12
+                ? FinanceNumberEngine.toChineseUppercaseRMB(intDigits: intDigits, fracDigits: fracDigits.map { String($0.prefix(2)) })
+                : nil
+
+            return InstantMathResult(
+                expressionDisplay: exprTitle,
+                plainValue: plainOut,
+                formattedThousands: richSummary,
+                rmbUppercase: rmb,
+                isExplicitOrContextual: true
+            )
+        }
 
         // 1. 中式商业折扣秒算：`1280 85折`、`299 7.5折`、或结合 `#1` 剪贴板金额免重敲输入 `85折`
         if let dm = cnDiscountFullRegex.firstMatch(in: trimmed, range: fullRange),
@@ -957,5 +1040,304 @@ enum InstantMathEvaluator {
         }
 
         return nil
+    }
+
+    // MARK: - 色彩全制式互转（HEX / RGB / HSL）与 WCAG 2.1 无障碍对比度直算（`#FFFFFF vs #1E5EFF`）
+
+    private static let colorHexTokenRegex = try! NSRegularExpression(
+        pattern: #"^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$"#
+    )
+    private static let colorRGBTokenRegex = try! NSRegularExpression(
+        pattern: #"^rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})(?:\s*,\s*([0-9]*\.?[0-9]+))?\s*\)$"#,
+        options: [.caseInsensitive]
+    )
+    private static let colorHSLTokenRegex = try! NSRegularExpression(
+        pattern: #"^hsla?\(\s*(\d{1,3}(?:\.\d+)?)\s*,\s*(\d{1,3}(?:\.\d+)?)%\s*,\s*(\d{1,3}(?:\.\d+)?)%(?:\s*,\s*([0-9]*\.?[0-9]+))?\s*\)$"#,
+        options: [.caseInsensitive]
+    )
+    private static let colorConvertTailRegex = try! NSRegularExpression(
+        pattern: #"^(.+?)\s+(?:to|in|->|=>|转)\s*(hex|rgb|hsl)$"#,
+        options: [.caseInsensitive]
+    )
+    private static let colorContrastPairRegex = try! NSRegularExpression(
+        pattern: #"^(?:(?:对比|contrast)\s*(#\S+|rgba?\([^)]+\)|hsla?\([^)]+\))\s+(#\S+|rgba?\([^)]+\)|hsla?\([^)]+\))|(#\S+|rgba?\([^)]+\)|hsla?\([^)]+\))\s+(?:vs|on|对比|with)\s+(#\S+|rgba?\([^)]+\)|hsla?\([^)]+\))|(?:vs|on|对比)\s+(#\S+|rgba?\([^)]+\)|hsla?\([^)]+\)))$"#,
+        options: [.caseInsensitive]
+    )
+
+    private enum ColorSourceKind {
+        case hex(digits: Int)
+        case rgb
+        case hsl
+    }
+
+    private struct ParsedColorValue {
+        let r: Double
+        let g: Double
+        let b: Double
+        let a: Double
+        let sourceKind: ColorSourceKind
+    }
+
+    static func hslToRGB(h: Double, s: Double, l: Double) -> (r: Double, g: Double, b: Double) {
+        let hue = ((h.truncatingRemainder(dividingBy: 360.0)) + 360.0).truncatingRemainder(dividingBy: 360.0)
+        let c = (1.0 - abs(2.0 * l - 1.0)) * s
+        let x = c * (1.0 - abs((hue / 60.0).truncatingRemainder(dividingBy: 2.0) - 1.0))
+        let m = l - c / 2.0
+        let (r1, g1, b1): (Double, Double, Double)
+        switch hue {
+        case 0..<60:   (r1, g1, b1) = (c, x, 0)
+        case 60..<120: (r1, g1, b1) = (x, c, 0)
+        case 120..<180:(r1, g1, b1) = (0, c, x)
+        case 180..<240:(r1, g1, b1) = (0, x, c)
+        case 240..<300:(r1, g1, b1) = (x, 0, c)
+        default:       (r1, g1, b1) = (c, 0, x)
+        }
+        return (min(max(r1 + m, 0), 1), min(max(g1 + m, 0), 1), min(max(b1 + m, 0), 1))
+    }
+
+    static func rgbToHSL(r: Double, g: Double, b: Double) -> (h: Int, s: Int, l: Int) {
+        let maxC = max(r, g, b)
+        let minC = min(r, g, b)
+        let delta = maxC - minC
+        let l = (maxC + minC) / 2.0
+        var h = 0.0
+        var s = 0.0
+        if delta > 1e-7 {
+            s = delta / (1.0 - abs(2.0 * l - 1.0))
+            if maxC == r {
+                h = 60.0 * (((g - b) / delta).truncatingRemainder(dividingBy: 6.0))
+            } else if maxC == g {
+                h = 60.0 * (((b - r) / delta) + 2.0)
+            } else {
+                h = 60.0 * (((r - g) / delta) + 4.0)
+            }
+            if h < 0 { h += 360.0 }
+        }
+        return (Int(round(h)) % 360, Int(round(s * 100.0)), Int(round(l * 100.0)))
+    }
+
+    static func formatHSL(r: Double, g: Double, b: Double, a: Double = 1.0) -> String {
+        let hsl = rgbToHSL(r: r, g: g, b: b)
+        if a < 0.995 {
+            return String(format: "hsla(%d, %d%%, %d%%, %.2f)", hsl.h, hsl.s, hsl.l, a)
+        }
+        return "hsl(\(hsl.h), \(hsl.s)%, \(hsl.l)%)"
+    }
+
+    private static func formatColorHex(_ c: ParsedColorValue) -> String {
+        let r = Int(round(c.r * 255.0))
+        let g = Int(round(c.g * 255.0))
+        let b = Int(round(c.b * 255.0))
+        if c.a < 0.995 {
+            let a = Int(round(c.a * 255.0))
+            return String(format: "#%02X%02X%02X%02X", r, g, b, a)
+        }
+        return String(format: "#%02X%02X%02X", r, g, b)
+    }
+
+    private static func formatColorRGB(_ c: ParsedColorValue) -> String {
+        let r = Int(round(c.r * 255.0))
+        let g = Int(round(c.g * 255.0))
+        let b = Int(round(c.b * 255.0))
+        if c.a < 0.995 {
+            return String(format: "rgba(%d, %d, %d, %.2f)", r, g, b, c.a)
+        }
+        return "rgb(\(r), \(g), \(b))"
+    }
+
+    private static func parseSingleColorToken(_ raw: String, allowShortHex: Bool) -> ParsedColorValue? {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard s.count >= 4, s.count <= 64 else { return nil }
+        let nsRange = NSRange(s.startIndex..<s.endIndex, in: s)
+
+        if let m = colorHexTokenRegex.firstMatch(in: s, range: nsRange),
+           let hexR = Range(m.range(at: 1), in: s) {
+            let hex = String(s[hexR])
+            if hex.count == 3 && !allowShortHex { return nil }
+            guard let val = UInt64(hex, radix: 16) else { return nil }
+            switch hex.count {
+            case 3:
+                return ParsedColorValue(
+                    r: Double((val >> 8) & 0xF) / 15.0,
+                    g: Double((val >> 4) & 0xF) / 15.0,
+                    b: Double(val & 0xF) / 15.0,
+                    a: 1.0,
+                    sourceKind: .hex(digits: 3)
+                )
+            case 6:
+                return ParsedColorValue(
+                    r: Double((val >> 16) & 0xFF) / 255.0,
+                    g: Double((val >> 8) & 0xFF) / 255.0,
+                    b: Double(val & 0xFF) / 255.0,
+                    a: 1.0,
+                    sourceKind: .hex(digits: 6)
+                )
+            case 8:
+                return ParsedColorValue(
+                    r: Double((val >> 24) & 0xFF) / 255.0,
+                    g: Double((val >> 16) & 0xFF) / 255.0,
+                    b: Double((val >> 8) & 0xFF) / 255.0,
+                    a: Double(val & 0xFF) / 255.0,
+                    sourceKind: .hex(digits: 8)
+                )
+            default:
+                return nil
+            }
+        }
+
+        if let m = colorRGBTokenRegex.firstMatch(in: s, range: nsRange),
+           let rR = Range(m.range(at: 1), in: s),
+           let gR = Range(m.range(at: 2), in: s),
+           let bR = Range(m.range(at: 3), in: s),
+           let ri = Int(s[rR]), let gi = Int(s[gR]), let bi = Int(s[bR]),
+           (0...255).contains(ri), (0...255).contains(gi), (0...255).contains(bi) {
+            var a = 1.0
+            if m.range(at: 4).location != NSNotFound,
+               let aR = Range(m.range(at: 4), in: s),
+               let av = Double(s[aR]) {
+                a = min(max(av, 0.0), 1.0)
+            }
+            return ParsedColorValue(
+                r: Double(ri) / 255.0,
+                g: Double(gi) / 255.0,
+                b: Double(bi) / 255.0,
+                a: a,
+                sourceKind: .rgb
+            )
+        }
+
+        if let m = colorHSLTokenRegex.firstMatch(in: s, range: nsRange),
+           let hR = Range(m.range(at: 1), in: s),
+           let sR = Range(m.range(at: 2), in: s),
+           let lR = Range(m.range(at: 3), in: s),
+           let hd = Double(s[hR]), let sp = Double(s[sR]), let lp = Double(s[lR]),
+           (0.0...360.0).contains(hd), (0.0...100.0).contains(sp), (0.0...100.0).contains(lp) {
+            var a = 1.0
+            if m.range(at: 4).location != NSNotFound,
+               let aR = Range(m.range(at: 4), in: s),
+               let av = Double(s[aR]) {
+                a = min(max(av, 0.0), 1.0)
+            }
+            let rgb = hslToRGB(h: hd, s: sp / 100.0, l: lp / 100.0)
+            return ParsedColorValue(r: rgb.r, g: rgb.g, b: rgb.b, a: a, sourceKind: .hsl)
+        }
+
+        return nil
+    }
+
+    private static func wcagRelativeLuminance(_ c: ParsedColorValue) -> Double {
+        func linearize(_ v: Double) -> Double {
+            v <= 0.04045 ? (v / 12.92) : pow((v + 0.055) / 1.055, 2.4)
+        }
+        return 0.2126 * linearize(c.r) + 0.7152 * linearize(c.g) + 0.0722 * linearize(c.b)
+    }
+
+    private static func evaluateColorAndContrastExpression(
+        _ input: String,
+        hasLeadingEquals: Bool,
+        latestClipboardText: String?
+    ) -> InstantMathResult? {
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fullRange = NSRange(trimmed.startIndex..<trimmed.endIndex, in: trimmed)
+
+        // 1. 双色 WCAG 2.1 无障碍对比度直算：`#FFFFFF vs #1E5EFF`、`对比 #FFF #1E5EFF` 或免重敲 `vs #FFFFFF`
+        if let cm = colorContrastPairRegex.firstMatch(in: trimmed, range: fullRange) {
+            let pairTokens: (String, String)? = {
+                if cm.range(at: 1).location != NSNotFound, cm.range(at: 2).location != NSNotFound,
+                   let r1 = Range(cm.range(at: 1), in: trimmed), let r2 = Range(cm.range(at: 2), in: trimmed) {
+                    return (String(trimmed[r1]), String(trimmed[r2]))
+                }
+                if cm.range(at: 3).location != NSNotFound, cm.range(at: 4).location != NSNotFound,
+                   let r3 = Range(cm.range(at: 3), in: trimmed), let r4 = Range(cm.range(at: 4), in: trimmed) {
+                    return (String(trimmed[r3]), String(trimmed[r4]))
+                }
+                if cm.range(at: 5).location != NSNotFound,
+                   let r5 = Range(cm.range(at: 5), in: trimmed),
+                   let clipRaw = latestClipboardText?.trimmingCharacters(in: .whitespacesAndNewlines) {
+                    return (clipRaw, String(trimmed[r5]))
+                }
+                return nil
+            }()
+
+            if let (tokA, tokB) = pairTokens,
+               let colA = parseSingleColorToken(tokA, allowShortHex: true),
+               let colB = parseSingleColorToken(tokB, allowShortHex: true) {
+                let lumA = wcagRelativeLuminance(colA)
+                let lumB = wcagRelativeLuminance(colB)
+                let ratio = (max(lumA, lumB) + 0.05) / (min(lumA, lumB) + 0.05)
+                let ratioStr = String(format: "%.2f:1", ratio)
+                let grade: String
+                if ratio >= 7.0 {
+                    grade = "WCAG AAA 极佳"
+                } else if ratio >= 4.5 {
+                    grade = "WCAG AA 达标（大字 AAA）"
+                } else if ratio >= 3.0 {
+                    grade = "仅大字 AA 达标"
+                } else {
+                    grade = "未达标（对比偏弱）"
+                }
+                return InstantMathResult(
+                    expressionDisplay: "\(formatColorHex(colA)) vs \(formatColorHex(colB))",
+                    plainValue: ratioStr,
+                    formattedThousands: "\(ratioStr) · \(grade)",
+                    rmbUppercase: nil,
+                    isExplicitOrContextual: true
+                )
+            }
+        }
+
+        // 2. 单色全制式互转：`#1E5EFF`、`rgb(30, 94, 255)`、`hsl(223, 100%, 56%)`（支持 `to rgb/hsl/hex`）
+        var targetFormat: String? = nil
+        var colorCandidate = trimmed
+        if let tm = colorConvertTailRegex.firstMatch(in: trimmed, range: fullRange),
+           let bodyR = Range(tm.range(at: 1), in: trimmed),
+           let dstR = Range(tm.range(at: 2), in: trimmed) {
+            colorCandidate = String(trimmed[bodyR])
+            targetFormat = trimmed[dstR].lowercased()
+        }
+
+        guard let parsed = parseSingleColorToken(colorCandidate, allowShortHex: hasLeadingEquals || targetFormat != nil) else {
+            return nil
+        }
+
+        let hexStr = formatColorHex(parsed)
+        let rgbStr = formatColorRGB(parsed)
+        let hslStr = formatHSL(r: parsed.r, g: parsed.g, b: parsed.b, a: parsed.a)
+
+        let primaryOut: String
+        let richDisplay: String
+        if let dst = targetFormat {
+            switch dst {
+            case "hex":
+                primaryOut = hexStr
+                richDisplay = "\(hexStr) · \(rgbStr)"
+            case "hsl":
+                primaryOut = hslStr
+                richDisplay = "\(hslStr) · \(hexStr)"
+            default:
+                primaryOut = rgbStr
+                richDisplay = "\(rgbStr) · \(hslStr)"
+            }
+        } else {
+            switch parsed.sourceKind {
+            case .hex:
+                primaryOut = rgbStr
+                richDisplay = "\(rgbStr) · \(hslStr)"
+            case .rgb:
+                primaryOut = hexStr
+                richDisplay = "\(hexStr) · \(hslStr)"
+            case .hsl:
+                primaryOut = hexStr
+                richDisplay = "\(hexStr) · \(rgbStr)"
+            }
+        }
+
+        return InstantMathResult(
+            expressionDisplay: hexStr,
+            plainValue: primaryOut,
+            formattedThousands: richDisplay,
+            rmbUppercase: nil,
+            isExplicitOrContextual: true
+        )
     }
 }

@@ -1123,6 +1123,12 @@ enum DragFileExportHelper {
         return "\(stem)-\(ts)\(suffix)"
     }
 
+    private static func isSymbolicLinkPath(_ path: String) -> Bool {
+        var st = stat()
+        guard lstat(path, &st) == 0 else { return false }
+        return (st.st_mode & S_IFMT) == S_IFLNK
+    }
+
     /// 在 `0700` 受保护临时导出目录按需解密物化可直拖发送的真实文件（自动回收超 10 分钟旧临时件）
     static func materializeExportFile(
         for item: ClipItem,
@@ -1131,7 +1137,9 @@ enum DragFileExportHelper {
     ) -> (url: URL, utType: UTType)? {
         let fm = FileManager.default
         let dir = exportDirectory ?? fm.temporaryDirectory.appendingPathComponent("iClipDragExports", isDirectory: true)
+        guard !isSymbolicLinkPath(dir.path) else { return nil }
         try? fm.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        guard !isSymbolicLinkPath(dir.path) else { return nil }
         try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
         pruneStaleExports(in: dir, maxAgeSeconds: 60)
 
@@ -1186,7 +1194,7 @@ enum DragFileExportHelper {
     static func purgeExportedFiles(for item: ClipItem, exportDirectory: URL? = nil) {
         let fm = FileManager.default
         let dir = exportDirectory ?? fm.temporaryDirectory.appendingPathComponent("iClipDragExports", isDirectory: true)
-        guard fm.fileExists(atPath: dir.path) else { return }
+        guard !isSymbolicLinkPath(dir.path), fm.fileExists(atPath: dir.path) else { return }
         switch item.type {
         case .image:
             let name = suggestedFileName(for: item, ext: "png")
@@ -1207,7 +1215,7 @@ enum DragFileExportHelper {
     static func wipeAllExports(exportDirectory: URL? = nil) {
         let fm = FileManager.default
         let dir = exportDirectory ?? fm.temporaryDirectory.appendingPathComponent("iClipDragExports", isDirectory: true)
-        guard fm.fileExists(atPath: dir.path) else { return }
+        guard !isSymbolicLinkPath(dir.path), fm.fileExists(atPath: dir.path) else { return }
         try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
         if let files = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) {
             for f in files {

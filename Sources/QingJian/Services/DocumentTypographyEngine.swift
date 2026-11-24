@@ -116,21 +116,32 @@ enum DocumentTypographyEngine {
     static func looksLikeMarkdownDocument(_ rawText: String) -> Bool {
         let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.count >= 6, !trimmed.hasPrefix("#!") else { return false }
-        if CronAndPathHelper.explainCronExpression(trimmed) != nil { return false }
+        // 超长单行无换行载荷（如压缩 JS / Base64）直接短路，阻断全文正则回溯抖动（CWE-400）
+        if !trimmed.contains("\n") && !trimmed.contains("\r") && trimmed.utf16.count > 4_096 {
+            return false
+        }
+        let sample: String
+        if trimmed.utf16.count > 16_384 {
+            let idx = String.Index(utf16Offset: 16_384, in: trimmed)
+            sample = String(trimmed[..<idx])
+        } else {
+            sample = trimmed
+        }
+        if CronAndPathHelper.explainCronExpression(sample) != nil { return false }
 
-        let lines = trimmed.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n")
+        let lines = sample.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n")
         if lines.count == 2 && lines[0].hasPrefix("# ") && CronAndPathHelper.explainCronExpression(lines[1]) != nil {
             return false
         }
 
         var score = 0
-        let fullRange = NSRange(trimmed.startIndex..<trimmed.endIndex, in: trimmed)
-        let boldCount = mdBoldStarRegex.numberOfMatches(in: trimmed, range: fullRange)
-            + mdBoldUnderRegex.numberOfMatches(in: trimmed, range: fullRange)
+        let fullRange = NSRange(sample.startIndex..<sample.endIndex, in: sample)
+        let boldCount = mdBoldStarRegex.numberOfMatches(in: sample, range: fullRange)
+            + mdBoldUnderRegex.numberOfMatches(in: sample, range: fullRange)
         score += boldCount * 2
-        score += mdLinkRegex.numberOfMatches(in: trimmed, range: fullRange) * 2
-        score += mdStrikeRegex.numberOfMatches(in: trimmed, range: fullRange) * 2
-        if mdInlineCodeRegex.firstMatch(in: trimmed, range: fullRange) != nil {
+        score += mdLinkRegex.numberOfMatches(in: sample, range: fullRange) * 2
+        score += mdStrikeRegex.numberOfMatches(in: sample, range: fullRange) * 2
+        if mdInlineCodeRegex.firstMatch(in: sample, range: fullRange) != nil {
             score += 1
         }
 

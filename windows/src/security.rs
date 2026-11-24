@@ -535,7 +535,19 @@ pub fn materialize_temp_preview_image(images_dir: &Path, file_name: &str) -> Opt
     } else {
         std::env::temp_dir().join("iClipPreviewExports")
     };
+    if fs::symlink_metadata(&preview_dir)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return None;
+    }
     let _ = fs::create_dir_all(&preview_dir);
+    if fs::symlink_metadata(&preview_dir)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return None;
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -558,22 +570,27 @@ pub fn materialize_temp_preview_image(images_dir: &Path, file_name: &str) -> Opt
         }
     }
     let out_path = preview_dir.join(clean_name);
-    fs::write(&out_path, plain).ok()?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&out_path, fs::Permissions::from_mode(0o600));
-    }
+    write_protected_atomic(&out_path, &plain).ok()?;
     Some(out_path)
 }
 
 /// 删除单条记录或即焚销毁时，立即擦除临时预览目录中对应的明文副本
 pub fn purge_temp_preview_image(file_name: &str) {
     if let Some(clean_name) = Path::new(file_name).file_name() {
-        let p = std::env::temp_dir()
-            .join("iClipPreviewExports")
-            .join(clean_name);
-        let _ = fs::remove_file(p);
+        let preview_dir = std::env::temp_dir().join("iClipPreviewExports");
+        if fs::symlink_metadata(&preview_dir)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return;
+        }
+        let p = preview_dir.join(clean_name);
+        if !fs::symlink_metadata(&p)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            let _ = fs::remove_file(p);
+        }
     }
 }
 
@@ -583,6 +600,12 @@ pub fn wipe_all_temp_previews() {
         return;
     }
     let preview_dir = std::env::temp_dir().join("iClipPreviewExports");
+    if fs::symlink_metadata(&preview_dir)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return;
+    }
     #[cfg(unix)]
     if preview_dir.exists() {
         use std::os::unix::fs::PermissionsExt;
@@ -590,7 +613,13 @@ pub fn wipe_all_temp_previews() {
     }
     if let Ok(entries) = fs::read_dir(&preview_dir) {
         for ent in entries.flatten() {
-            let _ = fs::remove_file(ent.path());
+            let p = ent.path();
+            if !fs::symlink_metadata(&p)
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false)
+            {
+                let _ = fs::remove_file(p);
+            }
         }
     }
 }
@@ -4022,6 +4051,196 @@ pub fn analyze_list_batch_conversion(
     }
 
     Vec::new()
+}
+
+/// URL 参数 / 表单 Query 串（`?a=1&b=2`）↔ 可读扁平 JSON 双向离线破壁（自动解码 `%XX`/`+` 并剥除空字节与毒字符）
+pub fn analyze_query_json_bridge(raw: &str) -> Vec<(&'static str, String, String, String)> {
+    let trimmed = raw.trim();
+    if !(5..=32_768).contains(&trimmed.len()) {
+        return Vec::new();
+    }
+
+    // 方向 A：扁平键值 JSON 对象 -> 标准 RFC 3986 URL 参数串（`k1=v1&k2=v2`）
+    if trimmed.starts_with('{') && trimmed.ends_with('}') {
+        if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(trimmed)
+        {
+            if (2..=64).contains(&map.len()) {
+                let mut pairs: Vec<(String, String)> = Vec::with_capacity(map.len());
+                let mut all_scalar = true;
+                for (k, v) in &map {
+                    let ck = k.trim();
+                    if ck.is_empty() || ck.len() > 128 {
+                        all_scalar = false;
+                        break;
+                    }
+                    match v {
+                        serde_json::Value::String(s) => {
+                            if s.len() > 2048 || s.contains('\n') {
+                                all_scalar = false;
+                                break;
+                            }
+                            pairs.push((ck.to_string(), s.clone()));
+                        }
+                        serde_json::Value::Number(n) => {
+                            pairs.push((ck.to_string(), n.to_string()));
+                        }
+                        serde_json::Value::Bool(b) => {
+                            pairs.push((ck.to_string(), if *b { "true" } else { "false" }.to_string()));
+                        }
+                        _ => {
+                            all_scalar = false;
+                            break;
+                        }
+                    }
+                }
+                if all_scalar && pairs.len() >= 2 {
+                    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+                    let encoded: Vec<String> = pairs
+                        .iter()
+                        .map(|(k, v)| format!("{}={}", percent_encode_rfc3986(k), percent_encode_rfc3986(v)))
+                        .collect();
+                    let cnt = pairs.len();
+                    return vec![(
+                        "json-to-query",
+                        "转 URL 参数串".to_string(),
+                        encoded.join("&"),
+                        format!("已将 {cnt} 个 JSON 字段编码为标准 URL 参数串"),
+                    )];
+                }
+            }
+        }
+        return Vec::new();
+    }
+
+    // 方向 B：完整 URL（含 `?k1=v1&k2=v2`）或单行表单 Query（`k1=v1&k2=v2`）-> 结构化可读 JSON
+    if trimmed.contains(['\n', '\r', ' ', '\t']) {
+        return Vec::new();
+    }
+    let (base_url_part, raw_query_slice): (Option<&str>, &str) = if let Some((pfx, rest)) = trimmed.split_once('?') {
+        let q_only = rest.split('#').next().unwrap_or(rest);
+        (if pfx.is_empty() { None } else { Some(pfx) }, q_only)
+    } else if !trimmed.contains("://") && trimmed.contains('&') && trimmed.contains('=') {
+        let stripped = trimmed.trim_start_matches('&');
+        let q_only = stripped.split('#').next().unwrap_or(stripped);
+        (None, q_only)
+    } else {
+        return Vec::new();
+    };
+
+    let segments: Vec<&str> = raw_query_slice
+        .split('&')
+        .filter(|s| !s.is_empty())
+        .collect();
+    if !(2..=80).contains(&segments.len()) {
+        return Vec::new();
+    }
+
+    let mut params_map = serde_json::Map::new();
+    let mut parsed_count = 0usize;
+
+    for seg in segments {
+        let Some((raw_k, raw_v)) = seg.split_once('=') else {
+            return Vec::new();
+        };
+        if raw_k.is_empty()
+            || raw_k.len() > 128
+            || !raw_k.bytes().all(|b| {
+                b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'[' | b']' | b'%')
+            })
+        {
+            return Vec::new();
+        }
+        let dec_k_raw = percent_decode_form_component(raw_k).replace('\0', "");
+        let dec_v_raw = percent_decode_form_component(raw_v).replace('\0', "");
+        let dec_k = sanitize_decoded_output(&dec_k_raw);
+        let dec_v = sanitize_decoded_output(&dec_v_raw);
+        if dec_k.is_empty() {
+            return Vec::new();
+        }
+        if let Some(existing) = params_map.get_mut(&dec_k) {
+            match existing {
+                serde_json::Value::Array(arr) => {
+                    arr.push(serde_json::Value::String(dec_v));
+                }
+                serde_json::Value::String(prev) => {
+                    let first = prev.clone();
+                    *existing = serde_json::Value::Array(vec![
+                        serde_json::Value::String(first),
+                        serde_json::Value::String(dec_v),
+                    ]);
+                }
+                _ => {}
+            }
+        } else {
+            params_map.insert(dec_k, serde_json::Value::String(dec_v));
+        }
+        parsed_count += 1;
+    }
+
+    if parsed_count < 2 || params_map.is_empty() {
+        return Vec::new();
+    }
+
+    let param_cnt = params_map.len();
+    let root_val = if let Some(base) = base_url_part.filter(|b| b.contains("://") || b.starts_with('/')) {
+        let safe_base = sanitize_decoded_output(&base.replace('\0', ""));
+        let mut root = serde_json::Map::new();
+        root.insert("_url".to_string(), serde_json::Value::String(safe_base));
+        root.insert("params".to_string(), serde_json::Value::Object(params_map));
+        serde_json::Value::Object(root)
+    } else {
+        serde_json::Value::Object(params_map)
+    };
+
+    let Ok(pretty_json) = serde_json::to_string_pretty(&root_val) else {
+        return Vec::new();
+    };
+
+    vec![(
+        "query-to-json",
+        format!("解析参数 JSON({param_cnt}项)"),
+        pretty_json,
+        format!("已离线解码并拆解 {param_cnt} 个 URL 查询参数为可读 JSON"),
+    )]
+}
+
+fn percent_encode_rfc3986(input: &str) -> String {
+    let mut out = String::with_capacity(input.len() + 8);
+    for &b in input.as_bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+fn percent_decode_form_component(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'+' {
+            out.push(b' ');
+            i += 1;
+        } else if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (
+                (bytes[i + 1] as char).to_digit(16),
+                (bytes[i + 2] as char).to_digit(16),
+            ) {
+                out.push(((hi << 4) | lo) as u8);
+                i += 3;
+                continue;
+            }
+            out.push(bytes[i]);
+            i += 1;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).unwrap_or_else(|_| input.replace('+', " "))
 }
 
 fn looks_like_source_code_or_md_fence(text: &str) -> bool {

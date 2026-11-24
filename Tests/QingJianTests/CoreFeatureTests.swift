@@ -3223,5 +3223,94 @@ final class CoreFeatureTests: XCTestCase {
         let punctAct = try XCTUnwrap(punctActs.first(where: { $0.id == "doc-normalize-punct" }))
         XCTAssertTrue(punctAct.resultText.contains("2026 年 Q4 季度营收突破 1280 万元，同比增长 3.14%（初稿）！"))
         XCTAssertTrue(punctAct.resultText.contains("https://app.webfooo.com/iClip."))
+
+        // 13. 第 30 轮自省：验证 `.iclip` 归档图像压缩炸弹拦截、拖拽导出目录软链拦截、长单行 Markdown 短路、URL Query ↔ JSON 双向转换及色彩/WCAG 2.1 对比度直算
+        let bombImgDir = FileManager.default.temporaryDirectory.appendingPathComponent("iclip-bomb30-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: bombImgDir) }
+        // 伪造 30000x30000 PNG 头（0x7530 = 30000，总像素 900MP > 67MP 上限）
+        let fakeBombPNG = Data([
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+            0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+            0x00, 0x00, 0x75, 0x30, 0x00, 0x00, 0x75, 0x30,
+            0x08, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+        ])
+        let bombEntry = ArchivedClipEntry(
+            type: .image,
+            text: nil,
+            imageWidth: 100,
+            imageHeight: 100,
+            ocrText: nil,
+            embeddedPNGBase64: fakeBombPNG.base64EncodedString(),
+            filePaths: nil,
+            contentHash: "img:bomb30",
+            sourceAppName: "Test",
+            createdAt: Date(),
+            pinCategory: nil,
+            customAlias: "伪装小图"
+        )
+        let bombBundle = PinnedArchiveBundle(
+            format: PinnedArchiveBundle.formatIdentifier,
+            schemaVersion: PinnedArchiveBundle.currentSchemaVersion,
+            appVersion: "2.8.0",
+            exportedEdition: "dev",
+            exportedAt: Date(),
+            entries: [bombEntry]
+        )
+        let enc = JSONEncoder()
+        enc.dateEncodingStrategy = .iso8601
+        let bombArchiveData = try enc.encode(bombBundle)
+        let mergedBomb = try ArchiveBackupService.mergeArchiveData(bombArchiveData, into: [], imagesDirectoryURL: bombImgDir)
+        XCTAssertEqual(mergedBomb.summary.importedNewCount, 0)
+
+        // 验证拖拽导出目录为软链接时拒绝写入明文（CWE-59）
+        let symBase = FileManager.default.temporaryDirectory.appendingPathComponent("iclip-drag-sym30-\(UUID().uuidString)", isDirectory: true)
+        let realTarget = symBase.appendingPathComponent("real", isDirectory: true)
+        let symExport = symBase.appendingPathComponent("sym-export")
+        try FileManager.default.createDirectory(at: realTarget, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: symBase) }
+        try FileManager.default.createSymbolicLink(at: symExport, withDestinationURL: realTarget)
+        let sampleTextClip = ClipItem(type: .text, text: "敏感导出测试", contentHash: "text:sym30")
+        XCTAssertNil(DragFileExportHelper.materializeExportFile(for: sampleTextClip, exportDirectory: symExport))
+
+        // 验证超长单行无换行载荷（如压缩 JS）Markdown 嗅探快速短路
+        let minifiedJSLine = String(repeating: "var __webpack_require__=function(a,b){return a*b};", count: 120)
+        XCTAssertFalse(DocumentTypographyEngine.looksLikeMarkdownDocument(minifiedJSLine))
+
+        // 验证 URL 参数串 ↔ JSON 双向转换及 `%00`/Bidi 安全净化
+        let callbackURL = "https://pay.example.com/notify?order_id=ORD88&redirect=https%3A%2F%2Fok.example.com&note=safe%00\u{202E}evil"
+        let q2j = try XCTUnwrap(UniversalEscapeDecoder.analyzeQueryJSONBridge(callbackURL).first)
+        XCTAssertEqual(q2j.id, "query-to-json")
+        XCTAssertTrue(q2j.resultText.contains("\"https://ok.example.com\""))
+        XCTAssertFalse(q2j.resultText.contains("\u{0000}"))
+        XCTAssertFalse(q2j.resultText.contains("\u{202E}"))
+
+        let flatJSON = #"{"utm_source":"xiaohongshu","campaign_id":30,"active":true}"#
+        let j2q = try XCTUnwrap(UniversalEscapeDecoder.analyzeQueryJSONBridge(flatJSON).first)
+        XCTAssertEqual(j2q.id, "json-to-query")
+        XCTAssertEqual(j2q.resultText, "active=true&campaign_id=30&utm_source=xiaohongshu")
+
+        // 验证搜索框离线色彩互转（HEX / RGB / HSL）与 WCAG 2.1 无障碍对比度直算
+        XCTAssertEqual(InstantMathEvaluator.evaluate("#1E5EFF")?.plainValue, "rgb(30, 94, 255)")
+        XCTAssertEqual(InstantMathEvaluator.evaluate("#1E5EFF to hsl")?.plainValue, "hsl(223, 100%, 56%)")
+        XCTAssertEqual(InstantMathEvaluator.evaluate("rgb(30, 94, 255)")?.plainValue, "#1E5EFF")
+        let wcagRes = try XCTUnwrap(InstantMathEvaluator.evaluate("#FFFFFF vs #1E5EFF"))
+        XCTAssertEqual(wcagRes.plainValue, "5.12:1")
+        XCTAssertTrue(wcagRes.formattedThousands.contains("WCAG AA"))
+        XCTAssertEqual(InstantMathEvaluator.evaluate("vs #000000", latestClipboardText: "#FFFFFF")?.plainValue, "21.00:1")
+
+        // 14. 第 31 轮自省：验证续接复制（⌃⌥C）严格隔离密码管理器 `ConcealedType` 口令与密文信封，及零尾差发票价税分离直算
+        let concealedPB = NSPasteboard.withUniqueName()
+        defer { concealedPB.releaseGlobally() }
+        concealedPB.clearContents()
+        concealedPB.setString("1PasswordMasterSecret!99", forType: .string)
+        PasteboardPrivacyStandards.applyLocalOnlyConcealedProtection(to: concealedPB)
+        XCTAssertEqual(ClipboardStore.shared.safeCopyAppendBaseText(from: concealedPB), "")
+
+        let taxSplit = try XCTUnwrap(InstantMathEvaluator.evaluate("12800 含税 6%"))
+        XCTAssertEqual(taxSplit.plainValue, "12075.47")
+        XCTAssertTrue(taxSplit.formattedThousands.contains("税额 724.53"))
+        XCTAssertEqual(taxSplit.rmbUppercase, "壹万贰仟零柒拾伍元肆角柒分")
+        XCTAssertEqual(InstantMathEvaluator.evaluate("10000 加税 13%")?.plainValue, "11300")
+        XCTAssertEqual(InstantMathEvaluator.evaluate("含税 13%", latestClipboardText: "¥1,130")?.plainValue, "1000")
     }
 }

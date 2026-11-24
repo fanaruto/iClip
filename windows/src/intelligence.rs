@@ -422,6 +422,13 @@ pub fn evaluate_instant_math(
         return Some(biz_res);
     }
 
+    // 0.6 检测离线色彩制式互转（`#1E5EFF` / `rgb(...)` / `hsl(...)`）与 WCAG 2.1 无障碍对比度直算（`#FFFFFF vs #1E5EFF`）
+    if let Some(color_res) =
+        evaluate_color_and_contrast(clean_expr, has_leading_eq, latest_clip_text)
+    {
+        return Some(color_res);
+    }
+
     // 1. 离线全能单位换算（存储 B/KB/MB/GB/TB、时长 ms/s/min/h/d、温度 C/F、重量长度 kg/lb、cm/in、km/mi）
     if let Some(unit_res) = evaluate_unit_conversion(clean_expr, has_leading_eq) {
         return Some(unit_res);
@@ -785,6 +792,80 @@ fn evaluate_business_and_radix(
     static CN_DISC_RE: OnceLock<Regex> = OnceLock::new();
     static PCT_DELTA_RE: OnceLock<Regex> = OnceLock::new();
     static RADIX_RE: OnceLock<Regex> = OnceLock::new();
+    static INVOICE_TAX_RE: OnceLock<Regex> = OnceLock::new();
+
+    // 0. 零尾差发票价税分离 & 加税开票直算：`12800 含税 6%`、`1130 含税`（默认 13%）、`10000 加税 6%` 或剪贴板免重敲 `含税 6%`
+    let tax_re = INVOICE_TAX_RE.get_or_init(|| {
+        Regex::new(
+            r"^(?:[¥￥$]?\s*(\d[\d,]*(?:\.\d+)?)\s*)?(含税|价税分离|去税|除税|加税|不含税|税前)\s*(?:(\d{1,2}(?:\.\d{1,2})?)\s*[%％]?)?$",
+        )
+        .unwrap()
+    });
+    if let Some(caps) = tax_re.captures(trimmed) {
+        let mode_str = caps.get(2)?.as_str();
+        let tax_pct: f64 = if let Some(rate_m) = caps.get(3) {
+            rate_m.as_str().parse().ok()?
+        } else {
+            13.0
+        };
+        if !(tax_pct > 0.0 && tax_pct <= 50.0) {
+            return None;
+        }
+        let (base_amt, used_ctx) = if let Some(amt_m) = caps.get(1) {
+            let v: f64 = amt_m.as_str().replace(',', "").parse().ok()?;
+            if v <= 0.0 {
+                return None;
+            }
+            (v, false)
+        } else {
+            let ctx_num = latest_clip_text.and_then(extract_leading_amount)?;
+            let v: f64 = ctx_num.parse().ok()?;
+            if v <= 0.0 {
+                return None;
+            }
+            (v, true)
+        };
+        let rate = tax_pct / 100.0;
+        let rate_lbl = format!("{}%", format_clean_decimal(tax_pct));
+        let is_inclusive = matches!(mode_str, "含税" | "价税分离" | "去税" | "除税");
+        let total_input_cents = (base_amt * 100.0).round() as i64;
+        let (primary_cents, expr_disp) = if is_inclusive {
+            let net_cents = ((total_input_cents as f64) / (1.0 + rate)).round() as i64;
+            let diff_tax_cents = total_input_cents - net_cents;
+            let tax_str = format_clean_decimal(diff_tax_cents as f64 / 100.0);
+            (
+                net_cents,
+                format!(
+                    "不含税 (税额 {tax_str} · {rate_lbl})"
+                ),
+            )
+        } else {
+            let gross_cents = ((total_input_cents as f64) * (1.0 + rate)).round() as i64;
+            let added_tax_cents = gross_cents - total_input_cents;
+            let tax_str = format_clean_decimal(added_tax_cents as f64 / 100.0);
+            (
+                gross_cents,
+                format!(
+                    "含税总价 (税额 {tax_str} · {rate_lbl})"
+                ),
+            )
+        };
+        let primary_val = primary_cents as f64 / 100.0;
+        let plain_out = format_clean_decimal(primary_val);
+        let rmb = if primary_val >= 0.0 && primary_val < 1_000_000_000_000.0 {
+            let abs_fixed = format!("{:.2}", primary_val.abs());
+            let (i_part, f_part) = abs_fixed.split_once('.').unwrap_or((&abs_fixed, "00"));
+            to_chinese_uppercase_rmb(i_part, Some(f_part))
+        } else {
+            None
+        };
+        return Some(InstantMathResult {
+            expression_display: expr_disp,
+            plain_value: plain_out,
+            rmb_uppercase: rmb,
+            used_clipboard_context: used_ctx,
+        });
+    }
 
     // 1. 中式商业折扣秒算：`1280 85折`、`299 7.5折`、或结合剪贴板首条金额输入 `85折`
     let disc_re = CN_DISC_RE.get_or_init(|| {
@@ -909,6 +990,346 @@ fn evaluate_business_and_radix(
     }
 
     None
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WinColorSource {
+    Hex,
+    Rgb,
+    Hsl,
+}
+
+#[derive(Clone, Copy)]
+struct WinParsedColor {
+    r: f64,
+    g: f64,
+    b: f64,
+    a: f64,
+    source: WinColorSource,
+}
+
+fn hsl_to_rgb_norm(h: f64, s: f64, l: f64) -> (f64, f64, f64) {
+    let hue = ((h % 360.0) + 360.0) % 360.0;
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let x = c * (1.0 - ((hue / 60.0) % 2.0 - 1.0).abs());
+    let m = l - c / 2.0;
+    let (r1, g1, b1) = if hue < 60.0 {
+        (c, x, 0.0)
+    } else if hue < 120.0 {
+        (x, c, 0.0)
+    } else if hue < 180.0 {
+        (0.0, c, x)
+    } else if hue < 240.0 {
+        (0.0, x, c)
+    } else if hue < 300.0 {
+        (x, 0.0, c)
+    } else {
+        (c, 0.0, x)
+    };
+    (
+        (r1 + m).clamp(0.0, 1.0),
+        (g1 + m).clamp(0.0, 1.0),
+        (b1 + m).clamp(0.0, 1.0),
+    )
+}
+
+fn rgb_to_hsl_deg(r: f64, g: f64, b: f64) -> (i32, i32, i32) {
+    let max_c = r.max(g).max(b);
+    let min_c = r.min(g).min(b);
+    let delta = max_c - min_c;
+    let l = (max_c + min_c) / 2.0;
+    let mut h = 0.0;
+    let mut s = 0.0;
+    if delta > 1e-7 {
+        s = delta / (1.0 - (2.0 * l - 1.0).abs());
+        if (max_c - r).abs() < 1e-9 {
+            h = 60.0 * (((g - b) / delta) % 6.0);
+        } else if (max_c - g).abs() < 1e-9 {
+            h = 60.0 * (((b - r) / delta) + 2.0);
+        } else {
+            h = 60.0 * (((r - g) / delta) + 4.0);
+        }
+        if h < 0.0 {
+            h += 360.0;
+        }
+    }
+    (
+        (h.round() as i32) % 360,
+        (s * 100.0).round() as i32,
+        (l * 100.0).round() as i32,
+    )
+}
+
+fn format_win_hex(c: WinParsedColor) -> String {
+    let r = (c.r * 255.0).round() as u8;
+    let g = (c.g * 255.0).round() as u8;
+    let b = (c.b * 255.0).round() as u8;
+    if c.a < 0.995 {
+        let a = (c.a * 255.0).round() as u8;
+        format!("#{r:02X}{g:02X}{b:02X}{a:02X}")
+    } else {
+        format!("#{r:02X}{g:02X}{b:02X}")
+    }
+}
+
+fn format_win_rgb(c: WinParsedColor) -> String {
+    let r = (c.r * 255.0).round() as u8;
+    let g = (c.g * 255.0).round() as u8;
+    let b = (c.b * 255.0).round() as u8;
+    if c.a < 0.995 {
+        format!("rgba({r}, {g}, {b}, {:.2})", c.a)
+    } else {
+        format!("rgb({r}, {g}, {b})")
+    }
+}
+
+fn format_win_hsl(c: WinParsedColor) -> String {
+    let (h, s, l) = rgb_to_hsl_deg(c.r, c.g, c.b);
+    if c.a < 0.995 {
+        format!("hsla({h}, {s}%, {l}%, {:.2})", c.a)
+    } else {
+        format!("hsl({h}, {s}%, {l}%)")
+    }
+}
+
+fn parse_single_color_token(raw: &str, allow_short_hex: bool) -> Option<WinParsedColor> {
+    use regex_lite::Regex;
+    use std::sync::OnceLock;
+    let s = raw.trim();
+    if !(4..=64).contains(&s.len()) {
+        return None;
+    }
+
+    static HEX_RE: OnceLock<Regex> = OnceLock::new();
+    static RGB_RE: OnceLock<Regex> = OnceLock::new();
+    static HSL_RE: OnceLock<Regex> = OnceLock::new();
+
+    let hex_re = HEX_RE
+        .get_or_init(|| Regex::new(r"^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$").unwrap());
+    if let Some(caps) = hex_re.captures(s) {
+        let hx = caps.get(1)?.as_str();
+        if hx.len() == 3 && !allow_short_hex {
+            return None;
+        }
+        let val = u64::from_str_radix(hx, 16).ok()?;
+        return match hx.len() {
+            3 => Some(WinParsedColor {
+                r: ((val >> 8) & 0xF) as f64 / 15.0,
+                g: ((val >> 4) & 0xF) as f64 / 15.0,
+                b: (val & 0xF) as f64 / 15.0,
+                a: 1.0,
+                source: WinColorSource::Hex,
+            }),
+            6 => Some(WinParsedColor {
+                r: ((val >> 16) & 0xFF) as f64 / 255.0,
+                g: ((val >> 8) & 0xFF) as f64 / 255.0,
+                b: (val & 0xFF) as f64 / 255.0,
+                a: 1.0,
+                source: WinColorSource::Hex,
+            }),
+            8 => Some(WinParsedColor {
+                r: ((val >> 24) & 0xFF) as f64 / 255.0,
+                g: ((val >> 16) & 0xFF) as f64 / 255.0,
+                b: ((val >> 8) & 0xFF) as f64 / 255.0,
+                a: (val & 0xFF) as f64 / 255.0,
+                source: WinColorSource::Hex,
+            }),
+            _ => None,
+        };
+    }
+
+    let rgb_re = RGB_RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)^rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})(?:\s*,\s*([0-9]*\.?[0-9]+))?\s*\)$",
+        )
+        .unwrap()
+    });
+    if let Some(caps) = rgb_re.captures(s) {
+        let ri: u32 = caps.get(1)?.as_str().parse().ok()?;
+        let gi: u32 = caps.get(2)?.as_str().parse().ok()?;
+        let bi: u32 = caps.get(3)?.as_str().parse().ok()?;
+        if ri <= 255 && gi <= 255 && bi <= 255 {
+            let a = caps
+                .get(4)
+                .and_then(|m| m.as_str().parse::<f64>().ok())
+                .map(|v| v.clamp(0.0, 1.0))
+                .unwrap_or(1.0);
+            return Some(WinParsedColor {
+                r: ri as f64 / 255.0,
+                g: gi as f64 / 255.0,
+                b: bi as f64 / 255.0,
+                a,
+                source: WinColorSource::Rgb,
+            });
+        }
+    }
+
+    let hsl_re = HSL_RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)^hsla?\(\s*(\d{1,3}(?:\.\d+)?)\s*,\s*(\d{1,3}(?:\.\d+)?)%\s*,\s*(\d{1,3}(?:\.\d+)?)%(?:\s*,\s*([0-9]*\.?[0-9]+))?\s*\)$",
+        )
+        .unwrap()
+    });
+    if let Some(caps) = hsl_re.captures(s) {
+        let hd: f64 = caps.get(1)?.as_str().parse().ok()?;
+        let sp: f64 = caps.get(2)?.as_str().parse().ok()?;
+        let lp: f64 = caps.get(3)?.as_str().parse().ok()?;
+        if (0.0..=360.0).contains(&hd) && (0.0..=100.0).contains(&sp) && (0.0..=100.0).contains(&lp)
+        {
+            let a = caps
+                .get(4)
+                .and_then(|m| m.as_str().parse::<f64>().ok())
+                .map(|v| v.clamp(0.0, 1.0))
+                .unwrap_or(1.0);
+            let (r, g, b) = hsl_to_rgb_norm(hd, sp / 100.0, lp / 100.0);
+            return Some(WinParsedColor {
+                r,
+                g,
+                b,
+                a,
+                source: WinColorSource::Hsl,
+            });
+        }
+    }
+
+    None
+}
+
+fn wcag_relative_luminance(c: WinParsedColor) -> f64 {
+    fn lin(v: f64) -> f64 {
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    }
+    0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
+}
+
+/// 供卡片动作管线识别单行颜色色值并生成 HEX / RGB / HSL 一键互转动作
+pub fn analyze_card_color_actions(raw: &str) -> Vec<(&'static str, String, String, String)> {
+    let trimmed = raw.trim();
+    let Some(c) = parse_single_color_token(trimmed, true) else {
+        return Vec::new();
+    };
+    let hex = format_win_hex(c);
+    let rgb = format_win_rgb(c);
+    let hsl = format_win_hsl(c);
+    let mut out = Vec::new();
+    if !hex.eq_ignore_ascii_case(trimmed) {
+        out.push(("color-hex", hex.clone(), hex.clone(), format!("已转换色值为 {hex}")));
+    }
+    if !rgb.eq_ignore_ascii_case(trimmed) {
+        out.push(("color-rgb", "转 RGB".to_string(), rgb.clone(), format!("已转换为 {rgb}")));
+    }
+    if c.source != WinColorSource::Hsl {
+        out.push(("color-hsl", "转 HSL".to_string(), hsl.clone(), format!("已转换为 {hsl}")));
+    }
+    out
+}
+
+fn evaluate_color_and_contrast(
+    input: &str,
+    has_leading_eq: bool,
+    latest_clip_text: Option<&str>,
+) -> Option<InstantMathResult> {
+    use regex_lite::Regex;
+    use std::sync::OnceLock;
+
+    let trimmed = input.trim();
+    static CONTRAST_RE: OnceLock<Regex> = OnceLock::new();
+    static TAIL_TO_RE: OnceLock<Regex> = OnceLock::new();
+
+    let contrast_re = CONTRAST_RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)^(?:(?:对比|contrast)\s*(#\S+|rgba?\([^)]+\)|hsla?\([^)]+\))\s+(#\S+|rgba?\([^)]+\)|hsla?\([^)]+\))|(#\S+|rgba?\([^)]+\)|hsla?\([^)]+\))\s+(?:vs|on|对比|with)\s+(#\S+|rgba?\([^)]+\)|hsla?\([^)]+\))|(?:vs|on|对比)\s+(#\S+|rgba?\([^)]+\)|hsla?\([^)]+\)))$",
+        )
+        .unwrap()
+    });
+    if let Some(caps) = contrast_re.captures(trimmed) {
+        let pair_opt: Option<(&str, &str, bool)> =
+            if let (Some(m1), Some(m2)) = (caps.get(1), caps.get(2)) {
+                Some((m1.as_str(), m2.as_str(), false))
+            } else if let (Some(m3), Some(m4)) = (caps.get(3), caps.get(4)) {
+                Some((m3.as_str(), m4.as_str(), false))
+            } else if let Some(m5) = caps.get(5) {
+                latest_clip_text
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|clip| (clip, m5.as_str(), true))
+            } else {
+                None
+            };
+
+        if let Some((tok_a, tok_b, used_ctx)) = pair_opt {
+            if let (Some(col_a), Some(col_b)) = (
+                parse_single_color_token(tok_a, true),
+                parse_single_color_token(tok_b, true),
+            ) {
+                let lum_a = wcag_relative_luminance(col_a);
+                let lum_b = wcag_relative_luminance(col_b);
+                let ratio = (lum_a.max(lum_b) + 0.05) / (lum_a.min(lum_b) + 0.05);
+                let ratio_str = format!("{ratio:.2}:1");
+                let grade = if ratio >= 7.0 {
+                    "WCAG AAA 极佳"
+                } else if ratio >= 4.5 {
+                    "WCAG AA 达标（大字 AAA）"
+                } else if ratio >= 3.0 {
+                    "仅大字 AA 达标"
+                } else {
+                    "未达标（对比偏弱）"
+                };
+                return Some(InstantMathResult {
+                    expression_display: format!(
+                        "{} vs {} · {grade}",
+                        format_win_hex(col_a),
+                        format_win_hex(col_b)
+                    ),
+                    plain_value: ratio_str,
+                    rmb_uppercase: None,
+                    used_clipboard_context: used_ctx,
+                });
+            }
+        }
+    }
+
+    let tail_re = TAIL_TO_RE
+        .get_or_init(|| Regex::new(r"(?i)^(.+?)\s+(?:to|in|->|=>|转)\s*(hex|rgb|hsl)$").unwrap());
+    let (candidate, dst_fmt): (&str, Option<String>) = if let Some(caps) = tail_re.captures(trimmed)
+    {
+        (
+            caps.get(1)?.as_str(),
+            Some(caps.get(2)?.as_str().to_ascii_lowercase()),
+        )
+    } else {
+        (trimmed, None)
+    };
+
+    let parsed = parse_single_color_token(candidate, has_leading_eq || dst_fmt.is_some())?;
+    let hex_str = format_win_hex(parsed);
+    let rgb_str = format_win_rgb(parsed);
+    let hsl_str = format_win_hsl(parsed);
+
+    let (primary_out, expr_disp) = if let Some(dst) = dst_fmt.as_deref() {
+        match dst {
+            "hex" => (hex_str.clone(), format!("{rgb_str} -> HEX")),
+            "hsl" => (hsl_str.clone(), format!("{hex_str} -> HSL")),
+            _ => (rgb_str.clone(), format!("{hex_str} -> RGB")),
+        }
+    } else {
+        match parsed.source {
+            WinColorSource::Hex => (rgb_str.clone(), format!("{hex_str} · {hsl_str}")),
+            WinColorSource::Rgb => (hex_str.clone(), format!("{rgb_str} · {hsl_str}")),
+            WinColorSource::Hsl => (hex_str.clone(), format!("{hsl_str} · {rgb_str}")),
+        }
+    };
+
+    Some(InstantMathResult {
+        expression_display: expr_disp,
+        plain_value: primary_out,
+        rmb_uppercase: None,
+        used_clipboard_context: false,
+    })
 }
 
 #[derive(Clone, Copy)]

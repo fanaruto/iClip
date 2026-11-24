@@ -2415,5 +2415,122 @@ mod tests {
         assert!(punct_act
             .result_text
             .contains("https://app.webfooo.com/iClip."));
+
+        // 14. 第 30 轮自省：验证 `.iclip` 归档图像压缩炸弹拦截、长单行 Markdown 短路、URL Query ↔ JSON 双向转换及色彩/WCAG 2.1 对比度直算
+        let bomb_dir = std::env::temp_dir().join(format!(
+            "iclip-bomb30-{}",
+            crate::model::generate_pseudo_uuid("bomb30")
+        ));
+        let fake_bomb_png: [u8; 33] = [
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x75, 0x30, 0x00, 0x00, 0x75, 0x30, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        use base64::engine::general_purpose::STANDARD as B64_STD;
+        let bomb_json = serde_json::json!({
+            "format": "com.qingjian.iclip.archive",
+            "schemaVersion": 1,
+            "appVersion": "2.8.0",
+            "exportedEdition": "dev",
+            "exportedAt": "2026-11-24T12:00:00Z",
+            "entries": [{
+                "type": "image",
+                "imageWidth": 100,
+                "imageHeight": 100,
+                "embeddedPNGBase64": B64_STD.encode(fake_bomb_png),
+                "contentHash": "img:bomb30",
+                "createdAt": "2026-11-24T12:00:00Z"
+            }]
+        });
+        let bomb_bytes = serde_json::to_vec(&bomb_json).unwrap();
+        let (_, bomb_sum) =
+            crate::archive::merge_archive_data(&bomb_bytes, &[], &bomb_dir).unwrap();
+        let _ = std::fs::remove_dir_all(&bomb_dir);
+        assert_eq!(bomb_sum.imported_new_count, 0);
+
+        let minified_js =
+            "var __webpack_require__=function(a,b){return a*b};".repeat(120);
+        assert!(!crate::engines::looks_like_markdown_document(&minified_js));
+
+        let cb_url = "https://pay.example.com/notify?order_id=ORD88&redirect=https%3A%2F%2Fok.example.com&note=safe%00\u{202E}evil";
+        let q2j_list = crate::security::analyze_query_json_bridge(cb_url);
+        assert_eq!(q2j_list[0].0, "query-to-json");
+        assert!(q2j_list[0].2.contains("\"https://ok.example.com\""));
+        assert!(!q2j_list[0].2.contains('\0'));
+        assert!(!q2j_list[0].2.contains('\u{202E}'));
+
+        let flat_json = r#"{"utm_source":"xiaohongshu","campaign_id":30,"active":true}"#;
+        let j2q_list = crate::security::analyze_query_json_bridge(flat_json);
+        assert_eq!(j2q_list[0].0, "json-to-query");
+        assert_eq!(
+            j2q_list[0].2,
+            "active=true&campaign_id=30&utm_source=xiaohongshu"
+        );
+
+        assert_eq!(
+            crate::intelligence::evaluate_instant_math("#1E5EFF", None)
+                .unwrap()
+                .plain_value,
+            "rgb(30, 94, 255)"
+        );
+        assert_eq!(
+            crate::intelligence::evaluate_instant_math("#1E5EFF to hsl", None)
+                .unwrap()
+                .plain_value,
+            "hsl(223, 100%, 56%)"
+        );
+        assert_eq!(
+            crate::intelligence::evaluate_instant_math("rgb(30, 94, 255)", None)
+                .unwrap()
+                .plain_value,
+            "#1E5EFF"
+        );
+        let wcag_res =
+            crate::intelligence::evaluate_instant_math("#FFFFFF vs #1E5EFF", None).unwrap();
+        assert_eq!(wcag_res.plain_value, "5.12:1");
+        assert!(wcag_res.expression_display.contains("WCAG AA"));
+        assert_eq!(
+            crate::intelligence::evaluate_instant_math("vs #000000", Some("#FFFFFF"))
+                .unwrap()
+                .plain_value,
+            "21.00:1"
+        );
+
+        // 15. 第 31 轮自省：验证 `append_to_latest_text` 严格隔离 `is_burn_after_paste` 即焚口令与 `ICLPMSG1:` 密文信封，及零尾差发票价税分离直算
+        let append_tmp = std::env::temp_dir().join(format!(
+            "iclip-append31-{}",
+            crate::model::generate_pseudo_uuid("append31")
+        ));
+        let mut append_store = ClipboardStore::new(append_tmp.clone());
+        let mut burn_secret = ClipItem::new_text("TOP_SECRET_BURN_KEY".to_string(), None);
+        burn_secret.set_burn_after_paste(true);
+        append_store.insert_or_promote(burn_secret);
+        let appended_res = append_store
+            .append_to_latest_text("公开会议摘录第一段", "\n")
+            .unwrap();
+        assert_eq!(appended_res, "公开会议摘录第一段");
+        assert!(!appended_res.contains("TOP_SECRET_BURN_KEY"));
+        let _ = std::fs::remove_dir_all(&append_tmp);
+
+        let tax_split =
+            crate::intelligence::evaluate_instant_math("12800 含税 6%", None).unwrap();
+        assert_eq!(tax_split.plain_value, "12075.47");
+        assert!(tax_split.expression_display.contains("724.53"));
+        assert_eq!(
+            tax_split.rmb_uppercase.as_deref(),
+            Some("壹万贰仟零柒拾伍元肆角柒分")
+        );
+        assert_eq!(
+            crate::intelligence::evaluate_instant_math("10000 加税 13%", None)
+                .unwrap()
+                .plain_value,
+            "11300"
+        );
+        assert_eq!(
+            crate::intelligence::evaluate_instant_math("含税 13%", Some("¥1,130"))
+                .unwrap()
+                .plain_value,
+            "1000"
+        );
     }
 }

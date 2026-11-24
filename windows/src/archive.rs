@@ -354,7 +354,7 @@ pub fn merge_archive_data_full(
                     if b64.len() <= (MAX_EMBEDDED_IMAGE_BYTES * 4 / 3 + 64) {
                         if let Ok(png_bytes) = BASE64.decode(b64) {
                             if png_bytes.len() <= MAX_EMBEDDED_IMAGE_BYTES
-                                && is_valid_raster_image_header(&png_bytes)
+                                && is_safe_archive_raster_bytes(&png_bytes)
                             {
                                 let missing = existing
                                     .image_file_name
@@ -395,7 +395,7 @@ pub fn merge_archive_data_full(
                     continue;
                 };
                 if png_bytes.len() > MAX_EMBEDDED_IMAGE_BYTES
-                    || !is_valid_raster_image_header(&png_bytes)
+                    || !is_safe_archive_raster_bytes(&png_bytes)
                 {
                     continue;
                 }
@@ -538,6 +538,26 @@ fn merge_external_candidates(
             source_format_label: format_label.to_string(),
         },
     )
+}
+
+pub fn is_safe_archive_raster_bytes(bytes: &[u8]) -> bool {
+    if !is_valid_raster_image_header(bytes) {
+        return false;
+    }
+    if bytes.len() < 24 {
+        return true;
+    }
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        if &bytes[12..16] != b"IHDR" {
+            return false;
+        }
+        let w = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]) as u64;
+        let h = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]) as u64;
+        if w == 0 || h == 0 || w > 12_000 || h > 12_000 || w * h > 67_108_864 {
+            return false;
+        }
+    }
+    crate::engines::has_safe_raster_dimensions_in_memory(bytes)
 }
 
 pub fn is_valid_raster_image_header(bytes: &[u8]) -> bool {

@@ -59,6 +59,12 @@ else
   printf "  \033[32m✓\033[0m 已从 GitHub Releases 下载安装包\n"
 fi
 
+ZIP_SIZE="$(wc -c < "$ZIP_PATH" | tr -d '[:space:]')"
+if [ "${ZIP_SIZE:-0}" -lt 65536 ]; then
+  printf "\033[31m✖ 安装包下载不完整（%s 字节），请检查网络后重试\033[0m\n" "${ZIP_SIZE:-0}"
+  exit 1
+fi
+
 ditto -x -k "$ZIP_PATH" "$STAGE_DIR/unpacked"
 APP_SRC="$STAGE_DIR/unpacked/iClip.app"
 if [ ! -x "$APP_SRC/Contents/MacOS/QingJian" ]; then
@@ -70,10 +76,14 @@ fi
 xattr -cr "$APP_SRC" 2>/dev/null || true
 codesign --force --deep --identifier com.qingjian.clipboard --sign - "$APP_SRC" >/dev/null 2>&1 || true
 
-if [ -w "/Applications" ]; then
+if [ -w "/Applications" ] && [ ! -L "/Applications" ]; then
   DEST_DIR="/Applications"
 else
   DEST_DIR="$HOME/Applications"
+  if [ -L "$DEST_DIR" ]; then
+    printf "\033[31m✖ 拒绝安装：目标目录 %s 为异常符号链接\033[0m\n" "$DEST_DIR"
+    exit 1
+  fi
   mkdir -p "$DEST_DIR"
 fi
 TARGET_APP="$DEST_DIR/iClip.app"

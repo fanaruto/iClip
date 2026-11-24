@@ -496,6 +496,42 @@ pub fn analyze_text_actions(raw: &str, minimal_mode: bool) -> Vec<QuickAction> {
         }
     }
 
+    if !trimmed.contains('\n') && trimmed.len() <= 64 {
+        for (act_id, act_title, act_res, act_toast) in
+            crate::intelligence::analyze_card_color_actions(trimmed)
+        {
+            if actions.len() >= 3 {
+                break;
+            }
+            actions.push(QuickAction {
+                id: act_id,
+                title: act_title,
+                is_security: false,
+                result_text: act_res,
+                html_table_payload: None,
+                toast_text: act_toast,
+            });
+        }
+    }
+
+    if actions.len() < 3 && raw.len() <= 32_768 {
+        for (act_id, act_title, act_res, act_toast) in
+            crate::security::analyze_query_json_bridge(raw)
+        {
+            if actions.len() >= 3 {
+                break;
+            }
+            actions.push(QuickAction {
+                id: act_id,
+                title: act_title,
+                is_security: false,
+                result_text: act_res,
+                html_table_payload: None,
+                toast_text: act_toast,
+            });
+        }
+    }
+
     if actions.len() < 3 && raw.len() <= 65_536 {
         let include_sql = cfg!(feature = "dev");
         let list_acts = crate::security::analyze_list_batch_conversion(raw, include_sql);
@@ -1338,15 +1374,20 @@ pub fn normalize_width_and_cjk_punctuation(raw: &str) -> Option<String> {
 }
 
 pub fn looks_like_markdown_document(raw: &str) -> bool {
+    use std::sync::OnceLock;
     let trimmed = raw.trim();
     if trimmed.chars().count() < 6
         || trimmed.starts_with("#!")
         || trimmed.contains("|---")
-        || crate::security::explain_cron_expression(trimmed).is_some()
+        || (!trimmed.contains('\n') && !trimmed.contains('\r') && trimmed.len() > 4_096)
     {
         return false;
     }
-    let lines: Vec<&str> = trimmed.lines().collect();
+    let sample = crate::model::safe_utf8_prefix(trimmed, 16_384);
+    if crate::security::explain_cron_expression(sample).is_some() {
+        return false;
+    }
+    let lines: Vec<&str> = sample.lines().collect();
     if lines.len() == 2
         && lines[0].starts_with("# ")
         && crate::security::explain_cron_expression(lines[1]).is_some()
@@ -1354,19 +1395,31 @@ pub fn looks_like_markdown_document(raw: &str) -> bool {
         return false;
     }
 
-    let bold_re = Regex::new(r"\*\*[^\s*](?:.*?[^\s*])?\*\*|__[^\s_](?:.*?[^\s_])?__").unwrap();
-    let link_re = Regex::new(r"\[[^\]]+\]\(https?://[^)\s]+\)").unwrap();
-    let strike_re = Regex::new(r"~~[^\s~](?:.*?[^\s~])?~~").unwrap();
-    let code_re = Regex::new(r"`[^`\n]+`").unwrap();
-    let heading_re = Regex::new(r"^\s*(#{1,6})\s+\S").unwrap();
-    let list_re = Regex::new(r"^\s*[-*+]\s+\S").unwrap();
-    let quote_re = Regex::new(r"^\s*>\s*\S").unwrap();
+    static MD_BOLD_RE: OnceLock<Regex> = OnceLock::new();
+    static MD_LINK_RE: OnceLock<Regex> = OnceLock::new();
+    static MD_STRIKE_RE: OnceLock<Regex> = OnceLock::new();
+    static MD_CODE_RE: OnceLock<Regex> = OnceLock::new();
+    static MD_HEADING_RE: OnceLock<Regex> = OnceLock::new();
+    static MD_LIST_RE: OnceLock<Regex> = OnceLock::new();
+    static MD_QUOTE_RE: OnceLock<Regex> = OnceLock::new();
+
+    let bold_re = MD_BOLD_RE.get_or_init(|| {
+        Regex::new(r"\*\*[^\s*](?:.*?[^\s*])?\*\*|__[^\s_](?:.*?[^\s_])?__").unwrap()
+    });
+    let link_re =
+        MD_LINK_RE.get_or_init(|| Regex::new(r"\[[^\]]+\]\(https?://[^)\s]+\)").unwrap());
+    let strike_re =
+        MD_STRIKE_RE.get_or_init(|| Regex::new(r"~~[^\s~](?:.*?[^\s~])?~~").unwrap());
+    let code_re = MD_CODE_RE.get_or_init(|| Regex::new(r"`[^`\n]+`").unwrap());
+    let heading_re = MD_HEADING_RE.get_or_init(|| Regex::new(r"^\s*(#{1,6})\s+\S").unwrap());
+    let list_re = MD_LIST_RE.get_or_init(|| Regex::new(r"^\s*[-*+]\s+\S").unwrap());
+    let quote_re = MD_QUOTE_RE.get_or_init(|| Regex::new(r"^\s*>\s*\S").unwrap());
 
     let mut score = 0usize;
-    score += bold_re.find_iter(trimmed).count() * 2;
-    score += link_re.find_iter(trimmed).count() * 2;
-    score += strike_re.find_iter(trimmed).count() * 2;
-    if code_re.is_match(trimmed) {
+    score += bold_re.find_iter(sample).count() * 2;
+    score += link_re.find_iter(sample).count() * 2;
+    score += strike_re.find_iter(sample).count() * 2;
+    if code_re.is_match(sample) {
         score += 1;
     }
 
@@ -1390,21 +1443,45 @@ pub fn looks_like_markdown_document(raw: &str) -> bool {
 }
 
 pub fn strip_markdown_to_clean_text(raw: &str) -> Option<String> {
+    use std::sync::OnceLock;
     let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
-    let hr_re =
-        Regex::new(r"^\s*(?:-\s*-\s*-[-\s]*|_\s*_\s*_[_\s]*|\*\s*\*\s*\*[\*\s]*)$").unwrap();
-    let quote_re = Regex::new(r"^(\s*)(?:>\s?)+").unwrap();
-    let heading_re = Regex::new(r"^(\s*)#{1,6}\s+").unwrap();
-    let task_un_re = Regex::new(r"^(\s*)[-*+]\s+\[\s\]\s+").unwrap();
-    let task_ok_re = Regex::new(r"^(\s*)[-*+]\s+\[[xX]\]\s+").unwrap();
-    let ul_re = Regex::new(r"^(\s*)[-*+]\s+").unwrap();
-    let img_re = Regex::new(r"!\s*\[([^\]]*)\]\(([^)\n]+)\)").unwrap();
-    let link_re = Regex::new(r"\[([^\]]+)\]\((https?://[^)\s]+)\)").unwrap();
-    let bold_star_re = Regex::new(r"\*\*([^\s*](?:.*?[^\s*])?)\*\*").unwrap();
-    let bold_under_re = Regex::new(r"__([^\s_](?:.*?[^\s_])?)__").unwrap();
-    let strike_re = Regex::new(r"~~[^\s~](?:.*?[^\s~])?~~").unwrap();
-    let inline_code_re = Regex::new(r"`([^`\n]+)`").unwrap();
-    let blank_re = Regex::new(r"\n{3,}").unwrap();
+
+    static STRIP_HR_RE: OnceLock<Regex> = OnceLock::new();
+    static STRIP_QUOTE_RE: OnceLock<Regex> = OnceLock::new();
+    static STRIP_HEADING_RE: OnceLock<Regex> = OnceLock::new();
+    static STRIP_TASK_UN_RE: OnceLock<Regex> = OnceLock::new();
+    static STRIP_TASK_OK_RE: OnceLock<Regex> = OnceLock::new();
+    static STRIP_UL_RE: OnceLock<Regex> = OnceLock::new();
+    static STRIP_IMG_RE: OnceLock<Regex> = OnceLock::new();
+    static STRIP_LINK_RE: OnceLock<Regex> = OnceLock::new();
+    static STRIP_BOLD_STAR_RE: OnceLock<Regex> = OnceLock::new();
+    static STRIP_BOLD_UNDER_RE: OnceLock<Regex> = OnceLock::new();
+    static STRIP_STRIKE_RE: OnceLock<Regex> = OnceLock::new();
+    static STRIP_INLINE_CODE_RE: OnceLock<Regex> = OnceLock::new();
+    static STRIP_BLANK_RE: OnceLock<Regex> = OnceLock::new();
+
+    let hr_re = STRIP_HR_RE.get_or_init(|| {
+        Regex::new(r"^\s*(?:-\s*-\s*-[-\s]*|_\s*_\s*_[_\s]*|\*\s*\*\s*\*[\*\s]*)$").unwrap()
+    });
+    let quote_re = STRIP_QUOTE_RE.get_or_init(|| Regex::new(r"^(\s*)(?:>\s?)+").unwrap());
+    let heading_re = STRIP_HEADING_RE.get_or_init(|| Regex::new(r"^(\s*)#{1,6}\s+").unwrap());
+    let task_un_re =
+        STRIP_TASK_UN_RE.get_or_init(|| Regex::new(r"^(\s*)[-*+]\s+\[\s\]\s+").unwrap());
+    let task_ok_re =
+        STRIP_TASK_OK_RE.get_or_init(|| Regex::new(r"^(\s*)[-*+]\s+\[[xX]\]\s+").unwrap());
+    let ul_re = STRIP_UL_RE.get_or_init(|| Regex::new(r"^(\s*)[-*+]\s+").unwrap());
+    let img_re = STRIP_IMG_RE.get_or_init(|| Regex::new(r"!\s*\[([^\]]*)\]\(([^)\n]+)\)").unwrap());
+    let link_re =
+        STRIP_LINK_RE.get_or_init(|| Regex::new(r"\[([^\]]+)\]\((https?://[^)\s]+)\)").unwrap());
+    let bold_star_re =
+        STRIP_BOLD_STAR_RE.get_or_init(|| Regex::new(r"\*\*([^\s*](?:.*?[^\s*])?)\*\*").unwrap());
+    let bold_under_re =
+        STRIP_BOLD_UNDER_RE.get_or_init(|| Regex::new(r"__([^\s_](?:.*?[^\s_])?)__").unwrap());
+    let strike_re =
+        STRIP_STRIKE_RE.get_or_init(|| Regex::new(r"~~([^\s~](?:.*?[^\s~])?)~~").unwrap());
+    let inline_code_re =
+        STRIP_INLINE_CODE_RE.get_or_init(|| Regex::new(r"`([^`\n]+)`").unwrap());
+    let blank_re = STRIP_BLANK_RE.get_or_init(|| Regex::new(r"\n{3,}").unwrap());
 
     let mut out_lines = Vec::new();
     let mut in_fence = false;

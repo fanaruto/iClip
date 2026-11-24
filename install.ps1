@@ -37,22 +37,40 @@ try {
         Write-Host "  [OK] 已从 GitHub Releases 下载安装包" -ForegroundColor Green
     }
 
-    Unblock-File -Path $ZipPath -ErrorAction SilentlyContinue
+    $ZipInfo = Get-Item -LiteralPath $ZipPath -ErrorAction Stop
+    if ($ZipInfo.Length -lt 65536) {
+        throw "安装包体积异常（$($ZipInfo.Length) 字节），已中止安装"
+    }
+
+    Unblock-File -LiteralPath $ZipPath -ErrorAction SilentlyContinue
     $UnpackDir = Join-Path $StageDir "unpacked"
-    Expand-Archive -Path $ZipPath -DestinationPath $UnpackDir -Force
+    Expand-Archive -LiteralPath $ZipPath -DestinationPath $UnpackDir -Force
 
     $ExeSrc = Join-Path $UnpackDir "iClip.exe"
-    if (-not (Test-Path $ExeSrc)) {
+    if (-not (Test-Path -LiteralPath $ExeSrc)) {
         throw "安装包校验失败：未找到 iClip.exe"
     }
 
     Get-Process -Name "iClip" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Milliseconds 350
 
-    New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+    if (Test-Path -LiteralPath $InstallDir) {
+        $DirItem = Get-Item -LiteralPath $InstallDir -Force
+        if ($DirItem.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw "安全拦截：安装目录 $InstallDir 存在异常重解析点/符号链接"
+        }
+    } else {
+        New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+    }
     $TargetExe = Join-Path $InstallDir "iClip.exe"
-    Copy-Item -Path $ExeSrc -Destination $TargetExe -Force
-    Unblock-File -Path $TargetExe -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $TargetExe) {
+        $ExeItem = Get-Item -LiteralPath $TargetExe -Force
+        if ($ExeItem.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw "安全拦截：目标文件 $TargetExe 为符号链接"
+        }
+    }
+    Copy-Item -LiteralPath $ExeSrc -Destination $TargetExe -Force
+    Unblock-File -LiteralPath $TargetExe -ErrorAction SilentlyContinue
 
     # 创建开始菜单与桌面快捷方式（自动读取内置高清图标）
     $WshShell = New-Object -ComObject WScript.Shell

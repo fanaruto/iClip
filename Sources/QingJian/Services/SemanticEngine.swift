@@ -229,6 +229,10 @@ enum SemanticEngine {
         pattern: #"^rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})(?:\s*,\s*([0-9]*\.?[0-9]+))?\s*\)$"#,
         options: [.caseInsensitive]
     )
+    private static let hslColorRegex = try! NSRegularExpression(
+        pattern: #"^hsla?\(\s*(\d{1,3}(?:\.\d+)?)\s*,\s*(\d{1,3}(?:\.\d+)?)%\s*,\s*(\d{1,3}(?:\.\d+)?)%(?:\s*,\s*([0-9]*\.?[0-9]+))?\s*\)$"#,
+        options: [.caseInsensitive]
+    )
 
     private static let isoFormatter: DateFormatter = {
         let f = DateFormatter()
@@ -469,12 +473,13 @@ enum SemanticEngine {
             ))
         }
 
-        // 3. 颜色色值解析（HEX / RGB）
-        if trimmed.count <= 48, let rgba = parseColor(trimmed) {
+        // 3. 颜色色值解析（HEX / RGB / HSL）
+        if trimmed.count <= 64, let rgba = parseColor(trimmed) {
             if primaryKind == nil { primaryKind = .colorCode }
             parsedColor = rgba
             let hex = formatHex(rgba)
             let rgb = formatRGB(rgba)
+            let hsl = InstantMathEvaluator.formatHSL(r: rgba.r, g: rgba.g, b: rgba.b, a: rgba.a)
             let swiftColor = formatSwiftUIColor(rgba)
             if hex.caseInsensitiveCompare(trimmed) != .orderedSame {
                 actions.append(TransformAction(
@@ -494,6 +499,16 @@ enum SemanticEngine {
                     isSecurityAction: false,
                     resultText: rgb,
                     toastText: "已转换为 \(rgb)"
+                ))
+            }
+            if !trimmed.lowercased().hasPrefix("hsl") {
+                actions.append(TransformAction(
+                    id: "color-hsl",
+                    title: "转 HSL",
+                    symbolName: "slider.horizontal.below.rectangle",
+                    isSecurityAction: false,
+                    resultText: hsl,
+                    toastText: "已转换为 \(hsl)"
                 ))
             }
             actions.append(TransformAction(
@@ -558,6 +573,21 @@ enum SemanticEngine {
                 resultText: strictJSON,
                 toastText: "已剥除注释与尾随逗号，转为标准合法 JSON"
             ))
+        }
+
+        // 4.4 URL 参数串 / 表单 Query ↔ 扁平 JSON 双向破壁
+        if actions.count < 3, raw.utf8.count <= 32_768 {
+            let qjActs = UniversalEscapeDecoder.analyzeQueryJSONBridge(raw)
+            for qa in qjActs where actions.count < 3 {
+                actions.append(TransformAction(
+                    id: qa.id,
+                    title: qa.title,
+                    symbolName: qa.symbolName,
+                    isSecurityAction: false,
+                    resultText: qa.resultText,
+                    toastText: qa.toastText
+                ))
+            }
         }
 
         // 4.5 乱码转义安全解码（Unicode \uXXXX / URL %XX / HTML 实体）与多行列表稳定去重
@@ -1174,6 +1204,22 @@ enum SemanticEngine {
                 alpha = min(max(parsedA, 0.0), 1.0)
             }
             return (Double(rInt) / 255.0, Double(gInt) / 255.0, Double(bInt) / 255.0, alpha)
+        }
+
+        if let match = hslColorRegex.firstMatch(in: input, options: [], range: nsRange),
+           let hR = Range(match.range(at: 1), in: input),
+           let sR = Range(match.range(at: 2), in: input),
+           let lR = Range(match.range(at: 3), in: input),
+           let hDeg = Double(input[hR]), let sPct = Double(input[sR]), let lPct = Double(input[lR]),
+           (0.0...360.0).contains(hDeg), (0.0...100.0).contains(sPct), (0.0...100.0).contains(lPct) {
+            var alpha = 1.0
+            if match.range(at: 4).location != NSNotFound,
+               let aR = Range(match.range(at: 4), in: input),
+               let parsedA = Double(input[aR]) {
+                alpha = min(max(parsedA, 0.0), 1.0)
+            }
+            let rgb = InstantMathEvaluator.hslToRGB(h: hDeg, s: sPct / 100.0, l: lPct / 100.0)
+            return (rgb.r, rgb.g, rgb.b, alpha)
         }
         return nil
     }

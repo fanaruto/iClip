@@ -508,6 +508,8 @@ impl ClipboardStore {
         if let Some(pos) = self.items.iter().position(|it| {
             !it.is_pinned
                 && !it.is_pending_todo()
+                && !it.is_burn_after_paste()
+                && !crate::security::contains_secret_capsule(it.text.as_deref())
                 && matches!(it.kind, ClipContentType::Text | ClipContentType::Link)
                 && it.text.is_some()
         }) {

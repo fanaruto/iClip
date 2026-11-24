@@ -864,6 +864,15 @@ final class ClipboardStore: ObservableObject {
 
         guard !purged.isEmpty else { return 0 }
         items = kept
+        #if ICLIP_EDITION_FLOW
+        let deadPurgedIDs = Set(purged.map(\.id))
+        if !pasteQueueIDs.isEmpty {
+            pasteQueueIDs.removeAll { deadPurgedIDs.contains($0) }
+        }
+        if !selectedMergeIDs.isEmpty {
+            selectedMergeIDs.removeAll { deadPurgedIDs.contains($0) }
+        }
+        #endif
         let activeHashes = Set(items.map(\.contentHash))
         let deadHashes = Set(purged.map(\.contentHash)).subtracting(activeHashes)
         AdaptiveIntelligenceEngine.shared.forgetContentHashes(deadHashes)
@@ -923,6 +932,15 @@ final class ClipboardStore: ObservableObject {
         guard !removed.isEmpty else { return 0 }
 
         items = kept
+        #if ICLIP_EDITION_FLOW
+        let deadRemovedIDs = Set(removed.map(\.id))
+        if !pasteQueueIDs.isEmpty {
+            pasteQueueIDs.removeAll { deadRemovedIDs.contains($0) }
+        }
+        if !selectedMergeIDs.isEmpty {
+            selectedMergeIDs.removeAll { deadRemovedIDs.contains($0) }
+        }
+        #endif
         let activeHashes = Set(items.map(\.contentHash))
         let deadHashes = Set(removed.map(\.contentHash)).subtracting(activeHashes)
         AdaptiveIntelligenceEngine.shared.forgetContentHashes(deadHashes)
@@ -3497,13 +3515,55 @@ final class ClipboardStore: ObservableObject {
         return true
     }
 
+    /// 安全获取续接复制基底文本：严禁将密码管理器 `ConcealedType` 口令、被拉黑应用内容、`isBurnAfterPaste` 即焚机密或 `ICLPMSG1:` 密文信封混入新摘录
+    func safeCopyAppendBaseText(from pb: NSPasteboard? = nil) -> String {
+        let targetPB = pb ?? pasteboard
+        let pbTypes = targetPB.types ?? []
+        let srcBundle = PasteboardPrivacyStandards.extractSourceBundleID(from: targetPB)
+        if PasteboardPrivacyStandards.inspect(
+            types: pbTypes,
+            sourceBundleIDFromPasteboard: srcBundle,
+            frontmostBundleID: nil
+        ) != .allowCapture {
+            copyAppendTargetID = nil
+            return ""
+        }
+        if let bid = srcBundle, ignoredBundleIDSet.contains(bid) {
+            copyAppendTargetID = nil
+            return ""
+        }
+        if let tid = copyAppendTargetID,
+           let targetItem = items.first(where: { $0.id == tid }),
+           (targetItem.isBurnAfterPaste || SecretCapsuleMessenger.containsCapsule(targetItem.text)) {
+            copyAppendTargetID = nil
+            return ""
+        }
+        let latestSafeHistoryItem = items.first(where: {
+            ($0.type == .text || $0.type == .link)
+                && !$0.isBurnAfterPaste
+                && !SecretCapsuleMessenger.containsCapsule($0.text)
+        })
+        if let rawPB = targetPB.string(forType: .string) {
+            if SecretCapsuleMessenger.containsCapsule(rawPB) {
+                copyAppendTargetID = nil
+                return ""
+            }
+            if let topItem = items.first(where: { $0.type == .text || $0.type == .link }),
+               topItem.text == rawPB,
+               topItem.isBurnAfterPaste {
+                copyAppendTargetID = nil
+                return ""
+            }
+            return rawPB
+        }
+        return latestSafeHistoryItem?.text ?? ""
+    }
+
     /// 跨处选段按 ⌃⌥C 触发全局「续接复制」：自动发送纯净 ⌘C 并将新选段换行衔接至当前剪贴板末尾
     func triggerGlobalCopyAppend() {
         refreshAccessibilityStatus()
         if isAccessibilityGranted {
-            let currentClip = pasteboard.string(forType: .string)
-                ?? items.first(where: { $0.type == .text || $0.type == .link })?.text
-                ?? ""
+            let currentClip = safeCopyAppendBaseText()
             pendingCopyAppendBaseText = currentClip
             pendingCopyAppendDeadlineUptime = ProcessInfo.processInfo.systemUptime + 0.75
             let changeCountBefore = pasteboard.changeCount
@@ -3531,8 +3591,12 @@ final class ClipboardStore: ObservableObject {
             return
         }
 
-        // 零辅助权限兜底：直接将最近复制的两条文本历史合并为同一剪贴板载荷
-        let recentTexts = items.filter { $0.type == .text || $0.type == .link }.prefix(2)
+        // 零辅助权限兜底：直接将最近复制的两条非即焚、非密文文本历史合并为同一剪贴板载荷
+        let recentTexts = items.filter {
+            ($0.type == .text || $0.type == .link)
+                && !$0.isBurnAfterPaste
+                && !SecretCapsuleMessenger.containsCapsule($0.text)
+        }.prefix(2)
         guard recentTexts.count == 2,
               let newest = recentTexts.first,
               let older = recentTexts.last,
@@ -3558,7 +3622,7 @@ final class ClipboardStore: ObservableObject {
             showToast("该图片暂无可追加的文本内容")
             return
         }
-        let currentBase = pasteboard.string(forType: .string) ?? ""
+        let currentBase = safeCopyAppendBaseText()
         commitAppendedSegment(incomingText: incoming, explicitBase: currentBase, sourceApp: item.sourceAppName, showGlobalNotice: false)
     }
 
@@ -3800,6 +3864,20 @@ final class ClipboardStore: ObservableObject {
                     toastText: "已按原序剔除 \(dedup.removedCount) 行重复项，保留 \(dedup.remainingCount) 行"
                 )
             )
+        }
+        if analyzed.count < 3, raw.utf8.count <= 32_768 {
+            let qjActs = UniversalEscapeDecoder.analyzeQueryJSONBridge(raw)
+            for qa in qjActs where analyzed.count < 3 {
+                analyzed.append(
+                    FinanceQuickAction(
+                        id: qa.id,
+                        title: qa.title,
+                        symbolName: qa.symbolName,
+                        resultText: qa.resultText,
+                        toastText: qa.toastText
+                    )
+                )
+            }
         }
         if analyzed.count < 3, raw.utf8.count <= 65_536 {
             let listActs = UniversalEscapeDecoder.analyzeListBatchConversion(raw, includeSQLIn: false)

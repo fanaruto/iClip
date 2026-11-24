@@ -3525,6 +3525,156 @@ enum UniversalEscapeDecoder {
         working = working.replacingOccurrences(of: "&amp;", with: "&", options: .caseInsensitive)
         return working
     }
+
+    /// URL 参数 / 表单 Query 串（`?a=1&b=2`）↔ 可读扁平 JSON 双向离线破壁（自动解码 `%XX`/`+` 并净化空字节与毒字符）
+    static func analyzeQueryJSONBridge(_ raw: String) -> [ListBatchConversionAction] {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count >= 5, trimmed.utf8.count <= 32_768 else { return [] }
+
+        // 方向 A：扁平键值 JSON 对象 -> 标准 RFC 3986 URL 参数串（`k1=v1&k2=v2`）
+        if trimmed.hasPrefix("{") && trimmed.hasSuffix("}"),
+           let data = trimmed.data(using: .utf8),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           obj.count >= 2, obj.count <= 64 {
+            var pairs: [(String, String)] = []
+            var allScalar = true
+            for (k, v) in obj {
+                let cleanKey = k.trimmingCharacters(in: .whitespacesAndNewlines)
+                if cleanKey.isEmpty || cleanKey.count > 128 {
+                    allScalar = false
+                    break
+                }
+                if let s = v as? String {
+                    if s.count > 2048 || s.contains("\n") {
+                        allScalar = false
+                        break
+                    }
+                    pairs.append((cleanKey, s))
+                } else if let num = v as? NSNumber {
+                    if CFGetTypeID(num) == CFBooleanGetTypeID() {
+                        pairs.append((cleanKey, num.boolValue ? "true" : "false"))
+                    } else {
+                        pairs.append((cleanKey, num.stringValue))
+                    }
+                } else {
+                    allScalar = false
+                    break
+                }
+            }
+            if allScalar && pairs.count >= 2 {
+                pairs.sort { $0.0 < $1.0 }
+                let queryAllowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+                let encoded = pairs.compactMap { key, val -> String? in
+                    guard let ek = key.addingPercentEncoding(withAllowedCharacters: queryAllowed),
+                          let ev = val.addingPercentEncoding(withAllowedCharacters: queryAllowed) else {
+                        return nil
+                    }
+                    return "\(ek)=\(ev)"
+                }
+                if encoded.count == pairs.count {
+                    let outQuery = encoded.joined(separator: "&")
+                    return [
+                        ListBatchConversionAction(
+                            id: "json-to-query",
+                            title: "转 URL 参数串",
+                            symbolName: "link.badge.plus",
+                            resultText: outQuery,
+                            toastText: "已将 \(pairs.count) 个 JSON 字段编码为标准 URL 参数串"
+                        )
+                    ]
+                }
+            }
+            return []
+        }
+
+        // 方向 B：完整 URL（含 `?k1=v1&k2=v2`）或单行表单 Query（`k1=v1&k2=v2`）-> 结构化可读 JSON
+        guard !trimmed.contains("\n"), !trimmed.contains("\r"), !trimmed.contains(" "), !trimmed.contains("\t") else {
+            return []
+        }
+        let baseURLPart: String?
+        let rawQuerySlice: String
+        if let qIdx = trimmed.firstIndex(of: "?") {
+            let prefix = String(trimmed[..<qIdx])
+            var rest = String(trimmed[trimmed.index(after: qIdx)...])
+            if let hashIdx = rest.firstIndex(of: "#") {
+                rest = String(rest[..<hashIdx])
+            }
+            baseURLPart = prefix.isEmpty ? nil : prefix
+            rawQuerySlice = rest
+        } else if !trimmed.contains("://") && trimmed.contains("&") && trimmed.contains("=") {
+            var rest = trimmed
+            if rest.hasPrefix("&") { rest.removeFirst() }
+            if let hashIdx = rest.firstIndex(of: "#") {
+                rest = String(rest[..<hashIdx])
+            }
+            baseURLPart = nil
+            rawQuerySlice = rest
+        } else {
+            return []
+        }
+
+        let segments = rawQuerySlice.split(separator: "&", omittingEmptySubsequences: true)
+        guard segments.count >= 2, segments.count <= 80 else { return [] }
+
+        let validKeyCharset = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_-.[]%"))
+        var paramsDict: [String: Any] = [:]
+        var parsedCount = 0
+
+        for seg in segments {
+            guard let eqIdx = seg.firstIndex(of: "=") else { return [] }
+            let rawK = String(seg[..<eqIdx])
+            let rawV = String(seg[seg.index(after: eqIdx)...])
+            guard !rawK.isEmpty, rawK.count <= 128,
+                  rawK.unicodeScalars.allSatisfy({ validKeyCharset.contains($0) }) else {
+                return []
+            }
+            let plusNormalizedK = rawK.replacingOccurrences(of: "+", with: " ")
+            let plusNormalizedV = rawV.replacingOccurrences(of: "+", with: " ")
+            let decK = sanitizeDecodedOutput((plusNormalizedK.removingPercentEncoding ?? plusNormalizedK).replacingOccurrences(of: "\0", with: ""))
+            let decV = sanitizeDecodedOutput((plusNormalizedV.removingPercentEncoding ?? plusNormalizedV).replacingOccurrences(of: "\0", with: ""))
+            guard !decK.isEmpty else { return [] }
+
+            if let existing = paramsDict[decK] {
+                if var arr = existing as? [String] {
+                    arr.append(decV)
+                    paramsDict[decK] = arr
+                } else if let prev = existing as? String {
+                    paramsDict[decK] = [prev, decV]
+                }
+            } else {
+                paramsDict[decK] = decV
+            }
+            parsedCount += 1
+        }
+
+        guard parsedCount >= 2, !paramsDict.isEmpty else { return [] }
+        let rootObj: [String: Any]
+        if let base = baseURLPart, base.contains("://") || base.hasPrefix("/") {
+            let safeBase = sanitizeDecodedOutput(base.replacingOccurrences(of: "\0", with: ""))
+            rootObj = [
+                "_url": safeBase,
+                "params": paramsDict
+            ]
+        } else {
+            rootObj = paramsDict
+        }
+
+        guard JSONSerialization.isValidJSONObject(rootObj),
+              let jsonData = try? JSONSerialization.data(withJSONObject: rootObj, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]),
+              let jsonStr = String(data: jsonData, encoding: .utf8) else {
+            return []
+        }
+
+        return [
+            ListBatchConversionAction(
+                id: "query-to-json",
+                title: "解析参数 JSON(\(paramsDict.count)项)",
+                symbolName: "curlybraces",
+                resultText: jsonStr,
+                toastText: "已离线解码并拆解 \(paramsDict.count) 个 URL 查询参数为可读 JSON"
+            )
+        ]
+    }
 }
 
 
