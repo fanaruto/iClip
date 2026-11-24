@@ -44,6 +44,11 @@ enum InstantMathEvaluator {
             return colorRes
         }
 
+        // 0.7 检测命名风格直转（`camel user_order_id`、`snake userOrderId`、`kebab ...`、`const ...` 或剪贴板续算 `to snake` / `转驼峰`）
+        if let caseRes = evaluateIdentifierCaseExpression(input, latestClipboardText: latestClipboardText) {
+            return caseRes
+        }
+
         // 1. 离线全能单位换算（存储 B/KB/MB/GB/TB、时长 ms/s/min/h/d、温度 C/F、重量长度 kg/lb、cm/in、km/mi）
         if let unitRes = evaluateUnitConversion(input, hasLeadingEquals: hasLeadingEquals) {
             return unitRes
@@ -1336,6 +1341,102 @@ enum InstantMathEvaluator {
             expressionDisplay: hexStr,
             plainValue: primaryOut,
             formattedThousands: richDisplay,
+            rmbUppercase: nil,
+            isExplicitOrContextual: true
+        )
+    }
+
+    // MARK: - 编程与数据库命名风格搜索框直转（`camel user_id` / `snake userOrderId` / `to snake` / `转驼峰`）
+
+    private static let casePrefixCmdRegex = try! NSRegularExpression(
+        pattern: #"^(camel|camelcase|pascal|pascalcase|snake|snakecase|kebab|kebabcase|const|constant|upper|转驼峰|驼峰|转下划线|下划线|转短横线|转常量)\s+([A-Za-z0-9_\-\s]{2,96})$"#,
+        options: [.caseInsensitive]
+    )
+    private static let caseSuffixCmdRegex = try! NSRegularExpression(
+        pattern: #"^(?:([A-Za-z0-9_\-]{2,96})\s+)?(?:to|in|->|=>|转)\s*(camel|camelcase|pascal|pascalcase|snake|snakecase|kebab|kebabcase|const|constant|驼峰|下划线|短横线|常量)$"#,
+        options: [.caseInsensitive]
+    )
+
+    private static func tokenizeIdentifierWords(_ raw: String) -> [String] {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty, s.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" || $0 == " ") }) else {
+            return []
+        }
+        var normalized = ""
+        let chars = Array(s)
+        for i in 0..<chars.count {
+            let c = chars[i]
+            if c == "_" || c == "-" || c == " " {
+                normalized.append(" ")
+                continue
+            }
+            if i > 0 {
+                let prev = chars[i - 1]
+                let prevLowerOrDigit = prev.isLowercase || prev.isNumber
+                let nextLower = (i + 1 < chars.count) ? chars[i + 1].isLowercase : false
+                if c.isUppercase && (prevLowerOrDigit || (prev.isUppercase && nextLower)) {
+                    normalized.append(" ")
+                }
+            }
+            normalized.append(c)
+        }
+        return normalized.split(separator: " ").map { String($0).lowercased() }.filter { !$0.isEmpty }
+    }
+
+    private static func evaluateIdentifierCaseExpression(
+        _ input: String,
+        latestClipboardText: String?
+    ) -> InstantMathResult? {
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        let nsRange = NSRange(trimmed.startIndex..<trimmed.endIndex, in: trimmed)
+
+        var styleRaw: String? = nil
+        var sourceIdent: String? = nil
+
+        if let pm = casePrefixCmdRegex.firstMatch(in: trimmed, range: nsRange),
+           let stR = Range(pm.range(at: 1), in: trimmed),
+           let idR = Range(pm.range(at: 2), in: trimmed) {
+            styleRaw = String(trimmed[stR]).lowercased()
+            sourceIdent = String(trimmed[idR])
+        } else if let sm = caseSuffixCmdRegex.firstMatch(in: trimmed, range: nsRange),
+                  let stR = Range(sm.range(at: 2), in: trimmed) {
+            styleRaw = String(trimmed[stR]).lowercased()
+            if sm.range(at: 1).location != NSNotFound, let idR = Range(sm.range(at: 1), in: trimmed) {
+                sourceIdent = String(trimmed[idR])
+            } else if let clip = latestClipboardText?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      clip.count >= 2, clip.count <= 96 {
+                sourceIdent = clip
+            }
+        }
+
+        guard let style = styleRaw, let ident = sourceIdent else { return nil }
+        let words = tokenizeIdentifierWords(ident)
+        guard words.count >= 2 else { return nil }
+
+        let outText: String
+        let styleLabel: String
+        switch style {
+        case "camel", "camelcase", "驼峰", "转驼峰":
+            outText = words[0] + words.dropFirst().map { $0.prefix(1).uppercased() + $0.dropFirst() }.joined()
+            styleLabel = "camelCase"
+        case "pascal", "pascalcase":
+            outText = words.map { $0.prefix(1).uppercased() + $0.dropFirst() }.joined()
+            styleLabel = "PascalCase"
+        case "kebab", "kebabcase", "短横线", "转短横线":
+            outText = words.joined(separator: "-")
+            styleLabel = "kebab-case"
+        case "const", "constant", "upper", "常量", "转常量":
+            outText = words.map { $0.uppercased() }.joined(separator: "_")
+            styleLabel = "UPPER_SNAKE"
+        default:
+            outText = words.joined(separator: "_")
+            styleLabel = "snake_case"
+        }
+
+        return InstantMathResult(
+            expressionDisplay: "\(ident) → \(styleLabel)",
+            plainValue: outText,
+            formattedThousands: outText,
             rmbUppercase: nil,
             isExplicitOrContextual: true
         )

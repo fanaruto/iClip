@@ -3312,5 +3312,38 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertEqual(taxSplit.rmbUppercase, "壹万贰仟零柒拾伍元肆角柒分")
         XCTAssertEqual(InstantMathEvaluator.evaluate("10000 加税 13%")?.plainValue, "11300")
         XCTAssertEqual(InstantMathEvaluator.evaluate("含税 13%", latestClipboardText: "¥1,130")?.plainValue, "1000")
+
+        // 15. 第 32 轮自省：验证动态模板多 `{{clip}}` 乘数膨胀熔断（<=1MB，CWE-400）、终端数据库框线表直粘 Excel / 转 JSON 及命名风格秒转
+        let bombTpl = String(repeating: "{{clip}}", count: 120)
+        let bigCtx = String(repeating: "X", count: 40_000)
+        let boundedOut = SnippetTemplateEngine.render(template: bombTpl, latestContextText: bigCtx)
+        XCTAssertLessThanOrEqual(boundedOut.utf8.count, 1_060_000)
+
+        let mysqlBox = """
+        +-----+-----------+--------------+
+        | id  | user_name | total_amount |
+        +-----+-----------+--------------+
+        | 101 | 张三      |      1280.50 |
+        | 102 | 李四      |       960.00 |
+        +-----+-----------+--------------+
+        (2 rows)
+        """
+        let boxActs = TableBridgeEngine.analyze(mysqlBox)
+        XCTAssertEqual(boxActs.first(where: { $0.id == "tbl-md-to-excel" })?.resultText, "id\tuser_name\ttotal_amount\n101\t张三\t1280.50\n102\t李四\t960.00")
+        XCTAssertTrue(boxActs.contains(where: { $0.id == "tbl-tsv-to-json" }))
+
+        let duckUnicodeBox = """
+        ┌─────┬───────────┐
+        │ id  │ dept_name │
+        ├─────┼───────────┤
+        │ 1   │ 研发中心  │
+        └─────┴───────────┘
+        """
+        XCTAssertEqual(TableBridgeEngine.analyze(duckUnicodeBox).first?.resultText, "id\tdept_name\n1\t研发中心")
+
+        XCTAssertEqual(InstantMathEvaluator.evaluate("camel user_order_id")?.plainValue, "userOrderId")
+        XCTAssertEqual(InstantMathEvaluator.evaluate("snake userOrderId")?.plainValue, "user_order_id")
+        XCTAssertEqual(InstantMathEvaluator.evaluate("kebab UserOrderId")?.plainValue, "user-order-id")
+        XCTAssertEqual(InstantMathEvaluator.evaluate("to const", latestClipboardText: "userOrderId")?.plainValue, "USER_ORDER_ID")
     }
 }

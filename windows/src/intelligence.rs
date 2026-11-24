@@ -429,6 +429,11 @@ pub fn evaluate_instant_math(
         return Some(color_res);
     }
 
+    // 0.7 检测编程与数据库命名风格直转（`camel user_id` / `snake userOrderId` / `kebab ...` / `to snake` / `转驼峰`）
+    if let Some(case_res) = evaluate_identifier_case_expr(clean_expr, latest_clip_text) {
+        return Some(case_res);
+    }
+
     // 1. 离线全能单位换算（存储 B/KB/MB/GB/TB、时长 ms/s/min/h/d、温度 C/F、重量长度 kg/lb、cm/in、km/mi）
     if let Some(unit_res) = evaluate_unit_conversion(clean_expr, has_leading_eq) {
         return Some(unit_res);
@@ -1332,6 +1337,192 @@ fn evaluate_color_and_contrast(
     })
 }
 
+fn tokenize_identifier_words(raw: &str) -> Vec<String> {
+    let s = raw.trim();
+    if s.is_empty()
+        || !s
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b' '))
+    {
+        return Vec::new();
+    }
+    let bytes = s.as_bytes();
+    let mut norm = String::with_capacity(bytes.len() + 8);
+    for i in 0..bytes.len() {
+        let b = bytes[i];
+        if matches!(b, b'_' | b'-' | b' ') {
+            norm.push(' ');
+            continue;
+        }
+        if i > 0 {
+            let prev = bytes[i - 1];
+            let prev_lower_or_digit = prev.is_ascii_lowercase() || prev.is_ascii_digit();
+            let next_lower = bytes
+                .get(i + 1)
+                .map(|nb| nb.is_ascii_lowercase())
+                .unwrap_or(false);
+            if b.is_ascii_uppercase()
+                && (prev_lower_or_digit || (prev.is_ascii_uppercase() && next_lower))
+            {
+                norm.push(' ');
+            }
+        }
+        norm.push(b as char);
+    }
+    norm.split_whitespace()
+        .map(|w| w.to_ascii_lowercase())
+        .filter(|w| !w.is_empty())
+        .collect()
+}
+
+fn capitalize_ascii_word(w: &str) -> String {
+    let mut chars = w.chars();
+    match chars.next() {
+        Some(first) => format!("{}{}", first.to_ascii_uppercase(), chars.as_str()),
+        None => String::new(),
+    }
+}
+
+/// 供卡片动作管线识别单行编程标识符并生成 camelCase / snake_case / UPPER_CASE 互转动作
+pub fn analyze_card_identifier_case_actions(
+    raw: &str,
+) -> Vec<(&'static str, String, String, String)> {
+    let trimmed = raw.trim();
+    let words = tokenize_identifier_words(trimmed);
+    if words.len() < 2 {
+        return Vec::new();
+    }
+    let camel = format!(
+        "{}{}",
+        words[0],
+        words[1..]
+            .iter()
+            .map(|w| capitalize_ascii_word(w))
+            .collect::<String>()
+    );
+    let snake = words.join("_");
+    let upper = words
+        .iter()
+        .map(|w| w.to_ascii_uppercase())
+        .collect::<Vec<_>>()
+        .join("_");
+    let mut out = Vec::new();
+    if camel != trimmed {
+        out.push((
+            "case-camel",
+            camel.clone(),
+            camel.clone(),
+            format!("已转为驼峰 {camel}"),
+        ));
+    }
+    if snake != trimmed {
+        out.push((
+            "case-snake",
+            snake.clone(),
+            snake.clone(),
+            format!("已转为下划线 {snake}"),
+        ));
+    }
+    if upper != trimmed && out.len() < 3 {
+        out.push((
+            "case-const",
+            "UPPER_CASE".to_string(),
+            upper,
+            "已转为常量命名".to_string(),
+        ));
+    }
+    out
+}
+
+fn evaluate_identifier_case_expr(
+    input: &str,
+    latest_clip_text: Option<&str>,
+) -> Option<InstantMathResult> {
+    use regex_lite::Regex;
+    use std::sync::OnceLock;
+
+    let trimmed = input.trim();
+    static CASE_PFX_RE: OnceLock<Regex> = OnceLock::new();
+    static CASE_SFX_RE: OnceLock<Regex> = OnceLock::new();
+
+    let pfx_re = CASE_PFX_RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)^(camel|camelcase|pascal|pascalcase|snake|snakecase|kebab|kebabcase|const|constant|upper|转驼峰|驼峰|转下划线|下划线|转短横线|转常量)\s+([A-Za-z0-9_\-\s]{2,96})$",
+        )
+        .unwrap()
+    });
+    let sfx_re = CASE_SFX_RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)^(?:([A-Za-z0-9_\-]{2,96})\s+)?(?:to|in|->|=>|转)\s*(camel|camelcase|pascal|pascalcase|snake|snakecase|kebab|kebabcase|const|constant|驼峰|下划线|短横线|常量)$",
+        )
+        .unwrap()
+    });
+
+    let (style, ident, used_ctx): (String, &str, bool) = if let Some(caps) = pfx_re.captures(trimmed)
+    {
+        (
+            caps.get(1)?.as_str().to_lowercase(),
+            caps.get(2)?.as_str(),
+            false,
+        )
+    } else if let Some(caps) = sfx_re.captures(trimmed) {
+        let st = caps.get(2)?.as_str().to_lowercase();
+        if let Some(id_m) = caps.get(1) {
+            (st, id_m.as_str(), false)
+        } else {
+            let clip = latest_clip_text
+                .map(str::trim)
+                .filter(|c| (2..=96).contains(&c.len()))?;
+            (st, clip, true)
+        }
+    } else {
+        return None;
+    };
+
+    let words = tokenize_identifier_words(ident);
+    if words.len() < 2 {
+        return None;
+    }
+
+    let (out_txt, lbl) = match style.as_str() {
+        "camel" | "camelcase" | "驼峰" | "转驼峰" => (
+            format!(
+                "{}{}",
+                words[0],
+                words[1..]
+                    .iter()
+                    .map(|w| capitalize_ascii_word(w))
+                    .collect::<String>()
+            ),
+            "camelCase",
+        ),
+        "pascal" | "pascalcase" => (
+            words
+                .iter()
+                .map(|w| capitalize_ascii_word(w))
+                .collect::<String>(),
+            "PascalCase",
+        ),
+        "kebab" | "kebabcase" | "短横线" | "转短横线" => (words.join("-"), "kebab-case"),
+        "const" | "constant" | "upper" | "常量" | "转常量" => (
+            words
+                .iter()
+                .map(|w| w.to_ascii_uppercase())
+                .collect::<Vec<_>>()
+                .join("_"),
+            "UPPER_SNAKE",
+        ),
+        _ => (words.join("_"), "snake_case"),
+    };
+
+    Some(InstantMathResult {
+        expression_display: format!("{ident} -> {lbl}"),
+        plain_value: out_txt,
+        rmb_uppercase: None,
+        used_clipboard_context: used_ctx,
+    })
+}
+
 #[derive(Clone, Copy)]
 enum WinUnitFamily {
     DataBytes(f64, &'static str),
@@ -2026,12 +2217,14 @@ impl ClipboardDiffSummary {
 }
 
 pub fn compute_clipboard_diff(older: &str, newer: &str) -> ClipboardDiffSummary {
+    let clamped_old = crate::model::safe_utf8_prefix(older, 262_144);
+    let clamped_new = crate::model::safe_utf8_prefix(newer, 262_144);
     let (norm_old, norm_new, both_json) =
-        match (canonical_pretty_json(older), canonical_pretty_json(newer)) {
+        match (canonical_pretty_json(clamped_old), canonical_pretty_json(clamped_new)) {
             (Some(o), Some(n)) => (o, n, true),
             _ => (
-                older.replace("\r\n", "\n"),
-                newer.replace("\r\n", "\n"),
+                clamped_old.replace("\r\n", "\n"),
+                clamped_new.replace("\r\n", "\n"),
                 false,
             ),
         };
@@ -2158,25 +2351,32 @@ fn canonical_pretty_json(raw: &str) -> Option<String> {
         return None;
     }
     let val: serde_json::Value = serde_json::from_str(t).ok()?;
-    let sorted = sort_json_value(val);
+    let sorted = sort_json_value(val, 0)?;
     serde_json::to_string_pretty(&sorted).ok()
 }
 
-fn sort_json_value(v: serde_json::Value) -> serde_json::Value {
+fn sort_json_value(v: serde_json::Value, depth: usize) -> Option<serde_json::Value> {
+    if depth > 32 {
+        return None;
+    }
     match v {
         serde_json::Value::Object(map) => {
             let mut entries: Vec<(String, serde_json::Value)> = map.into_iter().collect();
             entries.sort_by(|a, b| a.0.cmp(&b.0));
             let mut out = serde_json::Map::new();
             for (k, child) in entries {
-                out.insert(k, sort_json_value(child));
+                out.insert(k, sort_json_value(child, depth + 1)?);
             }
-            serde_json::Value::Object(out)
+            Some(serde_json::Value::Object(out))
         }
         serde_json::Value::Array(arr) => {
-            serde_json::Value::Array(arr.into_iter().map(sort_json_value).collect())
+            let mut sorted_arr = Vec::with_capacity(arr.len());
+            for item in arr {
+                sorted_arr.push(sort_json_value(item, depth + 1)?);
+            }
+            Some(serde_json::Value::Array(sorted_arr))
         }
-        other => other,
+        other => Some(other),
     }
 }
 

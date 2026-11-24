@@ -6,34 +6,51 @@ enum TableBridgeEngine {
     private static let mdSeparatorRegex = try! NSRegularExpression(
         pattern: #"^\s*\|?(?:\s*:?-{2,}:?\s*\|)+\s*:?-{2,}:?\s*\|?\s*$"#
     )
+    private static let dbBoxBorderRegex = try! NSRegularExpression(
+        pattern: #"^\s*(?:\+[-=+]+\+|┌[─┬]+┐|├[─┼]+┤|└[─┴]+┘|╔[═╦]+╗|╠[═╬]+╣|╚[═╩]+╝|(?:[-─═]{2,}\s*[+┼╬]\s*)+[-─═]{2,})\s*$"#
+    )
+    private static let psqlFooterRegex = try! NSRegularExpression(
+        pattern: #"^\s*\(\d+\s+rows?\)\s*$"#,
+        options: [.caseInsensitive]
+    )
 
     // MARK: - 主分析入口
 
     static func analyze(_ rawText: String) -> [FinanceQuickAction] {
         guard rawText.utf16.count <= 65_536,
               rawText.contains("\n"),
-              (rawText.contains("|") || rawText.contains("\t")) else { return [] }
+              (rawText.contains("|") || rawText.contains("\t") || rawText.contains("│") || rawText.contains("┃") || rawText.contains("║")) else { return [] }
 
-        // 1. Markdown 表格 -> Excel 直粘 (TSV + HTML Table) / CSV
-        if let grid = parseMarkdownTable(rawText) {
+        // 1. Markdown 表格或终端数据库框线表（MySQL / psql / DuckDB / ClickHouse） -> Excel 直粘 (TSV + HTML Table) / JSON / CSV
+        if let grid = parseMarkdownTable(rawText) ?? parseDatabaseBoxTable(rawText) {
             let tsv = toTSV(grid)
             let csv = toCSV(grid)
-            return [
+            var out: [FinanceQuickAction] = [
                 FinanceQuickAction(
                     id: "tbl-md-to-excel",
                     title: "转 Excel 分列直粘",
                     symbolName: "tablecells.fill",
                     resultText: tsv,
                     toastText: "已转为 Excel/飞书表格分列格式（\(grid.count) 行）"
-                ),
-                FinanceQuickAction(
-                    id: "tbl-md-to-csv",
-                    title: "转 CSV",
-                    symbolName: "doc.plaintext",
-                    resultText: csv,
-                    toastText: "已转为标准 CSV 表格"
                 )
             ]
+            if let json = toJSONObjects(grid) {
+                out.append(FinanceQuickAction(
+                    id: "tbl-tsv-to-json",
+                    title: "转 JSON 数组",
+                    symbolName: "curlybraces.square",
+                    resultText: json,
+                    toastText: "已按表头转为 JSON 对象数组"
+                ))
+            }
+            out.append(FinanceQuickAction(
+                id: "tbl-md-to-csv",
+                title: "转 CSV",
+                symbolName: "doc.plaintext",
+                resultText: csv,
+                toastText: "已转为标准 CSV 表格"
+            ))
+            return out
         }
 
         // 2. Excel / 飞书复制出的 TSV 制表符表格 -> Markdown 表格 / JSON 对象数组
@@ -116,6 +133,61 @@ enum TableBridgeEngine {
             if row.count > colCount { return Array(row.prefix(colCount)) }
             return row + Array(repeating: "", count: colCount - row.count)
         }
+    }
+
+    /// 解析终端 SQL / CLI 框线表：覆盖 MySQL `+---+---+`、PostgreSQL `psql` `---+---` 及 DuckDB/ClickHouse/Rich `┌─┬─┐ / │...│`
+    static func parseDatabaseBoxTable(_ rawText: String) -> [[String]]? {
+        let lines = rawText
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .components(separatedBy: "\n")
+        guard lines.count >= 3 else { return nil }
+
+        var borderHits = 0
+        var dataRows: [[String]] = []
+        var expectedCols: Int? = nil
+
+        for rawLine in lines {
+            let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty { continue }
+            let nsRange = NSRange(trimmed.startIndex..<trimmed.endIndex, in: trimmed)
+            if psqlFooterRegex.firstMatch(in: trimmed, range: nsRange) != nil {
+                continue
+            }
+            if dbBoxBorderRegex.firstMatch(in: trimmed, range: nsRange) != nil {
+                borderHits += 1
+                continue
+            }
+
+            let pipeChar: Character? = {
+                if trimmed.contains("│") { return "│" }
+                if trimmed.contains("┃") { return "┃" }
+                if trimmed.contains("║") { return "║" }
+                if trimmed.contains("|") { return "|" }
+                return nil
+            }()
+            guard let sep = pipeChar else {
+                if !dataRows.isEmpty && borderHits >= 1 { break }
+                continue
+            }
+
+            var work = trimmed
+            if work.first == sep { work.removeFirst() }
+            if work.last == sep { work.removeLast() }
+            let cols = work.split(separator: sep, omittingEmptySubsequences: false)
+                .map { String($0).trimmingCharacters(in: .whitespaces) }
+            guard cols.count >= 2 else { continue }
+            if let exp = expectedCols {
+                guard cols.count == exp else { continue }
+            } else {
+                expectedCols = cols.count
+            }
+            dataRows.append(cols)
+        }
+
+        guard borderHits >= 1, dataRows.count >= 2, let colCnt = expectedCols, colCnt >= 2 else {
+            return nil
+        }
+        return dataRows
     }
 
     private static func splitMarkdownRow(_ line: String) -> [String] {

@@ -402,6 +402,28 @@ pub fn analyze_text_actions(raw: &str, minimal_mode: bool) -> Vec<QuickAction> {
                 }
             }
         }
+
+        // Dev 4.5: 编程标识符命名风格互转（camelCase / snake_case / UPPER_CASE）
+        if actions.len() < 3
+            && (4..=80).contains(&trimmed.len())
+            && !trimmed.contains([' ', '\n', '/', '.'])
+        {
+            for (act_id, act_title, act_res, act_toast) in
+                crate::intelligence::analyze_card_identifier_case_actions(trimmed)
+            {
+                if actions.len() >= 3 {
+                    break;
+                }
+                actions.push(QuickAction {
+                    id: act_id,
+                    title: act_title,
+                    is_security: false,
+                    result_text: act_res,
+                    html_table_payload: None,
+                    toast_text: act_toast,
+                });
+            }
+        }
     }
 
     // 七大垂直行业引擎按优先级匹配
@@ -784,10 +806,15 @@ pub fn analyze_finance_numbers(raw: &str) -> Vec<QuickAction> {
     }
 
     if !trimmed.contains('\n') {
-        let re = Regex::new(
-            r"^\s*([¥￥$€£]?)\s*([0-9][0-9,]*)(?:\.([0-9]{1,2}))?\s*(元|圆|RMB|CNY)?\s*$",
-        )
-        .unwrap();
+        use std::sync::OnceLock;
+        static FIN_SINGLE_RE: OnceLock<Regex> = OnceLock::new();
+        static FIN_COMMA_RE: OnceLock<Regex> = OnceLock::new();
+        let re = FIN_SINGLE_RE.get_or_init(|| {
+            Regex::new(
+                r"^\s*([¥￥$€£]?)\s*([0-9][0-9,]*)(?:\.([0-9]{1,2}))?\s*(元|圆|RMB|CNY)?\s*$",
+            )
+            .unwrap()
+        });
         if let Some(caps) = re.captures(trimmed) {
             let prefix = caps.get(1).map(|m| m.as_str()).unwrap_or("");
             let raw_int = caps.get(2).map(|m| m.as_str()).unwrap_or("");
@@ -795,8 +822,8 @@ pub fn analyze_finance_numbers(raw: &str) -> Vec<QuickAction> {
             let suffix = caps.get(4).map(|m| m.as_str()).unwrap_or("");
 
             if raw_int.contains(',') {
-                let comma_ok = Regex::new(r"^\d{1,3}(?:,\d{3})+$")
-                    .unwrap()
+                let comma_ok = FIN_COMMA_RE
+                    .get_or_init(|| Regex::new(r"^\d{1,3}(?:,\d{3})+$").unwrap())
                     .is_match(raw_int);
                 if !comma_ok {
                     return Vec::new();
@@ -891,10 +918,11 @@ pub fn analyze_finance_numbers(raw: &str) -> Vec<QuickAction> {
         return Vec::new();
     }
 
-    let tail_re = Regex::new(
-        r"(?:[¥￥$]\s*)?(-?\d{1,3}(?:,\d{3})+|-?\d+)(?:\.(\d{1,2}))?\s*(?:元|圆|块)?\s*$",
-    )
-    .unwrap();
+    static FIN_TAIL_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    let tail_re = FIN_TAIL_RE.get_or_init(|| {
+        Regex::new(r"(?:[¥￥$]\s*)?(-?\d{1,3}(?:,\d{3})+|-?\d+)(?:\.(\d{1,2}))?\s*(?:元|圆|块)?\s*$")
+            .unwrap()
+    });
     let mut matched_count = 0usize;
     let mut sum_cents: i128 = 0;
 
@@ -1011,7 +1039,11 @@ pub fn heal_pdf_line_breaks(raw: &str) -> String {
     let lines: Vec<&str> = normalized.split('\n').collect();
     let mut paragraphs: Vec<String> = Vec::new();
     let mut current = String::new();
-    let bullet_re = Regex::new(r"^\s*(?:[-*•·]|\d+[.)、]|[（(][一二三四五六七八九十\d]+[)）]|[一二三四五六七八九十]+、)\s*").unwrap();
+    static PDF_BULLET_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    let bullet_re = PDF_BULLET_RE.get_or_init(|| {
+        Regex::new(r"^\s*(?:[-*•·]|\d+[.)、]|[（(][一二三四五六七八九十\d]+[)）]|[一二三四五六七八九十]+、)\s*")
+            .unwrap()
+    });
 
     for raw_line in lines {
         let line = raw_line.trim();
@@ -1073,7 +1105,9 @@ pub fn heal_pdf_line_breaks(raw: &str) -> String {
 
 pub fn apply_pangu_spacing(text: &str) -> String {
     // 保护 URL 不被插入空格
-    let url_re = Regex::new(r"https?://[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+").unwrap();
+    static PANGU_URL_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    let url_re = PANGU_URL_RE
+        .get_or_init(|| Regex::new(r"https?://[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+").unwrap());
     let mut placeholders: Vec<String> = Vec::new();
     let mut masked = String::with_capacity(text.len());
     let mut last_end = 0;
@@ -1609,12 +1643,19 @@ pub fn to_html_table_fragment(tsv: &str) -> Option<String> {
 }
 
 pub fn analyze_table_bridge(raw: &str) -> Vec<QuickAction> {
-    if !raw.contains('\n') || raw.len() > 65_536 || (!raw.contains('|') && !raw.contains('\t')) {
+    if !raw.contains('\n')
+        || raw.len() > 65_536
+        || (!raw.contains('|')
+            && !raw.contains('\t')
+            && !raw.contains('│')
+            && !raw.contains('┃')
+            && !raw.contains('║'))
+    {
         return Vec::new();
     }
 
-    // 1. Markdown Table -> Excel (TSV + CF_HTML) / CSV（内置 OWASP CWE-1236 公式注入护盾）
-    if let Some(grid) = parse_markdown_table(raw) {
+    // 1. Markdown 表格或终端数据库框线表（MySQL / psql / DuckDB / ClickHouse） -> Excel (TSV + CF_HTML) / JSON / CSV
+    if let Some(grid) = parse_markdown_table(raw).or_else(|| parse_database_box_table(raw)) {
         let tsv: String = grid
             .iter()
             .map(|r| {
@@ -1648,24 +1689,45 @@ pub fn analyze_table_bridge(raw: &str) -> Vec<QuickAction> {
         let cf_html = to_html_table_fragment(&tsv).map(|frag| build_windows_cf_html_payload(&frag));
         let has_secret = crate::security::classify_sensitive_text(raw).is_some();
 
-        return vec![
-            QuickAction {
-                id: "tbl-md-to-excel",
-                title: "转 Excel 分列直粘".to_string(),
-                is_security: has_secret,
-                result_text: tsv,
-                html_table_payload: cf_html,
-                toast_text: format!("已转为 Excel 双协议分列格式（{} 行）", grid.len()),
-            },
-            QuickAction {
-                id: "tbl-md-to-csv",
-                title: "转 CSV".to_string(),
-                is_security: has_secret,
-                result_text: csv,
-                html_table_payload: None,
-                toast_text: "已转为标准 CSV 表格".to_string(),
-            },
-        ];
+        let mut out = vec![QuickAction {
+            id: "tbl-md-to-excel",
+            title: "转 Excel 分列直粘".to_string(),
+            is_security: has_secret,
+            result_text: tsv,
+            html_table_payload: cf_html,
+            toast_text: format!("已转为 Excel 双协议分列格式（{} 行）", grid.len()),
+        }];
+        if grid.len() >= 2 {
+            let headers = &grid[0];
+            let mut objs = Vec::with_capacity(grid.len() - 1);
+            for row in grid.iter().skip(1) {
+                let mut map = serde_json::Map::new();
+                for (c, key) in headers.iter().enumerate() {
+                    let val = row.get(c).cloned().unwrap_or_default();
+                    map.insert(key.clone(), Value::String(val));
+                }
+                objs.push(Value::Object(map));
+            }
+            if let Ok(json_str) = serde_json::to_string_pretty(&objs) {
+                out.push(QuickAction {
+                    id: "tbl-tsv-to-json",
+                    title: "转 JSON 数组".to_string(),
+                    is_security: has_secret,
+                    result_text: json_str,
+                    html_table_payload: None,
+                    toast_text: "已按表头转为 JSON 对象数组".to_string(),
+                });
+            }
+        }
+        out.push(QuickAction {
+            id: "tbl-md-to-csv",
+            title: "转 CSV".to_string(),
+            is_security: has_secret,
+            result_text: csv,
+            html_table_payload: None,
+            toast_text: "已转为标准 CSV 表格".to_string(),
+        });
+        return out;
     }
 
     // 2. Excel TSV -> Markdown Table / JSON 数组
@@ -1719,7 +1781,9 @@ fn parse_markdown_table(raw: &str) -> Option<Vec<Vec<String>>> {
     if raw_lines.len() < 3 {
         return None;
     }
-    let sep_re = Regex::new(r"^\s*\|?(?:\s*:?-{2,}:?\s*\|)+\s*:?-{2,}:?\s*\|?\s*$").unwrap();
+    static MD_TBL_SEP_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    let sep_re = MD_TBL_SEP_RE
+        .get_or_init(|| Regex::new(r"^\s*\|?(?:\s*:?-{2,}:?\s*\|)+\s*:?-{2,}:?\s*\|?\s*$").unwrap());
 
     // 在混排文本（如带前置引导与结尾总结的 AI 回复）中自动寻址首个合法的 Markdown 表格连续区块（跳过代码围栏）
     let mut table_lines: Vec<&str> = Vec::new();
@@ -1799,6 +1863,82 @@ fn parse_markdown_table(raw: &str) -> Option<Vec<Vec<String>>> {
     }
     if grid.len() >= 2 {
         Some(grid)
+    } else {
+        None
+    }
+}
+
+fn parse_database_box_table(raw: &str) -> Option<Vec<Vec<String>>> {
+    use std::sync::OnceLock;
+    let lines: Vec<&str> = raw.lines().collect();
+    if lines.len() < 3 {
+        return None;
+    }
+    static DB_BORDER_RE: OnceLock<Regex> = OnceLock::new();
+    static PSQL_FOOTER_RE: OnceLock<Regex> = OnceLock::new();
+    let border_re = DB_BORDER_RE.get_or_init(|| {
+        Regex::new(
+            r"^\s*(?:\+[-=+]+\+|┌[─┬]+┐|├[─┼]+┤|└[─┴]+┘|╔[═╦]+╗|╠[═╬]+╣|╚[═╩]+╝|(?:[-─═]{2,}\s*[+┼╬]\s*)+[-─═]{2,})\s*$",
+        )
+        .unwrap()
+    });
+    let footer_re =
+        PSQL_FOOTER_RE.get_or_init(|| Regex::new(r"(?i)^\s*\(\d+\s+rows?\)\s*$").unwrap());
+
+    let mut border_hits = 0usize;
+    let mut data_rows: Vec<Vec<String>> = Vec::new();
+    let mut expected_cols: Option<usize> = None;
+
+    for raw_line in lines {
+        let trimmed = raw_line.trim();
+        if trimmed.is_empty() || footer_re.is_match(trimmed) {
+            continue;
+        }
+        if border_re.is_match(trimmed) {
+            border_hits += 1;
+            continue;
+        }
+        let sep_opt = if trimmed.contains('│') {
+            Some('│')
+        } else if trimmed.contains('┃') {
+            Some('┃')
+        } else if trimmed.contains('║') {
+            Some('║')
+        } else if trimmed.contains('|') {
+            Some('|')
+        } else {
+            None
+        };
+        let Some(sep) = sep_opt else {
+            if !data_rows.is_empty() && border_hits >= 1 {
+                break;
+            }
+            continue;
+        };
+
+        let mut work = trimmed;
+        if let Some(s) = work.strip_prefix(sep) {
+            work = s;
+        }
+        if let Some(s) = work.strip_suffix(sep) {
+            work = s;
+        }
+        let cols: Vec<String> = work.split(sep).map(|c| c.trim().to_string()).collect();
+        if cols.len() < 2 {
+            continue;
+        }
+        if let Some(exp) = expected_cols {
+            if cols.len() != exp {
+                continue;
+            }
+        } else {
+            expected_cols = Some(cols.len());
+        }
+        data_rows.push(cols);
+    }
+
+    if border_hits >= 1 && data_rows.len() >= 2 && expected_cols.unwrap_or(0) >= 2 {
+        Some(data_rows)
     } else {
         None
     }
@@ -2232,9 +2372,12 @@ pub fn extract_verification_code(raw: &str) -> Option<String> {
     }
 
     let lower = trimmed.to_lowercase();
+    static OTP_WORD_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
     let has_kw = OTP_KEYWORDS.iter().any(|&kw| {
         if kw == "otp" {
-            Regex::new(r"\botp\b").unwrap().is_match(&lower)
+            OTP_WORD_RE
+                .get_or_init(|| Regex::new(r"\botp\b").unwrap())
+                .is_match(&lower)
         } else {
             lower.contains(kw)
         }
@@ -2243,24 +2386,29 @@ pub fn extract_verification_code(raw: &str) -> Option<String> {
         return None;
     }
 
-    let noise_patterns = [
-        r"(?i)(?:尾号(?:为|是)?|ending\s+in)\s*[0-9A-Za-z]{3,6}",
-        r"(?i)\b\d{1,4}\s*(?:分钟|分|秒钟|秒|小时|min|mins|minute|minutes|sec|secs|second|seconds|hr|hrs|hours)\b",
-        r"(?i)(?:[¥￥$€£]\s*\d+(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?\s*(?:元|圆|RMB|USD))",
-        r"\b(?:\d{4}[-/年]\d{1,2}[-/月]\d{1,2}日?|\d{1,2}:\d{2}(?::\d{2})?)\b",
-    ];
+    static OTP_NOISE_RES: std::sync::OnceLock<[Regex; 4]> = std::sync::OnceLock::new();
+    let noise_res = OTP_NOISE_RES.get_or_init(|| {
+        [
+            Regex::new(r"(?i)(?:尾号(?:为|是)?|ending\s+in)\s*[0-9A-Za-z]{3,6}").unwrap(),
+            Regex::new(r"(?i)\b\d{1,4}\s*(?:分钟|分|秒钟|秒|小时|min|mins|minute|minutes|sec|secs|second|seconds|hr|hrs|hours)\b").unwrap(),
+            Regex::new(r"(?i)(?:[¥￥$€£]\s*\d+(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?\s*(?:元|圆|RMB|USD))").unwrap(),
+            Regex::new(r"\b(?:\d{4}[-/年]\d{1,2}[-/月]\d{1,2}日?|\d{1,2}:\d{2}(?::\d{2})?)\b").unwrap(),
+        ]
+    });
 
     let mut sanitized = trimmed.to_string();
-    for pat in noise_patterns {
-        let re = Regex::new(pat).unwrap();
+    for re in noise_res {
         sanitized = re.replace_all(&sanitized, " ").into_owned();
     }
 
     // 紧跟关键词后的 4~8 位数字或含数字的混合码
-    let after_re = Regex::new(
-        r##"(?i)(?:验证码|校验码|动态码|安全码|确认码|登录码|授权码|提取码|认证码|(?:verification|security|auth|authentication|login|confirmation|one-time)\s+code|passcode|\botp\b)\s*(?:为|是|is)?\s*[:：]?\s*[\(\[【「『"']?([A-Za-z0-9]{4,8})[\)\]】」』"']?"##,
-    )
-    .unwrap();
+    static OTP_AFTER_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    let after_re = OTP_AFTER_RE.get_or_init(|| {
+        Regex::new(
+            r##"(?i)(?:验证码|校验码|动态码|安全码|确认码|登录码|授权码|提取码|认证码|(?:verification|security|auth|authentication|login|confirmation|one-time)\s+code|passcode|\botp\b)\s*(?:为|是|is)?\s*[:：]?\s*[\(\[【「『"']?([A-Za-z0-9]{4,8})[\)\]】」』"']?"##,
+        )
+        .unwrap()
+    });
 
     if let Some(caps) = after_re.captures(&sanitized) {
         let code = caps.get(1).unwrap().as_str();
@@ -2270,10 +2418,13 @@ pub fn extract_verification_code(raw: &str) -> Option<String> {
     }
 
     // 验证码在前的英文/中文句式
-    let before_re = Regex::new(
-        r#"(?i)\b([A-Za-z0-9]{4,8})\b[^\n]{0,28}?(?:验证码|校验码|动态码|安全码|确认码|(?:verification|security|auth|login|confirmation|one-time)\s+code|passcode|\botp\b)"#,
-    )
-    .unwrap();
+    static OTP_BEFORE_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    let before_re = OTP_BEFORE_RE.get_or_init(|| {
+        Regex::new(
+            r#"(?i)\b([A-Za-z0-9]{4,8})\b[^\n]{0,28}?(?:验证码|校验码|动态码|安全码|确认码|(?:verification|security|auth|login|confirmation|one-time)\s+code|passcode|\botp\b)"#,
+        )
+        .unwrap()
+    });
     if let Some(caps) = before_re.captures(&sanitized) {
         let code = caps.get(1).unwrap().as_str();
         if code.bytes().any(|b| b.is_ascii_digit()) {
@@ -2282,7 +2433,8 @@ pub fn extract_verification_code(raw: &str) -> Option<String> {
     }
 
     // 兜底：清洗干扰后的首个独立 4~8 位纯数字
-    let digits_re = Regex::new(r"\b([0-9]{4,8})\b").unwrap();
+    static OTP_DIGITS_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    let digits_re = OTP_DIGITS_RE.get_or_init(|| Regex::new(r"\b([0-9]{4,8})\b").unwrap());
     for caps in digits_re.captures_iter(&sanitized) {
         return Some(caps.get(1).unwrap().as_str().to_string());
     }
@@ -2302,10 +2454,14 @@ pub fn clean_meeting_transcript(raw: &str) -> Option<CleanedTranscript> {
         return None;
     }
 
-    let log_excl = Regex::new(
-        r"(?:\[(?:INFO|WARN|WARNING|ERROR|DEBUG|TRACE|FATAL)\]|Exception\b|Traceback\b|\bHTTP/\d\.\d\b|\b(?:GET|POST|PUT|DELETE)\s+/|\berrno\b|\bpid=\d+)",
-    )
-    .unwrap();
+    use std::sync::OnceLock;
+    static MEET_LOG_EXCL_RE: OnceLock<Regex> = OnceLock::new();
+    let log_excl = MEET_LOG_EXCL_RE.get_or_init(|| {
+        Regex::new(
+            r"(?:\[(?:INFO|WARN|WARNING|ERROR|DEBUG|TRACE|FATAL)\]|Exception\b|Traceback\b|\bHTTP/\d\.\d\b|\b(?:GET|POST|PUT|DELETE)\s+/|\berrno\b|\bpid=\d+)",
+        )
+        .unwrap()
+    });
     if log_excl.is_match(raw) {
         return None;
     }
@@ -2316,14 +2472,25 @@ pub fn clean_meeting_transcript(raw: &str) -> Option<CleanedTranscript> {
         return None;
     }
 
-    let srt_re = Regex::new(
-        r"^\s*\d{1,2}:\d{2}(?::\d{2})?[.,]\d{1,3}\s*-->\s*\d{1,2}:\d{2}(?::\d{2})?[.,]\d{1,3}.*$",
-    )
-    .unwrap();
-    let standalone_ts_re =
-        Regex::new(r"^\s*[\(\[（【]?(\d{1,2}:\d{2}(?::\d{2})?)[\)\]）】]?\s*$").unwrap();
-    let header_re = Regex::new(r"^\s*([^\d\[\]\n:：]{1,24}?(?:\s*\d{1,2})?)\s*[\(\[（【]?\b(\d{1,2}:\d{2}(?::\d{2})?)\b[\)\]）】]?\s*$").unwrap();
-    let inline_re = Regex::new(r"^\s*[\(\[（【]?\b(\d{1,2}:\d{2}(?::\d{2})?)\b[\)\]）】]?\s*(?:([^\d\[\]\n:：]{1,20}?)\s*[:：]\s*)?(.+)$").unwrap();
+    static MEET_SRT_RE: OnceLock<Regex> = OnceLock::new();
+    static MEET_STANDALONE_TS_RE: OnceLock<Regex> = OnceLock::new();
+    static MEET_HEADER_RE: OnceLock<Regex> = OnceLock::new();
+    static MEET_INLINE_RE: OnceLock<Regex> = OnceLock::new();
+
+    let srt_re = MEET_SRT_RE.get_or_init(|| {
+        Regex::new(
+            r"^\s*\d{1,2}:\d{2}(?::\d{2})?[.,]\d{1,3}\s*-->\s*\d{1,2}:\d{2}(?::\d{2})?[.,]\d{1,3}.*$",
+        )
+        .unwrap()
+    });
+    let standalone_ts_re = MEET_STANDALONE_TS_RE
+        .get_or_init(|| Regex::new(r"^\s*[\(\[（【]?(\d{1,2}:\d{2}(?::\d{2})?)[\)\]）】]?\s*$").unwrap());
+    let header_re = MEET_HEADER_RE.get_or_init(|| {
+        Regex::new(r"^\s*([^\d\[\]\n:：]{1,24}?(?:\s*\d{1,2})?)\s*[\(\[（【]?\b(\d{1,2}:\d{2}(?::\d{2})?)\b[\)\]）】]?\s*$").unwrap()
+    });
+    let inline_re = MEET_INLINE_RE.get_or_init(|| {
+        Regex::new(r"^\s*[\(\[（【]?\b(\d{1,2}:\d{2}(?::\d{2})?)\b[\)\]）】]?\s*(?:([^\d\[\]\n:：]{1,20}?)\s*[:：]\s*)?(.+)$").unwrap()
+    });
 
     let mut hits = 0usize;
     let mut active_speaker: Option<String> = None;
@@ -2491,14 +2658,18 @@ pub fn contains_sensitive_secret(text: &str) -> bool {
 }
 
 pub fn redact_secrets(text: &str) -> String {
+    use std::sync::OnceLock;
     let mut out = text.to_string();
     if out.contains("-----BEGIN ")
         && (out.contains("PRIVATE KEY-----") || out.contains("PRIVATE KEY BLOCK-----"))
     {
-        let pem_re = Regex::new(
-            r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----",
-        )
-        .unwrap();
+        static RED_PEM_RE: OnceLock<Regex> = OnceLock::new();
+        let pem_re = RED_PEM_RE.get_or_init(|| {
+            Regex::new(
+                r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----",
+            )
+            .unwrap()
+        });
         out = pem_re
             .replace_all(&out, |caps: &regex_lite::Captures| {
                 let s = &caps[0];
@@ -2511,49 +2682,65 @@ pub fn redact_secrets(text: &str) -> String {
             .into_owned();
     }
     if out.contains("PuTTY-User-Key-File-") {
-        let ppk_re =
-            Regex::new(r"PuTTY-User-Key-File-[23]:[\s\S]*?Private-MAC:\s*[0-9a-fA-F]+").unwrap();
+        static RED_PPK_RE: OnceLock<Regex> = OnceLock::new();
+        let ppk_re = RED_PPK_RE.get_or_init(|| {
+            Regex::new(r"PuTTY-User-Key-File-[23]:[\s\S]*?Private-MAC:\s*[0-9a-fA-F]+").unwrap()
+        });
         out = ppk_re
             .replace_all(&out, "PuTTY-User-Key-File-3: [REDACTED_BY_iCLIP]")
             .into_owned();
     }
     if out.contains("client-key-data") {
-        let kube_re =
-            Regex::new(r"(?im)^(\s*client-key-data\s*:\s*)([A-Za-z0-9+/=]{32,})(\s*)$").unwrap();
+        static RED_KUBE_RE: OnceLock<Regex> = OnceLock::new();
+        let kube_re = RED_KUBE_RE.get_or_init(|| {
+            Regex::new(r"(?im)^(\s*client-key-data\s*:\s*)([A-Za-z0-9+/=]{32,})(\s*)$").unwrap()
+        });
         out = kube_re
             .replace_all(&out, "${1}***KUBE_KEY_REDACTED***${3}")
             .into_owned();
     }
     if out.to_ascii_lowercase().contains("jdbc:") {
-        let jdbc_re = Regex::new(
-            r##"(?i)(jdbc:[a-z0-9+:-]+://[^\s'"]*?(?:[?&;]|user=[^&\s;]+[?&;])password=)([^&\s;'"]{4,})"##,
-        )
-        .unwrap();
+        static RED_JDBC_RE: OnceLock<Regex> = OnceLock::new();
+        let jdbc_re = RED_JDBC_RE.get_or_init(|| {
+            Regex::new(
+                r##"(?i)(jdbc:[a-z0-9+:-]+://[^\s'"]*?(?:[?&;]|user=[^&\s;]+[?&;])password=)([^&\s;'"]{4,})"##,
+            )
+            .unwrap()
+        });
         out = jdbc_re.replace_all(&out, "${1}***REDACTED***").into_owned();
     }
     if out.contains("AGE-SECRET-KEY-1") {
-        let age_re = Regex::new(r"\bAGE-SECRET-KEY-1[A-Z0-9]{50,}\b").unwrap();
+        static RED_AGE_RE: OnceLock<Regex> = OnceLock::new();
+        let age_re =
+            RED_AGE_RE.get_or_init(|| Regex::new(r"\bAGE-SECRET-KEY-1[A-Z0-9]{50,}\b").unwrap());
         out = age_re
             .replace_all(&out, "AGE-SECRET-KEY-1***REDACTED***")
             .into_owned();
     }
     if out.contains("://") {
-        let webhook_re = Regex::new(
-            r"(?i)(https?://(?:open\.(?:feishu\.cn|larksuite\.com)/open-apis/bot/v2/hook/|qyapi\.weixin\.qq\.com/cgi-bin/webhook/send\?(?:[^&#\s]+&)*key=|hooks\.slack\.com/services/[A-Z0-9]{8,}/[A-Z0-9]{8,}/|(?:ptb\.|canary\.)?discord(?:app)?\.com/api/webhooks/\d{10,}/))([A-Za-z0-9_\-]{12,})",
-        )
-        .unwrap();
+        static RED_WEBHOOK_RE: OnceLock<Regex> = OnceLock::new();
+        let webhook_re = RED_WEBHOOK_RE.get_or_init(|| {
+            Regex::new(
+                r"(?i)(https?://(?:open\.(?:feishu\.cn|larksuite\.com)/open-apis/bot/v2/hook/|qyapi\.weixin\.qq\.com/cgi-bin/webhook/send\?(?:[^&#\s]+&)*key=|hooks\.slack\.com/services/[A-Z0-9]{8,}/[A-Z0-9]{8,}/|(?:ptb\.|canary\.)?discord(?:app)?\.com/api/webhooks/\d{10,}/))([A-Za-z0-9_\-]{12,})",
+            )
+            .unwrap()
+        });
         out = webhook_re
             .replace_all(&out, "${1}***WEBHOOK_REDACTED***")
             .into_owned();
         if out.to_ascii_lowercase().contains("otpauth") {
-            let otp_re = Regex::new(r##"(?i)([?&](?:secret|data)=)([^&\s#'"]+)"##).unwrap();
+            static RED_OTPAUTH_RE: OnceLock<Regex> = OnceLock::new();
+            let otp_re = RED_OTPAUTH_RE
+                .get_or_init(|| Regex::new(r##"(?i)([?&](?:secret|data)=)([^&\s#'"]+)"##).unwrap());
             out = otp_re
                 .replace_all(&out, "${1}***2FA_SECRET_REDACTED***")
                 .into_owned();
         }
     }
     if out.to_ascii_uppercase().contains("WIFI:") {
-        let wifi_re = Regex::new(r"(?i)(WIFI:(?:[^;\r\n]*;)*?P:)([^;\r\n]{4,})(;)").unwrap();
+        static RED_WIFI_RE: OnceLock<Regex> = OnceLock::new();
+        let wifi_re = RED_WIFI_RE
+            .get_or_init(|| Regex::new(r"(?i)(WIFI:(?:[^;\r\n]*;)*?P:)([^;\r\n]{4,})(;)").unwrap());
         out = wifi_re
             .replace_all(&out, "${1}***WIFI_REDACTED***${3}")
             .into_owned();
@@ -3106,20 +3293,24 @@ pub fn contains_dynamic_template_placeholders(text: &str) -> bool {
     re.is_match(text)
 }
 
-pub fn render_dynamic_template(template: &str, latest_context: Option<&str>) -> String {
-    if !contains_dynamic_template_placeholders(template) {
-        return template.to_string();
+#[cfg(target_os = "windows")]
+fn resolve_local_datetime_parts(_now_secs: u64) -> (String, String, &'static str) {
+    #[repr(C)]
+    #[derive(Default)]
+    struct WinSystemTime {
+        w_year: u16,
+        w_month: u16,
+        w_day_of_week: u16,
+        w_day: u16,
+        w_hour: u16,
+        w_minute: u16,
+        w_second: u16,
+        w_milliseconds: u16,
     }
-    let ctx = latest_context.unwrap_or("");
-    let redacted_ctx = redact_pii_and_private_ip(&redact_secrets(ctx));
-    let now_secs = crate::model::now_unix_secs();
-    // 默认东八区展示本地自然日期/时间/星期（与中文用户直觉一致）
-    let local_secs = now_secs.saturating_add(8 * 3600);
-    let iso_local = crate::model::unix_secs_to_iso8601(local_secs);
-    let date_only = &iso_local[0..10];
-    let time_only = &iso_local[11..19];
-    let datetime_pretty = format!("{date_only} {time_only}");
-    let weekday_idx = (((local_secs / 86_400) + 4) % 7) as usize;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetLocalTime(lp: *mut WinSystemTime);
+    }
     const WEEKDAYS: [&str; 7] = [
         "星期日",
         "星期一",
@@ -3129,7 +3320,48 @@ pub fn render_dynamic_template(template: &str, latest_context: Option<&str>) -> 
         "星期五",
         "星期六",
     ];
-    let weekday_str = WEEKDAYS[weekday_idx];
+    let mut st = WinSystemTime::default();
+    unsafe {
+        GetLocalTime(&mut st as *mut WinSystemTime);
+    }
+    let date_only = format!("{:04}-{:02}-{:02}", st.w_year, st.w_month, st.w_day);
+    let time_only = format!("{:02}:{:02}:{:02}", st.w_hour, st.w_minute, st.w_second);
+    let wd = WEEKDAYS[(st.w_day_of_week as usize) % 7];
+    (date_only, time_only, wd)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn resolve_local_datetime_parts(now_secs: u64) -> (String, String, &'static str) {
+    const WEEKDAYS: [&str; 7] = [
+        "星期日",
+        "星期一",
+        "星期二",
+        "星期三",
+        "星期四",
+        "星期五",
+        "星期六",
+    ];
+    let local_secs = now_secs.saturating_add(8 * 3600);
+    let iso_local = crate::model::unix_secs_to_iso8601(local_secs);
+    let date_only = iso_local[0..10].to_string();
+    let time_only = iso_local[11..19].to_string();
+    let weekday_idx = (((local_secs / 86_400) + 4) % 7) as usize;
+    (date_only, time_only, WEEKDAYS[weekday_idx])
+}
+
+pub fn render_dynamic_template(template: &str, latest_context: Option<&str>) -> String {
+    const MAX_TEMPLATE_EXPANSIONS: usize = 64;
+    const MAX_RENDERED_BYTES: usize = 1_048_576;
+    const MAX_REDACTION_INPUT_BYTES: usize = 262_144;
+
+    if template.len() > MAX_RENDERED_BYTES || !contains_dynamic_template_placeholders(template) {
+        return template.to_string();
+    }
+    let ctx = latest_context.unwrap_or("");
+    let mut cached_redacted: Option<String> = None;
+    let now_secs = crate::model::now_unix_secs();
+    let (date_only, time_only, weekday_str) = resolve_local_datetime_parts(now_secs);
+    let datetime_pretty = format!("{date_only} {time_only}");
     let ts_str = now_secs.to_string();
 
     static TPL_REP_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
@@ -3138,30 +3370,57 @@ pub fn render_dynamic_template(template: &str, latest_context: Option<&str>) -> 
             .unwrap()
     });
 
-    let mut out = String::with_capacity(template.len() + ctx.len());
+    let mut out =
+        String::with_capacity((template.len() + ctx.len().min(16_384)).min(MAX_RENDERED_BYTES));
     let mut last = 0usize;
     let mut uuid_seq = 0u32;
+    let mut expanded_cnt = 0usize;
+
     for caps in re.captures_iter(template) {
         let Some(full_m) = caps.get(0) else { continue };
         let Some(key_m) = caps.get(1) else { continue };
         out.push_str(&template[last..full_m.start()]);
-        match key_m.as_str().to_ascii_lowercase().as_str() {
-            "clip" => out.push_str(ctx),
-            "clip_redacted" => out.push_str(&redacted_ctx),
-            "date" => out.push_str(date_only),
-            "time" => out.push_str(time_only),
-            "datetime" => out.push_str(&datetime_pretty),
-            "weekday" => out.push_str(weekday_str),
-            "ts" => out.push_str(&ts_str),
+        last = full_m.end();
+
+        if expanded_cnt >= MAX_TEMPLATE_EXPANSIONS || out.len() >= MAX_RENDERED_BYTES {
+            out.push_str(full_m.as_str());
+            continue;
+        }
+
+        let uuid_buf: String;
+        let rep: &str = match key_m.as_str().to_ascii_lowercase().as_str() {
+            "clip" => ctx,
+            "clip_redacted" => {
+                if cached_redacted.is_none() {
+                    let bounded = crate::model::safe_utf8_prefix(ctx, MAX_REDACTION_INPUT_BYTES);
+                    cached_redacted = Some(redact_pii_and_private_ip(&redact_secrets(bounded)));
+                }
+                cached_redacted.as_deref().unwrap_or("")
+            }
+            "date" => &date_only,
+            "time" => &time_only,
+            "datetime" => &datetime_pretty,
+            "weekday" => weekday_str,
+            "ts" => &ts_str,
             "uuid" => {
                 uuid_seq += 1;
-                out.push_str(&crate::model::generate_pseudo_uuid(&format!(
-                    "tpl-{now_secs}-{uuid_seq}"
-                )));
+                uuid_buf =
+                    crate::model::generate_pseudo_uuid(&format!("tpl-{now_secs}-{uuid_seq}"));
+                &uuid_buf
             }
-            _ => out.push_str(full_m.as_str()),
+            _ => full_m.as_str(),
+        };
+
+        if out.len() + rep.len() > MAX_RENDERED_BYTES {
+            let remain = MAX_RENDERED_BYTES.saturating_sub(out.len());
+            if remain > 0 {
+                out.push_str(crate::model::safe_utf8_prefix(rep, remain));
+            }
+            expanded_cnt = MAX_TEMPLATE_EXPANSIONS;
+        } else {
+            out.push_str(rep);
+            expanded_cnt += 1;
         }
-        last = full_m.end();
     }
     out.push_str(&template[last..]);
     out

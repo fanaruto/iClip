@@ -2532,5 +2532,54 @@ mod tests {
                 .plain_value,
             "1000"
         );
+
+        // 16. 第 32 轮自省：验证动态模板多 `{{clip}}` 乘数膨胀熔断（<=1MB，CWE-400）、终端数据库框线表直粘 Excel / 转 JSON 及命名风格秒转
+        let bomb_tpl = "{{clip}}".repeat(120);
+        let big_ctx = "X".repeat(40_000);
+        let bounded_out = crate::engines::render_dynamic_template(&bomb_tpl, Some(&big_ctx));
+        assert!(bounded_out.len() <= 1_060_000);
+
+        let mysql_box = "+-----+-----------+--------------+\n| id  | user_name | total_amount |\n+-----+-----------+--------------+\n| 101 | 张三      |      1280.50 |\n| 102 | 李四      |       960.00 |\n+-----+-----------+--------------+\n(2 rows)";
+        let box_acts = crate::engines::analyze_table_bridge(mysql_box);
+        assert_eq!(
+            box_acts
+                .iter()
+                .find(|a| a.id == "tbl-md-to-excel")
+                .unwrap()
+                .result_text,
+            "id\tuser_name\ttotal_amount\n101\t张三\t1280.50\n102\t李四\t960.00"
+        );
+        assert!(box_acts.iter().any(|a| a.id == "tbl-tsv-to-json"));
+
+        let duck_box = "┌─────┬───────────┐\n│ id  │ dept_name │\n├─────┼───────────┤\n│ 1   │ 研发中心  │\n└─────┴───────────┘";
+        assert_eq!(
+            crate::engines::analyze_table_bridge(duck_box)[0].result_text,
+            "id\tdept_name\n1\t研发中心"
+        );
+
+        assert_eq!(
+            crate::intelligence::evaluate_instant_math("camel user_order_id", None)
+                .unwrap()
+                .plain_value,
+            "userOrderId"
+        );
+        assert_eq!(
+            crate::intelligence::evaluate_instant_math("snake userOrderId", None)
+                .unwrap()
+                .plain_value,
+            "user_order_id"
+        );
+        assert_eq!(
+            crate::intelligence::evaluate_instant_math("kebab UserOrderId", None)
+                .unwrap()
+                .plain_value,
+            "user-order-id"
+        );
+        assert_eq!(
+            crate::intelligence::evaluate_instant_math("to const", Some("userOrderId"))
+                .unwrap()
+                .plain_value,
+            "USER_ORDER_ID"
+        );
     }
 }

@@ -96,11 +96,24 @@ struct ClipboardDiffResult: Equatable {
 /// 纯本地有界 LCS 剪贴板差异比对引擎（支持单行/乱序 JSON 自动对齐、前后公共行 O(N) 裁剪与长上下文折叠）
 enum ClipboardDiffEngine {
     static let maxLineCap = 360
+    private static let maxDiffInputUTF16 = 262_144
+
+    private static func clampDiffInput(_ text: String) -> (slice: String, wasClamped: Bool) {
+        guard text.utf16.count > maxDiffInputUTF16 else {
+            return (text, false)
+        }
+        let rawCut = String.Index(utf16Offset: maxDiffInputUTF16, in: text)
+        let cut = rawCut.samePosition(in: text) ?? text.utf16.index(before: rawCut)
+        return (String(text[..<cut]), true)
+    }
 
     static func computeDiff(older: String, newer: String, contextLines: Int = 2) -> ClipboardDiffResult? {
-        let rawOld = older.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
-        let rawNew = newer.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
-        guard rawOld != rawNew else { return nil }
+        guard older != newer else { return nil }
+        let (clampedOld, oldCut) = clampDiffInput(older)
+        let (clampedNew, newCut) = clampDiffInput(newer)
+        let rawOld = clampedOld.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+        let rawNew = clampedNew.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+        if !oldCut && !newCut && rawOld == rawNew { return nil }
         guard !rawOld.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !rawNew.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return nil
@@ -136,7 +149,7 @@ enum ClipboardDiffEngine {
 
         let fullOldLines = workOld.components(separatedBy: "\n")
         let fullNewLines = workNew.components(separatedBy: "\n")
-        let truncated = fullOldLines.count > maxLineCap || fullNewLines.count > maxLineCap
+        let truncated = oldCut || newCut || fullOldLines.count > maxLineCap || fullNewLines.count > maxLineCap
         let oldLines = truncated ? Array(fullOldLines.prefix(maxLineCap)) : fullOldLines
         let newLines = truncated ? Array(fullNewLines.prefix(maxLineCap)) : fullNewLines
 

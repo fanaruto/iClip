@@ -345,16 +345,42 @@ enum SnippetTemplateEngine {
         return placeholderRegex.firstMatch(in: text, options: [], range: range) != nil
     }
 
-    /// 实时展开动态模板占位符
+    /// 最大模板展开占位符数与输出字节上限（阻断恶意多 `{{clip}}` 乘数级内存膨胀炸弹 CWE-400）
+    private static let maxPlaceholderExpansions = 64
+    private static let maxRenderedUTF8Bytes = 1_048_576
+    private static let maxRedactionInputUTF16 = 262_144
+
+    /// 实时展开动态模板占位符（按需惰性脱敏 + O(N) 前向单遍拼接 + 1MB 膨胀熔断）
     static func render(template: String, latestContextText: String?, referenceDate: Date = Date()) -> String {
+        guard template.contains("{{") && template.contains("}}"),
+              template.utf8.count <= maxRenderedUTF8Bytes else {
+            return template
+        }
+        let nsString = template as NSString
+        let matches = placeholderRegex.matches(in: template, options: [], range: NSRange(location: 0, length: nsString.length))
+        guard !matches.isEmpty else { return template }
+
         let contextRaw = latestContextText ?? ""
-        let contextRedacted: String = {
-            guard !contextRaw.isEmpty else { return "" }
+        var cachedRedacted: String? = nil
+        func resolveRedactedContext() -> String {
+            if let hit = cachedRedacted { return hit }
+            guard !contextRaw.isEmpty else {
+                cachedRedacted = ""
+                return ""
+            }
+            let boundedCtx: String
+            if contextRaw.utf16.count > maxRedactionInputUTF16 {
+                let endIdx = String.Index(utf16Offset: maxRedactionInputUTF16, in: contextRaw)
+                boundedCtx = String(contextRaw[..<endIdx])
+            } else {
+                boundedCtx = contextRaw
+            }
+            let computed: String
             #if !ICLIP_EDITION_FLOW
-            let step1 = SemanticEngine.redactSecrets(in: contextRaw)
-            return SemanticEngine.redactPIIAndPrivateIP(in: SensitiveCredentialVeil.redactForExternalSharing(step1))
+            let step1 = SemanticEngine.redactSecrets(in: boundedCtx)
+            computed = SemanticEngine.redactPIIAndPrivateIP(in: SensitiveCredentialVeil.redactForExternalSharing(step1))
             #else
-            var veiled = SensitiveCredentialVeil.redactForExternalSharing(contextRaw)
+            var veiled = SensitiveCredentialVeil.redactForExternalSharing(boundedCtx)
             veiled = fallbackPhoneRegex.stringByReplacingMatches(
                 in: veiled,
                 range: NSRange(veiled.startIndex..<veiled.endIndex, in: veiled),
@@ -365,31 +391,42 @@ enum SnippetTemplateEngine {
                 range: NSRange(veiled.startIndex..<veiled.endIndex, in: veiled),
                 withTemplate: "$1***$2"
             )
-            return fallbackPrivateIPRegex.stringByReplacingMatches(
+            computed = fallbackPrivateIPRegex.stringByReplacingMatches(
                 in: veiled,
                 range: NSRange(veiled.startIndex..<veiled.endIndex, in: veiled),
                 withTemplate: "[INTERNAL_IP]"
             )
             #endif
-        }()
+            cachedRedacted = computed
+            return computed
+        }
 
-        let nsString = template as NSString
-        let matches = placeholderRegex.matches(in: template, options: [], range: NSRange(location: 0, length: nsString.length))
-        guard !matches.isEmpty else { return template }
+        var out = ""
+        out.reserveCapacity(min(template.utf8.count + min(contextRaw.utf8.count, 16_384), maxRenderedUTF8Bytes))
+        var cursor = template.startIndex
+        var expandedCount = 0
 
-        var result = template
-        for match in matches.reversed() {
-            guard let fullRange = Range(match.range, in: result),
-                  let keyRange = Range(match.range(at: 1), in: result) else {
+        for match in matches {
+            guard let fullRange = Range(match.range, in: template),
+                  let keyRange = Range(match.range(at: 1), in: template),
+                  fullRange.lowerBound >= cursor else {
                 continue
             }
-            let key = result[keyRange].lowercased()
+            out.append(contentsOf: template[cursor..<fullRange.lowerBound])
+            cursor = fullRange.upperBound
+
+            if expandedCount >= maxPlaceholderExpansions || out.utf8.count >= maxRenderedUTF8Bytes {
+                out.append(contentsOf: template[fullRange])
+                continue
+            }
+
+            let key = template[keyRange].lowercased()
             let replacement: String
             switch key {
             case "clip":
                 replacement = contextRaw
             case "clip_redacted":
-                replacement = contextRedacted
+                replacement = resolveRedactedContext()
             case "date":
                 replacement = dateFormatter.string(from: referenceDate)
             case "time":
@@ -403,10 +440,23 @@ enum SnippetTemplateEngine {
             case "uuid":
                 replacement = UUID().uuidString.lowercased()
             default:
-                replacement = String(result[fullRange])
+                replacement = String(template[fullRange])
             }
-            result.replaceSubrange(fullRange, with: replacement)
+
+            if out.utf8.count + replacement.utf8.count > maxRenderedUTF8Bytes {
+                let remain = max(0, maxRenderedUTF8Bytes - out.utf8.count)
+                if remain > 0 {
+                    out.append(String(replacement.utf8.prefix(remain)) ?? "")
+                }
+                expandedCount = maxPlaceholderExpansions
+            } else {
+                out.append(replacement)
+                expandedCount += 1
+            }
         }
-        return result
+        if cursor < template.endIndex {
+            out.append(contentsOf: template[cursor..<template.endIndex])
+        }
+        return out
     }
 }
