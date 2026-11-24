@@ -505,6 +505,7 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
     let surfaceKind: PhysicalCardSurfaceKind
     let isHovered: Bool
     let trailingExclusionWidth: CGFloat
+    let leadingExclusionWidth: CGFloat
     let bottomExclusionHeight: CGFloat
     let onPressStateChange: (Int, CGFloat) -> Void
     let onScrollReset: () -> Void
@@ -522,6 +523,7 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
         context.coordinator.itemID = itemID
         context.coordinator.surfaceKind = surfaceKind
         context.coordinator.trailingExclusionWidth = trailingExclusionWidth
+        context.coordinator.leadingExclusionWidth = leadingExclusionWidth
         context.coordinator.bottomExclusionHeight = bottomExclusionHeight
         context.coordinator.onPressStateChange = onPressStateChange
         context.coordinator.onScrollReset = onScrollReset
@@ -541,6 +543,7 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
             itemID: itemID,
             surfaceKind: surfaceKind,
             trailingExclusionWidth: trailingExclusionWidth,
+            leadingExclusionWidth: leadingExclusionWidth,
             bottomExclusionHeight: bottomExclusionHeight,
             onPressStateChange: onPressStateChange,
             onScrollReset: onScrollReset,
@@ -553,6 +556,7 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
         var itemID: UUID
         var surfaceKind: PhysicalCardSurfaceKind
         var trailingExclusionWidth: CGFloat
+        var leadingExclusionWidth: CGFloat
         var bottomExclusionHeight: CGFloat
         var onPressStateChange: (Int, CGFloat) -> Void
         var onScrollReset: () -> Void
@@ -563,6 +567,7 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
             itemID: UUID,
             surfaceKind: PhysicalCardSurfaceKind,
             trailingExclusionWidth: CGFloat,
+            leadingExclusionWidth: CGFloat,
             bottomExclusionHeight: CGFloat,
             onPressStateChange: @escaping (Int, CGFloat) -> Void,
             onScrollReset: @escaping () -> Void,
@@ -572,6 +577,7 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
             self.itemID = itemID
             self.surfaceKind = surfaceKind
             self.trailingExclusionWidth = trailingExclusionWidth
+            self.leadingExclusionWidth = leadingExclusionWidth
             self.bottomExclusionHeight = bottomExclusionHeight
             self.onPressStateChange = onPressStateChange
             self.onScrollReset = onScrollReset
@@ -691,7 +697,8 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
                     && visualY <= (isTile ? 30 : 32)
                 let inBottomChipZone = botH > 0
                     && visualY >= (bounds.height - botH)
-                let inLeadingControlZone = !isTile && localPt.x <= 48 && visualY <= 52
+                let leadW = coordinator?.leadingExclusionWidth ?? 0
+                let inLeadingControlZone = !isTile && leadW > 0 && localPt.x <= leadW && visualY <= 56
 
                 guard !inTrailingActionZone && !inBottomChipZone && !inLeadingControlZone else { return }
 
@@ -775,6 +782,7 @@ struct AppleTVPhysicalCardModifier: ViewModifier {
     /// 若调用方需共享外部归一化偏移（如图片 Tile 的 Z 轴视差），可传入外部 `pointerNorm`；为 `nil` 时由修饰器内部接管 120Hz 指针追踪，避免卡片宿主视图逐帧重算 `body`
     var pointerNorm: CGPoint? = nil
     var trailingActionWidth: CGFloat = 0
+    var leadingExclusionWidth: CGFloat = 0
     var bottomChipHeight: CGFloat = 0
     var onHoverEnterSelect: (() -> Bool)? = nil
     var onHoverEnded: (() -> Void)? = nil
@@ -968,6 +976,7 @@ struct AppleTVPhysicalCardModifier: ViewModifier {
                     surfaceKind: surfaceKind,
                     isHovered: isHovered,
                     trailingExclusionWidth: trailingActionWidth,
+                    leadingExclusionWidth: leadingExclusionWidth,
                     bottomExclusionHeight: bottomChipHeight,
                     onPressStateChange: { stage, progress in
                         if pressStage != stage {

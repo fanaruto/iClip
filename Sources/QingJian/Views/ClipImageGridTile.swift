@@ -243,14 +243,10 @@ struct ClipImageGridTile: View {
                 isHovered: isHovered,
                 isSelected: isSelected,
                 pointerNorm: hoverNorm,
-                trailingActionWidth: {
-                    var cnt = 2
-                    if !ClipboardStore.shared.minimalModeEnabled {
-                        if onExtractOCR != nil { cnt += 1 }
-                        if onToggleTodo != nil { cnt += 1 }
-                    }
-                    return CGFloat(cnt) * 25.0 + 10.0
-                }(),
+                trailingActionWidth: ClipCardLayoutMetrics.imageTileTrailingActionWidth(
+                    hasOCRButton: !ClipboardStore.shared.minimalModeEnabled && (onExtractOCR != nil || onOpenOCRBigBang != nil),
+                    hasTodoButton: !ClipboardStore.shared.minimalModeEnabled && onToggleTodo != nil
+                ),
                 bottomChipHeight: 0,
                 onResetHoverFromHide: {
                     if isHovered {
@@ -316,30 +312,36 @@ struct ClipImageGridTile: View {
             let suppressed = ForceTouchSuppressionRegistry.consumeSuppressionIfNeeded(for: item.id)
             let now = ProcessInfo.processInfo.systemUptime
             let clickCount = (NSApp.currentEvent?.type == .leftMouseUp) ? (NSApp.currentEvent?.clickCount ?? 1) : 1
-            let isDouble = clickCount >= 2 || (now - lastTapUptime) <= min(NSEvent.doubleClickInterval, 0.32)
             let mode = ClipboardStore.shared.cardClickPasteMode
+            let effectiveClickCount = CardClickGestureResolver.effectiveClickCount(
+                mode: mode,
+                eventClickCount: clickCount,
+                elapsedSinceLastTap: now - lastTapUptime,
+                maxInterval: min(NSEvent.doubleClickInterval, 0.32)
+            )
             let outcome = CardClickGestureResolver.resolve(
                 mode: mode,
-                clickCount: isDouble ? 2 : 1,
+                clickCount: effectiveClickCount,
                 modifiers: NSEvent.modifierFlags,
                 isLink: false,
                 isForceTouchSuppressed: suppressed
             )
+            lastTapUptime = CardClickGestureResolver.nextLastTapUptime(
+                mode: mode,
+                outcome: outcome,
+                now: now
+            )
             switch outcome {
             case .ignore:
-                lastTapUptime = 0
                 return
             case .openExternalLink:
-                lastTapUptime = 0
                 if !isHovered { isHovered = true }
                 onSelect()
             case .paste:
-                lastTapUptime = 0
                 if !isHovered { isHovered = true }
                 onSelect()
                 onPaste()
             case .copyOnly:
-                lastTapUptime = (mode == .doubleClick) ? now : 0
                 if !isHovered { isHovered = true }
                 onSelect()
                 onCopyOnly()

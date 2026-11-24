@@ -42,10 +42,49 @@ enum CardClickGestureResolver {
             return .paste(plainTextOnly: false)
 
         case .doubleClick:
-            if clickCount >= 2 {
+            if clickCount >= 3 {
+                return .ignore
+            }
+            if clickCount == 2 {
                 return .paste(plainTextOnly: modifiers.contains(.shift))
             }
             return .copyOnly
+        }
+    }
+
+    static func effectiveClickCount(
+        mode: CardClickPasteMode,
+        eventClickCount: Int,
+        elapsedSinceLastTap: TimeInterval,
+        maxInterval: TimeInterval
+    ) -> Int {
+        let withinDebounce = elapsedSinceLastTap >= 0 && elapsedSinceLastTap <= maxInterval
+        switch mode {
+        case .singleClick:
+            return withinDebounce ? max(2, eventClickCount) : 1
+        case .doubleClick:
+            if eventClickCount >= 2 {
+                return eventClickCount
+            }
+            return withinDebounce ? 2 : 1
+        }
+    }
+
+    /// 计算本次点击结算后的 `lastTapUptime`，确保 `.singleClick` 粘贴或连击拦截后顺延防误连击窗口，`.doubleClick` 首击等待升级双击
+    static func nextLastTapUptime(
+        mode: CardClickPasteMode,
+        outcome: CardClickGestureOutcome,
+        now: TimeInterval
+    ) -> TimeInterval {
+        switch outcome {
+        case .paste:
+            return (mode == .singleClick) ? now : 0
+        case .copyOnly:
+            return (mode == .doubleClick) ? now : 0
+        case .ignore:
+            return (mode == .singleClick) ? now : 0
+        case .openExternalLink:
+            return 0
         }
     }
 }
@@ -405,6 +444,29 @@ enum BigBangTokenizer {
             width: normalized.width * imageRect.width,
             height: normalized.height * imageRect.height
         )
+    }
+
+    /// 计算图片原位词框胶囊在画面内的最终显示及命中对齐矩形（最小 `20×18` 并将边缘胶囊夹紧在 `imageRect` 内）
+    static func displayImageBoxRect(for box: BigBangImageWordBox, in imageRect: CGRect) -> CGRect {
+        let mapped = mapNormalizedBox(box.normalizedRect, into: imageRect)
+        let chipW = min(imageRect.width, max(20, mapped.width + 6))
+        let chipH = min(imageRect.height, max(18, mapped.height + 4))
+        let clampedX = min(max(imageRect.minX + chipW * 0.5, mapped.midX), imageRect.maxX - chipW * 0.5)
+        let clampedY = min(max(imageRect.minY + chipH * 0.5, mapped.midY), imageRect.maxY - chipH * 0.5)
+        return CGRect(
+            x: clampedX - chipW * 0.5,
+            y: clampedY - chipH * 0.5,
+            width: chipW,
+            height: chipH
+        )
+    }
+
+    /// 计算图片原位词框的悬停/点选/划选命中矩形（按比例覆盖选中态 `1.04x` / 悬停态 `1.03x` 外扩边缘）
+    static func displayImageBoxHitRect(for box: BigBangImageWordBox, in imageRect: CGRect) -> CGRect {
+        let chipRect = displayImageBoxRect(for: box, in: imageRect)
+        let padX = max(2.0, chipRect.width * 0.02 + 1.0)
+        let padY = max(2.0, chipRect.height * 0.02 + 1.0)
+        return chipRect.insetBy(dx: -padX, dy: -padY)
     }
 
     /// 按字素簇（Character）边界安全截取不超过 `maxUTF16` 码元的前缀，杜绝 emoji/CRLF 截断归零

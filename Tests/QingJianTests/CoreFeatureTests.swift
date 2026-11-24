@@ -3829,6 +3829,34 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertEqual(narrow.frames[4], CGRect(x: 0, y: 68, width: 100, height: 26))
         XCTAssertEqual(narrow.size.height, 94, accuracy: 0.01)
 
+        // 末尾显式换行不应额外拉长底部留白，而中间段落空行须保留 14pt 段间距
+        let trailingBreak = BigBangFlowLayout.computeLayout(
+            items: [
+                (CGSize(width: 80, height: 26), false),
+                (CGSize(width: 0, height: 0), true),
+            ],
+            maxWidth: 300,
+            spacing: 7,
+            lineSpacing: 8,
+            fullWidthRows: false
+        )
+        XCTAssertEqual(trailingBreak.size.height, 26, accuracy: 0.01)
+
+        let middleBlankGap = BigBangFlowLayout.computeLayout(
+            items: [
+                (CGSize(width: 80, height: 26), false),
+                (CGSize(width: 0, height: 0), true),
+                (CGSize(width: 0, height: 0), true),
+                (CGSize(width: 90, height: 26), false),
+            ],
+            maxWidth: 300,
+            spacing: 7,
+            lineSpacing: 8,
+            fullWidthRows: false
+        )
+        XCTAssertEqual(middleBlankGap.frames[3], CGRect(x: 0, y: 48, width: 90, height: 26))
+        XCTAssertEqual(middleBlankGap.size.height, 74, accuracy: 0.01)
+
         // fullWidthRows = true 逐行等宽排布（标准 .line 序列无显式换行占位）与带空行占位
         let fullRows = BigBangFlowLayout.computeLayout(
             items: [
@@ -3911,5 +3939,178 @@ final class CoreFeatureTests: XCTestCase {
             XCTAssertLessThanOrEqual(stops.fadeEnd * totalW, totalW - actualCapsuleWidth)
         }
         XCTAssertEqual(ClipCardLayoutMetrics.hoverActionBarWidth(buttonCount: 0), 0)
+
+        // 前置控件 Force Touch 排斥区：纯文本/图像/文件卡片可全宽深按；仅待办勾选或交互式链接按钮保护精确右缘
+        XCTAssertEqual(ClipCardLayoutMetrics.leadingForceTouchExclusionWidth(hasTodoCheckbox: false, hasInteractiveLeadingLink: false), 0)
+        XCTAssertEqual(ClipCardLayoutMetrics.leadingForceTouchExclusionWidth(hasTodoCheckbox: true, hasInteractiveLeadingLink: false), 40)
+        XCTAssertEqual(ClipCardLayoutMetrics.leadingForceTouchExclusionWidth(hasTodoCheckbox: false, hasInteractiveLeadingLink: true), 58)
+        XCTAssertEqual(ClipCardLayoutMetrics.leadingForceTouchExclusionWidth(hasTodoCheckbox: true, hasInteractiveLeadingLink: true), 89)
+
+        // 图片瓷砖右上角悬浮按钮栏留白（2..4 按钮严格大于实宽）
+        XCTAssertGreaterThan(ClipCardLayoutMetrics.imageTileTrailingActionWidth(hasOCRButton: false, hasTodoButton: false), 2 * 22 + 4 + 10)
+        XCTAssertGreaterThan(ClipCardLayoutMetrics.imageTileTrailingActionWidth(hasOCRButton: true, hasTodoButton: true), 4 * 22 + 12 + 10)
+    }
+
+    func testCardClickGestureResolverNextLastTapUptimeDoublePasteGuard() {
+        let t0: TimeInterval = 1200.5
+        // 单击模式：粘贴后锁定 lastTapUptime = now，第 2/3 击即使系统双击间隔较大，在 0.32s 内也始终被忽略并保留首次时间
+        let firstSingleCount = CardClickGestureResolver.effectiveClickCount(
+            mode: .singleClick,
+            eventClickCount: 1,
+            elapsedSinceLastTap: 10.0,
+            maxInterval: 0.32
+        )
+        XCTAssertEqual(firstSingleCount, 1)
+        let firstSingle = CardClickGestureResolver.resolve(
+            mode: .singleClick,
+            clickCount: firstSingleCount,
+            modifiers: [],
+            isLink: false,
+            isForceTouchSuppressed: false
+        )
+        XCTAssertEqual(firstSingle, .paste(plainTextOnly: false))
+        let lock1 = CardClickGestureResolver.nextLastTapUptime(
+            mode: .singleClick,
+            outcome: firstSingle,
+            now: t0
+        )
+        XCTAssertEqual(lock1, t0)
+
+        let secondSingleCount = CardClickGestureResolver.effectiveClickCount(
+            mode: .singleClick,
+            eventClickCount: 2,
+            elapsedSinceLastTap: (t0 + 0.2) - lock1,
+            maxInterval: 0.32
+        )
+        let secondSingle = CardClickGestureResolver.resolve(
+            mode: .singleClick,
+            clickCount: secondSingleCount,
+            modifiers: [],
+            isLink: false,
+            isForceTouchSuppressed: false
+        )
+        XCTAssertEqual(secondSingle, .ignore)
+        // 被忽略时顺延 lastTapUptime = now，使紧随而来的第 3 击（t0 + 0.4）仍落在 0.32s 防抖窗口内并被拦截
+        let lock2 = CardClickGestureResolver.nextLastTapUptime(mode: .singleClick, outcome: secondSingle, now: t0 + 0.2)
+        XCTAssertEqual(lock2, t0 + 0.2)
+
+        let thirdSingleCount = CardClickGestureResolver.effectiveClickCount(
+            mode: .singleClick,
+            eventClickCount: 3,
+            elapsedSinceLastTap: (t0 + 0.4) - lock2,
+            maxInterval: 0.32
+        )
+        let thirdSingle = CardClickGestureResolver.resolve(
+            mode: .singleClick,
+            clickCount: thirdSingleCount,
+            modifiers: [],
+            isLink: false,
+            isForceTouchSuppressed: false
+        )
+        XCTAssertEqual(thirdSingle, .ignore)
+        let lock3 = CardClickGestureResolver.nextLastTapUptime(mode: .singleClick, outcome: thirdSingle, now: t0 + 0.4)
+        XCTAssertEqual(lock3, t0 + 0.4)
+
+        // 若距上次被拦截点击超过 0.32s（即使系统双击间隔设为 1.0s 令 NSEvent.clickCount == 2），仍恢复正常单击粘贴
+        let slowSingleCount = CardClickGestureResolver.effectiveClickCount(
+            mode: .singleClick,
+            eventClickCount: 2,
+            elapsedSinceLastTap: (t0 + 0.9) - lock3,
+            maxInterval: 0.32
+        )
+        XCTAssertEqual(slowSingleCount, 1)
+        XCTAssertEqual(
+            CardClickGestureResolver.resolve(
+                mode: .singleClick,
+                clickCount: slowSingleCount,
+                modifiers: [],
+                isLink: false,
+                isForceTouchSuppressed: false
+            ),
+            .paste(plainTextOnly: false)
+        )
+
+        // 双击模式：首击 .copyOnly 记录时间戳；次击 .paste 后归零；3/4 连击直接 .ignore 绝不重复粘贴
+        let firstDouble = CardClickGestureResolver.resolve(
+            mode: .doubleClick,
+            clickCount: 1,
+            modifiers: [],
+            isLink: false,
+            isForceTouchSuppressed: false
+        )
+        XCTAssertEqual(firstDouble, .copyOnly)
+        XCTAssertEqual(
+            CardClickGestureResolver.nextLastTapUptime(mode: .doubleClick, outcome: firstDouble, now: t0),
+            t0
+        )
+
+        let secondDoubleCount = CardClickGestureResolver.effectiveClickCount(
+            mode: .doubleClick,
+            eventClickCount: 2,
+            elapsedSinceLastTap: 0.15,
+            maxInterval: 0.32
+        )
+        let secondDouble = CardClickGestureResolver.resolve(
+            mode: .doubleClick,
+            clickCount: secondDoubleCount,
+            modifiers: [],
+            isLink: false,
+            isForceTouchSuppressed: false
+        )
+        XCTAssertEqual(secondDouble, .paste(plainTextOnly: false))
+        XCTAssertEqual(
+            CardClickGestureResolver.nextLastTapUptime(mode: .doubleClick, outcome: secondDouble, now: t0 + 0.15),
+            0
+        )
+
+        let thirdDoubleCount = CardClickGestureResolver.effectiveClickCount(
+            mode: .doubleClick,
+            eventClickCount: 3,
+            elapsedSinceLastTap: 0.25,
+            maxInterval: 0.32
+        )
+        XCTAssertEqual(thirdDoubleCount, 3)
+        XCTAssertEqual(
+            CardClickGestureResolver.resolve(
+                mode: .doubleClick,
+                clickCount: thirdDoubleCount,
+                modifiers: [],
+                isLink: false,
+                isForceTouchSuppressed: false
+            ),
+            .ignore
+        )
+
+        // 图片原位 OCR 词框渲染矩形与命中区同源对齐（小字号及边缘夹紧场景不失准）
+        let edgeBox = BigBangImageWordBox(
+            id: 1,
+            text: "ok",
+            normalizedRect: CGRect(x: 0.99, y: 0.99, width: 0.01, height: 0.01),
+            lineIndex: 0,
+            granularity: .word
+        )
+        let imgRect = CGRect(x: 12, y: 10, width: 400, height: 300)
+        let displayRect = BigBangTokenizer.displayImageBoxRect(for: edgeBox, in: imgRect)
+        XCTAssertEqual(displayRect.width, 20, accuracy: 0.01)
+        XCTAssertEqual(displayRect.height, 18, accuracy: 0.01)
+        XCTAssertEqual(displayRect.maxX, imgRect.maxX, accuracy: 0.01)
+        XCTAssertEqual(displayRect.maxY, imgRect.maxY, accuracy: 0.01)
+        XCTAssertTrue(BigBangTokenizer.displayImageBoxHitRect(for: edgeBox, in: imgRect).contains(CGPoint(x: displayRect.minX + 1, y: displayRect.minY + 1)))
+
+        // 宽词框（>100pt）在选中态 1.04x 放大下仍被命中矩形完整包裹，边缘不会误判空白清选
+        let wideBox = BigBangImageWordBox(
+            id: 2,
+            text: "AuthorizationBearerTokenExample",
+            normalizedRect: CGRect(x: 0.25, y: 0.40, width: 0.50, height: 0.08),
+            lineIndex: 1,
+            granularity: .word
+        )
+        let wideDisplay = BigBangTokenizer.displayImageBoxRect(for: wideBox, in: imgRect)
+        let wideHit = BigBangTokenizer.displayImageBoxHitRect(for: wideBox, in: imgRect)
+        let scaledMarginX = wideDisplay.width * 0.02
+        XCTAssertGreaterThanOrEqual(wideDisplay.minX - wideHit.minX, scaledMarginX + 0.9)
+        XCTAssertGreaterThanOrEqual(wideHit.maxX - wideDisplay.maxX, scaledMarginX + 0.9)
+        XCTAssertTrue(wideHit.contains(CGPoint(x: wideDisplay.minX - scaledMarginX, y: wideDisplay.midY)))
+        XCTAssertTrue(wideHit.contains(CGPoint(x: wideDisplay.maxX + scaledMarginX, y: wideDisplay.midY)))
     }
 }

@@ -63,15 +63,22 @@ struct BigBangFlowLayout: Layout {
         var frames: [CGRect] = []
         frames.reserveCapacity(items.count)
 
+        let lastContentIdx = items.lastIndex(where: { !$0.isBreak })
         var x: CGFloat = 0
         var y: CGFloat = 0
         var rowH: CGFloat = 0
         var usedW: CGFloat = 0
         var hasRow = false
 
-        for item in items {
+        for (idx, item) in items.enumerated() {
             if item.isBreak {
                 frames.append(CGRect(x: 0, y: y, width: 0, height: 0))
+                if let lastContentIdx, idx > lastContentIdx {
+                    continue
+                }
+                if lastContentIdx == nil {
+                    continue
+                }
                 usedW = max(usedW, x)
                 x = 0
                 y += (rowH > 0 ? rowH + lineSpacing : 14)
@@ -1284,14 +1291,10 @@ struct BigBangStageRootView: View {
                         .position(x: geo.size.width * 0.5, y: geo.size.height * 0.5)
                     } else {
                         ForEach(controller.imageWordBoxes) { box in
-                            let mapped = BigBangTokenizer.mapNormalizedBox(box.normalizedRect, into: absImageRect)
-                            let chipW = min(absImageRect.width, max(20, mapped.width + 6))
-                            let chipH = min(absImageRect.height, max(18, mapped.height + 4))
-                            let clampedX = min(max(absImageRect.minX + chipW * 0.5, mapped.midX), absImageRect.maxX - chipW * 0.5)
-                            let clampedY = min(max(absImageRect.minY + chipH * 0.5, mapped.midY), absImageRect.maxY - chipH * 0.5)
+                            let chipRect = BigBangTokenizer.displayImageBoxRect(for: box, in: absImageRect)
                             let selected = controller.imageSelectedBoxIDs.contains(box.id)
                             let hovered = (hoveredBoxID == box.id)
-                            let fontPt = min(13.5, max(9.5, mapped.height * 0.66))
+                            let fontPt = min(13.5, max(9.5, (chipRect.height - 4) * 0.66))
 
                             Text(box.text)
                                 .font(.system(size: fontPt, weight: selected ? .bold : .medium))
@@ -1299,7 +1302,7 @@ struct BigBangStageRootView: View {
                                 .minimumScaleFactor(0.65)
                                 .foregroundStyle(.white)
                                 .padding(.horizontal, 3)
-                                .frame(width: chipW, height: chipH)
+                                .frame(width: chipRect.width, height: chipRect.height)
                                 .background(
                                     RoundedRectangle(cornerRadius: 5, style: .continuous)
                                         .fill(
@@ -1319,7 +1322,7 @@ struct BigBangStageRootView: View {
                                 )
                                 .scaleEffect(selected ? 1.04 : (hovered ? 1.03 : 1.0))
                                 .zIndex(selected ? 15 : (hovered ? 20 : 1))
-                                .position(x: clampedX, y: clampedY)
+                                .position(x: chipRect.midX, y: chipRect.midY)
                                 .allowsHitTesting(false)
                         }
                     }
@@ -1334,8 +1337,8 @@ struct BigBangStageRootView: View {
                 switch phase {
                 case .active(let loc):
                     let hit = controller.imageWordBoxes.first { box in
-                        let mapped = BigBangTokenizer.mapNormalizedBox(box.normalizedRect, into: absImageRect)
-                        return mapped.insetBy(dx: -4, dy: -3).contains(loc)
+                        BigBangTokenizer.displayImageBoxHitRect(for: box, in: absImageRect)
+                            .contains(loc)
                     }?.id
                     if hoveredBoxID != hit {
                         hoveredBoxID = hit
@@ -1357,7 +1360,15 @@ struct BigBangStageRootView: View {
                             handleImageBoxDragChanged(location: pt, imageRect: absImageRect)
                         }
                     }
-                    .onEnded { _ in
+                    .onEnded { value in
+                        let dragDist = hypot(value.translation.width, value.translation.height)
+                        if controller.isImageBigBangActive,
+                           boxSweepVisited.isEmpty,
+                           dragDist < 5.0,
+                           !controller.imageSelectedBoxIDs.isEmpty {
+                            controller.clearTokenSelection()
+                            TactileFeedbackEngine.shared.performNavigationStepHaptic()
+                        }
                         boxDragTargetSelect = nil
                         boxSweepVisited = []
                         lastBoxSweepPoint = nil
@@ -1380,8 +1391,7 @@ struct BigBangStageRootView: View {
 
     private func handleImageBoxDragChanged(location: CGPoint, imageRect: CGRect) {
         for box in controller.imageWordBoxes {
-            let mapped = BigBangTokenizer.mapNormalizedBox(box.normalizedRect, into: imageRect)
-            let hitRect = mapped.insetBy(dx: -4, dy: -3)
+            let hitRect = BigBangTokenizer.displayImageBoxHitRect(for: box, in: imageRect)
             guard hitRect.contains(location) else { continue }
             guard !boxSweepVisited.contains(box.id) else { return }
             boxSweepVisited.insert(box.id)

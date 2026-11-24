@@ -51,6 +51,10 @@ struct ClipCardView: View {
         return true
     }
 
+    private var hasInteractiveLeadingLink: Bool {
+        item.type == .link || (item.type == .text && semantic.parsedColorRGBA == nil && hasEmbeddedWebLink)
+    }
+
     private var showsTodoCheckbox: Bool {
         !ClipboardStore.shared.minimalModeEnabled && item.isTodo
     }
@@ -111,8 +115,10 @@ struct ClipCardView: View {
                                     .frame(width: 5.5, height: 5.5)
                                 Text(cat.title)
                                     .font(.system(size: 10, weight: .semibold))
+                                    .lineLimit(1)
                             }
                             .foregroundStyle(isSelected ? Color.white.opacity(0.95) : cat.dotColor)
+                            .layoutPriority(1)
                             Text("·")
                         }
 
@@ -120,16 +126,22 @@ struct ClipCardView: View {
                             Text("粘贴即焚")
                                 .font(.system(size: 10, weight: .semibold))
                                 .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.red)
+                                .lineLimit(1)
+                                .layoutPriority(1)
                             Text("·")
                         } else if case .pastejackingOrBidi = item.detectedPoisonThreat {
                             Text("含隐藏控制符")
                                 .font(.system(size: 10, weight: .semibold))
                                 .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.red)
+                                .lineLimit(1)
+                                .layoutPriority(1)
                             Text("·")
                         } else if let linkRisk = item.detectedLinkRisk {
                             Text(linkRisk.badgeTitle)
                                 .font(.system(size: 10, weight: .semibold))
                                 .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.red)
+                                .lineLimit(1)
+                                .layoutPriority(1)
                             Text("·")
                         }
 
@@ -141,6 +153,8 @@ struct ClipCardView: View {
                                         ? Color.white.opacity(0.95)
                                         : (item.isTodoCompleted ? Color.green : Color.accentColor)
                                 )
+                                .lineLimit(1)
+                                .layoutPriority(1)
                             Text("·")
                         }
 
@@ -152,12 +166,16 @@ struct ClipCardView: View {
                                         ? Color.white.opacity(0.95)
                                         : (kind == .sensitiveSecret ? Color.orange : Color.accentColor)
                                 )
+                                .lineLimit(1)
+                                .layoutPriority(1)
                             Text("·")
                         } else if !item.isBurnAfterPaste, let secKind = item.detectedSensitiveKind {
                             let ttlHint = (!item.isPinned && !item.isPendingTodo && ClipboardStore.shared.autoExpireUnpinnedSecrets) ? " · 24h自毁" : ""
                             Text(secKind.shieldBadgeTitle + ttlHint)
                                 .font(.system(size: 10, weight: .semibold))
                                 .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.orange)
+                                .lineLimit(1)
+                                .layoutPriority(1)
                             Text("·")
                         }
 
@@ -176,6 +194,8 @@ struct ClipCardView: View {
                             Text("✓ 已复制")
                                 .font(.system(size: 10, weight: .semibold))
                                 .foregroundStyle(isSelected ? Color.white : Color.green)
+                                .fixedSize(horizontal: true, vertical: false)
+                                .layoutPriority(2)
                                 .transition(.opacity)
                         } else if !ClipboardStore.shared.minimalModeEnabled {
                             if let contextBadge = AdaptiveIntelligenceEngine.shared.preferredTargetAppBadge(
@@ -194,6 +214,8 @@ struct ClipCardView: View {
                                     Text("高频 ×\(reuse)")
                                         .font(.system(size: 10, weight: .semibold))
                                         .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.orange)
+                                        .lineLimit(1)
+                                        .layoutPriority(1)
                                 }
                             }
                         }
@@ -202,7 +224,11 @@ struct ClipCardView: View {
 
                         Text(item.relativeTimeText)
                             .monospacedDigit()
+                            .fixedSize(horizontal: true, vertical: false)
+                            .layoutPriority(3)
                     }
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .font(.system(size: 11, weight: .regular))
                     .foregroundStyle(isSelected ? Color.white.opacity(0.82) : Color.secondary)
                 }
@@ -237,6 +263,10 @@ struct ClipCardView: View {
                 isHovered: isHovered,
                 isSelected: isSelected,
                 trailingActionWidth: hoverActionBarEstimateWidth,
+                leadingExclusionWidth: ClipCardLayoutMetrics.leadingForceTouchExclusionWidth(
+                    hasTodoCheckbox: showsTodoCheckbox,
+                    hasInteractiveLeadingLink: hasInteractiveLeadingLink
+                ),
                 bottomChipHeight: !semantic.actions.isEmpty ? 28 : 0,
                 onHoverEnterSelect: {
                     let allowed = onHoverSelect?() ?? {
@@ -277,9 +307,13 @@ struct ClipCardView: View {
         let suppressed = ForceTouchSuppressionRegistry.consumeSuppressionIfNeeded(for: item.id)
         let now = ProcessInfo.processInfo.systemUptime
         let eventClickCount = (NSApp.currentEvent?.type == .leftMouseUp) ? (NSApp.currentEvent?.clickCount ?? 1) : 1
-        let isDoubleTap = eventClickCount >= 2 || (now - lastTapUptime) <= min(NSEvent.doubleClickInterval, 0.32)
-        let effectiveClickCount = isDoubleTap ? 2 : 1
         let mode = ClipboardStore.shared.cardClickPasteMode
+        let effectiveClickCount = CardClickGestureResolver.effectiveClickCount(
+            mode: mode,
+            eventClickCount: eventClickCount,
+            elapsedSinceLastTap: now - lastTapUptime,
+            maxInterval: min(NSEvent.doubleClickInterval, 0.32)
+        )
         let outcome = CardClickGestureResolver.resolve(
             mode: mode,
             clickCount: effectiveClickCount,
@@ -287,22 +321,23 @@ struct ClipCardView: View {
             isLink: (item.type == .link || hasEmbeddedWebLink),
             isForceTouchSuppressed: suppressed
         )
+        lastTapUptime = CardClickGestureResolver.nextLastTapUptime(
+            mode: mode,
+            outcome: outcome,
+            now: now
+        )
         switch outcome {
         case .ignore:
-            lastTapUptime = 0
             return
         case .openExternalLink:
-            lastTapUptime = 0
             if !isHovered { isHovered = true }
             onSelect()
             _ = ClipboardStore.shared.openItemExternally(item)
         case .paste(let plainTextOnly):
-            lastTapUptime = 0
             if !isHovered { isHovered = true }
             onSelect()
             onPaste(plainTextOnly)
         case .copyOnly:
-            lastTapUptime = (mode == .doubleClick) ? now : 0
             if !isHovered { isHovered = true }
             onSelect()
             onCopyOnly(false)
@@ -788,6 +823,22 @@ enum ClipCardLayoutMetrics {
         let fadeEnd = max(0.05, min(0.98, (totalW - max(0, reservedActionWidth)) / totalW))
         let fadeStart = max(0.0, fadeEnd - (22.0 / totalW))
         return (fadeStart, fadeEnd)
+    }
+
+    static func leadingForceTouchExclusionWidth(hasTodoCheckbox: Bool, hasInteractiveLeadingLink: Bool) -> CGFloat {
+        switch (hasTodoCheckbox, hasInteractiveLeadingLink) {
+        case (false, false): return 0
+        case (true, false): return 40
+        case (false, true): return 58
+        case (true, true): return 89
+        }
+    }
+
+    static func imageTileTrailingActionWidth(hasOCRButton: Bool, hasTodoButton: Bool) -> CGFloat {
+        var count = 2
+        if hasOCRButton { count += 1 }
+        if hasTodoButton { count += 1 }
+        return CGFloat(count) * 26.0 + 8.0
     }
 }
 

@@ -240,6 +240,7 @@ enum HitAction {
     SetQuickLookTab(u8),
     ToggleBigBangToken(usize),
     SetBigBangGranularity(BigBangGranularity),
+    CycleBigBangGranularity,
     SelectAllBigBang,
     ClearBigBangSelection,
     PasteBigBangSelection,
@@ -1791,6 +1792,9 @@ unsafe fn hide_panel(hwnd: HWND, restore_focus: bool) {
     reload_global_hotkeys_and_hooks(hwnd);
     iclip_core::security::wipe_all_temp_previews();
     dismiss_large_ql_stage();
+    if GetCapture() == hwnd {
+        let _ = ReleaseCapture();
+    }
     ShowWindow(hwnd, SW_HIDE);
     if restore_focus {
         restore_target_foreground_if_needed(target_fg);
@@ -2201,28 +2205,30 @@ unsafe extern "system" fn wnd_proc(
             0
         }
         WM_MOUSEMOVE => {
-            let need_track = APP_STATE.with(|c| {
-                if let Some(st) = c.borrow_mut().as_mut() {
-                    if !st.tracking_mouse_leave {
-                        st.tracking_mouse_leave = true;
-                        return true;
-                    }
-                }
-                false
-            });
-            if need_track {
-                let mut tme = TRACKMOUSEEVENT {
-                    cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
-                    dwFlags: TME_LEAVE,
-                    hwndTrack: hwnd,
-                    dwHoverTime: 0,
-                };
-                if TrackMouseEvent(&mut tme) == FALSE {
-                    APP_STATE.with(|c| {
-                        if let Some(st) = c.borrow_mut().as_mut() {
-                            st.tracking_mouse_leave = false;
+            if GetCapture() != hwnd {
+                let need_track = APP_STATE.with(|c| {
+                    if let Some(st) = c.borrow_mut().as_mut() {
+                        if !st.tracking_mouse_leave {
+                            st.tracking_mouse_leave = true;
+                            return true;
                         }
-                    });
+                    }
+                    false
+                });
+                if need_track {
+                    let mut tme = TRACKMOUSEEVENT {
+                        cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+                        dwFlags: TME_LEAVE,
+                        hwndTrack: hwnd,
+                        dwHoverTime: 0,
+                    };
+                    if TrackMouseEvent(&mut tme) == FALSE {
+                        APP_STATE.with(|c| {
+                            if let Some(st) = c.borrow_mut().as_mut() {
+                                st.tracking_mouse_leave = false;
+                            }
+                        });
+                    }
                 }
             }
             let x = (lparam & 0xFFFF) as i16 as i32;
@@ -2232,6 +2238,7 @@ unsafe extern "system" fn wnd_proc(
             0
         }
         WM_MOUSELEAVE_MSG => {
+            let holding_capture = GetCapture() == hwnd;
             let dpi_scale = get_dpi_scale(hwnd);
             let m = (34.0 * dpi_scale).ceil() as i32;
             let mut dirty_rect: Option<RECT> = None;
@@ -2240,7 +2247,9 @@ unsafe extern "system" fn wnd_proc(
             APP_STATE.with(|c| {
                 if let Some(st) = c.borrow_mut().as_mut() {
                     st.tracking_mouse_leave = false;
-                    st.big_bang_sweep_target = None;
+                    if !holding_capture {
+                        st.big_bang_sweep_target = None;
+                    }
                     let old_hovered = st.hovered_visible_pos.take();
                     if let Some(old_pos) = old_hovered {
                         need_redraw = true;
@@ -2279,6 +2288,9 @@ unsafe extern "system" fn wnd_proc(
             0
         }
         WM_LBUTTONUP => {
+            if GetCapture() == hwnd {
+                let _ = ReleaseCapture();
+            }
             let mut need_redraw = false;
             APP_STATE.with(|c| {
                 if let Some(st) = c.borrow_mut().as_mut() {
@@ -2295,14 +2307,30 @@ unsafe extern "system" fn wnd_proc(
             0
         }
         WM_CAPTURECHANGED_MSG => {
+            let mut pt: POINT = zeroed();
+            let mut rc: RECT = zeroed();
+            let cursor_outside = GetCursorPos(&mut pt) != FALSE
+                && GetWindowRect(hwnd, &mut rc) != FALSE
+                && !point_in_rect(pt.x, pt.y, &rc);
             let mut need_redraw = false;
             APP_STATE.with(|c| {
                 if let Ok(mut b) = c.try_borrow_mut() {
                     if let Some(st) = b.as_mut() {
+                        st.tracking_mouse_leave = false;
                         st.dragging_slider_track = None;
                         st.big_bang_sweep_target = None;
                         if st.pressed_visible_pos.take().is_some() {
                             need_redraw = true;
+                        }
+                        if cursor_outside {
+                            if st.hovered_visible_pos.take().is_some() {
+                                need_redraw = true;
+                            }
+                            st.hover_card_nx = 0.0;
+                            st.hover_card_ny = 0.0;
+                            if st.hovered_link_badge_store_idx.take().is_some() {
+                                need_redraw = true;
+                            }
                         }
                     }
                 }
@@ -10883,6 +10911,9 @@ unsafe fn handle_mouse_move(hwnd: HWND, x: i32, y: i32, left_held: bool) {
         }
         st.dragging_slider_track
     });
+    if !left_held && GetCapture() == hwnd {
+        let _ = ReleaseCapture();
+    }
     if let Some((tl, tw)) = drag_track {
         apply_slider_drag_pct(hwnd, x, tl, tw);
         SetCursor(LoadCursorW(null_mut(), IDC_HAND));
@@ -11371,16 +11402,33 @@ unsafe fn handle_left_click(hwnd: HWND, x: i32, y: i32, is_double: bool) {
                     st.big_bang_sweep_target = Some(next);
                 }
             });
+            let _ = SetCapture(hwnd);
             let _ = InvalidateRect(hwnd, null(), FALSE);
         }
         HitAction::SetBigBangGranularity(g) => {
             APP_STATE.with(|c| {
                 if let Some(st) = c.borrow_mut().as_mut() {
-                    st.big_bang_granularity = g;
-                    st.big_bang_selected_ids.clear();
+                    set_shared_big_bang_granularity(st, g);
                 }
             });
             let _ = InvalidateRect(hwnd, null(), FALSE);
+            let ql_h = QL_STAGE_HWND_RAW.load(Ordering::SeqCst) as HWND;
+            if !ql_h.is_null() && IsWindowVisible(ql_h) != FALSE {
+                let _ = InvalidateRect(ql_h, null(), FALSE);
+            }
+        }
+        HitAction::CycleBigBangGranularity => {
+            APP_STATE.with(|c| {
+                if let Some(st) = c.borrow_mut().as_mut() {
+                    let next = st.big_bang_granularity.next();
+                    set_shared_big_bang_granularity(st, next);
+                }
+            });
+            let _ = InvalidateRect(hwnd, null(), FALSE);
+            let ql_h = QL_STAGE_HWND_RAW.load(Ordering::SeqCst) as HWND;
+            if !ql_h.is_null() && IsWindowVisible(ql_h) != FALSE {
+                let _ = InvalidateRect(ql_h, null(), FALSE);
+            }
         }
         HitAction::SelectAllBigBang => {
             APP_STATE.with(|c| {
@@ -12496,19 +12544,33 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
     }
 
     if !ctrl_down && !alt_down && !shift_down && vk == 0x47 {
-        let cycled = APP_STATE.with(|c| {
+        let (cycled_main, cycled_ql) = APP_STATE.with(|c| {
             let mut b = c.borrow_mut();
-            let Some(st) = b.as_mut() else { return false };
-            if st.show_quick_look && st.quick_look_tab == 0 {
-                st.big_bang_granularity = st.big_bang_granularity.next();
-                st.big_bang_selected_ids.clear();
-                st.big_bang_sweep_target = None;
-                return true;
+            let Some(st) = b.as_mut() else {
+                return (false, false);
+            };
+            if st.ql_stage_visible && st.ql_stage_big_bang {
+                let next = st.big_bang_granularity.next();
+                set_shared_big_bang_granularity(st, next);
+                return (st.show_quick_look && st.quick_look_tab == 0, true);
             }
-            false
+            if st.show_quick_look && st.quick_look_tab == 0 {
+                let next = st.big_bang_granularity.next();
+                set_shared_big_bang_granularity(st, next);
+                return (true, st.ql_stage_visible && st.ql_stage_big_bang);
+            }
+            (false, false)
         });
-        if cycled {
+        if cycled_ql {
+            let ql_h = QL_STAGE_HWND_RAW.load(Ordering::SeqCst) as HWND;
+            if !ql_h.is_null() {
+                let _ = InvalidateRect(ql_h, null(), FALSE);
+            }
+        }
+        if cycled_main {
             let _ = InvalidateRect(hwnd, null(), FALSE);
+        }
+        if cycled_main || cycled_ql {
             return;
         }
     }
@@ -13792,6 +13854,14 @@ unsafe fn cancel_ota_download(hwnd: HWND) {
     set_toast(hwnd, "已取消更新下载".to_string());
 }
 
+fn set_shared_big_bang_granularity(st: &mut WinAppState, granularity: BigBangGranularity) {
+    st.big_bang_granularity = granularity;
+    st.big_bang_selected_ids.clear();
+    st.big_bang_sweep_target = None;
+    st.ql_stage_ocr_selected.clear();
+    st.ql_stage_sweep_target = None;
+}
+
 unsafe fn dismiss_large_ql_stage() {
     let ql_h = QL_STAGE_HWND_RAW.load(Ordering::SeqCst) as HWND;
     if !ql_h.is_null() && GetCapture() == ql_h {
@@ -13989,6 +14059,22 @@ unsafe fn handle_ql_stage_wnd_proc(
                     });
                     let _ = InvalidateRect(hwnd, null(), FALSE);
                 }
+                Some(HitAction::CycleBigBangGranularity) | Some(HitAction::SetBigBangGranularity(_)) => {
+                    APP_STATE.with(|c| {
+                        if let Some(st) = c.borrow_mut().as_mut() {
+                            let target_g = match hit {
+                                Some(HitAction::SetBigBangGranularity(g)) => g,
+                                _ => st.big_bang_granularity.next(),
+                            };
+                            set_shared_big_bang_granularity(st, target_g);
+                        }
+                    });
+                    let _ = InvalidateRect(hwnd, null(), FALSE);
+                    let main_h = MAIN_HWND_RAW.load(Ordering::SeqCst) as HWND;
+                    if !main_h.is_null() && IsWindowVisible(main_h) != FALSE {
+                        let _ = InvalidateRect(main_h, null(), FALSE);
+                    }
+                }
                 Some(HitAction::ToggleBigBangToken(id)) => {
                     APP_STATE.with(|c| {
                         if let Some(st) = c.borrow_mut().as_mut() {
@@ -14064,28 +14150,30 @@ unsafe fn handle_ql_stage_wnd_proc(
             0
         }
         WM_MOUSEMOVE => {
-            let need_track = APP_STATE.with(|c| {
-                if let Some(st) = c.borrow_mut().as_mut() {
-                    if !st.ql_stage_tracking_mouse_leave {
-                        st.ql_stage_tracking_mouse_leave = true;
-                        return true;
-                    }
-                }
-                false
-            });
-            if need_track {
-                let mut tme = TRACKMOUSEEVENT {
-                    cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
-                    dwFlags: TME_LEAVE,
-                    hwndTrack: hwnd,
-                    dwHoverTime: 0,
-                };
-                if TrackMouseEvent(&mut tme) == FALSE {
-                    APP_STATE.with(|c| {
-                        if let Some(st) = c.borrow_mut().as_mut() {
-                            st.ql_stage_tracking_mouse_leave = false;
+            if GetCapture() != hwnd {
+                let need_track = APP_STATE.with(|c| {
+                    if let Some(st) = c.borrow_mut().as_mut() {
+                        if !st.ql_stage_tracking_mouse_leave {
+                            st.ql_stage_tracking_mouse_leave = true;
+                            return true;
                         }
-                    });
+                    }
+                    false
+                });
+                if need_track {
+                    let mut tme = TRACKMOUSEEVENT {
+                        cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+                        dwFlags: TME_LEAVE,
+                        hwndTrack: hwnd,
+                        dwHoverTime: 0,
+                    };
+                    if TrackMouseEvent(&mut tme) == FALSE {
+                        APP_STATE.with(|c| {
+                            if let Some(st) = c.borrow_mut().as_mut() {
+                                st.ql_stage_tracking_mouse_leave = false;
+                            }
+                        });
+                    }
                 }
             }
             let x = (lparam & 0xFFFF) as i16 as i32;
@@ -14150,6 +14238,7 @@ unsafe fn handle_ql_stage_wnd_proc(
             APP_STATE.with(|c| {
                 if let Ok(mut b) = c.try_borrow_mut() {
                     if let Some(st) = b.as_mut() {
+                        st.ql_stage_tracking_mouse_leave = false;
                         st.ql_stage_sweep_target = None;
                     }
                 }
@@ -14232,7 +14321,11 @@ unsafe fn handle_ql_stage_wnd_proc(
                                 rect: RECT {
                                     left: s(18),
                                     top: s(10),
-                                    right: w - s(164),
+                                    right: if st.ql_stage_big_bang {
+                                        w - s(242)
+                                    } else {
+                                        w - s(164)
+                                    },
                                     bottom: s(36),
                                 },
                                 color: palette.text_primary,
@@ -14246,6 +14339,36 @@ unsafe fn handle_ql_stage_wnd_proc(
                             let cx = w - s(14) - c_sz;
                             let cy = s(11);
                             let bb_x = cx - s(8) - bb_w;
+                            if st.ql_stage_big_bang {
+                                let gr_w = s(72);
+                                let gr_x = bb_x - s(6) - gr_w;
+                                let gr_rc = RECT {
+                                    left: gr_x,
+                                    top: cy,
+                                    right: gr_x + gr_w,
+                                    bottom: cy + bb_h,
+                                };
+                                canvas.fill_round_rect(
+                                    gr_x,
+                                    cy,
+                                    gr_w,
+                                    bb_h,
+                                    sf(12.0),
+                                    palette.chip_bg,
+                                );
+                                texts.push(TextDrawCmd {
+                                    text: format!("{} (G)", st.big_bang_granularity.title()),
+                                    rect: gr_rc,
+                                    color: palette.text_primary,
+                                    font_kind: FontKind::BadgeBold,
+                                    flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                                });
+                                st.ql_stage_hit_regions.push(HitRegion {
+                                    rect: gr_rc,
+                                    interactive_cursor: true,
+                                    action: HitAction::CycleBigBangGranularity,
+                                });
+                            }
                             canvas.fill_round_rect(
                                 bb_x,
                                 cy,
@@ -14346,6 +14469,9 @@ unsafe fn handle_ql_stage_wnd_proc(
                                     let ch = s(24);
                                     let max_cx = draw_x + draw_w - s(14);
                                     let max_cy = draw_y + draw_h - s(44);
+                                    let is_line_mode =
+                                        st.big_bang_granularity == BigBangGranularity::Line;
+                                    let full_line_w = (draw_w - s(28)).max(s(24));
                                     let mut shown = 0usize;
                                     for tok in tokens.iter() {
                                         if tok.is_line_break {
@@ -14359,9 +14485,14 @@ unsafe fn handle_ql_stage_wnd_proc(
                                             break;
                                         }
                                         shown += 1;
-                                        let cw = (estimate_text_px(&tok.text, sf(12.0)) + s(16))
-                                            .clamp(s(24), (draw_w - s(28)).max(s(24)));
-                                        if tx > draw_x + s(14) && tx + cw > max_cx {
+                                        let cw = if is_line_mode {
+                                            full_line_w
+                                        } else {
+                                            (estimate_text_px(&tok.text, sf(12.0)) + s(16))
+                                                .clamp(s(24), full_line_w)
+                                        };
+                                        if !is_line_mode && tx > draw_x + s(14) && tx + cw > max_cx
+                                        {
                                             tx = draw_x + s(14);
                                             ty += ch + s(6);
                                         }
@@ -14387,19 +14518,41 @@ unsafe fn handle_ql_stage_wnd_proc(
                                             right: tx + cw,
                                             bottom: ty + ch,
                                         };
+                                        let text_rc = if is_line_mode {
+                                            RECT {
+                                                left: tx + s(10),
+                                                top: ty,
+                                                right: tx + cw - s(10),
+                                                bottom: ty + ch,
+                                            }
+                                        } else {
+                                            trc
+                                        };
                                         texts.push(TextDrawCmd {
                                             text: tok.text.clone(),
-                                            rect: trc,
+                                            rect: text_rc,
                                             color: Color4::rgb(255, 255, 255),
                                             font_kind: FontKind::Body,
-                                            flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                                            flags: if is_line_mode {
+                                                DT_LEFT
+                                                    | DT_VCENTER
+                                                    | DT_SINGLELINE
+                                                    | DT_END_ELLIPSIS
+                                            } else {
+                                                DT_CENTER | DT_VCENTER | DT_SINGLELINE
+                                            },
                                         });
                                         st.ql_stage_hit_regions.push(HitRegion {
                                             rect: trc,
                                             interactive_cursor: true,
                                             action: HitAction::ToggleBigBangToken(tok.id),
                                         });
-                                        tx += cw + s(6);
+                                        if is_line_mode {
+                                            tx = draw_x + s(14);
+                                            ty += ch + s(6);
+                                        } else {
+                                            tx += cw + s(6);
+                                        }
                                     }
 
                                     let pb_w = s(94);
