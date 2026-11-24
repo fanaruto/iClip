@@ -8,7 +8,7 @@ import Quartz
 let iClipSyntheticEventMagic: Int64 = 0x4943_4C50
 
 /// 支持按需获取键盘焦点且唤醒时绝不抢夺宿主窗口 Key Window / 输入框焦点的原生非激活悬浮面板
-final class KeyableFloatingPanel: NSPanel {
+final class KeyableFloatingPanel: UnifiedActiveFloatingPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
     override var becomesKeyOnlyIfNeeded: Bool {
@@ -341,6 +341,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             return ok
         }
         applyNativeSurface(style: store.surfaceStyle)
+        panel.enforceUnifiedActiveAppearance()
         if ProcessInfo.processInfo.arguments.contains("--demo") {
             let runner = DemoShowcaseRunner(panelController: self, store: store, nav: nav)
             self.demoRunner = runner
@@ -454,6 +455,15 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             .sink { [weak self] needsKey in
                 guard let self, needsKey, self.isVisible, !self.panel.isKeyWindow else { return }
                 self.panel.makeKey()
+            }
+            .store(in: &cancellables)
+
+        NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                guard let self, self.isVisible else { return }
+                self.panel.enforceUnifiedActiveAppearance()
+                self.surfaceHost.refreshInPlace()
             }
             .store(in: &cancellables)
     }
@@ -597,6 +607,8 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             panel.makeKeyAndOrderFront(nil)
             nav.focusTrigger = UUID()
         }
+        panel.enforceUnifiedActiveAppearance()
+        surfaceHost.refreshInPlace()
         panel.invalidateShadow()
 
         NSAnimationContext.runAnimationGroup { ctx in
@@ -710,13 +722,16 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     }
 
     func windowDidResignKey(_ notification: Notification) {
-        if BigBangStageController.shared.isVisible || SystemQuickLookController.shared.isVisible {
-            return
-        }
-        if InteractivePlaygroundController.shared.isActive && InteractivePlaygroundController.shared.phase == .permissionsSetup {
-            return
-        }
-        if store.alwaysOnTop || nav.suppressAutoHide || nav.isRecordingHotKey {
+        let keepVisible = BigBangStageController.shared.isVisible
+            || SystemQuickLookController.shared.isVisible
+            || (InteractivePlaygroundController.shared.isActive && InteractivePlaygroundController.shared.phase == .permissionsSetup)
+            || store.alwaysOnTop
+            || nav.suppressAutoHide
+            || nav.isRecordingHotKey
+        if keepVisible {
+            panel.makeFirstResponder(nil)
+            panel.enforceUnifiedActiveAppearance()
+            surfaceHost.refreshInPlace()
             return
         }
         hide(restoreFocus: false)

@@ -310,7 +310,7 @@ final class ActionSparkController {
             return
         }
         let rect = NSRect(origin: .zero, size: size)
-        let p = NSPanel(
+        let p = UnifiedActiveFloatingPanel(
             contentRect: rect,
             styleMask: [.nonactivatingPanel, .borderless],
             backing: .buffered,

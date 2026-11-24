@@ -1,4 +1,6 @@
 import XCTest
+import AppKit
+import QuartzCore
 import CoreImage
 import Carbon
 import CryptoKit
@@ -3619,5 +3621,97 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertEqual(combKeep, "e\u{0301}")
 
         _ = ClipboardStore.hasFullDiskAccess()
+    }
+
+    @MainActor
+    func testUnifiedActiveFloatingPanelGlassParityAcrossFocusTransitions() throws {
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)
+
+        let p1 = UnifiedActiveFloatingPanel(
+            contentRect: NSRect(x: -1600, y: 120, width: 280, height: 320),
+            styleMask: [.nonactivatingPanel, .borderless],
+            backing: .buffered,
+            defer: false
+        )
+        let p2 = KeyableFloatingPanel(
+            contentRect: NSRect(x: -1600, y: 120, width: 320, height: 360),
+            styleMask: [.nonactivatingPanel, .borderless],
+            backing: .buffered,
+            defer: false
+        )
+        for panel in [p1, p2] {
+            panel.isFloatingPanel = true
+            panel.level = .floating
+            panel.isOpaque = false
+            panel.backgroundColor = .clear
+            panel.hasShadow = true
+            panel.hidesOnDeactivate = false
+        }
+        defer {
+            p1.orderOut(nil)
+            p2.orderOut(nil)
+        }
+
+        for panel in [p1, p2] {
+            XCTAssertEqual(panel.value(forKey: "_hasActiveAppearance") as? Bool, true)
+            XCTAssertEqual(panel.value(forKey: "_hasKeyAppearance") as? Bool, true)
+            XCTAssertEqual(panel.value(forKey: "_hasActiveControls") as? Bool, true)
+            XCTAssertEqual(panel.value(forKey: "_hasMainAppearance") as? Bool, true)
+        }
+
+        // 零失焦唤出：仅 orderFrontRegardless 绝不强抢 Key 状态
+        p2.orderFrontRegardless()
+        XCTAssertFalse(p2.isKeyWindow)
+        XCTAssertFalse(p1.canBecomeKey)
+        XCTAssertTrue(p2.canBecomeKey)
+
+        if #available(macOS 26.0, *) {
+            let root = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 360))
+            let glass = NSGlassEffectView(frame: root.bounds)
+            glass.style = .clear
+            glass.cornerRadius = 26
+            glass.tintColor = NSColor(srgbRed: 0.08, green: 0.09, blue: 0.12, alpha: 0.28)
+            root.addSubview(glass)
+            p2.contentView = root
+
+            func glassMetrics(in view: NSView) -> (outerRef: Double, blur: Double, white: Double)? {
+                func scan(_ layer: CALayer) -> (Double, Double, Double)? {
+                    if let filters = layer.filters as? [NSObject] {
+                        for filter in filters where (filter.value(forKey: "name") as? String) == "glassBackground" {
+                            let outerRef = (filter.value(forKey: "inputOuterRefractionAmount") as? NSNumber)?.doubleValue ?? 0
+                            let blur = (filter.value(forKey: "inputBlurRadius") as? NSNumber)?.doubleValue ?? 0
+                            let white = (filter.value(forKey: "inputFaceColorMatrixWhite") as? NSNumber)?.doubleValue ?? 0
+                            return (outerRef, blur, white)
+                        }
+                    }
+                    for sub in layer.sublayers ?? [] {
+                        if let hit = scan(sub) { return hit }
+                    }
+                    return nil
+                }
+                return view.layer.flatMap(scan)
+            }
+
+            p2.orderFrontRegardless()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.08))
+            let wakeMetrics = try XCTUnwrap(glassMetrics(in: glass))
+            XCTAssertGreaterThan(wakeMetrics.outerRef, 0.0)
+
+            p2.makeKey()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.08))
+            let focusedMetrics = try XCTUnwrap(glassMetrics(in: glass))
+
+            p2.resignKey()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.08))
+            let resignedMetrics = try XCTUnwrap(glassMetrics(in: glass))
+
+            XCTAssertEqual(wakeMetrics.outerRef, focusedMetrics.outerRef, accuracy: 0.01)
+            XCTAssertEqual(wakeMetrics.blur, focusedMetrics.blur, accuracy: 0.01)
+            XCTAssertEqual(wakeMetrics.white, focusedMetrics.white, accuracy: 0.01)
+            XCTAssertEqual(resignedMetrics.outerRef, focusedMetrics.outerRef, accuracy: 0.01)
+            XCTAssertEqual(resignedMetrics.blur, focusedMetrics.blur, accuracy: 0.01)
+            XCTAssertEqual(resignedMetrics.white, focusedMetrics.white, accuracy: 0.01)
+        }
     }
 }

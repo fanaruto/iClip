@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import ObjectiveC
 
 /// macOS 26+ Liquid Glass 官方级无毛边光学表面控制器
 ///
@@ -368,6 +369,11 @@ private final class ConfigurableBlurVisualEffectView: NSVisualEffectView {
         syncBackdropFilter()
     }
 
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        syncBackdropFilter()
+    }
+
     override func updateLayer() {
         super.updateLayer()
         syncBackdropFilter()
@@ -419,6 +425,56 @@ final class LiquidGlassBleedRootView: NSView {
     override func hitTest(_ point: NSPoint) -> NSView? {
         guard cardFrame.contains(point) else { return nil }
         return super.hitTest(point)
+    }
+}
+
+/// 统一全天候激活态非抢焦悬浮面板基类：
+/// 解决以 `orderFrontRegardless()` 零失焦唤出与点击聚焦 / 失焦后 AppKit `_hasActiveAppearance`、`NSGlassEffectView` 外折射与 SwiftUI `.controlActiveState` 前后质感不一致问题。
+class UnifiedActiveFloatingPanel: NSPanel {
+    @objc var _hasActiveAppearance: Bool { true }
+    @objc var _hasKeyAppearance: Bool { true }
+    @objc var _hasActiveControls: Bool { true }
+    @objc var _hasMainAppearance: Bool { true }
+
+    /// 通过精确 C-ABI IMP 同步窗口内部激活外观、控件活跃态与阴影活跃态（绝不触发 `NSApp.activate` 或抢夺宿主窗口焦点）
+    func enforceUnifiedActiveAppearance() {
+        let forceSel = Selector(("_setForceActiveControls:"))
+        if let m = class_getInstanceMethod(object_getClass(self), forceSel),
+           method_getNumberOfArguments(m) == 3 {
+            var argBuf = [CChar](repeating: 0, count: 16)
+            method_getArgumentType(m, 2, &argBuf, argBuf.count)
+            let code = argBuf.first ?? 0
+            if code == 66 /* 'B' */ || code == 99 /* 'c' */ {
+                typealias Fn = @convention(c) (AnyObject, Selector, Bool) -> Void
+                let fn = unsafeBitCast(method_getImplementation(m), to: Fn.self)
+                fn(self, forceSel, true)
+            }
+        }
+
+        for zeroArgName in ["acquireKeyAppearance", "_setShadowActiveState"] {
+            let sel = Selector((zeroArgName))
+            if let m = class_getInstanceMethod(object_getClass(self), sel),
+               method_getNumberOfArguments(m) == 2 {
+                let retPtr = method_copyReturnType(m)
+                let retCode = retPtr.pointee
+                free(retPtr)
+                if retCode == 118 /* 'v' */ {
+                    typealias Fn0 = @convention(c) (AnyObject, Selector) -> Void
+                    let fn = unsafeBitCast(method_getImplementation(m), to: Fn0.self)
+                    fn(self, sel)
+                }
+            }
+        }
+    }
+
+    override func orderFrontRegardless() {
+        super.orderFrontRegardless()
+        enforceUnifiedActiveAppearance()
+    }
+
+    override func resignKey() {
+        super.resignKey()
+        enforceUnifiedActiveAppearance()
     }
 }
 

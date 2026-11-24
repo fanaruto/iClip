@@ -219,7 +219,7 @@ final class CursorDropPodController {
     private func ensurePanel(size: NSSize) {
         guard panel == nil else { return }
         let rect = NSRect(origin: .zero, size: size)
-        let p = NSPanel(
+        let p = UnifiedActiveFloatingPanel(
             contentRect: rect,
             styleMask: [.nonactivatingPanel, .borderless],
             backing: .buffered,

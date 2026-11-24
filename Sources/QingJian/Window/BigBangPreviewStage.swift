@@ -11,7 +11,7 @@ enum BigBangInitialPreviewMode: Equatable {
 }
 
 /// 无边框非激活独立大画幅预览窗口：不抢夺目标应用光标焦点，并跟随系统投屏隐私屏蔽开关
-final class BigBangStagePanel: NSPanel {
+final class BigBangStagePanel: UnifiedActiveFloatingPanel {
     var allowBecomeKeyForEditing: Bool = false
 
     override var canBecomeKey: Bool { allowBecomeKeyForEditing }
@@ -130,6 +130,10 @@ final class BigBangStageController: ObservableObject {
                 panel?.makeKey()
             } else {
                 panel?.makeFirstResponder(nil)
+                if panel?.isKeyWindow == true {
+                    panel?.resignKey()
+                }
+                panel?.enforceUnifiedActiveAppearance()
             }
         }
     }
@@ -285,6 +289,7 @@ final class BigBangStageController: ObservableObject {
             stagePanel.setFrame(startFrame, display: false)
             stagePanel.alphaValue = 0.08
             stagePanel.orderFrontRegardless()
+            stagePanel.enforceUnifiedActiveAppearance()
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = 0.21
                 ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.18, 1.0, 0.32, 1.0)

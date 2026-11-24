@@ -102,6 +102,7 @@ const WM_APP_ASYNC_CHAT_IMAGE: u32 = WM_USER + 108;
 const WS_EX_NOACTIVATE_VAL: u32 = 0x0800_0000;
 const SWP_NOACTIVATE_VAL: u32 = 0x0010;
 const WM_MOUSEACTIVATE_MSG: u32 = 0x0021;
+const WM_NCACTIVATE_MSG: u32 = 0x0086;
 const MA_NOACTIVATE_RES: LRESULT = 3;
 const WM_CLIPBOARDUPDATE_MSG: u32 = 0x031D;
 const WM_POWERBROADCAST_MSG: u32 = 0x0218;
@@ -1707,6 +1708,7 @@ unsafe fn show_panel_near_cursor(hwnd: HWND) {
         }
     });
 
+    let _ = DefWindowProcW(hwnd, WM_NCACTIVATE_MSG, 1, (-1isize) as LPARAM);
     SetWindowPos(
         hwnd,
         HWND_TOPMOST,
@@ -2108,6 +2110,12 @@ unsafe extern "system" fn wnd_proc(
                 }
             }
             0
+        }
+        WM_NCACTIVATE_MSG => {
+            let keep_active = APP_STATE
+                .with(|c| c.try_borrow().ok().and_then(|b| b.as_ref().map(|s| s.visible)).unwrap_or(false));
+            let active_flag = if keep_active { 1usize } else { wparam };
+            DefWindowProcW(hwnd, WM_NCACTIVATE_MSG, active_flag, lparam)
         }
         WM_EXITSIZEMOVE => {
             let mut rc: RECT = zeroed();
@@ -13712,6 +13720,7 @@ unsafe fn present_or_update_large_ql_stage(
 
     apply_dwm_glass_style(ql_h, st.is_dark_mode, 78);
     apply_screen_capture_shield(main_hwnd, st.store.config.screen_share_privacy);
+    let _ = DefWindowProcW(ql_h, WM_NCACTIVATE_MSG, 1, (-1isize) as LPARAM);
     let _ = SetWindowPos(
         ql_h,
         HWND_TOPMOST,
@@ -13733,6 +13742,7 @@ unsafe fn handle_ql_stage_wnd_proc(
 ) -> LRESULT {
     match msg {
         WM_MOUSEACTIVATE_MSG => MA_NOACTIVATE_RES,
+        WM_NCACTIVATE_MSG => DefWindowProcW(hwnd, WM_NCACTIVATE_MSG, 1, lparam),
         WM_ERASEBKGND => 1,
         WM_LBUTTONDOWN => {
             let x = (lparam & 0xFFFF) as i16 as i32;
