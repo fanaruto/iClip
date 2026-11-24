@@ -919,6 +919,7 @@ final class ClipboardStore: ObservableObject {
             lastChangeCount = pasteboard.changeCount
         }
         ReversiblePrivacyTwin.wipeAll()
+        clearTransientDragImageBuffers()
         saveHistory()
         TactileFeedbackEngine.shared.perform(.magicTransform)
         showToast("已无痕清扫 \(removed.count) 条未收藏敏感记录")
@@ -1021,9 +1022,10 @@ final class ClipboardStore: ObservableObject {
         saveHistory(immediate: true)
     }
 
-    /// 锁屏、休眠或清扫时立即冲刷删除撤销栈、清空 AI 替身映射与动作缓存
+    /// 锁屏、休眠或清扫时立即冲刷删除撤销栈、清空拖拽原图缓冲、AI 替身映射与动作缓存
     func lockDownEphemeralBuffers() {
         flushPendingUndoImages()
+        clearTransientDragImageBuffers()
         ReversiblePrivacyTwin.wipeAll()
         #if !ICLIP_EDITION_FLOW
         semanticCache.removeAllObjects()
@@ -1052,6 +1054,7 @@ final class ClipboardStore: ObservableObject {
     }
 
     func onPanelHidden() {
+        clearTransientDragImageBuffers()
         cacheTrimWorkItem?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
@@ -1227,22 +1230,25 @@ final class ClipboardStore: ObservableObject {
                         if !self.minimalModeEnabled,
                            let qr = detectedQR, !qr.isEmpty,
                            AdaptiveIntelligenceEngine.shared.enabledAutoRules.contains(.extractQRCode) {
+                            let resolved = Self.resolveSafeAutoQRCodeOutput(for: qr)
                             self.pasteboard.clearContents()
-                            self.pasteboard.setString(qr, forType: .string)
-                            if Self.isValidWebURL(qr) && SensitiveCredentialVeil.classify(qr) == nil {
-                                self.pasteboard.setString(qr, forType: .URL)
+                            self.pasteboard.setString(resolved.outputText, forType: .string)
+                            if !resolved.isSensitiveOrEphemeral && Self.isValidWebURL(resolved.outputText) {
+                                self.pasteboard.setString(resolved.outputText, forType: .URL)
                             }
-                            let isSensQR = SensitiveCredentialVeil.classify(qr) != nil
-                            if isSensQR {
+                            if resolved.isSensitiveOrEphemeral {
                                 PasteboardPrivacyStandards.applyLocalOnlyConcealedProtection(to: self.pasteboard)
                             }
                             let written = self.pasteboard.changeCount
                             self.ignoreNextChangeCount = written
                             self.lastChangeCount = written
-                            if isSensQR {
-                                self.scheduleConcealedPasteboardScrubIfNeeded(capturedChangeCount: written, delaySeconds: 45.0)
+                            if resolved.isSensitiveOrEphemeral {
+                                self.scheduleConcealedPasteboardScrubIfNeeded(
+                                    capturedChangeCount: written,
+                                    delaySeconds: resolved.scrubDelay
+                                )
                             }
-                            self.showToast(LearnedAutoRuleKind.extractQRCode.shortToast)
+                            self.showToast(resolved.toastText)
                         } else if !self.minimalModeEnabled,
                                   AdaptiveIntelligenceEngine.shared.enabledAutoRules.contains(.compressLargeImage),
                                   pngData.count > 1_500_000 {
@@ -1453,9 +1459,40 @@ final class ClipboardStore: ObservableObject {
         }
     }
 
-    /// 最近一次通过拖放成功导入的预览图与标准 PNG 数据（供光标微落点样机渲染零磁盘竞态直接复用）
+    /// 最近一次通过拖放成功导入的预览图与标准 PNG 数据（供光标微落点样机渲染零磁盘竞态直接复用，用毕或 15s 自动归零释放）
     private(set) var lastImportedDragPreviewCGImage: CGImage?
     private(set) var lastImportedDragPNGData: Data?
+    private var dragBufferReleaseWorkItem: DispatchWorkItem?
+
+    /// 立即释放拖拽导入暂存的 CGImage 与原图字节缓冲（消除 Retina 大图常驻内存与锁屏明文残留）
+    func clearTransientDragImageBuffers() {
+        dragBufferReleaseWorkItem?.cancel()
+        dragBufferReleaseWorkItem = nil
+        lastImportedDragPreviewCGImage = nil
+        lastImportedDragPNGData = nil
+    }
+
+    /// 自动二维码解码安全出口决议：若二维码内容为 `otpauth://` 2FA 密钥，绝不裸写根密钥到剪贴板，改为直算 6 位动态码 + 30s 自动擦除
+    nonisolated static func resolveSafeAutoQRCodeOutput(
+        for qr: String,
+        date: Date = Date()
+    ) -> (outputText: String, isSensitiveOrEphemeral: Bool, scrubDelay: TimeInterval, toastText: String) {
+        if let totp = TOTPAuthenticator.evaluate(uri: qr, timestampSeconds: Int64(date.timeIntervalSince1970)) {
+            return (
+                outputText: totp.code,
+                isSensitiveOrEphemeral: true,
+                scrubDelay: 30.0,
+                toastText: "已从二维码直算 2FA 动态码 \(totp.formattedCode)（30s后自动擦除）"
+            )
+        }
+        let isSens = SensitiveCredentialVeil.classify(qr) != nil
+        return (
+            outputText: qr,
+            isSensitiveOrEphemeral: isSens,
+            scrubDelay: 45.0,
+            toastText: LearnedAutoRuleKind.extractQRCode.shortToast
+        )
+    }
 
     private static let legacyFilenamesType = NSPasteboard.PasteboardType("NSFilenamesPboardType")
     private static let jpegPasteboardType = NSPasteboard.PasteboardType("public.jpeg")
@@ -1494,8 +1531,7 @@ final class ClipboardStore: ObservableObject {
     /// 接收拖拽到面板或菜单栏图标的内容：写入系统剪贴板（立即生效 ⌘V）并收录至历史列表
     @discardableResult
     func importAndCopy(from draggingPasteboard: NSPasteboard, sourceLabel: String = "拖拽复制") -> Bool {
-        lastImportedDragPreviewCGImage = nil
-        lastImportedDragPNGData = nil
+        clearTransientDragImageBuffers()
         let types = draggingPasteboard.types ?? []
 
         // 1. 优先读取内存直接图像流（网页图片 / 截图 / 跨平台直接图像字节，零磁盘权限依赖）
@@ -1780,6 +1816,13 @@ final class ClipboardStore: ObservableObject {
     ) {
         lastImportedDragPreviewCGImage = normalized.cgImage
         lastImportedDragPNGData = normalized.pngData
+        dragBufferReleaseWorkItem?.cancel()
+        let releaseWork = DispatchWorkItem { [weak self] in
+            self?.clearTransientDragImageBuffers()
+        }
+        dragBufferReleaseWorkItem = releaseWork
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15.0, execute: releaseWork)
+
         pasteboard.clearContents()
         pasteboard.setData(normalized.pngData, forType: .png)
         pasteboard.setData(normalized.tiffData, forType: .tiff)
@@ -1797,6 +1840,7 @@ final class ClipboardStore: ObservableObject {
     /// 将刚通过拖放导入的内存图像字节零竞态渲染为苹果风圆角柔和阴影样机图，并写入系统剪贴板
     func convertLastImportedDragImageToMockup() {
         guard let pngData = lastImportedDragPNGData else { return }
+        clearTransientDragImageBuffers()
         Task.detached(priority: .userInitiated) { [weak self] in
             guard let result = ImageStudioEngine.renderAppleMockupFrame(from: pngData) else { return }
             let tiffData = NSImage(data: result.data)?.tiffRepresentation
@@ -2323,6 +2367,9 @@ final class ClipboardStore: ObservableObject {
         pendingOTPExpirationTasks.removeValue(forKey: item.id)
         guard let idx = items.firstIndex(where: { $0.id == item.id }) else { return }
         let removed = items.remove(at: idx)
+        if removed.type == .image {
+            clearTransientDragImageBuffers()
+        }
         evictItemMemoryCaches(for: removed)
         #if ICLIP_EDITION_FLOW
         pasteQueueIDs.removeAll { $0 == removed.id }
@@ -2389,6 +2436,7 @@ final class ClipboardStore: ObservableObject {
         }
         DragFileExportHelper.wipeAllExports()
         ReversiblePrivacyTwin.wipeAll()
+        clearTransientDragImageBuffers()
         #if ICLIP_EDITION_FLOW
         let removedIDs = Set(toRemove.map(\.id))
         pasteQueueIDs.removeAll { removedIDs.contains($0) }
@@ -3371,29 +3419,36 @@ final class ClipboardStore: ObservableObject {
         let isFirstSegment = explicitBase.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         copyAppendSegmentCount = isFirstSegment ? 1 : (copyAppendSegmentCount + 1)
 
-        pasteboard.clearContents()
-        pasteboard.setString(combined, forType: .string)
-        commitOutboundPasteboardGuard(for: combined, forceProtected: false, isPinnedSource: false)
-
         let finalIsLink = isValidWebURL(combined.trimmingCharacters(in: .whitespacesAndNewlines))
         let newType: ClipContentType = finalIsLink ? .link : .text
         let newHash = "\(finalIsLink ? "link" : "text"):\(Self.sha256(combined))"
 
+        var targetBurnAfterPaste = false
         if let targetID = copyAppendTargetID,
            let idx = items.firstIndex(where: { $0.id == targetID }),
            !items[idx].isPinned {
             let existing = items[idx]
+            let oldHash = existing.contentHash
+            targetBurnAfterPaste = existing.isBurnAfterPaste
+            evictItemMemoryCaches(for: existing)
             items[idx] = ClipItem(
                 id: existing.id,
                 type: newType,
                 text: combined,
                 contentHash: newHash,
                 sourceAppName: sourceApp ?? existing.sourceAppName,
+                sourceAppBundleID: existing.sourceAppBundleID,
                 createdAt: Date(),
                 isPinned: false,
                 pinCategory: existing.pinCategory,
-                customAlias: existing.customAlias
+                customAlias: existing.customAlias,
+                isTodoItem: existing.isTodoItem,
+                todoCompletedAt: existing.todoCompletedAt,
+                burnAfterPaste: existing.burnAfterPaste
             )
+            if oldHash != newHash && !items.contains(where: { $0.contentHash == oldHash }) {
+                AdaptiveIntelligenceEngine.shared.forgetContentHashes([oldHash])
+            }
             items = sortItems(items)
             saveHistory()
         } else {
@@ -3406,6 +3461,15 @@ final class ClipboardStore: ObservableObject {
             insertOrPromote(mergedItem)
             copyAppendTargetID = items.first(where: { $0.contentHash == newHash })?.id
         }
+
+        pasteboard.clearContents()
+        pasteboard.setString(combined, forType: .string)
+        commitOutboundPasteboardGuard(
+            for: combined,
+            forceProtected: targetBurnAfterPaste,
+            isPinnedSource: false,
+            scrubDelay: targetBurnAfterPaste ? 5.0 : 45.0
+        )
 
         TactileFeedbackEngine.shared.perform(.queueToggle(added: true))
         let msg = copyAppendSegmentCount > 1
@@ -3518,6 +3582,19 @@ final class ClipboardStore: ObservableObject {
                     )
                 )
             }
+        }
+        if !raw.contains("\n"),
+           let publicURL = URLTrackingCleaner.sanitizeURLForPublicShare(raw.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            analyzed.insert(
+                FinanceQuickAction(
+                    id: "sanitize-auth-url",
+                    title: "去鉴权净链",
+                    symbolName: "link.badge.plus",
+                    resultText: publicURL,
+                    toastText: "已剥离 URL 鉴权令牌与追踪尾巴，可安全外发"
+                ),
+                at: 0
+            )
         }
         if item.detectedSensitiveKind != nil {
             if let envExample = EnvTemplateSanitizer.generateExampleTemplate(from: raw) {
@@ -3907,10 +3984,19 @@ final class ClipboardStore: ObservableObject {
         }
 
         let count = segments.count
+        let burnSources = sourceItems.filter(\.isBurnAfterPaste)
         selectedMergeIDs.removeAll()
         pasteboard.clearContents()
         pasteboard.setString(merged, forType: .string)
-        commitOutboundPasteboardGuard(for: merged, forceProtected: anySourceSensitive, isPinnedSource: false)
+        commitOutboundPasteboardGuard(
+            for: merged,
+            forceProtected: anySourceSensitive,
+            isPinnedSource: false,
+            scrubDelay: burnSources.isEmpty ? 45.0 : 5.0
+        )
+        for burnItem in burnSources {
+            scheduleBurnAfterPasteIfNeeded(for: burnItem, delaySeconds: 5.0)
+        }
 
         onBeforePaste?()
         refreshAccessibilityStatus()

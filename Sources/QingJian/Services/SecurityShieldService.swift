@@ -537,7 +537,7 @@ enum SensitiveCredentialVeil {
         pattern: ##"(?im)^(\s*(?:export\s+)?[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY|AUTH_TOKEN|CLIENT_SECRET)[A-Z0-9_]*\s*[:=]\s*['"]?)([^\s'"#]{6,})(['"]?)"##
     )
     private static let urlQuerySecretRegex = try! NSRegularExpression(
-        pattern: #"(?i)([?&](?:api_key|apikey|access_token|auth_token|client_secret|secret|password|passwd)=)([^&\s#]{8,})"#
+        pattern: #"(?i)([?&](?:api_key|apikey|access_token|auth_token|id_token|refresh_token|session_token|jwt|client_secret|secret|password|passwd|x-amz-signature|x-amz-security-token|x-goog-signature|q-signature|ossaccesskeyid|signature)=)([^&\s#]{8,})"#
     )
     private static let httpBasicAuthRegex = try! NSRegularExpression(
         pattern: #"(?i)\b(https?://[^:\s/@]+:)([^@\s/]{4,})(@)"#
@@ -1096,7 +1096,7 @@ enum PasteboardPrivacyStandards {
     }
 }
 
-/// 4. 跨软件零成本搬家引擎（原生支持导入 Raycast Snippets / Maccy / Paste / CopyQ JSON 及 Excel CSV/TSV 常用语表）
+/// 4. 跨软件零成本搬家引擎（原生支持导入 Raycast Snippets / Alfred / TextExpander / Maccy / Paste / CopyQ JSON、Markdown 标题常用语库及 Excel CSV/TSV）
 enum UniversalCompetitorImporter {
     struct ExternalCandidate: Equatable {
         let text: String
@@ -1112,18 +1112,23 @@ enum UniversalCompetitorImporter {
     ) -> (entries: [ExternalCandidate], formatName: String)? {
         let ext = (fileExtensionHint ?? "").lowercased()
 
-        // A. 优先尝试 JSON 结构（Raycast Snippets / Maccy / Paste / CopyQ / 通用键值数组）
-        if ext != "csv" && ext != "tsv",
+        // A. 优先尝试 JSON 结构（Raycast Snippets / Alfred / TextExpander / Maccy / Paste / CopyQ / 通用键值数组）
+        if ext != "csv" && ext != "tsv" && ext != "md" && ext != "markdown",
            let jsonObj = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) {
             if let parsed = parseJSONPayload(jsonObj), !parsed.entries.isEmpty {
                 return parsed
             }
         }
 
-        // B. 尝试 UTF-8 CSV / TSV 常用语表（例如从 Excel / 飞书多维表 / Ditto 导出的 `备注标题,正文`）
+        // B. 尝试 UTF-8 Markdown 常用语笔记（Obsidian / Notion 二级/三级标题分段）或 CSV / TSV 常用语表
         if let rawStr = String(data: data, encoding: .utf8) {
             let trimmed = rawStr.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty && !trimmed.hasPrefix("{") && !trimmed.hasPrefix("[") {
+                if ext == "md" || ext == "markdown" || looksLikeMarkdownSnippetNote(trimmed) {
+                    if let mdParsed = parseMarkdownSnippets(trimmed), !mdParsed.entries.isEmpty {
+                        return mdParsed
+                    }
+                }
                 let delimiter: Character = (ext == "tsv" || (trimmed.contains("\t") && !trimmed.contains(","))) ? "\t" : ","
                 let rows = parseDelimitedRows(trimmed, delimiter: delimiter)
                 let candidates = buildCandidatesFromTableRows(rows)
@@ -1136,16 +1141,134 @@ enum UniversalCompetitorImporter {
         return nil
     }
 
+    private static func looksLikeMarkdownSnippetNote(_ trimmed: String) -> Bool {
+        trimmed.components(separatedBy: .newlines).contains { line in
+            let l = line.trimmingCharacters(in: .whitespaces)
+            return l.hasPrefix("## ") || l.hasPrefix("### ")
+        }
+    }
+
+    /// 解析 Obsidian / Notion 导出的 Markdown 二级/三级标题常用语库（`## 备注名\n正文`，若小节为单一围栏代码块则自动去围栏提取纯代码）
+    private static func parseMarkdownSnippets(_ input: String) -> (entries: [ExternalCandidate], formatName: String)? {
+        var lines = input.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n")
+        // 跳过顶部 YAML Frontmatter
+        if lines.first?.trimmingCharacters(in: .whitespaces) == "---" {
+            if let closeIdx = lines.dropFirst().firstIndex(where: {
+                let s = $0.trimmingCharacters(in: .whitespaces)
+                return s == "---" || s == "..."
+            }) {
+                lines = Array(lines.suffix(from: closeIdx + 1))
+            }
+        }
+
+        var sections: [(title: String, bodyLines: [String])] = []
+        var currentTitle: String? = nil
+        var currentBody: [String] = []
+        var insideCodeFence = false
+
+        for line in lines {
+            let wsTrimmed = line.trimmingCharacters(in: .whitespaces)
+            if wsTrimmed.hasPrefix("```") || wsTrimmed.hasPrefix("~~~") {
+                insideCodeFence.toggle()
+                if currentTitle != nil {
+                    currentBody.append(line)
+                }
+                continue
+            }
+
+            if !insideCodeFence {
+                if wsTrimmed.hasPrefix("# ") {
+                    if let prev = currentTitle {
+                        sections.append((prev, currentBody))
+                        currentTitle = nil
+                        currentBody = []
+                    }
+                    continue
+                }
+                if wsTrimmed.hasPrefix("## ") || wsTrimmed.hasPrefix("### ") {
+                    if let prev = currentTitle {
+                        sections.append((prev, currentBody))
+                    }
+                    let prefixLen = wsTrimmed.hasPrefix("### ") ? 4 : 3
+                    var heading = String(wsTrimmed.dropFirst(prefixLen))
+                        .trimmingCharacters(in: CharacterSet(charactersIn: "# ").union(.whitespaces))
+                    if heading.hasPrefix("`") && heading.hasSuffix("`") && heading.count >= 3 {
+                        heading.removeFirst()
+                        heading.removeLast()
+                    }
+                    currentTitle = heading
+                    currentBody = []
+                    continue
+                }
+                if wsTrimmed == "---" || wsTrimmed == "***" {
+                    continue
+                }
+            }
+
+            if currentTitle != nil {
+                currentBody.append(line)
+            }
+        }
+        if let prev = currentTitle {
+            sections.append((prev, currentBody))
+        }
+
+        var out: [ExternalCandidate] = []
+        for sec in sections {
+            let rawSection = sec.bodyLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !rawSection.isEmpty else { continue }
+            let unwrapped = unwrapSingleCodeFenceIfApplicable(rawSection)
+            let finalBody = unwrapped.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !finalBody.isEmpty else { continue }
+            let alias = (!sec.title.isEmpty && sec.title != finalBody) ? String(sec.title.prefix(80)) : nil
+            out.append(ExternalCandidate(
+                text: finalBody,
+                alias: alias,
+                sourceLabel: "Markdown 常用语笔记",
+                createdAt: nil
+            ))
+        }
+        return out.isEmpty ? nil : (out, "Markdown 常用语笔记")
+    }
+
+    private static func unwrapSingleCodeFenceIfApplicable(_ block: String) -> String {
+        let lines = block.components(separatedBy: "\n")
+        guard lines.count >= 3 else { return block }
+        let first = lines.first?.trimmingCharacters(in: .whitespaces) ?? ""
+        let last = lines.last?.trimmingCharacters(in: .whitespaces) ?? ""
+        let fenceMarker: String?
+        if first.hasPrefix("```") && last == "```" {
+            fenceMarker = "```"
+        } else if first.hasPrefix("~~~") && last == "~~~" {
+            fenceMarker = "~~~"
+        } else {
+            fenceMarker = nil
+        }
+        guard let marker = fenceMarker else { return block }
+        let innerLines = lines.dropFirst().dropLast()
+        if innerLines.contains(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix(marker) }) {
+            return block
+        }
+        return innerLines.joined(separator: "\n")
+    }
+
     private static func parseJSONPayload(_ root: Any) -> (entries: [ExternalCandidate], formatName: String)? {
         var dictList: [[String: Any]] = []
         var formatHint = "外部 JSON 收藏"
 
         if let arr = root as? [[String: Any]] {
-            dictList = arr
-            if arr.first?["keyword"] != nil && arr.first?["text"] != nil {
-                formatHint = "Raycast 常用语"
-            } else if arr.first?["pin"] != nil || arr.first?["application"] != nil {
-                formatHint = "Maccy 剪贴记录"
+            if arr.first?["alfredsnippet"] is [String: Any] {
+                dictList = arr.compactMap { $0["alfredsnippet"] as? [String: Any] }
+                formatHint = "Alfred 常用语"
+            } else {
+                dictList = arr
+                if arr.first?["keyword"] != nil && arr.first?["text"] != nil {
+                    formatHint = "Raycast 常用语"
+                } else if arr.first?["abbreviation"] != nil && (arr.first?["plainText"] != nil || arr.first?["string"] != nil) {
+                    formatHint = "TextExpander 常用语"
+                } else if arr.first?["pin"] != nil || arr.first?["application"] != nil {
+                    formatHint = "Maccy 剪贴记录"
+                }
             }
         } else if let strArr = root as? [String] {
             let entries = strArr
@@ -1158,15 +1281,27 @@ enum UniversalCompetitorImporter {
             if (obj["format"] as? String) == PinnedArchiveBundle.formatIdentifier {
                 return nil
             }
-            for key in ["snippets", "items", "pins", "history", "clips", "data", "records"] {
-                if let sub = obj[key] as? [[String: Any]], !sub.isEmpty {
-                    dictList = sub
-                    if key == "snippets" {
-                        formatHint = "常用语片段包"
-                    } else if key == "pins" {
-                        formatHint = "Maccy / Paste 收藏"
+            if let singleAlfred = obj["alfredsnippet"] as? [String: Any] {
+                dictList = [singleAlfred]
+                formatHint = "Alfred 常用语"
+            } else {
+                for key in ["snippets", "snippetPlists", "items", "pins", "history", "clips", "data", "records"] {
+                    if let sub = obj[key] as? [[String: Any]], !sub.isEmpty {
+                        if sub.first?["alfredsnippet"] is [String: Any] {
+                            dictList = sub.compactMap { $0["alfredsnippet"] as? [String: Any] }
+                            formatHint = "Alfred 常用语"
+                        } else {
+                            dictList = sub
+                            if key == "snippetPlists" || (sub.first?["abbreviation"] != nil) {
+                                formatHint = "TextExpander 常用语"
+                            } else if key == "snippets" {
+                                formatHint = "常用语片段包"
+                            } else if key == "pins" {
+                                formatHint = "Maccy / Paste 收藏"
+                            }
+                        }
+                        break
                     }
-                    break
                 }
             }
         }
@@ -1186,7 +1321,7 @@ enum UniversalCompetitorImporter {
 
             let rawTitle = firstNonEmptyString(
                 in: item,
-                keys: ["title", "name", "alias", "customAlias", "label", "keyword"]
+                keys: ["title", "name", "alias", "customAlias", "label", "keyword", "abbreviation"]
             )
             let alias: String? = {
                 guard let t = rawTitle?.trimmingCharacters(in: .whitespacesAndNewlines),

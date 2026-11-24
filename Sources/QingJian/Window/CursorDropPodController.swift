@@ -340,6 +340,16 @@ final class CursorDropPodController {
         hideWorkItem = work
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
     }
+
+    /// 锁屏、休眠或清扫时立即无动画收起光标微落点悬浮窗
+    func dismiss() {
+        hideWorkItem?.cancel()
+        hideWorkItem = nil
+        wasOptionPressed = false
+        didCompleteDropInCurrentDrag = false
+        panel?.alphaValue = 0
+        panel?.orderOut(nil)
+    }
 }
 
 /// 底层 AppKit 拖放目标接收容器：实时根据光标水平落点切分「存入剪贴板」与「套圆角样机」双热区

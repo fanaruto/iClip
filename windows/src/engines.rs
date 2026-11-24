@@ -184,6 +184,32 @@ pub fn analyze_text_actions(raw: &str, minimal_mode: bool) -> Vec<QuickAction> {
         }
     }
 
+    // 0.85 双角色共享：公域外发去鉴权净链 & 营销追踪参数净链
+    if !trimmed.contains('\n') && trimmed.len() <= 4096 {
+        if let Some(public_url) = sanitize_url_for_public_share(trimmed) {
+            actions.insert(
+                0,
+                QuickAction {
+                    id: "sanitize-auth-url",
+                    title: "去鉴权净链".to_string(),
+                    is_security: true,
+                    result_text: public_url,
+                    html_table_payload: None,
+                    toast_text: "已剥离 URL 鉴权令牌与追踪尾巴，可安全外发".to_string(),
+                },
+            );
+        } else if let Some(clean_url) = clean_tracking_url(trimmed) {
+            actions.push(QuickAction {
+                id: "clean-url",
+                title: "净链粘贴".to_string(),
+                is_security: false,
+                result_text: clean_url,
+                html_table_payload: None,
+                toast_text: "已剥离营销追踪参数".to_string(),
+            });
+        }
+    }
+
     #[cfg(feature = "dev")]
     {
         if trimmed.len() >= 11 && !actions.iter().any(|a| a.id.starts_with("redact-")) {
@@ -210,20 +236,6 @@ pub fn analyze_text_actions(raw: &str, minimal_mode: bool) -> Vec<QuickAction> {
                         ),
                     });
                 }
-            }
-        }
-
-        // Dev 2: 营销追踪链接净链
-        if !trimmed.contains('\n') && trimmed.len() <= 4096 {
-            if let Some(clean_url) = clean_tracking_url(trimmed) {
-                actions.push(QuickAction {
-                    id: "clean-url",
-                    title: "净链粘贴".to_string(),
-                    is_security: false,
-                    result_text: clean_url,
-                    html_table_payload: None,
-                    toast_text: "已剥离营销追踪参数".to_string(),
-                });
             }
         }
 
@@ -1998,7 +2010,7 @@ pub fn redact_secrets(text: &str) -> String {
         ),
         (
             "=",
-            r"(?i)([?&](?:api_key|apikey|access_token|auth_token|client_secret|secret|password|passwd)=)([^&\s#*]{8,})",
+            r"(?i)([?&](?:api_key|apikey|access_token|auth_token|id_token|refresh_token|session_token|jwt|client_secret|secret|password|passwd|x-amz-signature|x-amz-security-token|x-goog-signature|q-signature|ossaccesskeyid|signature)=)([^&\s#*]{8,})",
             "${1}***REDACTED***",
         ),
     ];
@@ -2199,6 +2211,201 @@ pub fn clean_tracking_url(raw: &str) -> Option<String> {
         out.push_str(f);
     }
     Some(out)
+}
+
+/// 外发公域链接安全净享：一键同时剥离 HTTP Basic Auth 账密、URL 鉴权/云预签名令牌参数与营销追踪尾巴，保留干净业务参数
+pub fn sanitize_url_for_public_share(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || trimmed.len() > 4096
+        || trimmed.contains('\n')
+        || trimmed.contains('\r')
+        || trimmed.contains(' ')
+        || crate::security::is_webhook_url(trimmed)
+    {
+        return None;
+    }
+    let scheme_len = if trimmed
+        .as_bytes()
+        .get(..8)
+        .map(|s| s.eq_ignore_ascii_case(b"https://"))
+        .unwrap_or(false)
+    {
+        8usize
+    } else if trimmed
+        .as_bytes()
+        .get(..7)
+        .map(|s| s.eq_ignore_ascii_case(b"http://"))
+        .unwrap_or(false)
+    {
+        7usize
+    } else {
+        return None;
+    };
+
+    let scheme = &trimmed[..scheme_len];
+    let rest = &trimmed[scheme_len..];
+    let (before_frag, frag) = match rest.split_once('#') {
+        Some((b, f)) => (b, Some(f)),
+        None => (rest, None),
+    };
+    let (authority_and_path, query_opt) = match before_frag.split_once('?') {
+        Some((ap, q)) => (ap, Some(q)),
+        None => (before_frag, None),
+    };
+    let (authority, path_part) = match authority_and_path.find('/') {
+        Some(idx) => (&authority_and_path[..idx], &authority_and_path[idx..]),
+        None => (authority_and_path, ""),
+    };
+    let (has_basic_auth, clean_host) = match authority.rfind('@') {
+        Some(at_idx) => {
+            let userinfo = &authority[..at_idx];
+            let host = &authority[at_idx + 1..];
+            (!userinfo.is_empty(), host)
+        }
+        None => (false, authority),
+    };
+    if clean_host.is_empty() {
+        return None;
+    }
+
+    const AUTH_KEYS: &[&str] = &[
+        "token",
+        "access_token",
+        "auth_token",
+        "id_token",
+        "refresh_token",
+        "session_token",
+        "jwt",
+        "api_key",
+        "apikey",
+        "secret",
+        "client_secret",
+        "password",
+        "passwd",
+        "sig",
+        "signature",
+        "x-amz-signature",
+        "x-amz-credential",
+        "x-amz-security-token",
+        "x-goog-signature",
+        "x-goog-credential",
+        "ossaccesskeyid",
+        "q-signature",
+        "q-ak",
+    ];
+    const COMPANION_KEYS: &[&str] = &[
+        "expires",
+        "x-amz-date",
+        "x-amz-expires",
+        "x-amz-algorithm",
+        "x-amz-signedheaders",
+        "x-goog-date",
+        "x-goog-expires",
+        "x-goog-algorithm",
+        "x-goog-signedheaders",
+        "q-key-time",
+        "q-sign-time",
+        "q-sign-algorithm",
+        "q-header-list",
+        "q-url-param-list",
+        "sv",
+        "se",
+        "sp",
+        "spr",
+        "srt",
+        "ss",
+    ];
+    const TRACKING_KEYS: &[&str] = &[
+        "utm_source",
+        "utm_medium",
+        "utm_campaign",
+        "utm_term",
+        "utm_content",
+        "utm_id",
+        "spm",
+        "spm_id_from",
+        "vd_source",
+        "from_spmid",
+        "from_source",
+        "share_source",
+        "share_medium",
+        "share_plat",
+        "share_from",
+        "share_tag",
+        "share_session_id",
+        "unique_k",
+        "xhsshare",
+        "xsec_source",
+        "apptime",
+        "appuid",
+        "author_share",
+        "tt_from",
+        "u_code",
+        "iid",
+        "from_copylink",
+        "fbclid",
+        "gclid",
+        "dclid",
+        "msclkid",
+        "twclid",
+        "igshid",
+        "igsh",
+        "mc_cid",
+        "mc_eid",
+        "_hsenc",
+        "_hsmi",
+        "mkt_tok",
+        "yclid",
+        "wickedid",
+        "si",
+    ];
+
+    let mut has_auth_query = false;
+    let mut kept_pairs: Vec<&str> = Vec::new();
+    if let Some(q) = query_opt {
+        for pair in q.split('&') {
+            if pair.is_empty() {
+                continue;
+            }
+            let (raw_k, raw_v) = match pair.split_once('=') {
+                Some((k, v)) => (k, v),
+                None => (pair, ""),
+            };
+            let key = raw_k.to_ascii_lowercase();
+            if AUTH_KEYS.contains(&key.as_str()) && !raw_v.trim().is_empty() {
+                has_auth_query = true;
+                continue;
+            }
+            if AUTH_KEYS.contains(&key.as_str())
+                || COMPANION_KEYS.contains(&key.as_str())
+                || TRACKING_KEYS.contains(&key.as_str())
+                || key.starts_with("utm_")
+            {
+                continue;
+            }
+            kept_pairs.push(pair);
+        }
+    }
+
+    if !has_basic_auth && !has_auth_query {
+        return None;
+    }
+
+    let mut out = format!("{scheme}{clean_host}{path_part}");
+    if !kept_pairs.is_empty() {
+        out.push('?');
+        out.push_str(&kept_pairs.join("&"));
+    }
+    if let Some(f) = frag {
+        out.push('#');
+        out.push_str(f);
+    }
+    if out == trimmed {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 pub fn contains_dynamic_template_placeholders(text: &str) -> bool {

@@ -975,7 +975,7 @@ pub fn classify_sensitive_text(raw: &str) -> Option<SensitiveSecretKind> {
     static URL_QUERY_SEC_RE: OnceLock<Regex> = OnceLock::new();
     let url_q_re = URL_QUERY_SEC_RE.get_or_init(|| {
         Regex::new(
-            r"(?i)[?&](?:api_key|apikey|access_token|auth_token|client_secret|secret|password|passwd)=[^&\s#]{8,}",
+            r"(?i)[?&](?:api_key|apikey|access_token|auth_token|id_token|refresh_token|session_token|jwt|client_secret|secret|password|passwd|x-amz-signature|x-amz-security-token|x-goog-signature|q-signature|ossaccesskeyid|signature)=[^&\s#]{8,}",
         )
         .unwrap()
     });
@@ -1531,7 +1531,7 @@ pub fn parse_external_competitor_data(
 ) -> Option<(Vec<ExternalImportCandidate>, String)> {
     let ext = ext_hint.unwrap_or("").to_ascii_lowercase();
 
-    if ext != "csv" && ext != "tsv" {
+    if ext != "csv" && ext != "tsv" && ext != "md" && ext != "markdown" {
         if let Ok(json_val) = serde_json::from_slice::<Value>(data) {
             if let Some(res) = parse_json_competitor_payload(&json_val) {
                 if !res.0.is_empty() {
@@ -1544,6 +1544,13 @@ pub fn parse_external_competitor_data(
     if let Ok(raw_str) = std::str::from_utf8(data) {
         let trimmed = raw_str.trim();
         if !trimmed.is_empty() && !trimmed.starts_with('{') && !trimmed.starts_with('[') {
+            if ext == "md" || ext == "markdown" || looks_like_markdown_snippet_note(trimmed) {
+                if let Some(md_res) = parse_markdown_snippets(trimmed) {
+                    if !md_res.0.is_empty() {
+                        return Some(md_res);
+                    }
+                }
+            }
             let delim = if ext == "tsv" || (trimmed.contains('\t') && !trimmed.contains(',')) {
                 '\t'
             } else {
@@ -1565,41 +1572,216 @@ pub fn parse_external_competitor_data(
     None
 }
 
+fn looks_like_markdown_snippet_note(trimmed: &str) -> bool {
+    trimmed.lines().any(|line| {
+        let l = line.trim_start();
+        l.starts_with("## ") || l.starts_with("### ")
+    })
+}
+
+fn unwrap_single_code_fence(block: &str) -> String {
+    let lines: Vec<&str> = block.lines().collect();
+    if lines.len() < 3 {
+        return block.to_string();
+    }
+    let first = lines.first().copied().unwrap_or("").trim();
+    let last = lines.last().copied().unwrap_or("").trim();
+    let marker = if first.starts_with("```") && last == "```" {
+        Some("```")
+    } else if first.starts_with("~~~") && last == "~~~" {
+        Some("~~~")
+    } else {
+        None
+    };
+    let Some(mk) = marker else {
+        return block.to_string();
+    };
+    let inner = &lines[1..lines.len() - 1];
+    if inner.iter().any(|l| l.trim_start().starts_with(mk)) {
+        return block.to_string();
+    }
+    inner.join("\n")
+}
+
+fn parse_markdown_snippets(input: &str) -> Option<(Vec<ExternalImportCandidate>, String)> {
+    let normalized = input.replace("\r\n", "\n");
+    let all_lines: Vec<&str> = normalized.split('\n').collect();
+    let mut lines: &[&str] = &all_lines;
+
+    if lines.first().map(|s| s.trim()) == Some("---") {
+        if let Some(close_rel) = lines
+            .iter()
+            .skip(1)
+            .position(|s| matches!(s.trim(), "---" | "..."))
+        {
+            lines = &all_lines[close_rel + 2..];
+        }
+    }
+
+    let mut sections: Vec<(String, Vec<&str>)> = Vec::new();
+    let mut cur_title: Option<String> = None;
+    let mut cur_body: Vec<&str> = Vec::new();
+    let mut inside_fence = false;
+
+    for &line in lines {
+        let ws = line.trim();
+        if ws.starts_with("```") || ws.starts_with("~~~") {
+            inside_fence = !inside_fence;
+            if cur_title.is_some() {
+                cur_body.push(line);
+            }
+            continue;
+        }
+        if !inside_fence {
+            if ws.starts_with("# ") {
+                if let Some(prev) = cur_title.take() {
+                    sections.push((prev, std::mem::take(&mut cur_body)));
+                }
+                continue;
+            }
+            if ws.starts_with("## ") || ws.starts_with("### ") {
+                if let Some(prev) = cur_title.take() {
+                    sections.push((prev, std::mem::take(&mut cur_body)));
+                }
+                let prefix_len = if ws.starts_with("### ") { 4 } else { 3 };
+                let mut heading = ws[prefix_len..].trim_matches(['#', ' ']).trim().to_string();
+                if heading.starts_with('`') && heading.ends_with('`') && heading.len() >= 3 {
+                    heading = heading[1..heading.len() - 1].to_string();
+                }
+                cur_title = Some(heading);
+                continue;
+            }
+            if ws == "---" || ws == "***" {
+                continue;
+            }
+        }
+        if cur_title.is_some() {
+            cur_body.push(line);
+        }
+    }
+    if let Some(prev) = cur_title.take() {
+        sections.push((prev, cur_body));
+    }
+
+    let mut out = Vec::new();
+    for (title, body_lines) in sections {
+        let raw_sec = body_lines.join("\n");
+        let raw_trimmed = raw_sec.trim();
+        if raw_trimmed.is_empty() {
+            continue;
+        }
+        let unwrapped = unwrap_single_code_fence(raw_trimmed);
+        let final_body = unwrapped.trim();
+        if final_body.is_empty() {
+            continue;
+        }
+        let alias = if !title.is_empty() && title != final_body {
+            Some(title.chars().take(80).collect::<String>())
+        } else {
+            None
+        };
+        out.push(ExternalImportCandidate {
+            text: final_body.to_string(),
+            alias,
+            source_label: "Markdown 常用语笔记".to_string(),
+        });
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some((out, "Markdown 常用语笔记".to_string()))
+    }
+}
+
 fn parse_json_competitor_payload(root: &Value) -> Option<(Vec<ExternalImportCandidate>, String)> {
     let mut format_name = "外部 JSON 收藏".to_string();
+    let single_buf: Vec<Value>;
     let arr: &[Value] = match root {
         Value::Array(list) => {
-            if let Some(first) = list.first().and_then(|v| v.as_object()) {
-                if first.contains_key("keyword") && first.contains_key("text") {
-                    format_name = "Raycast 常用语".to_string();
-                } else if first.contains_key("pin") || first.contains_key("application") {
-                    format_name = "Maccy 剪贴记录".to_string();
+            if list
+                .first()
+                .and_then(|v| v.as_object())
+                .and_then(|o| o.get("alfredsnippet"))
+                .is_some()
+            {
+                format_name = "Alfred 常用语".to_string();
+                single_buf = list
+                    .iter()
+                    .filter_map(|v| v.get("alfredsnippet").cloned())
+                    .collect();
+                single_buf.as_slice()
+            } else {
+                if let Some(first) = list.first().and_then(|v| v.as_object()) {
+                    if first.contains_key("keyword") && first.contains_key("text") {
+                        format_name = "Raycast 常用语".to_string();
+                    } else if first.contains_key("abbreviation")
+                        && (first.contains_key("plainText") || first.contains_key("string"))
+                    {
+                        format_name = "TextExpander 常用语".to_string();
+                    } else if first.contains_key("pin") || first.contains_key("application") {
+                        format_name = "Maccy 剪贴记录".to_string();
+                    }
                 }
+                list.as_slice()
             }
-            list.as_slice()
         }
         Value::Object(map) => {
             if map.get("format").and_then(|v| v.as_str()) == Some(crate::archive::ARCHIVE_FORMAT_ID)
             {
                 return None;
             }
-            let mut found = None;
-            for key in [
-                "snippets", "items", "pins", "history", "clips", "data", "records",
-            ] {
-                if let Some(sub) = map.get(key).and_then(|v| v.as_array()) {
-                    if !sub.is_empty() {
-                        if key == "snippets" {
-                            format_name = "常用语片段包".to_string();
-                        } else if key == "pins" {
-                            format_name = "Maccy / Paste 收藏".to_string();
+            if let Some(single_alfred) = map.get("alfredsnippet") {
+                format_name = "Alfred 常用语".to_string();
+                single_buf = vec![single_alfred.clone()];
+                single_buf.as_slice()
+            } else {
+                let mut found = None;
+                for key in [
+                    "snippets",
+                    "snippetPlists",
+                    "items",
+                    "pins",
+                    "history",
+                    "clips",
+                    "data",
+                    "records",
+                ] {
+                    if let Some(sub) = map.get(key).and_then(|v| v.as_array()) {
+                        if !sub.is_empty() {
+                            if sub
+                                .first()
+                                .and_then(|v| v.as_object())
+                                .and_then(|o| o.get("alfredsnippet"))
+                                .is_some()
+                            {
+                                format_name = "Alfred 常用语".to_string();
+                                single_buf = sub
+                                    .iter()
+                                    .filter_map(|v| v.get("alfredsnippet").cloned())
+                                    .collect();
+                                found = Some(single_buf.as_slice());
+                            } else {
+                                if key == "snippetPlists"
+                                    || sub
+                                        .first()
+                                        .and_then(|v| v.as_object())
+                                        .map(|o| o.contains_key("abbreviation"))
+                                        .unwrap_or(false)
+                                {
+                                    format_name = "TextExpander 常用语".to_string();
+                                } else if key == "snippets" {
+                                    format_name = "常用语片段包".to_string();
+                                } else if key == "pins" {
+                                    format_name = "Maccy / Paste 收藏".to_string();
+                                }
+                                found = Some(sub.as_slice());
+                            }
+                            break;
                         }
-                        found = Some(sub.as_slice());
-                        break;
                     }
                 }
+                found?
             }
-            found?
         }
         _ => return None,
     };
@@ -1636,12 +1818,20 @@ fn parse_json_competitor_payload(root: &Value) -> Option<(Vec<ExternalImportCand
             continue;
         };
 
-        let raw_alias = ["title", "name", "alias", "customAlias", "label", "keyword"]
-            .iter()
-            .find_map(|k| obj.get(*k).and_then(|v| v.as_str()))
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty() && *s != clean_text.trim())
-            .map(|s| s.chars().take(80).collect::<String>());
+        let raw_alias = [
+            "title",
+            "name",
+            "alias",
+            "customAlias",
+            "label",
+            "keyword",
+            "abbreviation",
+        ]
+        .iter()
+        .find_map(|k| obj.get(*k).and_then(|v| v.as_str()))
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty() && *s != clean_text.trim())
+        .map(|s| s.chars().take(80).collect::<String>());
 
         let source_label = ["application", "sourceAppName", "app", "source"]
             .iter()

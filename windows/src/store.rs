@@ -446,16 +446,20 @@ impl ClipboardStore {
         final_id
     }
 
-    /// 跨处选段续接复制（`Ctrl+Alt+C` / `Ctrl+Shift+C`）：将新选段无缝追加至最近一条文本记录末尾
+    /// 跨处选段续接复制（`Ctrl+Alt+C` / `Ctrl+Shift+C`）：将新选段无缝追加至最近一条未收藏、非待办文本记录末尾（绝不污染已锁定的收藏常用语）
     pub fn append_to_latest_text(&mut self, fragment: &str, separator: &str) -> Option<String> {
         let clean_frag = fragment.trim_matches(['\r', '\n']);
         if clean_frag.trim().is_empty() {
             return None;
         }
         if let Some(pos) = self.items.iter().position(|it| {
-            matches!(it.kind, ClipContentType::Text | ClipContentType::Link) && it.text.is_some()
+            !it.is_pinned
+                && !it.is_pending_todo()
+                && matches!(it.kind, ClipContentType::Text | ClipContentType::Link)
+                && it.text.is_some()
         }) {
             let mut target = self.items.remove(pos);
+            let old_hash = target.content_hash.clone();
             let prev = target.text.unwrap_or_default();
             let merged = if prev.is_empty() {
                 clean_frag.to_string()
@@ -469,11 +473,15 @@ impl ClipboardStore {
                 ClipContentType::Text
             };
             let hash = sha256_hex(merged.as_bytes());
-            target.content_hash = format!("{}:{hash}", if is_link { "link" } else { "text" });
+            let new_hash = format!("{}:{hash}", if is_link { "link" } else { "text" });
+            target.content_hash = new_hash.clone();
             target.text = Some(merged.clone());
             target.created_unix_secs = now_unix_secs();
             self.items.insert(0, target);
             Self::sort_items(&mut self.items);
+            if old_hash != new_hash && !self.items.iter().any(|it| it.content_hash == old_hash) {
+                self.forget_memory_hashes(&[old_hash]);
+            }
             self.save_history();
             Some(merged)
         } else {

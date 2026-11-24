@@ -423,8 +423,18 @@ enum SemanticEngine {
             }
         }
 
-        // 3. 链接追踪参数净链检测与社媒分享口令剥壳提链
-        if trimmed.count < 4096, !trimmed.contains("\n"), let cleaned = cleanTrackingURL(trimmed) {
+        // 3. 链接鉴权剥离净享、追踪参数净链检测与社媒分享口令剥壳提链
+        if trimmed.count < 4096, !trimmed.contains("\n"), let publicURL = URLTrackingCleaner.sanitizeURLForPublicShare(trimmed) {
+            if primaryKind == nil { primaryKind = .sensitiveSecret }
+            actions.insert(TransformAction(
+                id: "sanitize-auth-url",
+                title: "去鉴权净链",
+                symbolName: "link.badge.plus",
+                isSecurityAction: true,
+                resultText: publicURL,
+                toastText: "已剥离 URL 鉴权令牌与追踪尾巴，可安全外发"
+            ), at: 0)
+        } else if trimmed.count < 4096, !trimmed.contains("\n"), let cleaned = cleanTrackingURL(trimmed) {
             if primaryKind == nil { primaryKind = .dirtyURL }
             actions.append(TransformAction(
                 id: "clean-url",

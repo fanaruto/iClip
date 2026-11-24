@@ -62,6 +62,14 @@ final class QueueHUDController {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.35, execute: work)
     }
 
+    /// 锁屏或休眠时立即收起顺序队列灵动胶囊窗
+    func dismiss() {
+        dismissWorkItem?.cancel()
+        dismissWorkItem = nil
+        panel?.alphaValue = 0
+        panel?.orderOut(nil)
+    }
+
     private func ensurePanel() {
         guard panel == nil else { return }
         let rect = NSRect(origin: .zero, size: hudSize)

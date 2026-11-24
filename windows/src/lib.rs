@@ -1697,4 +1697,83 @@ mod tests {
 
         let _ = fs::remove_dir_all(tmp_dir);
     }
+
+    #[test]
+    fn test_presigned_url_public_share_clean_markdown_alfred_import_and_pinned_safe_append() {
+        use crate::engines::{analyze_text_actions, sanitize_url_for_public_share};
+        use crate::security::{
+            classify_sensitive_text, parse_external_competitor_data, SensitiveSecretKind,
+        };
+
+        // 1. 验证云对象存储预签名 URL 敏感识别与外发「去鉴权净链」（剥离 Basic Auth + 预签名令牌 + utm 追踪尾巴）
+        let fake_sig = format!("{}{}", "9f8e7d6c", "5b4a3210fedcba9876543210");
+        let presigned = format!(
+            "https://user:pass99@docs.example.com/report/q4?id=42&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=demo&X-Amz-Signature={fake_sig}&utm_source=feishu#summary"
+        );
+        assert_eq!(
+            classify_sensitive_text(&presigned),
+            Some(SensitiveSecretKind::ConnectionSecret)
+        );
+        assert!(!redact_secrets(&presigned).contains(&fake_sig));
+        assert_eq!(
+            sanitize_url_for_public_share(&presigned).as_deref(),
+            Some("https://docs.example.com/report/q4?id=42#summary")
+        );
+        assert!(sanitize_url_for_public_share(
+            "https://docs.example.com/report/q4?id=42&utm_source=feishu"
+        )
+        .is_none());
+
+        let actions = analyze_text_actions(&presigned, false);
+        assert!(actions.iter().any(|a| a.id == "sanitize-auth-url"));
+
+        // 2. 验证 Alfred JSON、TextExpander JSON 与 Obsidian/Notion Markdown 常用语笔记迁入
+        let alfred_json = r#"{"alfredsnippet":{"snippet":"git status -sb","uid":"u1","name":"Git 简明状态","keyword":";gs"}}"#.as_bytes();
+        let (alfred_items, alfred_fmt) =
+            parse_external_competitor_data(alfred_json, Some("json")).unwrap();
+        assert_eq!(alfred_fmt, "Alfred 常用语");
+        assert_eq!(alfred_items[0].alias.as_deref(), Some("Git 简明状态"));
+        assert_eq!(alfred_items[0].text, "git status -sb");
+
+        let te_json = r#"{"snippetPlists":[{"abbreviation":";addr","label":"公司收件地址","plainText":"深圳市南山区科技园 88 号"}]}"#.as_bytes();
+        let (te_items, te_fmt) = parse_external_competitor_data(te_json, Some("json")).unwrap();
+        assert_eq!(te_fmt, "TextExpander 常用语");
+        assert_eq!(te_items[0].alias.as_deref(), Some("公司收件地址"));
+
+        let obsidian_md = "---\ntags: [snippets]\n---\n# 研发常用语\n\n## 开票抬头\n星辰智造科技有限公司\n\n### `Docker 日志排障`\n```bash\ndocker compose logs -f --tail=100 app\n```\n";
+        let (md_items, md_fmt) =
+            parse_external_competitor_data(obsidian_md.as_bytes(), Some("md")).unwrap();
+        assert_eq!(md_fmt, "Markdown 常用语笔记");
+        assert_eq!(md_items.len(), 2);
+        assert_eq!(md_items[0].alias.as_deref(), Some("开票抬头"));
+        assert_eq!(md_items[1].alias.as_deref(), Some("Docker 日志排障"));
+        assert_eq!(md_items[1].text, "docker compose logs -f --tail=100 app");
+
+        // 3. 验证跨处续接复制绝不污染已锁定的置顶收藏常用语，且自动连根遗忘孤儿旧段哈希指纹
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "iclip-iter14-test-{}-{}",
+            std::process::id(),
+            crate::model::now_unix_secs()
+        ));
+        let mut store = ClipboardStore::new(tmp_dir.clone());
+        let mut pinned_item =
+            ClipItem::new_text("严禁被改写的收藏常用语".to_string(), Some("Notes".into()));
+        pinned_item.is_pinned = true;
+        let pinned_id = pinned_item.id.clone();
+        store.insert_or_promote(pinned_item);
+
+        let seg1 = ClipItem::new_text("第一段摘录".to_string(), Some("Browser".into()));
+        let old_seg_hash = seg1.content_hash.clone();
+        store.insert_or_promote(seg1);
+        store.record_paste_usage(&old_seg_hash, Some("ChatGPT"));
+        assert!(store.reuse_count(&old_seg_hash) >= 1);
+
+        let appended = store.append_to_latest_text("第二段补充", "\n").unwrap();
+        assert_eq!(appended, "第一段摘录\n第二段补充");
+        let still_intact = store.items.iter().find(|i| i.id == pinned_id).unwrap();
+        assert_eq!(still_intact.text.as_deref(), Some("严禁被改写的收藏常用语"));
+        assert_eq!(store.reuse_count(&old_seg_hash), 0);
+
+        let _ = fs::remove_dir_all(tmp_dir);
+    }
 }

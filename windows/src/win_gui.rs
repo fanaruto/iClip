@@ -2023,7 +2023,26 @@ unsafe fn handle_clipboard_update(hwnd: HWND) {
 
                         if st.pending_append_capture {
                             st.pending_append_capture = false;
+                            let target_was_burn = st
+                                .store
+                                .items
+                                .iter()
+                                .find(|it| {
+                                    !it.is_pinned
+                                        && !it.is_pending_todo()
+                                        && matches!(
+                                            it.kind,
+                                            iclip_core::model::ClipContentType::Text
+                                                | iclip_core::model::ClipContentType::Link
+                                        )
+                                        && it.text.is_some()
+                                })
+                                .map(|it| it.is_burn_after_paste())
+                                .unwrap_or(false);
                             if let Some(merged) = st.store.append_to_latest_text(&raw_text, "\n") {
+                                if target_was_burn {
+                                    rewrite_scrub_ms = Some(5_000);
+                                }
                                 rewrite_clipboard_text = Some(merged);
                                 feedback_toast = Some("已跨处续接追加至首条记录".to_string());
                             }
@@ -9758,7 +9777,7 @@ unsafe fn import_archive_via_dialog(hwnd: HWND) {
 
     let mut file_buf = vec![0u16; 260];
     let filter: Vec<u16> =
-        "支持导入的收藏与常用语 (*.iclip;*.json;*.csv;*.tsv)\0*.iclip;*.json;*.csv;*.tsv\0所有文件 (*.*)\0*.*\0\0"
+        "支持导入的收藏与常用语 (*.iclip;*.json;*.md;*.markdown;*.csv;*.tsv)\0*.iclip;*.json;*.md;*.markdown;*.alfredsnippets;*.csv;*.tsv\0所有文件 (*.*)\0*.*\0\0"
             .encode_utf16()
             .collect();
 

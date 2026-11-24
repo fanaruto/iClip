@@ -2874,12 +2874,17 @@ struct ClipboardPopoverView: View {
     private func importPinnedArchiveAction() {
         nav.suppressAutoHide = true
         let panel = NSOpenPanel()
-        panel.title = "导入 .iclip 归档或 Raycast / Maccy / Paste / CSV 常用语"
+        panel.title = "导入 .iclip 归档或 Raycast / Alfred / Markdown / CSV 常用语"
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
         panel.allowsOtherFileTypes = true
         var allowed: [UTType] = [.json, .commaSeparatedText, .tabSeparatedText, .plainText, .data]
+        for ext in ["md", "markdown", "alfredsnippets", "alfredsnippet"] {
+            if let ut = UTType(filenameExtension: ext), !allowed.contains(ut) {
+                allowed.append(ut)
+            }
+        }
         if let iclipType = UTType(filenameExtension: "iclip") {
             allowed.insert(iclipType, at: 0)
         }
@@ -5648,12 +5653,17 @@ struct ClipboardPopoverView: View {
     private func importPinnedArchiveAction() {
         nav.suppressAutoHide = true
         let panel = NSOpenPanel()
-        panel.title = "导入 .iclip 归档或 Raycast / Maccy / Paste / CSV 常用语"
+        panel.title = "导入 .iclip 归档或 Raycast / Alfred / Markdown / CSV 常用语"
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
         panel.allowsOtherFileTypes = true
         var allowed: [UTType] = [.json, .commaSeparatedText, .tabSeparatedText, .plainText, .data]
+        for ext in ["md", "markdown", "alfredsnippets", "alfredsnippet"] {
+            if let ut = UTType(filenameExtension: ext), !allowed.contains(ut) {
+                allowed.append(ut)
+            }
+        }
         if let iclipType = UTType(filenameExtension: "iclip") {
             allowed.insert(iclipType, at: 0)
         }

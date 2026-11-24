@@ -2699,4 +2699,78 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertFalse(SensitiveCredentialVeil.redactForExternalSharing(jdbcUrl).contains("UltraSecretDbPass99"))
         XCTAssertTrue(SensitiveCredentialVeil.redactForExternalSharing(kubeYaml).contains("***KUBE_KEY_REDACTED***"))
     }
+
+    // MARK: - 54. 自动二维码防泄密动态码直出、预签名直链保护、去鉴权净链与 Alfred/TextExpander/Markdown 常用语迁入测试
+
+    @MainActor
+    func testAutoQR2FASafeOutputPresignedURLPublicShareCleanAndMarkdownAlfredImport() throws {
+        // 1. 验证开启 `.extractQRCode` 时截取 2FA 二维码直接产出 6 位动态码 + 30s 擦除，绝不裸写 `otpauth://` 根密钥
+        let otpSecret = "GEZDGNBV" + "GY3TQOJQGEZDGNBVGY3TQOJQ"
+        let otpQR = "otpauth://totp/GitHub:dev?secret=\(otpSecret)&issuer=GitHub"
+        let qrRes = ClipboardStore.resolveSafeAutoQRCodeOutput(for: otpQR, date: Date(timeIntervalSince1970: 59))
+        XCTAssertEqual(qrRes.outputText, "287082")
+        XCTAssertTrue(qrRes.isSensitiveOrEphemeral)
+        XCTAssertEqual(qrRes.scrubDelay, 30.0)
+        XCTAssertFalse(qrRes.outputText.contains(otpSecret))
+
+        let plainWebQR = "https://app.webfooo.com/iClip"
+        let webRes = ClipboardStore.resolveSafeAutoQRCodeOutput(for: plainWebQR)
+        XCTAssertEqual(webRes.outputText, plainWebQR)
+        XCTAssertFalse(webRes.isSensitiveOrEphemeral)
+
+        // 2. 验证云对象存储预签名 URL 敏感识别与外发「去鉴权净链」（同时剥除 Basic Auth、签名令牌与 utm 追踪尾巴）
+        let fakeSig = "9f8e7d6c" + "5b4a3210fedcba9876543210"
+        let presignedS3 = "https://user:pass99@docs.example.com/report/q4?id=42&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=demo&X-Amz-Signature=\(fakeSig)&utm_source=feishu#summary"
+        XCTAssertEqual(SensitiveCredentialVeil.classify(presignedS3), .connectionSecret)
+        XCTAssertFalse(SensitiveCredentialVeil.redactForExternalSharing(presignedS3).contains(fakeSig))
+
+        let publicShareURL = try XCTUnwrap(URLTrackingCleaner.sanitizeURLForPublicShare(presignedS3))
+        XCTAssertEqual(publicShareURL, "https://docs.example.com/report/q4?id=42#summary")
+        // 纯追踪无鉴权链接不触发去鉴权净链（交由普通净链处理）
+        XCTAssertNil(URLTrackingCleaner.sanitizeURLForPublicShare("https://docs.example.com/report/q4?id=42&utm_source=feishu"))
+
+        // 3. 验证 Alfred JSON、TextExpander JSON 与 Obsidian/Notion Markdown 二级标题常用语笔记无损迁入
+        let alfredJSON = """
+        {"alfredsnippet":{"snippet":"git status -sb","uid":"u1","name":"Git 简明状态","keyword":";gs"}}
+        """
+        let alfredParsed = try XCTUnwrap(UniversalCompetitorImporter.parseExternalData(Data(alfredJSON.utf8), fileExtensionHint: "json"))
+        XCTAssertEqual(alfredParsed.formatName, "Alfred 常用语")
+        XCTAssertEqual(alfredParsed.entries.first?.alias, "Git 简明状态")
+        XCTAssertEqual(alfredParsed.entries.first?.text, "git status -sb")
+
+        let teJSON = """
+        {"snippetPlists":[{"abbreviation":";addr","label":"公司收件地址","plainText":"深圳市南山区科技园 88 号"}]}
+        """
+        let teParsed = try XCTUnwrap(UniversalCompetitorImporter.parseExternalData(Data(teJSON.utf8), fileExtensionHint: "json"))
+        XCTAssertEqual(teParsed.formatName, "TextExpander 常用语")
+        XCTAssertEqual(teParsed.entries.first?.alias, "公司收件地址")
+
+        let obsidianMD = """
+        ---
+        tags: [snippets]
+        ---
+        # 研发与商务高频话术库
+
+        ## 开票抬头信息
+        名称：星辰智造科技有限公司
+        税号：91440300MA5FX23P8L
+
+        ### `Docker 日志排障`
+        ```bash
+        docker compose logs -f --tail=100 app
+        ```
+        """
+        let mdParsed = try XCTUnwrap(UniversalCompetitorImporter.parseExternalData(Data(obsidianMD.utf8), fileExtensionHint: "md"))
+        XCTAssertEqual(mdParsed.formatName, "Markdown 常用语笔记")
+        XCTAssertEqual(mdParsed.entries.count, 2)
+        XCTAssertEqual(mdParsed.entries[0].alias, "开票抬头信息")
+        XCTAssertTrue(mdParsed.entries[0].text.contains("91440300MA5FX23P8L"))
+        XCTAssertEqual(mdParsed.entries[1].alias, "Docker 日志排障")
+        XCTAssertEqual(mdParsed.entries[1].text, "docker compose logs -f --tail=100 app")
+
+        // 4. 验证拖拽暂存缓冲清理幂等安全
+        ClipboardStore.shared.clearTransientDragImageBuffers()
+        XCTAssertNil(ClipboardStore.shared.lastImportedDragPNGData)
+        XCTAssertNil(ClipboardStore.shared.lastImportedDragPreviewCGImage)
+    }
 }

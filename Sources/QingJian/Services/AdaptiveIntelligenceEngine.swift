@@ -1387,6 +1387,23 @@ enum URLTrackingCleaner {
         "mc_cid", "mc_eid", "_hsenc", "_hsmi", "mkt_tok", "yclid", "wickedid", "si"
     ]
 
+    /// 公域外发时需彻底剥除的 URL 鉴权令牌与云对象存储预签名参数
+    static let authAndSignatureParams: Set<String> = [
+        "token", "access_token", "auth_token", "id_token", "refresh_token", "session_token", "jwt",
+        "api_key", "apikey", "secret", "client_secret", "password", "passwd", "sig", "signature",
+        "x-amz-signature", "x-amz-credential", "x-amz-security-token",
+        "x-goog-signature", "x-goog-credential",
+        "ossaccesskeyid", "q-signature", "q-ak"
+    ]
+
+    /// 预签名 URL 配套的过期与签名元数据参数（当命中上述鉴权参数时一并剥净）
+    private static let companionPresignParams: Set<String> = [
+        "expires", "x-amz-date", "x-amz-expires", "x-amz-algorithm", "x-amz-signedheaders",
+        "x-goog-date", "x-goog-expires", "x-goog-algorithm", "x-goog-signedheaders",
+        "q-key-time", "q-sign-time", "q-sign-algorithm", "q-header-list", "q-url-param-list",
+        "sv", "se", "sp", "spr", "srt", "ss"
+    ]
+
     static func cleanTrackingURL(_ raw: String) -> String? {
         guard var comps = URLComponents(string: raw),
               let scheme = comps.scheme?.lowercased(),
@@ -1401,6 +1418,52 @@ enum URLTrackingCleaner {
         guard filtered.count < items.count else { return nil }
         comps.queryItems = filtered.isEmpty ? nil : filtered
         return comps.string
+    }
+
+    /// 外发公域链接安全净享：一键同时剥离 HTTP Basic Auth 账密、URL 鉴权/云预签名令牌参数与营销追踪尾巴，保留干净业务参数
+    static func sanitizeURLForPublicShare(_ raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              trimmed.utf8.count <= 4_096,
+              !trimmed.contains("\n"),
+              !trimmed.contains("\r"),
+              !trimmed.contains(" "),
+              !SensitiveCredentialVeil.isWebhookURL(trimmed),
+              var comps = URLComponents(string: trimmed),
+              let scheme = comps.scheme?.lowercased(),
+              (scheme == "http" || scheme == "https"),
+              let host = comps.host, !host.isEmpty else {
+            return nil
+        }
+
+        let hasBasicAuth = !(comps.user ?? "").isEmpty || !(comps.password ?? "").isEmpty
+        let queryItems = comps.queryItems ?? []
+        let hasAuthQuery = queryItems.contains { item in
+            let key = item.name.lowercased()
+            let val = (item.value ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return authAndSignatureParams.contains(key) && !val.isEmpty
+        }
+
+        guard hasBasicAuth || hasAuthQuery else { return nil }
+
+        comps.user = nil
+        comps.password = nil
+        if !queryItems.isEmpty {
+            let filtered = queryItems.filter { item in
+                let key = item.name.lowercased()
+                if authAndSignatureParams.contains(key) || companionPresignParams.contains(key) {
+                    return false
+                }
+                if trackingParams.contains(key) || key.hasPrefix("utm_") {
+                    return false
+                }
+                return true
+            }
+            comps.queryItems = filtered.isEmpty ? nil : filtered
+        }
+
+        guard let cleaned = comps.string, cleaned != trimmed else { return nil }
+        return cleaned
     }
 
     /// 扫描混排文本中的合法 HTTP(S) 链接：自动在中日韩全角标点/空白处截断，并保留 URL 内部配对括号（如 Wikipedia 词条）
