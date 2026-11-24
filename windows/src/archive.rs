@@ -361,6 +361,21 @@ pub fn merge_archive_data_full(
                     raw_a.clone()
                 }
             });
+            let sanitized_ocr = entry.ocr_text.as_ref().map(|raw_o| {
+                if matches!(
+                    crate::security::inspect_clipboard_poison(raw_o),
+                    Some(crate::security::PoisonThreatKind::PastejackingOrBidi(_))
+                ) {
+                    let clean = crate::security::sanitize_clipboard_poison(raw_o);
+                    if clean.is_empty() {
+                        raw_o.clone()
+                    } else {
+                        clean
+                    }
+                } else {
+                    raw_o.clone()
+                }
+            });
             let effective_hash = if sanitized_text.as_deref() != entry.text.as_deref() {
                 if let Some(clean_t) = &sanitized_text {
                     ClipItem::new_text(clean_t.clone(), None).content_hash
@@ -378,8 +393,8 @@ pub fn merge_archive_data_full(
                 image_file_name: saved_image_name,
                 image_width: entry.image_width,
                 image_height: entry.image_height,
-                ocr_text: entry.ocr_text.clone(),
-                ocr_checked: entry.ocr_text.as_ref().map(|_| true),
+                ocr_text: sanitized_ocr.clone(),
+                ocr_checked: sanitized_ocr.as_ref().map(|_| true),
                 file_paths: entry.file_paths.clone(),
                 content_hash: effective_hash,
                 source_app_name: entry.source_app_name.clone(),

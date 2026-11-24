@@ -129,10 +129,13 @@ enum ArchiveBackupService {
         let entries: [ArchivedClipEntry] = pinnedItems.map { item in
             var base64PNG: String? = nil
             if item.type == .image, let fileName = item.imageFileName {
-                let imgURL = imagesDirectoryURL.appendingPathComponent(fileName)
-                if let imgData = LocalVaultCrypto.readDecryptedImageData(at: imgURL),
-                   imgData.count <= maxEmbeddedImageBytes {
-                    base64PNG = imgData.base64EncodedString()
+                let safeName = (fileName as NSString).lastPathComponent
+                if !safeName.isEmpty && safeName != "." && safeName != ".." && safeName == fileName {
+                    let imgURL = imagesDirectoryURL.appendingPathComponent(safeName)
+                    if let imgData = LocalVaultCrypto.readDecryptedImageData(at: imgURL),
+                       imgData.count <= maxEmbeddedImageBytes {
+                        base64PNG = imgData.base64EncodedString()
+                    }
                 }
             }
             return ArchivedClipEntry(
@@ -341,6 +344,13 @@ enum ArchiveBackupService {
                     }
                     return rawAlias
                 }
+                let sanitizedEntryOCR: String? = entry.ocrText.map { rawOCR in
+                    if case .pastejackingOrBidi = ClipboardPoisonGuard.inspect(rawOCR) {
+                        let clean = ClipboardPoisonGuard.sanitize(rawOCR)
+                        return clean.isEmpty ? rawOCR : clean
+                    }
+                    return rawOCR
+                }
                 let effectiveHash: String = {
                     if let cleanText = sanitizedEntryText, cleanText != entry.text {
                         let digest = SHA256.hash(data: Data(cleanText.utf8)).map { String(format: "%02x", $0) }.joined()
@@ -355,8 +365,8 @@ enum ArchiveBackupService {
                     imageFileName: savedImageName,
                     imageWidth: entry.imageWidth,
                     imageHeight: entry.imageHeight,
-                    ocrText: entry.ocrText,
-                    ocrChecked: (entry.ocrText != nil) ? true : nil,
+                    ocrText: sanitizedEntryOCR,
+                    ocrChecked: (sanitizedEntryOCR != nil) ? true : nil,
                     filePaths: entry.filePaths,
                     contentHash: effectiveHash,
                     sourceAppName: entry.sourceAppName,

@@ -560,6 +560,31 @@ enum SemanticEngine {
             ))
         }
 
+        // 4.5 乱码转义安全解码（Unicode \uXXXX / URL %XX / HTML 实体）与多行列表稳定去重
+        if raw.utf8.count <= 32_768,
+           !actions.contains(where: { $0.id == "json-pretty" || $0.id == "json-minify" || $0.id == "jsonc-clean-strict" }),
+           let decoded = UniversalEscapeDecoder.decodeIfApplicable(raw) {
+            actions.append(TransformAction(
+                id: "decode-escaped-text",
+                title: decoded.chipTitle,
+                symbolName: "character.bubble",
+                isSecurityAction: false,
+                resultText: decoded.decodedText,
+                toastText: decoded.toastText
+            ))
+        }
+        if raw.utf8.count <= 65_536,
+           let dedup = UniversalEscapeDecoder.deduplicateListLines(raw) {
+            actions.append(TransformAction(
+                id: "dedup-list-lines",
+                title: "去重净列(剩\(dedup.remainingCount)行)",
+                symbolName: "line.3.horizontal.decrease.circle",
+                isSecurityAction: false,
+                resultText: dedup.cleanedText,
+                toastText: "已按原序剔除 \(dedup.removedCount) 行重复项，保留 \(dedup.remainingCount) 行"
+            ))
+        }
+
         // 5. Unix 时间戳检测（秒级 10 位 / 毫秒级 13 位）
         if (trimmed.count == 10 || trimmed.count == 13),
            trimmed.allSatisfy(\.isNumber),

@@ -2992,3 +2992,224 @@ enum CurlAndJSONCSanitizer {
         "'" + val.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 }
+
+
+// MARK: - 14. 乱码转义一键安全解码（Unicode \uXXXX / URL %XX / HTML 实体 + 内联防隐藏毒字符）与杂乱多行列表稳定去重
+
+enum UniversalEscapeDecoder {
+    struct DecodedEscapeResult: Equatable {
+        let decodedText: String
+        let chipTitle: String
+        let toastText: String
+    }
+
+    struct DeduplicatedLinesResult: Equatable {
+        let cleanedText: String
+        let removedCount: Int
+        let remainingCount: Int
+    }
+
+    private static let unicodeEscapeRegex = try! NSRegularExpression(
+        pattern: #"\\u([0-9a-fA-F]{4})"#
+    )
+    private static let percentTripletRegex = try! NSRegularExpression(
+        pattern: #"(?:%[0-9a-fA-F]{2}){2,}"#
+    )
+    private static let htmlEntityHintRegex = try! NSRegularExpression(
+        pattern: #"&(?:lt|gt|quot|apos|amp|nbsp|copy|reg|mdash|ndash|hellip|#\d{2,7}|#x[0-9a-fA-F]{2,6});"#,
+        options: [.caseInsensitive]
+    )
+
+    /// 离线识别并解码 `\uXXXX` Unicode 转义、UTF-8 `%XX` 百分号编码与 HTML 实体，并自动净化解码后可能暗藏的 Trojan Bidi 毒字符
+    static func decodeIfApplicable(_ raw: String) -> DecodedEscapeResult? {
+        guard raw.utf8.count >= 6, raw.utf8.count <= 32_768 else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // 1. Unicode `\uXXXX` 转义（支持 UTF-16 高低代理对，要求至少含 2 处 `\uXXXX` 避免误伤单次代码字面量）
+        if trimmed.contains("\\u") {
+            let fullRange = NSRange(raw.startIndex..<raw.endIndex, in: raw)
+            let matches = unicodeEscapeRegex.matches(in: raw, range: fullRange)
+            if matches.count >= 2, let decoded = decodeUnicodeEscapes(in: raw), decoded != raw {
+                let safe = sanitizeDecodedOutput(decoded)
+                return DecodedEscapeResult(
+                    decodedText: safe,
+                    chipTitle: "解码 Unicode 中文",
+                    toastText: "已将 \\uXXXX 转义解码为可读文本"
+                )
+            }
+        }
+
+        // 2. UTF-8 `%XX` 百分号编码还原（针对含中文编码的链接或参数串）
+        if trimmed.contains("%") {
+            let fullRange = NSRange(trimmed.startIndex..<trimmed.endIndex, in: trimmed)
+            if percentTripletRegex.firstMatch(in: trimmed, range: fullRange) != nil,
+               let unescaped = raw.removingPercentEncoding,
+               unescaped != raw,
+               containsNewlyDecodedNonASCIIOrReadable(original: raw, decoded: unescaped) {
+                let safe = sanitizeDecodedOutput(unescaped)
+                return DecodedEscapeResult(
+                    decodedText: safe,
+                    chipTitle: "URL 解码还原",
+                    toastText: "已将 %XX 编码还原为可读中文/符号"
+                )
+            }
+        }
+
+        // 3. HTML 实体转义（`&lt;div&gt;`、`&quot;`、`&#20013;`、`&#x4e2d;`）
+        if trimmed.contains("&") && trimmed.contains(";") {
+            let fullRange = NSRange(trimmed.startIndex..<trimmed.endIndex, in: trimmed)
+            if htmlEntityHintRegex.firstMatch(in: trimmed, range: fullRange) != nil {
+                let decoded = decodeHTMLEntities(in: raw)
+                if decoded != raw {
+                    let safe = sanitizeDecodedOutput(decoded)
+                    return DecodedEscapeResult(
+                        decodedText: safe,
+                        chipTitle: "解码 HTML 实体",
+                        toastText: "已解码 HTML 转义实体字符"
+                    )
+                }
+            }
+        }
+
+        return nil
+    }
+
+    /// 识别含重复项的非代码多行名单/单号/IP/标签列表（3~2000 行），按首次出现顺序稳定去重
+    static func deduplicateListLines(_ raw: String) -> DeduplicatedLinesResult? {
+        guard raw.contains("\n"), raw.utf8.count <= 65_536 else { return nil }
+        let normalized = raw.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+        if looksLikeSourceCodeOrMarkdownBlock(normalized) {
+            return nil
+        }
+
+        let rawLines = normalized.components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        guard rawLines.count >= 3, rawLines.count <= 2_000 else { return nil }
+        // 每行长度适中（排除长篇自然语言文章段落）
+        guard rawLines.allSatisfy({ $0.count <= 140 }) else { return nil }
+
+        var seen = Set<String>()
+        var unique: [String] = []
+        unique.reserveCapacity(rawLines.count)
+        for line in rawLines {
+            if seen.insert(line).inserted {
+                unique.append(line)
+            }
+        }
+        let removed = rawLines.count - unique.count
+        guard removed >= 1, !unique.isEmpty else { return nil }
+        return DeduplicatedLinesResult(
+            cleanedText: unique.joined(separator: "\n"),
+            removedCount: removed,
+            remainingCount: unique.count
+        )
+    }
+
+    private static func looksLikeSourceCodeOrMarkdownBlock(_ text: String) -> Bool {
+        if text.contains("```") || text.contains("{\n") || text.contains("\n}") || text.contains(";\n") {
+            return true
+        }
+        let codeKeywords = [
+            "func ", "def ", "class ", "struct ", "import ", "#include",
+            "public ", "private ", "const ", "let ", "var ", "return ", "SELECT ", "FROM "
+        ]
+        return codeKeywords.contains { text.contains($0) }
+    }
+
+    private static func sanitizeDecodedOutput(_ decoded: String) -> String {
+        if case .pastejackingOrBidi = ClipboardPoisonGuard.inspect(decoded) {
+            let clean = ClipboardPoisonGuard.sanitize(decoded)
+            return clean.isEmpty ? decoded : clean
+        }
+        return decoded
+    }
+
+    private static func containsNewlyDecodedNonASCIIOrReadable(original: String, decoded: String) -> Bool {
+        let origNonASCII = original.unicodeScalars.filter { $0.value >= 128 }.count
+        let decNonASCII = decoded.unicodeScalars.filter { $0.value >= 128 }.count
+        if decNonASCII > origNonASCII {
+            return true
+        }
+        return original.contains("%2F") || original.contains("%2f") || original.contains("%3A") || original.contains("%3a")
+    }
+
+    private static func decodeUnicodeEscapes(in input: String) -> String? {
+        let chars = Array(input)
+        let n = chars.count
+        var out = ""
+        out.reserveCapacity(n)
+        var i = 0
+        var convertedAny = false
+
+        func parseHex4(at pos: Int) -> UInt16? {
+            guard pos + 4 <= n else { return nil }
+            let hexStr = String(chars[pos..<(pos + 4)])
+            return UInt16(hexStr, radix: 16)
+        }
+
+        while i < n {
+            if chars[i] == "\\", i + 5 < n, chars[i + 1] == "u", let u1 = parseHex4(at: i + 2) {
+                if (0xD800...0xDBFF).contains(u1),
+                   i + 11 < n,
+                   chars[i + 6] == "\\",
+                   chars[i + 7] == "u",
+                   let u2 = parseHex4(at: i + 8),
+                   (0xDC00...0xDFFF).contains(u2) {
+                    let codePoint = 0x10000 + ((UInt32(u1 - 0xD800) << 10) | UInt32(u2 - 0xDC00))
+                    if let scalar = UnicodeScalar(codePoint) {
+                        out.unicodeScalars.append(scalar)
+                        convertedAny = true
+                        i += 12
+                        continue
+                    }
+                } else if let scalar = UnicodeScalar(UInt32(u1)) {
+                    out.unicodeScalars.append(scalar)
+                    convertedAny = true
+                    i += 6
+                    continue
+                }
+            }
+            out.append(chars[i])
+            i += 1
+        }
+        return convertedAny ? out : nil
+    }
+
+    private static func decodeHTMLEntities(in input: String) -> String {
+        let namedMap: [(String, String)] = [
+            ("&quot;", "\""),
+            ("&apos;", "'"),
+            ("&#39;", "'"),
+            ("&lt;", "<"),
+            ("&gt;", ">"),
+            ("&nbsp;", " "),
+            ("&copy;", "©"),
+            ("&reg;", "®"),
+            ("&mdash;", "—"),
+            ("&ndash;", "–"),
+            ("&hellip;", "…")
+        ]
+        var working = input
+        for (entity, rep) in namedMap {
+            working = working.replacingOccurrences(of: entity, with: rep, options: .caseInsensitive)
+        }
+        // 解析数字实体 &#12345; 与 &#x4f60;
+        let numRegex = try! NSRegularExpression(pattern: #"&#(?:x([0-9a-fA-F]{1,6})|(\d{1,7}));"#, options: [.caseInsensitive])
+        let matches = numRegex.matches(in: working, range: NSRange(working.startIndex..<working.endIndex, in: working))
+        for m in matches.reversed() {
+            guard let fullR = Range(m.range, in: working) else { continue }
+            var code: UInt32?
+            if let hexR = Range(m.range(at: 1), in: working) {
+                code = UInt32(working[hexR], radix: 16)
+            } else if let decR = Range(m.range(at: 2), in: working) {
+                code = UInt32(working[decR], radix: 10)
+            }
+            if let c = code, c > 0, let scalar = UnicodeScalar(c) {
+                working.replaceSubrange(fullR, with: String(scalar))
+            }
+        }
+        working = working.replacingOccurrences(of: "&amp;", with: "&", options: .caseInsensitive)
+        return working
+    }
+}

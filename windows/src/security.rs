@@ -3515,3 +3515,273 @@ fn tokenize_shell_words(cmd: &str) -> Vec<String> {
 fn shell_single_quote(val: &str) -> String {
     format!("'{}'", val.replace('\'', "'\\''"))
 }
+
+// ============================================================================
+// 14. 乱码转义一键安全解码（Unicode \uXXXX / URL %XX / HTML 实体 + 内联防隐藏毒字符）与多行列表稳定去重
+// ============================================================================
+
+pub fn decode_escaped_text(raw: &str) -> Option<(String, String, String)> {
+    if !(6..=32_768).contains(&raw.len()) {
+        return None;
+    }
+    let trimmed = raw.trim();
+
+    // 1. Unicode `\uXXXX` 转义（支持 UTF-16 代理对，至少含 2 处 `\uXXXX` 避免误伤单次转义）
+    if trimmed.contains("\\u") {
+        static UNI_ESC_RE: OnceLock<Regex> = OnceLock::new();
+        let re = UNI_ESC_RE.get_or_init(|| Regex::new(r"\\u[0-9a-fA-F]{4}").unwrap());
+        if re.find_iter(raw).take(2).count() >= 2 {
+            if let Some(decoded) = decode_unicode_escapes(raw) {
+                if decoded != raw {
+                    let safe = sanitize_decoded_output(&decoded);
+                    return Some((
+                        safe,
+                        "解码 Unicode 中文".to_string(),
+                        "已将 \\uXXXX 转义解码为可读文本".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
+    // 2. UTF-8 `%XX` 百分号编码还原
+    if trimmed.contains('%') {
+        static PCT_RE: OnceLock<Regex> = OnceLock::new();
+        let re = PCT_RE.get_or_init(|| Regex::new(r"(?:%[0-9a-fA-F]{2}){2,}").unwrap());
+        if re.is_match(trimmed) {
+            if let Some(unescaped) = decode_percent_utf8(raw) {
+                if unescaped != raw && has_newly_decoded_non_ascii_or_uri_delim(raw, &unescaped) {
+                    let safe = sanitize_decoded_output(&unescaped);
+                    return Some((
+                        safe,
+                        "URL 解码还原".to_string(),
+                        "已将 %XX 编码还原为可读中文/符号".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
+    // 3. HTML 实体转义
+    if trimmed.contains('&') && trimmed.contains(';') {
+        static HTML_ENT_RE: OnceLock<Regex> = OnceLock::new();
+        let re = HTML_ENT_RE.get_or_init(|| {
+            Regex::new(
+                r"(?i)&(?:lt|gt|quot|apos|amp|nbsp|copy|reg|mdash|ndash|hellip|#\d{2,7}|#x[0-9a-fA-F]{2,6});",
+            )
+            .unwrap()
+        });
+        if re.is_match(trimmed) {
+            let decoded = decode_html_entities(raw);
+            if decoded != raw {
+                let safe = sanitize_decoded_output(&decoded);
+                return Some((
+                    safe,
+                    "解码 HTML 实体".to_string(),
+                    "已解码 HTML 转义实体字符".to_string(),
+                ));
+            }
+        }
+    }
+
+    None
+}
+
+pub fn deduplicate_list_lines(raw: &str) -> Option<(String, usize, usize)> {
+    if !raw.contains('\n') || raw.len() > 65_536 {
+        return None;
+    }
+    let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
+    if looks_like_source_code_or_md_fence(&normalized) {
+        return None;
+    }
+
+    let lines: Vec<&str> = normalized
+        .split('\n')
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    if !(3..=2_000).contains(&lines.len()) {
+        return None;
+    }
+    if lines.iter().any(|l| l.chars().count() > 140) {
+        return None;
+    }
+
+    let mut seen = std::collections::HashSet::with_capacity(lines.len());
+    let mut unique: Vec<&str> = Vec::with_capacity(lines.len());
+    for line in &lines {
+        if seen.insert(*line) {
+            unique.push(*line);
+        }
+    }
+    let removed = lines.len().saturating_sub(unique.len());
+    if removed == 0 || unique.is_empty() {
+        return None;
+    }
+    Some((unique.join("\n"), removed, unique.len()))
+}
+
+fn looks_like_source_code_or_md_fence(text: &str) -> bool {
+    if text.contains("```") || text.contains("{\n") || text.contains("\n}") || text.contains(";\n")
+    {
+        return true;
+    }
+    const CODE_KEYWORDS: &[&str] = &[
+        "func ", "def ", "class ", "struct ", "import ", "#include", "public ", "private ",
+        "const ", "let ", "var ", "return ", "SELECT ", "FROM ",
+    ];
+    CODE_KEYWORDS.iter().any(|kw| text.contains(kw))
+}
+
+fn sanitize_decoded_output(decoded: &str) -> String {
+    if matches!(
+        inspect_clipboard_poison(decoded),
+        Some(PoisonThreatKind::PastejackingOrBidi(_))
+    ) {
+        let clean = sanitize_clipboard_poison(decoded);
+        if clean.is_empty() {
+            decoded.to_string()
+        } else {
+            clean
+        }
+    } else {
+        decoded.to_string()
+    }
+}
+
+fn has_newly_decoded_non_ascii_or_uri_delim(orig: &str, decoded: &str) -> bool {
+    let orig_non_ascii = orig.chars().filter(|c| !c.is_ascii()).count();
+    let dec_non_ascii = decoded.chars().filter(|c| !c.is_ascii()).count();
+    if dec_non_ascii > orig_non_ascii {
+        return true;
+    }
+    let lower = orig.to_ascii_lowercase();
+    lower.contains("%2f") || lower.contains("%3a")
+}
+
+fn decode_unicode_escapes(input: &str) -> Option<String> {
+    let chars: Vec<char> = input.chars().collect();
+    let n = chars.len();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0usize;
+    let mut converted_any = false;
+
+    let parse_hex4 = |pos: usize| -> Option<u16> {
+        if pos + 4 > n {
+            return None;
+        }
+        let s: String = chars[pos..pos + 4].iter().collect();
+        u16::from_str_radix(&s, 16).ok()
+    };
+
+    while i < n {
+        if chars[i] == '\\' && i + 5 < n && chars[i + 1] == 'u' {
+            if let Some(u1) = parse_hex4(i + 2) {
+                if (0xD800..=0xDBFF).contains(&u1)
+                    && i + 11 < n
+                    && chars[i + 6] == '\\'
+                    && chars[i + 7] == 'u'
+                {
+                    if let Some(u2) = parse_hex4(i + 8) {
+                        if (0xDC00..=0xDFFF).contains(&u2) {
+                            let cp =
+                                0x10000 + (((u1 - 0xD800) as u32) << 10 | ((u2 - 0xDC00) as u32));
+                            if let Some(ch) = char::from_u32(cp) {
+                                out.push(ch);
+                                converted_any = true;
+                                i += 12;
+                                continue;
+                            }
+                        }
+                    }
+                } else if let Some(ch) = char::from_u32(u1 as u32) {
+                    out.push(ch);
+                    converted_any = true;
+                    i += 6;
+                    continue;
+                }
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    if converted_any {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+fn decode_percent_utf8(input: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut out_bytes = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+    let hex_val = |b: u8| -> Option<u8> {
+        match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            b'A'..=b'F' => Some(b - b'A' + 10),
+            _ => None,
+        }
+    };
+
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                out_bytes.push((h << 4) | l);
+                i += 3;
+                continue;
+            }
+        }
+        out_bytes.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out_bytes).ok()
+}
+
+fn decode_html_entities(input: &str) -> String {
+    let mut working = input.to_string();
+    const NAMED: &[(&str, &str)] = &[
+        ("&quot;", "\""),
+        ("&QUOT;", "\""),
+        ("&apos;", "'"),
+        ("&#39;", "'"),
+        ("&lt;", "<"),
+        ("&LT;", "<"),
+        ("&gt;", ">"),
+        ("&GT;", ">"),
+        ("&nbsp;", " "),
+        ("&NBSP;", " "),
+        ("&copy;", "©"),
+        ("&reg;", "®"),
+        ("&mdash;", "—"),
+        ("&ndash;", "–"),
+        ("&hellip;", "…"),
+    ];
+    for &(ent, rep) in NAMED {
+        if working.contains(ent) {
+            working = working.replace(ent, rep);
+        }
+    }
+    static NUM_ENT_RE: OnceLock<Regex> = OnceLock::new();
+    let re =
+        NUM_ENT_RE.get_or_init(|| Regex::new(r"(?i)&#(?:x([0-9a-fA-F]{1,6})|(\d{1,7}));").unwrap());
+    working = re
+        .replace_all(&working, |caps: &regex_lite::Captures| {
+            let code = if let Some(hx) = caps.get(1) {
+                u32::from_str_radix(hx.as_str(), 16).ok()
+            } else if let Some(dc) = caps.get(2) {
+                dc.as_str().parse::<u32>().ok()
+            } else {
+                None
+            };
+            if let Some(ch) = code.filter(|&c| c > 0).and_then(char::from_u32) {
+                ch.to_string()
+            } else {
+                caps.get(0).map(|m| m.as_str()).unwrap_or("").to_string()
+            }
+        })
+        .into_owned();
+    working.replace("&amp;", "&").replace("&AMP;", "&")
+}

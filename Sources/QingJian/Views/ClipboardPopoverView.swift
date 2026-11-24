@@ -479,9 +479,25 @@ struct ClipboardPopoverView: View {
                     draftText: $nav.quickLookDraftText,
                     preferDiffOnOpen: nav.quickLookPreferDiff,
                     onCommitPasteText: { content, toast in
+                        let currentTabs = QuickLookTabBuilder.buildTabs(for: target, store: store)
+                        let activeTabID = currentTabs.indices.contains(nav.quickLookTabIndex) ? currentTabs[nav.quickLookTabIndex].id : nil
+                        let latestSensitiveDiff: Bool = {
+                            guard activeTabID == QuickLookTabItem.diffLatestTabID,
+                                  let latest = store.items.first(where: { $0.type == .text || $0.type == .link }) else {
+                                return false
+                            }
+                            return latest.isBurnAfterPaste || latest.detectedSensitiveKind != nil
+                        }()
                         nav.isQuickLookEditing = false
                         nav.showQuickLook = false
-                        store.pasteCustomString(content, sourceItem: target, toast: toast, shouldAutoPaste: true, onBeforePaste: onDismiss)
+                        store.pasteCustomString(
+                            content,
+                            sourceItem: target,
+                            toast: toast,
+                            shouldAutoPaste: true,
+                            extraForceProtected: latestSensitiveDiff,
+                            onBeforePaste: onDismiss
+                        )
                     },
                     onCommitPasteImage: {
                         nav.isQuickLookEditing = false
@@ -3432,9 +3448,25 @@ struct ClipboardPopoverView: View {
                     draftText: $nav.quickLookDraftText,
                     preferDiffOnOpen: nav.quickLookPreferDiff,
                     onCommitPasteText: { content, toast in
+                        let currentTabs = QuickLookTabBuilder.buildTabs(for: target, store: store)
+                        let activeTabID = currentTabs.indices.contains(nav.quickLookTabIndex) ? currentTabs[nav.quickLookTabIndex].id : nil
+                        let latestSensitiveDiff: Bool = {
+                            guard activeTabID == QuickLookTabItem.diffLatestTabID,
+                                  let latest = store.items.first(where: { $0.type == .text || $0.type == .link }) else {
+                                return false
+                            }
+                            return latest.isBurnAfterPaste || latest.detectedSensitiveKind != nil
+                        }()
                         nav.isQuickLookEditing = false
                         nav.showQuickLook = false
-                        store.pasteCustomString(content, sourceItem: target, toast: toast, shouldAutoPaste: true, onBeforePaste: onDismiss)
+                        store.pasteCustomString(
+                            content,
+                            sourceItem: target,
+                            toast: toast,
+                            shouldAutoPaste: true,
+                            extraForceProtected: latestSensitiveDiff,
+                            onBeforePaste: onDismiss
+                        )
                     },
                     onCommitPasteImage: {
                         nav.isQuickLookEditing = false

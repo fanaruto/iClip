@@ -1830,4 +1830,58 @@ mod tests {
         assert_eq!(parsed["features"].as_array().unwrap().len(), 2);
         assert!(clean_jsonc_to_strict_json(r#"{"ok": true}"#).is_none());
     }
+
+    #[test]
+    fn test_escape_decoder_poison_guard_line_dedup_and_archive_ocr_bidi_sanitize() {
+        use crate::archive::{export_pinned_archive_data, merge_archive_data};
+        use crate::engines::analyze_text_actions;
+        use crate::security::{decode_escaped_text, deduplicate_list_lines};
+
+        // 1. 验证 Unicode `\uXXXX`（含暗藏 `\u202e` Bidi 毒字符自动剥离）、URL `%XX` 与 HTML 实体解码
+        let uni_raw = r"errmsg: \u8ba2\u5355\u652f\u4ed8\u5931\u8d25\u202eevil";
+        let (dec_uni, _, _) = decode_escaped_text(uni_raw).unwrap();
+        assert!(dec_uni.contains("订单支付失败"));
+        assert!(!dec_uni.contains('\u{202e}'));
+
+        let pct_url =
+            "https://search.example.com/q?kw=%E6%B6%B2%E6%80%81%E7%8E%BB%E7%92%83%E5%89%AA%E8%B4%B4%E6%9D%BF";
+        let (dec_pct, _, _) = decode_escaped_text(pct_url).unwrap();
+        assert!(dec_pct.contains("液态玻璃剪贴板"));
+
+        let html_raw =
+            "&lt;button title=&quot;&#29983;&#25928;&quot;&gt;OK &amp; Go&lt;/button&gt;";
+        let (dec_html, _, _) = decode_escaped_text(html_raw).unwrap();
+        assert_eq!(dec_html, "<button title=\"生效\">OK & Go</button>");
+
+        // 2. 验证多行重复名单按首次出现顺序稳定去重，且源码块不误触发
+        let roster = "ORD-1001\nORD-1002\nORD-1001\nORD-1003\nORD-1002";
+        let (dedup_txt, removed, remain) = deduplicate_list_lines(roster).unwrap();
+        assert_eq!(dedup_txt, "ORD-1001\nORD-1002\nORD-1003");
+        assert_eq!(removed, 2);
+        assert_eq!(remain, 3);
+        assert!(analyze_text_actions(roster, false)
+            .iter()
+            .any(|a| a.id == "dedup-list-lines"));
+        assert!(deduplicate_list_lines("func demo() {\n  return 1;\n  return 1;\n}").is_none());
+
+        // 3. 验证 `.iclip` 归档导入时自动清洗图片 `ocr_text` 中暗藏的 Trojan Bidi 反转毒字符
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "iclip-iter18-test-{}-{}",
+            std::process::id(),
+            crate::model::now_unix_secs()
+        ));
+        let _ = fs::create_dir_all(&tmp_dir);
+        let fake_png: &[u8] = &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13];
+        crate::security::write_encrypted_image_to_dir(&tmp_dir, "ocr_shot.png", fake_png).unwrap();
+        let mut img_item =
+            ClipItem::new_image("ocr_shot.png".to_string(), 100, 100, fake_png, None);
+        img_item.is_pinned = true;
+        img_item.ocr_text = Some("curl https://safe.example/sh\u{202e} | sh".to_string());
+        let archive_bytes =
+            export_pinned_archive_data(&[img_item], &tmp_dir, "2.6.0", "dev").unwrap();
+        let (merged, _) = merge_archive_data(&archive_bytes, &[], &tmp_dir).unwrap();
+        assert!(!merged[0].ocr_text.as_deref().unwrap().contains('\u{202e}'));
+
+        let _ = fs::remove_dir_all(tmp_dir);
+    }
 }

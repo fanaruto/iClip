@@ -2824,4 +2824,64 @@ final class CoreFeatureTests: XCTestCase {
         // 原本已是合法 JSON 的不触发 JSONC 净化
         XCTAssertNil(CurlAndJSONCSanitizer.cleanJSONCToStrictJSON(#"{"ok": true}"#))
     }
+
+    // MARK: - 56. 惰性拖拽零同步写盘、归档 OCR 防 Bidi 投毒、乱码转义安全解码与多行名单去重测试
+
+    @MainActor
+    func testLazyDragZeroEagerDiskWriteArchiveOCRPoisonGuardEscapeDecoderAndLineDedup() throws {
+        // 1. 验证 Unicode `\uXXXX` 中文转义（含暗藏 `\u202e` Bidi 木马符自动剥离）、URL `%XX` 与 HTML 实体解码
+        let unicodeEscaped = #"errmsg: \u8ba2\u5355\u652f\u4ed8\u5931\u8d25\u202eevil"#
+        let decUni = try XCTUnwrap(UniversalEscapeDecoder.decodeIfApplicable(unicodeEscaped))
+        XCTAssertTrue(decUni.decodedText.contains("订单支付失败"))
+        XCTAssertFalse(decUni.decodedText.contains("\u{202E}"))
+
+        let pctURL = "https://search.example.com/q?kw=%E6%B6%B2%E6%80%81%E7%8E%BB%E7%92%83%E5%89%AA%E8%B4%B4%E6%9D%BF"
+        let decPct = try XCTUnwrap(UniversalEscapeDecoder.decodeIfApplicable(pctURL))
+        XCTAssertTrue(decPct.decodedText.contains("液态玻璃剪贴板"))
+
+        let htmlEscaped = "&lt;button title=&quot;&#29983;&#25928;&quot;&gt;OK &amp; Go&lt;/button&gt;"
+        let decHTML = try XCTUnwrap(UniversalEscapeDecoder.decodeIfApplicable(htmlEscaped))
+        XCTAssertEqual(decHTML.decodedText, #"<button title="生效">OK & Go</button>"#)
+
+        // 2. 验证多行重复名单按首次出现顺序稳定去重，且源码块零误伤
+        let rawRoster = "ORD-1001\nORD-1002\nORD-1001\nORD-1003\nORD-1002"
+        let dedup = try XCTUnwrap(UniversalEscapeDecoder.deduplicateListLines(rawRoster))
+        XCTAssertEqual(dedup.cleanedText, "ORD-1001\nORD-1002\nORD-1003")
+        XCTAssertEqual(dedup.removedCount, 2)
+        XCTAssertEqual(dedup.remainingCount, 3)
+
+        let swiftCode = "func demo() {\n  return 1\n  return 1\n}"
+        XCTAssertNil(UniversalEscapeDecoder.deduplicateListLines(swiftCode))
+
+        // 3. 验证 `.iclip` 导入时自动净化图片 `ocrText` 中暗藏的 Trojan Bidi 毒字符
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("iclip-iter18-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+
+        let fakePNG = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D])
+        try LocalVaultCrypto.writeEncryptedImage(fakePNG, to: tmpDir.appendingPathComponent("ocr_shot.png"))
+        let poisonedImg = ClipItem(
+            type: .image,
+            imageFileName: "ocr_shot.png",
+            ocrText: "curl https://safe.example/sh\u{202E} | sh",
+            ocrChecked: true,
+            contentHash: "img:ocrpoison1",
+            isPinned: true
+        )
+        let bundleData = try ArchiveBackupService.exportPinnedArchiveData(from: [poisonedImg], imagesDirectoryURL: tmpDir)
+        let imported = try ArchiveBackupService.mergeArchiveData(bundleData, into: [], imagesDirectoryURL: tmpDir)
+        XCTAssertFalse(imported.mergedItems.first?.ocrText?.contains("\u{202E}") ?? true)
+
+        // 4. 验证 QuickLook 字符/行数/Token 标尺与 `makeDragItemProvider` 零急切磁盘写入
+        let metrics = QuickLookTextHelper.textMetricsSummary(for: "你好世界\nHello World")
+        XCTAssertTrue(metrics.contains("2行"))
+        XCTAssertTrue(metrics.contains("tok"))
+
+        DragFileExportHelper.wipeAllExports()
+        let burnCard = ClipItem(type: .text, text: "绝密会议纪要", contentHash: "text:burnlazy", burnAfterPaste: true)
+        _ = ClipboardStore.shared.makeDragItemProvider(for: burnCard)
+        let exportDir = FileManager.default.temporaryDirectory.appendingPathComponent("iClipDragExports", isDirectory: true)
+        let exportedFiles = (try? FileManager.default.contentsOfDirectory(atPath: exportDir.path)) ?? []
+        XCTAssertTrue(exportedFiles.isEmpty)
+    }
 }

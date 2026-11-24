@@ -242,8 +242,10 @@ pub fn analyze_text_actions(raw: &str, minimal_mode: bool) -> Vec<QuickAction> {
     }
     if !trimmed.contains('\n') && trimmed.len() <= 4096 {
         if let Some(public_url) = sanitize_url_for_public_share(trimmed) {
+            let pos = usize::from(actions.first().map(|a| a.id) == Some("restore-privacy-twin"))
+                .min(actions.len());
             actions.insert(
-                0,
+                pos,
                 QuickAction {
                     id: "sanitize-auth-url",
                     title: "去鉴权净链".to_string(),
@@ -261,6 +263,38 @@ pub fn analyze_text_actions(raw: &str, minimal_mode: bool) -> Vec<QuickAction> {
                 result_text: clean_url,
                 html_table_payload: None,
                 toast_text: "已剥离营销追踪参数".to_string(),
+            });
+        }
+    }
+    if actions.len() < 3
+        && raw.len() <= 32_768
+        && !actions.iter().any(|a| a.id == "jsonc-clean-strict")
+        && serde_json::from_str::<Value>(trimmed).is_err()
+    {
+        if let Some((decoded_txt, chip_title, toast_txt)) =
+            crate::security::decode_escaped_text(raw)
+        {
+            actions.push(QuickAction {
+                id: "decode-escaped-text",
+                title: chip_title,
+                is_security: false,
+                result_text: decoded_txt,
+                html_table_payload: None,
+                toast_text: toast_txt,
+            });
+        }
+    }
+    if actions.len() < 3 && raw.len() <= 65_536 && raw.contains('\n') {
+        if let Some((dedup_txt, removed_cnt, remain_cnt)) =
+            crate::security::deduplicate_list_lines(raw)
+        {
+            actions.push(QuickAction {
+                id: "dedup-list-lines",
+                title: format!("去重净列(剩{remain_cnt}行)"),
+                is_security: false,
+                result_text: dedup_txt,
+                html_table_payload: None,
+                toast_text: format!("已按原序剔除 {removed_cnt} 行重复项，保留 {remain_cnt} 行"),
             });
         }
     }

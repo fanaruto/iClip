@@ -31,6 +31,28 @@ enum QuickLookTextHelper {
             .filter { !$0.isEmpty }
         return parts.joined(separator: " ")
     }
+
+    /// 实时计算速览文本的字符数、行数与 AI 上下文 Token 估算（CJK 字约 1.2 tok，ASCII 词约 0.25 tok/char）
+    static func textMetricsSummary(for text: String) -> String {
+        let charCount = text.count
+        guard charCount > 0 else { return "0 字" }
+        var lines = 1
+        var asciiCount = 0
+        var nonAsciiCount = 0
+        for scalar in text.unicodeScalars {
+            if scalar.value == 10 { lines += 1 }
+            if scalar.value < 128 {
+                asciiCount += 1
+            } else {
+                nonAsciiCount += 1
+            }
+        }
+        let estTokens = max(1, Int((Double(asciiCount) * 0.26 + Double(nonAsciiCount) * 1.15).rounded()))
+        if lines > 1 {
+            return "\(charCount)字 · \(lines)行 · ≈\(estTokens) tok"
+        }
+        return "\(charCount)字 · ≈\(estTokens) tok"
+    }
 }
 
 /// 剪贴板历史条目与最新剪贴（`#1`）的行级差异模型
@@ -376,17 +398,10 @@ enum QuickLookTabBuilder {
         ]
 
         #if ICLIP_EDITION_FLOW
-        if !store.minimalModeEnabled && item.type == .text {
-            var actions = MeetingAndEphemeralEngine.analyze(rawText)
-            if actions.isEmpty { actions = ComplianceCodeEngine.analyze(rawText) }
-            if actions.isEmpty { actions = TableBridgeEngine.analyze(rawText) }
-            if actions.isEmpty { actions = FinanceNumberEngine.analyze(rawText) }
-            if actions.isEmpty { actions = DocumentTypographyEngine.analyze(rawText) }
-            let ranked = AdaptiveIntelligenceEngine.shared.rankActions(
-                actions,
-                idOf: \.id,
-                sourceApp: item.sourceAppName
-            )
+        if !store.minimalModeEnabled && (item.type == .text || item.type == .link) {
+            let ranked = store.financeActions(for: item).filter {
+                $0.id != "todo-split-checklist" && $0.id != "contact-split-queue"
+            }
             for action in ranked {
                 list.append(
                     QuickLookTabItem(
@@ -575,7 +590,11 @@ struct SemanticQuickLookOverlay: View {
                 .font(.system(size: 12.5, weight: .semibold))
                 .lineLimit(1)
 
-            Text("· \(item.subtitleInfo)")
+            Text(
+                activeTab?.textValue != nil
+                    ? "· \(QuickLookTextHelper.textMetricsSummary(for: isEditing ? draftText : (activeTab?.textValue ?? "")))"
+                    : "· \(item.subtitleInfo)"
+            )
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)

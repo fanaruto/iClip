@@ -5,6 +5,7 @@ import ImageIO
 import CryptoKit
 import ApplicationServices
 import ServiceManagement
+import UniformTypeIdentifiers
 
 /// 隐私忽略来源应用条目
 struct IgnoredAppEntry: Identifiable, Codable, Equatable {
@@ -1373,29 +1374,53 @@ final class ClipboardStore: ObservableObject {
         lastInternalDragUptime = -100
     }
 
-    /// 将 iClip 面板内的条目（文本 / 链接 / 图片 / 文件）包装为原生 NSItemProvider，支持直接拖出至任意外部应用
+    /// 将 iClip 面板内的条目（文本 / 链接 / 图片 / 文件）包装为原生 NSItemProvider：
+    /// 采用后台按需惰性交付（Lazy Drop-Time Delivery），点按或微移卡片 0 字节磁盘写入、0.0ms 主线程解密开销，且仅在外部窗口真正接收 Drop 时才触发 5s 粘贴即焚自毁
     func makeDragItemProvider(for item: ClipItem) -> NSItemProvider {
         lastInternalDragUptime = ProcessInfo.processInfo.systemUptime
-        if item.isBurnAfterPaste {
-            scheduleBurnAfterPasteIfNeeded(for: item, delaySeconds: 5.0)
+        let itemSnapshot = item
+
+        let notifyBurnOnActualDrop: @Sendable () -> Void = { [weak self] in
+            guard itemSnapshot.isBurnAfterPaste else { return }
+            Task { @MainActor [weak self] in
+                self?.scheduleBurnAfterPasteIfNeeded(for: itemSnapshot, delaySeconds: 5.0)
+            }
         }
 
         switch item.type {
         case .image:
-            if let fileName = item.imageFileName {
-                let url = imagesDirectoryURL.appendingPathComponent(fileName)
-                if FileManager.default.fileExists(atPath: url.path) {
-                    let exportURL = DragFileExportHelper.materializeExportFile(for: item, sourceImageURL: url)?.url ?? url
-                    if let provider = NSItemProvider(contentsOf: exportURL) {
-                        provider.suggestedName = exportURL.lastPathComponent
-                        return provider
+            if let srcURL = imageURL(for: item), FileManager.default.fileExists(atPath: srcURL.path) {
+                let provider = NSItemProvider()
+                provider.suggestedName = DragFileExportHelper.suggestedFileName(for: item, ext: "png")
+                provider.registerFileRepresentation(
+                    forTypeIdentifier: UTType.png.identifier,
+                    fileOptions: [],
+                    visibility: .all
+                ) { completion in
+                    notifyBurnOnActualDrop()
+                    if let exported = DragFileExportHelper.materializeExportFile(for: itemSnapshot, sourceImageURL: srcURL) {
+                        completion(exported.url, false, nil)
+                    } else {
+                        completion(nil, false, nil)
                     }
+                    return nil
                 }
+                provider.registerDataRepresentation(
+                    forTypeIdentifier: UTType.png.identifier,
+                    visibility: .all
+                ) { completion in
+                    notifyBurnOnActualDrop()
+                    let plainData = LocalVaultCrypto.readDecryptedImageData(at: srcURL)
+                    completion(plainData, nil)
+                    return nil
+                }
+                return provider
             }
             if let nsImage = cachedThumbnail(for: item), let tiff = nsImage.tiffRepresentation {
                 let provider = NSItemProvider()
                 provider.suggestedName = DragFileExportHelper.suggestedFileName(for: item, ext: "png")
                 provider.registerDataRepresentation(forTypeIdentifier: "public.tiff", visibility: .all) { completion in
+                    notifyBurnOnActualDrop()
                     completion(tiff, nil)
                     return nil
                 }
@@ -1406,9 +1431,22 @@ final class ClipboardStore: ObservableObject {
         case .file:
             if let firstPath = item.filePaths?.first {
                 let fileURL = URL(fileURLWithPath: firstPath)
-                if FileManager.default.fileExists(atPath: firstPath),
-                   let provider = NSItemProvider(contentsOf: fileURL) {
+                if FileManager.default.fileExists(atPath: firstPath) {
+                    if !item.isBurnAfterPaste, let provider = NSItemProvider(contentsOf: fileURL) {
+                        provider.suggestedName = fileURL.lastPathComponent
+                        return provider
+                    }
+                    let provider = NSItemProvider()
                     provider.suggestedName = fileURL.lastPathComponent
+                    provider.registerFileRepresentation(
+                        forTypeIdentifier: UTType.data.identifier,
+                        fileOptions: [],
+                        visibility: .all
+                    ) { completion in
+                        notifyBurnOnActualDrop()
+                        completion(fileURL, false, nil)
+                        return nil
+                    }
                     return provider
                 }
                 return NSItemProvider(object: (fileURL as NSURL))
@@ -1417,6 +1455,16 @@ final class ClipboardStore: ObservableObject {
 
         case .link:
             let raw = (item.text ?? item.primaryTitle).trimmingCharacters(in: .whitespacesAndNewlines)
+            if item.isBurnAfterPaste {
+                let provider = NSItemProvider()
+                let rawData = Data(raw.utf8)
+                provider.registerDataRepresentation(forTypeIdentifier: UTType.utf8PlainText.identifier, visibility: .all) { completion in
+                    notifyBurnOnActualDrop()
+                    completion(rawData, nil)
+                    return nil
+                }
+                return provider
+            }
             if let url = URL(string: raw) {
                 return NSItemProvider(object: url as NSURL)
             }
@@ -1424,12 +1472,24 @@ final class ClipboardStore: ObservableObject {
 
         case .text:
             let raw = item.text ?? item.primaryTitle
-            // 按住 ⌥ 拖拽任意文本卡片时，强制物化为带语义扩展名的真实文件（直投微信/飞书/网页上传框/桌面）
-            if NSEvent.modifierFlags.contains(.option),
+            // 按住 ⌥ 拖拽非即焚文本卡片时，强制物化为带语义扩展名的真实文件（直投微信/飞书/网页上传框/桌面）
+            if !item.isBurnAfterPaste,
+               NSEvent.modifierFlags.contains(.option),
                let exported = DragFileExportHelper.materializeExportFile(for: item),
                let fileProvider = NSItemProvider(contentsOf: exported.url) {
                 fileProvider.suggestedName = exported.url.lastPathComponent
                 return fileProvider
+            }
+
+            if item.isBurnAfterPaste {
+                let provider = NSItemProvider()
+                let rawData = Data(raw.utf8)
+                provider.registerDataRepresentation(forTypeIdentifier: UTType.utf8PlainText.identifier, visibility: .all) { completion in
+                    notifyBurnOnActualDrop()
+                    completion(rawData, nil)
+                    return nil
+                }
+                return provider
             }
 
             let provider = NSItemProvider(object: raw as NSString)
@@ -1439,9 +1499,8 @@ final class ClipboardStore: ObservableObject {
                 ext: spec.ext,
                 fallbackStem: spec.fallbackStem
             )
-            // 对 SVG / JSON / HTML / CSV / 脚本 / Markdown 同时附带标准文件表示（粘贴即焚高机密卡片禁止静默落盘临时文件）
-            if !item.isBurnAfterPaste && spec.utType != .utf8PlainText && spec.utType != .plainText {
-                let itemSnapshot = item
+            // 对 SVG / JSON / HTML / CSV / 脚本 / Markdown 同时附带标准文件表示
+            if spec.utType != .utf8PlainText && spec.utType != .plainText {
                 provider.registerFileRepresentation(
                     forTypeIdentifier: spec.utType.identifier,
                     fileOptions: [],
@@ -3240,6 +3299,7 @@ final class ClipboardStore: ObservableObject {
         sourceItem: ClipItem,
         toast: String,
         shouldAutoPaste: Bool = true,
+        extraForceProtected: Bool = false,
         onBeforePaste: (() -> Void)? = nil
     ) {
         pasteboard.clearContents()
@@ -3250,8 +3310,8 @@ final class ClipboardStore: ObservableObject {
         }
         commitOutboundPasteboardGuard(
             for: text,
-            forceProtected: sourceItem.isBurnAfterPaste,
-            isPinnedSource: sourceItem.isPinned,
+            forceProtected: sourceItem.isBurnAfterPaste || extraForceProtected,
+            isPinnedSource: sourceItem.isPinned && !extraForceProtected,
             scrubDelay: sourceItem.isBurnAfterPaste ? 5.0 : 45.0
         )
 
@@ -3629,6 +3689,30 @@ final class ClipboardStore: ObservableObject {
                     toastText: "已剥除注释与尾随逗号，转为标准合法 JSON"
                 ),
                 at: 0
+            )
+        }
+        if analyzed.count < 3, raw.utf8.count <= 32_768,
+           let decoded = UniversalEscapeDecoder.decodeIfApplicable(raw) {
+            analyzed.append(
+                FinanceQuickAction(
+                    id: "decode-escaped-text",
+                    title: decoded.chipTitle,
+                    symbolName: "character.bubble",
+                    resultText: decoded.decodedText,
+                    toastText: decoded.toastText
+                )
+            )
+        }
+        if analyzed.count < 3, raw.utf8.count <= 65_536,
+           let dedup = UniversalEscapeDecoder.deduplicateListLines(raw) {
+            analyzed.append(
+                FinanceQuickAction(
+                    id: "dedup-list-lines",
+                    title: "去重净列(剩\(dedup.remainingCount)行)",
+                    symbolName: "line.3.horizontal.decrease.circle",
+                    resultText: dedup.cleanedText,
+                    toastText: "已按原序剔除 \(dedup.removedCount) 行重复项，保留 \(dedup.remainingCount) 行"
+                )
             )
         }
         if !raw.contains("\n"),
