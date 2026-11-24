@@ -3099,5 +3099,34 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertEqual(InstantMathEvaluator.evaluate("180 min")?.plainValue, "3 h")
         XCTAssertNil(InstantMathEvaluator.evaluate("3f"))
         XCTAssertNil(InstantMathEvaluator.evaluate("100c"))
+
+        // 8. 第 25 轮自省：验证 OWASP `|` 公式注入转义与 AI 混排文字中内嵌 Markdown 表格自动寻址直粘 Excel
+        XCTAssertEqual(TableBridgeEngine.sanitizeSpreadsheetCell("|calc.exe"), "'|calc.exe")
+        let aiMixedReply = """
+        好的，为您整理了本季度的供应商报价对比如下：
+
+        | 供应商 | 单价 | 交付周期 |
+        | :--- | :---: | ---: |
+        | 方案甲 | 1280 | 3个工作日 |
+        | 方案乙 | 960 | 5个工作日 |
+
+        建议综合考虑交付时效选择方案甲。
+        """
+        let tblActs = TableBridgeEngine.analyze(aiMixedReply)
+        let excelAct = try XCTUnwrap(tblActs.first(where: { $0.id == "tbl-md-to-excel" }))
+        XCTAssertTrue(excelAct.resultText.contains("供应商\t单价\t交付周期"))
+        XCTAssertTrue(excelAct.resultText.contains("方案甲\t1280\t3个工作日"))
+        XCTAssertFalse(excelAct.resultText.contains("建议综合考虑"))
+
+        // 验证 CWE-409 压缩炸弹（50000×50000 伪造 PNG IHDR）零像素解码拦截
+        var bombPNG = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+        bombPNG.append(contentsOf: [0x00, 0x00, 0x00, 0x0D]) // IHDR length = 13
+        bombPNG.append(contentsOf: [0x49, 0x48, 0x44, 0x52]) // "IHDR"
+        bombPNG.append(contentsOf: [0x00, 0x00, 0xC3, 0x50]) // width = 50000
+        bombPNG.append(contentsOf: [0x00, 0x00, 0xC3, 0x50]) // height = 50000
+        bombPNG.append(contentsOf: [0x08, 0x06, 0x00, 0x00, 0x00]) // 8-bit RGBA
+        bombPNG.append(contentsOf: [0x00, 0x00, 0x00, 0x00]) // CRC placeholder
+        XCTAssertFalse(ImageStudioEngine.hasSafeImageDimensions(in: bombPNG))
+        XCTAssertNil(ImageStudioEngine.renderAppleMockupFrame(from: bombPNG))
     }
 }

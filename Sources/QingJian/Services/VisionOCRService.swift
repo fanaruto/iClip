@@ -15,7 +15,8 @@ enum VisionOCRService {
     static func detectBarcodesFast(in imageData: Data) -> String? {
         autoreleasepool {
             guard !imageData.isEmpty,
-                  let source = CGImageSourceCreateWithData(imageData as CFData, nil) else {
+                  let source = CGImageSourceCreateWithData(imageData as CFData, nil),
+                  ImageStudioEngine.hasSafeImageDimensions(source) else {
                 return nil
             }
             let thumbOptions: [CFString: Any] = [
@@ -89,7 +90,8 @@ enum VisionOCRService {
     private static func performSyncRecognition(at url: URL) -> String? {
         autoreleasepool {
             guard let imgData = LocalVaultCrypto.readDecryptedImageData(at: url),
-                  let source = CGImageSourceCreateWithData(imgData as CFData, nil) else {
+                  let source = CGImageSourceCreateWithData(imgData as CFData, nil),
+                  ImageStudioEngine.hasSafeImageDimensions(source) else {
                 return nil
             }
             // 使用 ImageIO 硬件降采样至最大 2048px 长边，5K 截图峰值内存直降 75%，文字识别精度不受损

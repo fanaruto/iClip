@@ -14,11 +14,45 @@ enum ImageStudioEngine {
         let byteCount: Int
     }
 
+    /// 零像素分配前置校验图像宽高，阻断恶意压缩炸弹（Decompression Bomb / CWE-409）耗尽进程内存
+    static func hasSafeImageDimensions(
+        _ source: CGImageSource,
+        maxSingleEdge: Int = 16_384,
+        maxTotalPixels: Int64 = 67_108_864
+    ) -> Bool {
+        guard CGImageSourceGetCount(source) > 0,
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let wNum = props[kCGImagePropertyPixelWidth] as? NSNumber,
+              let hNum = props[kCGImagePropertyPixelHeight] as? NSNumber else {
+            return false
+        }
+        let w = wNum.int64Value
+        let h = hNum.int64Value
+        guard w > 0, h > 0, w <= Int64(maxSingleEdge), h <= Int64(maxSingleEdge) else {
+            return false
+        }
+        let (total, overflow) = w.multipliedReportingOverflow(by: h)
+        return !overflow && total <= maxTotalPixels
+    }
+
+    static func hasSafeImageDimensions(
+        in data: Data,
+        maxSingleEdge: Int = 16_384,
+        maxTotalPixels: Int64 = 67_108_864
+    ) -> Bool {
+        guard !data.isEmpty,
+              let source = CGImageSourceCreateWithData(data as CFData, nil) else {
+            return false
+        }
+        return hasSafeImageDimensions(source, maxSingleEdge: maxSingleEdge, maxTotalPixels: maxTotalPixels)
+    }
+
     /// 将本地 PNG 截图转换为高画质轻量 JPEG（自动垫白底防止透明通道变黑底，体积通常缩减 80%~92%）
     static func compressToLightweightJPEG(at imageURL: URL, quality: CGFloat = 0.78, maxEdge: Int = 2560) -> ProcessedImageResult? {
         autoreleasepool {
             guard let imgData = LocalVaultCrypto.readDecryptedImageData(at: imageURL),
-                  let source = CGImageSourceCreateWithData(imgData as CFData, nil) else {
+                  let source = CGImageSourceCreateWithData(imgData as CFData, nil),
+                  hasSafeImageDimensions(source) else {
                 return nil
             }
             let thumbOpts: [CFString: Any] = [
@@ -103,6 +137,7 @@ enum ImageStudioEngine {
 
     private static func renderAppleMockupFrame(fromSource source: CGImageSource, maxSourceEdge: Int) -> ProcessedImageResult? {
         autoreleasepool {
+            guard hasSafeImageDimensions(source) else { return nil }
             let thumbOpts: [CFString: Any] = [
                 kCGImageSourceCreateThumbnailFromImageAlways: true,
                 kCGImageSourceCreateThumbnailWithTransform: true,
@@ -209,13 +244,14 @@ enum ImageStudioEngine {
     // MARK: - 离线 Vision 坐标级「截图隐私一键智能打码」（自动定位二维码 / 密钥 / 身份证 / 银行卡 / 手机 / 邮箱 / 密码值）
 
     private static let imageInlineSecretRegexes: [(regex: NSRegularExpression, valueGroup: Int)] = [
-        (try! NSRegularExpression(pattern: #"\b(?:sk-(?:proj-|ant-|live_|test_)?[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{24,}|glpat-[A-Za-z0-9_-]{16,}|AIzaSy[A-Za-z0-9_-]{28,}|AKIA[0-9A-Z]{16})\b"#), 0),
+        (try! NSRegularExpression(pattern: #"\b(?:sk-or-v1-[A-Za-z0-9_-]{24,}|sk-(?:proj-|ant-|live_|test_)?[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{24,}|glpat-[A-Za-z0-9_-]{16,}|hf_[A-Za-z0-9]{24,}|gsk_[A-Za-z0-9]{24,}|pplx-[A-Za-z0-9]{24,}|ntn_[A-Za-z0-9]{24,}|secret_[A-Za-z0-9]{24,}|sbp_[A-Za-z0-9]{24,}|lin_api_[A-Za-z0-9]{20,}|dapi[0-9a-f]{32}|re_[A-Za-z0-9_]{20,}|npm_[A-Za-z0-9]{24,}|pypi-[A-Za-z0-9_-]{32,}|AIzaSy[A-Za-z0-9_-]{28,}|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|LTAI[A-Za-z0-9]{12,24}|xox[baprs]-[A-Za-z0-9-]{16,}|eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})\b"#), 0),
+        (try! NSRegularExpression(pattern: #"(?i)\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|rediss|amqp|amqps)://(?:[^/\s:@]*:)([^@\s/]{4,})@"#), 1),
         (try! NSRegularExpression(pattern: #"(?<![0-9A-Za-z])[1-8]\d{5}(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[0-9Xx](?![0-9A-Za-z])"#), 0),
         (try! NSRegularExpression(pattern: #"(?<![0-9A-Za-z])(?:62\d{14,17}|4\d{15}|5[1-5]\d{14}|3[47]\d{13})(?![0-9A-Za-z])"#), 0),
         (try! NSRegularExpression(pattern: #"(?<![0-9])1[3-9]\d{9}(?![0-9])"#), 0),
         (try! NSRegularExpression(pattern: #"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"#), 0),
         (try! NSRegularExpression(pattern: #"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3})\b"#), 0),
-        (try! NSRegularExpression(pattern: #"(?i)(?:密码|口令|提取码|验证码|password|passwd|secret|api[_-]?key|access[_-]?token)\s*[:=：]\s*([^\s,，;；]{4,})"#), 1)
+        (try! NSRegularExpression(pattern: #"(?i)(?:密码|口令|提取码|验证码|password|passwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|[a-z0-9_]+_token|signing[_-]?key|master[_-]?key|encryption[_-]?key|accountkey)\s*[:=：]\s*([^\s,，;；'"]{6,})"#), 1)
     ]
 
     /// 离线扫描截图中的敏感文字与二维码包围盒，生成物理不可逆的圆角晶格马赛克打码图（原图局部文字保持 100% 锐利）
@@ -234,7 +270,8 @@ enum ImageStudioEngine {
         maxEdge: Int = 2560
     ) -> (result: ProcessedImageResult, redactedCount: Int)? {
         autoreleasepool {
-            guard let source = CGImageSourceCreateWithData(imageData as CFData, nil) else {
+            guard let source = CGImageSourceCreateWithData(imageData as CFData, nil),
+                  hasSafeImageDimensions(source) else {
                 return nil
             }
             let thumbOpts: [CFString: Any] = [
@@ -452,7 +489,7 @@ enum ImageStudioEngine {
                 }
                 return CGImageSourceCreateWithURL(imageURL as CFURL, nil)
             }()
-            guard let source = sourceOpt else { return nil }
+            guard let source = sourceOpt, hasSafeImageDimensions(source) else { return nil }
 
             let thumbOpts: [CFString: Any] = [
                 kCGImageSourceCreateThumbnailFromImageAlways: true,

@@ -1181,9 +1181,12 @@ final class ClipboardStore: ObservableObject {
                 let isMinimal = self.minimalModeEnabled
                 Task.detached(priority: .utility) { [weak self] in
                     let finalPNG: Data?
-                    if let rawPNG {
+                    if let rawPNG, ImageStudioEngine.hasSafeImageDimensions(in: rawPNG) {
                         finalPNG = rawPNG
-                    } else if let rawTIFF, let bitmap = NSBitmapImageRep(data: rawTIFF) {
+                    } else if rawPNG == nil,
+                              let rawTIFF,
+                              ImageStudioEngine.hasSafeImageDimensions(in: rawTIFF),
+                              let bitmap = NSBitmapImageRep(data: rawTIFF) {
                         finalPNG = bitmap.representation(using: .png, properties: [:])
                     } else {
                         finalPNG = nil
@@ -1897,23 +1900,28 @@ final class ClipboardStore: ObservableObject {
 
     /// 将任意图片数据（JPG/WebP/HEIC/PNG/TIFF/GIF）标准化解码为通用 PNG + TIFF 双格式字节流
     private static func normalizeImageForClipboard(from rawData: Data) -> NormalizedClipboardImage? {
-        guard let source = CGImageSourceCreateWithData(rawData as CFData, nil),
-              let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
-            guard let nsImage = NSImage(data: rawData),
-                  let tiff = nsImage.tiffRepresentation,
-                  let rep = NSBitmapImageRep(data: tiff),
-                  let png = rep.representation(using: .png, properties: [:]) else {
+        if let source = CGImageSourceCreateWithData(rawData as CFData, nil) {
+            guard ImageStudioEngine.hasSafeImageDimensions(source),
+                  let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
                 return nil
             }
-            return NormalizedClipboardImage(pngData: png, tiffData: tiff, cgImage: rep.cgImage)
+            let rep = NSBitmapImageRep(cgImage: cgImage)
+            guard let pngData = rep.representation(using: .png, properties: [:]),
+                  let tiffData = rep.tiffRepresentation else {
+                return nil
+            }
+            return NormalizedClipboardImage(pngData: pngData, tiffData: tiffData, cgImage: cgImage)
         }
 
-        let rep = NSBitmapImageRep(cgImage: cgImage)
-        guard let pngData = rep.representation(using: .png, properties: [:]),
-              let tiffData = rep.tiffRepresentation else {
+        guard rawData.count <= 32 * 1024 * 1024,
+              let nsImage = NSImage(data: rawData),
+              let tiff = nsImage.tiffRepresentation,
+              ImageStudioEngine.hasSafeImageDimensions(in: tiff),
+              let rep = NSBitmapImageRep(data: tiff),
+              let png = rep.representation(using: .png, properties: [:]) else {
             return nil
         }
-        return NormalizedClipboardImage(pngData: pngData, tiffData: tiffData, cgImage: cgImage)
+        return NormalizedClipboardImage(pngData: png, tiffData: tiff, cgImage: rep.cgImage)
     }
 
     /// 写入纯正的 PNG + TIFF 双格式到系统剪贴板（不夹带受保护的私有容器 fileURL，确保任何目标应用 ⌘V 100% 粘出原图）
@@ -1982,9 +1990,12 @@ final class ClipboardStore: ObservableObject {
         let isMinimal = self.minimalModeEnabled
         Task.detached(priority: .utility) { [weak self] in
             let finalPNG: Data?
-            if let rawPNG {
+            if let rawPNG, ImageStudioEngine.hasSafeImageDimensions(in: rawPNG) {
                 finalPNG = rawPNG
-            } else if let rawTIFF, let bitmap = NSBitmapImageRep(data: rawTIFF) {
+            } else if rawPNG == nil,
+                      let rawTIFF,
+                      ImageStudioEngine.hasSafeImageDimensions(in: rawTIFF),
+                      let bitmap = NSBitmapImageRep(data: rawTIFF) {
                 finalPNG = bitmap.representation(using: .png, properties: [:])
             } else {
                 finalPNG = nil
@@ -4738,7 +4749,8 @@ final class ClipboardStore: ObservableObject {
 
     nonisolated static func decodeImage(at url: URL, maxPixelSize: Int) -> NSImage? {
         guard let imgData = LocalVaultCrypto.readDecryptedImageData(at: url),
-              let source = CGImageSourceCreateWithData(imgData as CFData, nil) else {
+              let source = CGImageSourceCreateWithData(imgData as CFData, nil),
+              ImageStudioEngine.hasSafeImageDimensions(source) else {
             return nil
         }
         let options: [CFString: Any] = [

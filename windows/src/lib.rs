@@ -2190,5 +2190,33 @@ mod tests {
         );
         assert!(crate::intelligence::evaluate_instant_math("3f", None).is_none());
         assert!(crate::intelligence::evaluate_instant_math("100c", None).is_none());
+
+        // 9. 第 25 轮自省：验证 OWASP `|` 公式注入转义、压缩炸弹维度门控与 AI 混排段落内嵌 Markdown 表格自动寻址直粘
+        assert_eq!(
+            crate::security::sanitize_spreadsheet_cell("|calc.exe"),
+            "'|calc.exe"
+        );
+        // 伪造超界 PNG IHDR 头（width = 50000, height = 50000），验证零解码直接拦截
+        let mut bomb_png = vec![
+            0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, b'I', b'H',
+            b'D', b'R',
+        ];
+        bomb_png.extend_from_slice(&50_000u32.to_be_bytes());
+        bomb_png.extend_from_slice(&50_000u32.to_be_bytes());
+        bomb_png.extend_from_slice(&[8, 6, 0, 0, 0, 0, 0, 0, 0]);
+        assert!(!crate::engines::has_safe_raster_dimensions_in_memory(
+            &bomb_png
+        ));
+        assert!(crate::engines::compress_png_to_white_bg_jpeg(&bomb_png, 80).is_none());
+
+        let ai_mixed_tbl = "好的，为您整理对比如下：\n\n| 供应商 | 单价 | 周期 |\n| :--- | :---: | ---: |\n| 方案甲 | 1280 | 3天 |\n| 方案乙 | 960 | 5天 |\n\n建议优先选方案甲。";
+        let mixed_acts = analyze_text_actions(ai_mixed_tbl, false);
+        let excel_act = mixed_acts
+            .iter()
+            .find(|a| a.id == "tbl-md-to-excel")
+            .unwrap();
+        assert!(excel_act.result_text.contains("供应商\t单价\t周期"));
+        assert!(excel_act.result_text.contains("方案甲\t1280\t3天"));
+        assert!(!excel_act.result_text.contains("建议优先选方案甲"));
     }
 }

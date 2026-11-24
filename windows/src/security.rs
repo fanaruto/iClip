@@ -2806,7 +2806,7 @@ pub fn sanitize_spreadsheet_cell(raw: &str) -> String {
     let Some(first) = trimmed_lead.chars().next() else {
         return raw.to_string();
     };
-    if matches!(first, '=' | '@' | '\t' | '\r') {
+    if matches!(first, '=' | '@' | '|' | '\t' | '\r' | '\n') {
         return format!("'{raw}");
     }
     if first == '+' || first == '-' {

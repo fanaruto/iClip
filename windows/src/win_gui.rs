@@ -2696,39 +2696,56 @@ unsafe fn read_dib_as_png_from_clipboard(hwnd: HWND) -> Option<(Vec<u8>, u32, u3
     let bpp = hdr.biBitCount;
 
     let mut result = None;
-    if (bpp == 32 || bpp == 24) && w > 0 && h > 0 && w <= 8192 && h <= 8192 {
-        let header_bytes = hdr.biSize as usize;
+    let is_uncompressed = hdr.biCompression == BI_RGB || hdr.biCompression == 3;
+    if is_uncompressed && (bpp == 32 || bpp == 24) && w > 0 && h > 0 && w <= 8192 && h <= 8192 {
+        let mask_extra =
+            if hdr.biCompression == 3 && hdr.biSize == size_of::<BITMAPINFOHEADER>() as u32 {
+                12usize
+            } else {
+                0usize
+            };
+        let header_bytes = (hdr.biSize as usize).saturating_add(mask_extra);
         let stride = (((w as usize * bpp as usize) + 31) & !31) / 8;
-        if header_bytes + stride * (h as usize) <= total_size {
-            let pixels = std::slice::from_raw_parts(ptr.add(header_bytes), stride * (h as usize));
-            let mut rgba = vec![0u8; (w * h * 4) as usize];
-            for y in 0..h as usize {
-                let src_row = if top_down { y } else { (h as usize) - 1 - y };
-                let row_slice = &pixels[src_row * stride..];
-                for x in 0..w as usize {
-                    let dst_idx = (y * w as usize + x) * 4;
-                    if bpp == 32 {
-                        let s = x * 4;
-                        rgba[dst_idx] = row_slice[s + 2];
-                        rgba[dst_idx + 1] = row_slice[s + 1];
-                        rgba[dst_idx + 2] = row_slice[s];
-                        let a = row_slice[s + 3];
-                        rgba[dst_idx + 3] = if a == 0 { 255 } else { a };
-                    } else {
-                        let s = x * 3;
-                        rgba[dst_idx] = row_slice[s + 2];
-                        rgba[dst_idx + 1] = row_slice[s + 1];
-                        rgba[dst_idx + 2] = row_slice[s];
-                        rgba[dst_idx + 3] = 255;
+        let pixel_span = stride.checked_mul(h as usize);
+        let rgba_len = (w as usize)
+            .checked_mul(h as usize)
+            .and_then(|px| px.checked_mul(4));
+        if let (Some(span), Some(out_len)) = (pixel_span, rgba_len) {
+            if header_bytes >= size_of::<BITMAPINFOHEADER>()
+                && header_bytes
+                    .checked_add(span)
+                    .is_some_and(|end| end <= total_size)
+            {
+                let pixels = std::slice::from_raw_parts(ptr.add(header_bytes), span);
+                let mut rgba = vec![0u8; out_len];
+                for y in 0..h as usize {
+                    let src_row = if top_down { y } else { (h as usize) - 1 - y };
+                    let row_slice = &pixels[src_row * stride..];
+                    for x in 0..w as usize {
+                        let dst_idx = (y * w as usize + x) * 4;
+                        if bpp == 32 {
+                            let s = x * 4;
+                            rgba[dst_idx] = row_slice[s + 2];
+                            rgba[dst_idx + 1] = row_slice[s + 1];
+                            rgba[dst_idx + 2] = row_slice[s];
+                            let a = row_slice[s + 3];
+                            rgba[dst_idx + 3] = if a == 0 { 255 } else { a };
+                        } else {
+                            let s = x * 3;
+                            rgba[dst_idx] = row_slice[s + 2];
+                            rgba[dst_idx + 1] = row_slice[s + 1];
+                            rgba[dst_idx + 2] = row_slice[s];
+                            rgba[dst_idx + 3] = 255;
+                        }
                     }
                 }
-            }
-            let mut png_out = Vec::new();
-            if PngEncoder::new(&mut png_out)
-                .write_image(&rgba, w, h, ColorType::Rgba8.into())
-                .is_ok()
-            {
-                result = Some((png_out, w, h));
+                let mut png_out = Vec::new();
+                if PngEncoder::new(&mut png_out)
+                    .write_image(&rgba, w, h, ColorType::Rgba8.into())
+                    .is_ok()
+                {
+                    result = Some((png_out, w, h));
+                }
             }
         }
     }
@@ -2840,19 +2857,33 @@ unsafe fn write_image_bytes_to_clipboard_ext(
     encoded_img: &[u8],
     privacy_guard: WinClipboardLocalOnlyGuard,
 ) -> bool {
+    if !iclip_core::engines::has_safe_raster_dimensions_in_memory(encoded_img) {
+        return false;
+    }
     let Ok(dyn_img) = image::load_from_memory(encoded_img) else {
         return false;
     };
     let rgba = dyn_img.to_rgba8();
     let (w, h) = rgba.dimensions();
     let hdr_size = size_of::<BITMAPINFOHEADER>();
-    let pixel_bytes = (w * h * 4) as usize;
+    let Some(pixel_bytes) = (w as usize)
+        .checked_mul(h as usize)
+        .and_then(|px| px.checked_mul(4))
+    else {
+        return false;
+    };
+    let Some(alloc_bytes) = hdr_size.checked_add(pixel_bytes) else {
+        return false;
+    };
+    if pixel_bytes > u32::MAX as usize {
+        return false;
+    }
 
     if OpenClipboard(hwnd) == FALSE {
         return false;
     };
     let _ = EmptyClipboard();
-    let hdib = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, hdr_size + pixel_bytes);
+    let hdib = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, alloc_bytes);
     if !hdib.is_null() {
         let ptr = GlobalLock(hdib) as *mut u8;
         if !ptr.is_null() {
@@ -3896,6 +3927,9 @@ fn load_or_get_thumbnail<'a>(
         return Some((item.width, item.height, item.rgba.as_slice()));
     }
     let raw = iclip_core::security::read_decrypted_image_from_dir(images_dir, file_name)?;
+    if !iclip_core::engines::has_safe_raster_dimensions_in_memory(&raw) {
+        return None;
+    }
     let dyn_img = image::load_from_memory(&raw).ok()?;
     let (ow, oh) = (dyn_img.width(), dyn_img.height());
     let thumb = if ow > 260 || oh > 260 {

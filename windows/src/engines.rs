@@ -1363,12 +1363,13 @@ pub fn analyze_table_bridge(raw: &str) -> Vec<QuickAction> {
             .collect::<Vec<_>>()
             .join("\n");
         let cf_html = to_html_table_fragment(&tsv).map(|frag| build_windows_cf_html_payload(&frag));
+        let has_secret = crate::security::classify_sensitive_text(raw).is_some();
 
         return vec![
             QuickAction {
                 id: "tbl-md-to-excel",
                 title: "转 Excel 分列直粘".to_string(),
-                is_security: false,
+                is_security: has_secret,
                 result_text: tsv,
                 html_table_payload: cf_html,
                 toast_text: format!("已转为 Excel 双协议分列格式（{} 行）", grid.len()),
@@ -1376,7 +1377,7 @@ pub fn analyze_table_bridge(raw: &str) -> Vec<QuickAction> {
             QuickAction {
                 id: "tbl-md-to-csv",
                 title: "转 CSV".to_string(),
-                is_security: false,
+                is_security: has_secret,
                 result_text: csv,
                 html_table_payload: None,
                 toast_text: "已转为标准 CSV 表格".to_string(),
@@ -1431,16 +1432,48 @@ pub fn analyze_table_bridge(raw: &str) -> Vec<QuickAction> {
 }
 
 fn parse_markdown_table(raw: &str) -> Option<Vec<Vec<String>>> {
-    let lines: Vec<&str> = raw
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .collect();
-    if lines.len() < 2 || !lines[0].contains('|') {
+    let raw_lines: Vec<&str> = raw.lines().collect();
+    if raw_lines.len() < 3 {
         return None;
     }
     let sep_re = Regex::new(r"^\s*\|?(?:\s*:?-{2,}:?\s*\|)+\s*:?-{2,}:?\s*\|?\s*$").unwrap();
-    if !sep_re.is_match(lines[1]) {
+
+    // 在混排文本（如带前置引导与结尾总结的 AI 回复）中自动寻址首个合法的 Markdown 表格连续区块（跳过代码围栏）
+    let mut table_lines: Vec<&str> = Vec::new();
+    let mut in_fence = false;
+    let mut idx = 0usize;
+    while idx < raw_lines.len() {
+        let trimmed = raw_lines[idx].trim();
+        if trimmed.starts_with("```") {
+            in_fence = !in_fence;
+            idx += 1;
+            continue;
+        }
+        if !in_fence && trimmed.contains('|') && idx + 1 < raw_lines.len() {
+            let next_trimmed = raw_lines[idx + 1].trim();
+            if sep_re.is_match(next_trimmed) {
+                table_lines.push(trimmed);
+                let mut cur = idx + 2;
+                while cur < raw_lines.len() {
+                    let row_t = raw_lines[cur].trim();
+                    if row_t.is_empty() || !row_t.contains('|') || row_t.starts_with("```") {
+                        break;
+                    }
+                    if !sep_re.is_match(row_t) {
+                        table_lines.push(row_t);
+                    }
+                    cur += 1;
+                }
+                if table_lines.len() >= 2 {
+                    break;
+                }
+                table_lines.clear();
+            }
+        }
+        idx += 1;
+    }
+
+    if table_lines.len() < 2 {
         return None;
     }
 
@@ -1464,20 +1497,28 @@ fn parse_markdown_table(raw: &str) -> Option<Vec<Vec<String>>> {
         s.split('|').map(strip_md).collect()
     };
 
-    let mut grid = vec![split_row(lines[0])];
-    if grid[0].len() < 2 {
+    let expected_cols = split_row(table_lines[0]).len();
+    if expected_cols < 2 {
         return None;
     }
-    for line in lines.iter().skip(2) {
-        if !line.contains('|') {
-            return None;
-        }
-        if sep_re.is_match(line) {
+    let mut grid = Vec::with_capacity(table_lines.len());
+    for line in table_lines {
+        let mut row = split_row(line);
+        if row.is_empty() {
             continue;
         }
-        grid.push(split_row(line));
+        if row.len() > expected_cols {
+            row.truncate(expected_cols);
+        } else if row.len() < expected_cols {
+            row.resize(expected_cols, String::new());
+        }
+        grid.push(row);
     }
-    Some(grid)
+    if grid.len() >= 2 {
+        Some(grid)
+    } else {
+        None
+    }
 }
 
 fn parse_tsv_table(raw: &str) -> Option<Vec<Vec<String>>> {
@@ -1508,10 +1549,25 @@ fn parse_tsv_table(raw: &str) -> Option<Vec<Vec<String>>> {
 // 引擎 4：截图白底合成瞬时瘦身 JPEG & 柔光圆角阴影样机衬底渲染
 // ============================================================================
 
+/// 零像素分配前置校验图像宽高，阻断恶意压缩炸弹（Decompression Bomb / CWE-409）耗尽进程内存
+pub fn has_safe_raster_dimensions_in_memory(bytes: &[u8]) -> bool {
+    let Ok(reader) = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()
+    else {
+        return false;
+    };
+    let Ok((w, h)) = reader.into_dimensions() else {
+        return false;
+    };
+    w > 0 && h > 0 && w <= 12_000 && h <= 12_000 && (w as u64) * (h as u64) <= 67_108_864
+}
+
 pub fn compress_png_to_white_bg_jpeg(png_bytes: &[u8], quality: u8) -> Option<Vec<u8>> {
+    if !has_safe_raster_dimensions_in_memory(png_bytes) {
+        return None;
+    }
     let img = image::load_from_memory(png_bytes).ok()?.to_rgba8();
     let (w, h) = img.dimensions();
-    let mut rgb_buf = Vec::with_capacity((w * h * 3) as usize);
+    let mut rgb_buf = Vec::with_capacity((w as usize).saturating_mul(h as usize).saturating_mul(3));
 
     for px in img.pixels() {
         let a = px[3] as u32;
@@ -1533,6 +1589,9 @@ pub fn compress_png_to_white_bg_jpeg(png_bytes: &[u8], quality: u8) -> Option<Ve
 }
 
 pub fn render_mockup_frame_png(png_bytes: &[u8], padding: u32) -> Option<(Vec<u8>, u32, u32)> {
+    if !has_safe_raster_dimensions_in_memory(png_bytes) {
+        return None;
+    }
     let src = image::load_from_memory(png_bytes).ok()?.to_rgba8();
     let (w, h) = src.dimensions();
     let out_w = w + padding * 2;
@@ -2898,12 +2957,13 @@ pub fn file_has_privacy_metadata(path: &std::path::Path) -> bool {
 
 /// 纯像素级重绘剥离照片全部 GPS / EXIF / XMP / 文本隐私块，输出纯净 PNG 字节流
 pub fn strip_file_metadata_to_clean_png(path: &std::path::Path) -> Option<Vec<u8>> {
+    let (pw, ph) = image::image_dimensions(path).ok()?;
+    if pw == 0 || ph == 0 || pw > 12_000 || ph > 12_000 || (pw as u64) * (ph as u64) > 67_108_864 {
+        return None;
+    }
     let dyn_img = image::open(path).ok()?;
     let rgba = dyn_img.to_rgba8();
     let (w, h) = rgba.dimensions();
-    if w == 0 || h == 0 || w > 12_000 || h > 12_000 {
-        return None;
-    }
     let mut clean_png = Vec::new();
     PngEncoder::new(&mut clean_png)
         .write_image(&rgba, w, h, ColorType::Rgba8.into())

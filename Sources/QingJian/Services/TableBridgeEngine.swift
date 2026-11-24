@@ -66,29 +66,49 @@ enum TableBridgeEngine {
     // MARK: - Markdown Table 解析
 
     static func parseMarkdownTable(_ rawText: String) -> [[String]]? {
-        let lines = rawText
+        let rawLines = rawText
             .replacingOccurrences(of: "\r\n", with: "\n")
             .components(separatedBy: "\n")
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
 
-        guard lines.count >= 2 else { return nil }
-        let sepLine = lines[1]
-        let sepRange = NSRange(sepLine.startIndex..<sepLine.endIndex, in: sepLine)
-        guard mdSeparatorRegex.firstMatch(in: sepLine, options: [], range: sepRange) != nil,
-              lines[0].contains("|") else {
-            return nil
+        // 自动在混排段落（如带前置说明与结尾建议的 AI 回复）中扫描首个合法的 Markdown 表格连续块（跳过 ``` 代码围栏内部）
+        var cleanTableLines: [String] = []
+        var inFence = false
+        var idx = 0
+        while idx < rawLines.count {
+            let trimmed = rawLines[idx].trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("```") {
+                inFence.toggle()
+                idx += 1
+                continue
+            }
+            if !inFence && trimmed.contains("|") && idx + 1 < rawLines.count {
+                let nextTrimmed = rawLines[idx + 1].trimmingCharacters(in: .whitespaces)
+                let sepRange = NSRange(nextTrimmed.startIndex..<nextTrimmed.endIndex, in: nextTrimmed)
+                if mdSeparatorRegex.firstMatch(in: nextTrimmed, options: [], range: sepRange) != nil {
+                    cleanTableLines.append(trimmed)
+                    var cursor = idx + 2
+                    while cursor < rawLines.count {
+                        let rowTrimmed = rawLines[cursor].trimmingCharacters(in: .whitespaces)
+                        if rowTrimmed.isEmpty || !rowTrimmed.contains("|") || rowTrimmed.hasPrefix("```") {
+                            break
+                        }
+                        let rowSepR = NSRange(rowTrimmed.startIndex..<rowTrimmed.endIndex, in: rowTrimmed)
+                        if mdSeparatorRegex.firstMatch(in: rowTrimmed, options: [], range: rowSepR) == nil {
+                            cleanTableLines.append(rowTrimmed)
+                        }
+                        cursor += 1
+                    }
+                    if cleanTableLines.count >= 2 {
+                        break
+                    }
+                    cleanTableLines.removeAll()
+                }
+            }
+            idx += 1
         }
 
-        var rows: [[String]] = []
-        for (idx, line) in lines.enumerated() {
-            if idx == 1 { continue } // 跳过 | --- | --- | 分隔行
-            guard line.contains("|") else { return nil }
-            let cells = splitMarkdownRow(line)
-            guard !cells.isEmpty else { continue }
-            rows.append(cells)
-        }
-
+        guard cleanTableLines.count >= 2 else { return nil }
+        let rows = cleanTableLines.map { splitMarkdownRow($0) }.filter { !$0.isEmpty }
         guard rows.count >= 2, let colCount = rows.first?.count, colCount >= 2 else { return nil }
         // 对齐各行列数
         return rows.map { row in
@@ -162,7 +182,7 @@ enum TableBridgeEngine {
         if raw.hasPrefix("'") { return raw }
         let trimmedLead = raw.drop(while: { $0 == " " })
         guard let first = trimmedLead.first else { return raw }
-        if first == "=" || first == "@" || first == "\t" || first == "\r" {
+        if first == "=" || first == "@" || first == "|" || first == "\t" || first == "\r" || first == "\n" {
             return "'" + raw
         }
         if first == "+" || first == "-" {
