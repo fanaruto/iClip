@@ -430,7 +430,7 @@ impl ClipItem {
                 if trimmed.is_empty() {
                     "空白文本".to_string()
                 } else {
-                    trimmed.replace('\r', "").replace('\n', " ↵ ")
+                    trimmed.replace('\r', "").replace('\n', " · ")
                 }
             }
             ClipContentType::Image => {

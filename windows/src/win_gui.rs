@@ -23,6 +23,7 @@ use iclip_core::model::{
     now_unix_secs, ClipContentType, ClipFilterTab, ClipItem, PinCategory, QuickAction,
 };
 use iclip_core::store::{ClipboardStore, GlassAppearance};
+use iclip_core::updater::{OtaReleaseInfo, OtaState};
 use image::{codecs::png::PngEncoder, imageops::FilterType, ColorType, ImageEncoder};
 use std::cell::RefCell;
 use std::ffi::OsString;
@@ -30,21 +31,23 @@ use std::mem::{size_of, zeroed};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, FALSE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+    CloseHandle, FALSE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
 };
 use windows_sys::Win32::Graphics::Dwm::{DwmExtendFrameIntoClientArea, DwmSetWindowAttribute};
 use windows_sys::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject,
-    DrawTextW, EndPaint, GdiFlush, GetDC, GetMonitorInfoW, InvalidateRect, MonitorFromPoint,
-    ReleaseDC, SelectObject, SetBkMode, SetTextColor, ANTIALIASED_QUALITY, BITMAPINFO,
-    BITMAPINFOHEADER, BI_RGB, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DIB_RGB_COLORS, DT_CENTER,
-    DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK,
-    FW_MEDIUM, FW_NORMAL, FW_SEMIBOLD, HDC, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-    OUT_DEFAULT_PRECIS, PAINTSTRUCT, SRCCOPY, TRANSPARENT,
+    DrawTextW, EndPaint, EnumFontFamiliesExW, GdiFlush, GetDC, GetMonitorInfoW,
+    GetTextExtentPoint32W, InvalidateRect, MonitorFromPoint, ReleaseDC, SelectObject, SetBkMode,
+    SetTextColor, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CLEARTYPE_NATURAL_QUALITY,
+    CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DIB_RGB_COLORS, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT,
+    DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, FW_BOLD, FW_MEDIUM, FW_NORMAL,
+    FW_SEMIBOLD, HDC, LOGFONTW, MONITORINFO, MONITOR_DEFAULTTONEAREST, OUT_DEFAULT_PRECIS,
+    PAINTSTRUCT, SRCCOPY, TEXTMETRICW, TRANSPARENT,
 };
 use windows_sys::Win32::System::DataExchange::{
     AddClipboardFormatListener, CloseClipboard, EmptyClipboard, GetClipboardData,
@@ -91,6 +94,8 @@ const WM_APP_DOUBLETAP: u32 = WM_USER + 102;
 const WM_APP_PANEL_KEY: u32 = WM_USER + 103;
 const WM_APP_PANEL_TYPE_CHAR: u32 = WM_USER + 104;
 const WM_APP_OUTSIDE_CLICK: u32 = WM_USER + 105;
+const WM_APP_OTA_STATE: u32 = WM_USER + 106;
+const WM_APP_OTA_RESTART: u32 = WM_USER + 107;
 const WS_EX_NOACTIVATE_VAL: u32 = 0x0800_0000;
 const SWP_NOACTIVATE_VAL: u32 = 0x0010;
 const WM_MOUSEACTIVATE_MSG: u32 = 0x0021;
@@ -118,6 +123,7 @@ const TIMER_ID_COPY_FLASH_CLEAR: usize = 2003;
 const TIMER_ID_DEFERRED_APPEND: usize = 2004;
 const TIMER_ID_SPRING_ANIM: usize = 2005;
 const TIMER_ID_CONCEALED_SCRUB: usize = 2006;
+const TIMER_ID_SILENT_OTA_CHECK: usize = 2007;
 
 const WDA_NONE_AFFINITY: u32 = 0x0000_0000;
 const WDA_EXCLUDEFROMCAPTURE_AFFINITY: u32 = 0x0000_0011;
@@ -139,6 +145,7 @@ const CMD_PIN_TODO_BOARD: usize = 3014;
 const CMD_INSTALL_TO_SYSTEM: usize = 3015;
 const CMD_PAUSE_15M: usize = 3016;
 const CMD_PAUSE_60M: usize = 3017;
+const CMD_CHECK_UPDATES: usize = 3018;
 
 const CF_UNICODETEXT_ID: u32 = 13;
 const CF_DIB_ID: u32 = 8;
@@ -247,6 +254,9 @@ enum HitAction {
     TogglePauseCapture,
     ShowHighlightsOverlay,
     DismissHighlightsOverlay,
+    CheckForUpdates,
+    StartOtaDownload,
+    CancelOtaDownload,
     ToggleShortcutRef,
     QuitApp,
 }
@@ -308,6 +318,9 @@ struct WinAppState {
     boot_instant: Instant,
     scrub_expected_seq_num: u32,
     double_tap_machine: WinModifierDoubleTapMachine,
+    ota_state: OtaState,
+    ota_shared: Arc<Mutex<OtaState>>,
+    ota_cancel: Arc<AtomicBool>,
 }
 
 thread_local! {
@@ -432,6 +445,7 @@ pub fn run_windows_app() -> i32 {
         }
         MAIN_HWND_RAW.store(hwnd as isize, Ordering::SeqCst);
 
+        iclip_core::updater::win_runtime::cleanup_stale_old_binary();
         iclip_core::security::wipe_all_temp_previews();
         let store = ClipboardStore::new(ClipboardStore::default_app_data_dir());
         let init_highlights = !store.config.has_seen_highlights_v27;
@@ -500,6 +514,9 @@ pub fn run_windows_app() -> i32 {
                 boot_instant: Instant::now(),
                 scrub_expected_seq_num: 0,
                 double_tap_machine: WinModifierDoubleTapMachine::default(),
+                ota_state: OtaState::Idle,
+                ota_shared: Arc::new(Mutex::new(OtaState::Idle)),
+                ota_cancel: Arc::new(AtomicBool::new(false)),
             });
         });
 
@@ -507,6 +524,7 @@ pub fn run_windows_app() -> i32 {
         let _ = WTSRegisterSessionNotification(hwnd, 0);
         reload_global_hotkeys_and_hooks(hwnd);
         SetTimer(hwnd, TIMER_ID_OTP_SWEEP, 5_000, None);
+        SetTimer(hwnd, TIMER_ID_SILENT_OTA_CHECK, 4_000, None);
         install_or_update_tray_icon(hwnd, false);
 
         show_panel_near_cursor(hwnd);
@@ -656,6 +674,11 @@ pub fn run_windows_self_test() -> Result<(), String> {
             boot_instant: Instant::now(),
             scrub_expected_seq_num: 0,
             double_tap_machine: WinModifierDoubleTapMachine::default(),
+            ota_state: OtaState::UpToDate {
+                latest: env!("CARGO_PKG_VERSION").to_string(),
+            },
+            ota_shared: Arc::new(Mutex::new(OtaState::Idle)),
+            ota_cancel: Arc::new(AtomicBool::new(false)),
         };
 
         // 检测可选截图输出目录（从命令行 `--self-test <json_path>` 推断同级目录）
@@ -1722,6 +1745,45 @@ unsafe extern "system" fn wnd_proc(
             }
             0
         }
+        WM_APP_OTA_STATE => {
+            let notify_toast: Option<String> = APP_STATE.with(|c| {
+                let mut b = c.borrow_mut();
+                let Some(st) = b.as_mut() else { return None };
+                let latest_state = st
+                    .ota_shared
+                    .lock()
+                    .map(|g| g.clone())
+                    .unwrap_or(OtaState::Idle);
+                let prev_was_checking = matches!(st.ota_state, OtaState::Checking);
+                let silent = wparam != 0;
+                st.ota_state = latest_state.clone();
+                if silent {
+                    None
+                } else {
+                    match latest_state {
+                        OtaState::Available(info) => Some(format!(
+                            "发现新版本 v{}，点击「立即更新」秒装",
+                            info.version
+                        )),
+                        OtaState::UpToDate { latest } if prev_was_checking => {
+                            Some(format!("当前已是最新版本 v{latest}"))
+                        }
+                        OtaState::Failed(msg) => Some(msg),
+                        _ => None,
+                    }
+                }
+            });
+            if let Some(msg) = notify_toast {
+                set_toast(hwnd, msg);
+            } else {
+                let _ = InvalidateRect(hwnd, null(), FALSE);
+            }
+            0
+        }
+        WM_APP_OTA_RESTART => {
+            DestroyWindow(hwnd);
+            0
+        }
         WM_TIMER => {
             if wparam == TIMER_ID_SPRING_ANIM {
                 let mut stop = true;
@@ -1799,6 +1861,9 @@ unsafe extern "system" fn wnd_proc(
                     let _ = EmptyClipboard();
                     let _ = CloseClipboard();
                 }
+            } else if wparam == TIMER_ID_SILENT_OTA_CHECK {
+                KillTimer(hwnd, TIMER_ID_SILENT_OTA_CHECK);
+                trigger_ota_check(hwnd, true);
             }
             0
         }
@@ -3409,8 +3474,9 @@ struct TextDrawCmd {
     flags: u32,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum FontKind {
+    Display,
     Headline,
     CardTitle,
     Body,
@@ -3420,10 +3486,93 @@ enum FontKind {
     Mono,
 }
 
-unsafe fn make_antialias_font(face_name: &str, px: i32, weight: i32) -> *mut core::ffi::c_void {
+#[derive(Clone)]
+struct ResolvedFontFamilies {
+    latin_display: String,
+    latin_ui: String,
+    cjk_ui: String,
+    mono: String,
+}
+
+thread_local! {
+    static RESOLVED_FONTS: RefCell<Option<ResolvedFontFamilies>> = const { RefCell::new(None) };
+}
+
+unsafe extern "system" fn collect_font_family_proc(
+    lpelfe: *const LOGFONTW,
+    _lpntme: *const TEXTMETRICW,
+    _font_type: u32,
+    lparam: LPARAM,
+) -> i32 {
+    if lpelfe.is_null() || lparam == 0 {
+        return 1;
+    }
+    let set = &mut *(lparam as *mut std::collections::HashSet<String>);
+    let face = &(*lpelfe).lfFaceName;
+    let len = face.iter().position(|&c| c == 0).unwrap_or(face.len());
+    if len > 0 {
+        let name = String::from_utf16_lossy(&face[..len]);
+        if !name.starts_with('@') {
+            set.insert(name);
+        }
+    }
+    1
+}
+
+unsafe fn resolve_font_families(ref_dc: HDC) -> ResolvedFontFamilies {
+    if let Some(cached) = RESOLVED_FONTS.with(|c| c.borrow().clone()) {
+        return cached;
+    }
+    let mut installed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut lf: LOGFONTW = zeroed();
+    lf.lfCharSet = DEFAULT_CHARSET as u8;
+    let _ = EnumFontFamiliesExW(
+        ref_dc,
+        &lf,
+        Some(collect_font_family_proc),
+        (&mut installed as *mut std::collections::HashSet<String>) as LPARAM,
+        0,
+    );
+    let pick = |candidates: &[&str], fallback: &str| -> String {
+        for cand in candidates {
+            if installed.contains(*cand) {
+                return (*cand).to_string();
+            }
+        }
+        fallback.to_string()
+    };
+    let resolved = ResolvedFontFamilies {
+        latin_display: pick(
+            &[
+                "Segoe UI Variable Display",
+                "Segoe UI Variable Text",
+                "Segoe UI",
+            ],
+            "Segoe UI",
+        ),
+        latin_ui: pick(&["Segoe UI Variable Text", "Segoe UI"], "Segoe UI"),
+        cjk_ui: pick(
+            &[
+                "HarmonyOS Sans SC",
+                "MiSans",
+                "PingFang SC",
+                "Noto Sans SC",
+                "Microsoft YaHei UI",
+            ],
+            "Microsoft YaHei UI",
+        ),
+        mono: pick(&["Cascadia Mono", "JetBrains Mono", "Consolas"], "Consolas"),
+    };
+    RESOLVED_FONTS.with(|c| {
+        *c.borrow_mut() = Some(resolved.clone());
+    });
+    resolved
+}
+
+unsafe fn make_cleartype_font(face_name: &str, px: i32, weight: i32) -> *mut core::ffi::c_void {
     let face = to_wide(face_name);
     CreateFontW(
-        -px,
+        -px.max(8),
         0,
         0,
         0,
@@ -3434,10 +3583,280 @@ unsafe fn make_antialias_font(face_name: &str, px: i32, weight: i32) -> *mut cor
         DEFAULT_CHARSET as u32,
         OUT_DEFAULT_PRECIS as u32,
         CLIP_DEFAULT_PRECIS as u32,
-        ANTIALIASED_QUALITY as u32,
+        CLEARTYPE_NATURAL_QUALITY,
         0,
         face.as_ptr(),
     )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ScriptClass {
+    Latin,
+    Cjk,
+}
+
+fn char_script_class(ch: char) -> ScriptClass {
+    if ch.is_ascii()
+        || matches!(
+            ch,
+            '¥' | '€'
+                | '£'
+                | '·'
+                | '×'
+                | '÷'
+                | '±'
+                | '°'
+                | '–'
+                | '—'
+                | '…'
+                | '✓'
+                | '•'
+                | '‹'
+                | '›'
+        )
+    {
+        ScriptClass::Latin
+    } else {
+        ScriptClass::Cjk
+    }
+}
+
+/// 将单行文本切分为西文/数字段与中文段，实现真正双字族混排与盘古光学微距
+fn split_script_runs(text: &str) -> Vec<(ScriptClass, String)> {
+    let mut runs: Vec<(ScriptClass, String)> = Vec::new();
+    let mut cur_class: Option<ScriptClass> = None;
+    let mut cur_buf = String::new();
+    for ch in text.chars() {
+        let cls = if ch == ' ' {
+            cur_class.unwrap_or(ScriptClass::Latin)
+        } else {
+            char_script_class(ch)
+        };
+        if Some(cls) == cur_class {
+            cur_buf.push(ch);
+        } else {
+            if let Some(prev) = cur_class {
+                if !cur_buf.is_empty() {
+                    runs.push((prev, std::mem::take(&mut cur_buf)));
+                }
+            }
+            cur_class = Some(cls);
+            cur_buf.push(ch);
+        }
+    }
+    if let Some(prev) = cur_class {
+        if !cur_buf.is_empty() {
+            runs.push((prev, cur_buf));
+        }
+    }
+    runs
+}
+
+/// 判断相邻两段是否需要插入轻微中英盘古光学间距（两侧已有空格或标点时不重复加宽）
+fn needs_pangu_gap(
+    prev_txt: &str,
+    prev_cls: ScriptClass,
+    next_txt: &str,
+    next_cls: ScriptClass,
+) -> bool {
+    if prev_cls == next_cls {
+        return false;
+    }
+    let Some(last) = prev_txt.chars().last() else {
+        return false;
+    };
+    let Some(first) = next_txt.chars().next() else {
+        return false;
+    };
+    if last.is_whitespace() || first.is_whitespace() {
+        return false;
+    }
+    let is_sep = |c: char| {
+        matches!(
+            c,
+            '·' | '•'
+                | '/'
+                | ':'
+                | '：'
+                | '（'
+                | '）'
+                | '('
+                | ')'
+                | '['
+                | ']'
+                | '「'
+                | '」'
+                | '，'
+                | '。'
+                | '、'
+                | '-'
+                | '—'
+                | '…'
+        )
+    };
+    !(is_sep(last) || is_sep(first))
+}
+
+unsafe fn measure_wide_px(dc: HDC, text: &str) -> i32 {
+    if text.is_empty() {
+        return 0;
+    }
+    let wide = to_wide(text);
+    let mut sz = SIZE { cx: 0, cy: 0 };
+    let _ = GetTextExtentPoint32W(
+        dc,
+        wide.as_ptr(),
+        (wide.len().saturating_sub(1)) as i32,
+        &mut sz,
+    );
+    sz.cx
+}
+
+/// 在 2x 超采样离屏缓冲中以双字族精准混排绘制单行文本（支持左/中/右对齐与像素级省略号截断）
+#[allow(clippy::too_many_arguments)]
+unsafe fn draw_mixed_singleline_2x(
+    dc: HDC,
+    text: &str,
+    latin_font: *mut core::ffi::c_void,
+    cjk_font: *mut core::ffi::c_void,
+    box_w_2x: i32,
+    box_h_2x: i32,
+    flags: u32,
+    scale: f32,
+) {
+    let pangu_gap_2x = (2.6 * scale).round() as i32;
+    let runs = split_script_runs(text);
+    if runs.is_empty() {
+        return;
+    }
+
+    let mut measured: Vec<(ScriptClass, String, i32, i32)> = Vec::with_capacity(runs.len());
+    let mut total_w = 0i32;
+    for (idx, (cls, seg)) in runs.into_iter().enumerate() {
+        let gap = if idx > 0 {
+            let (p_cls, ref p_txt, _, _) = measured[idx - 1];
+            if needs_pangu_gap(p_txt, p_cls, &seg, cls) {
+                pangu_gap_2x
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        SelectObject(
+            dc,
+            if cls == ScriptClass::Latin {
+                latin_font
+            } else {
+                cjk_font
+            },
+        );
+        let seg_w = measure_wide_px(dc, &seg);
+        total_w += gap + seg_w;
+        measured.push((cls, seg, gap, seg_w));
+    }
+
+    // 超出矩形宽度且要求省略号时，按字符级精确截断并追加 `…`
+    if total_w > box_w_2x && (flags & DT_END_ELLIPSIS) != 0 {
+        SelectObject(dc, latin_font);
+        let ell_w = measure_wide_px(dc, "…");
+        let budget = (box_w_2x - ell_w).max(0);
+        let mut trimmed: Vec<(ScriptClass, String, i32, i32)> = Vec::new();
+        let mut acc = 0i32;
+        for (cls, seg, gap, seg_w) in measured {
+            if acc + gap + seg_w <= budget {
+                acc += gap + seg_w;
+                trimmed.push((cls, seg, gap, seg_w));
+            } else {
+                let rem = (budget - acc - gap).max(0);
+                if rem > 0 {
+                    SelectObject(
+                        dc,
+                        if cls == ScriptClass::Latin {
+                            latin_font
+                        } else {
+                            cjk_font
+                        },
+                    );
+                    let mut kept = String::new();
+                    let mut kw = 0i32;
+                    for ch in seg.chars() {
+                        let mut trial = kept.clone();
+                        trial.push(ch);
+                        let tw = measure_wide_px(dc, &trial);
+                        if tw > rem {
+                            break;
+                        }
+                        kept = trial;
+                        kw = tw;
+                    }
+                    if !kept.is_empty() {
+                        acc += gap + kw;
+                        trimmed.push((cls, kept, gap, kw));
+                    }
+                }
+                break;
+            }
+        }
+        trimmed.push((ScriptClass::Latin, "…".to_string(), 0, ell_w));
+        total_w = acc + ell_w;
+        measured = trimmed;
+    }
+
+    let start_x = if (flags & DT_CENTER) != 0 {
+        ((box_w_2x - total_w) / 2).max(0)
+    } else if (flags & DT_RIGHT) != 0 {
+        (box_w_2x - total_w).max(0)
+    } else {
+        0
+    };
+
+    let cjk_y_comp = if (flags & DT_VCENTER) != 0 {
+        -(1.8 * scale).round() as i32
+    } else {
+        0
+    };
+    let latin_y_comp = if (flags & DT_VCENTER) != 0 {
+        -(0.6 * scale).round() as i32
+    } else {
+        0
+    };
+
+    let mut cur_x = start_x;
+    for (cls, seg, gap, seg_w) in measured {
+        cur_x += gap;
+        if cur_x >= box_w_2x {
+            break;
+        }
+        SelectObject(
+            dc,
+            if cls == ScriptClass::Latin {
+                latin_font
+            } else {
+                cjk_font
+            },
+        );
+        let y_comp = if cls == ScriptClass::Latin {
+            latin_y_comp
+        } else {
+            cjk_y_comp
+        };
+        let mut r = RECT {
+            left: cur_x,
+            top: y_comp,
+            right: (cur_x + seg_w + 4).min(box_w_2x),
+            bottom: box_h_2x,
+        };
+        let mut wide = to_wide(&seg);
+        let _ = DrawTextW(
+            dc,
+            wide.as_mut_ptr(),
+            (wide.len().saturating_sub(1)) as i32,
+            &mut r,
+            DT_LEFT | (flags & DT_VCENTER) | DT_SINGLELINE | DT_NOPREFIX,
+        );
+        cur_x += seg_w;
+    }
 }
 
 fn load_or_get_thumbnail<'a>(
@@ -3484,47 +3903,63 @@ unsafe fn composite_texts_premultiplied_alpha(
     }
     let w = canvas.width;
     let h = canvas.height;
+    let families = resolve_font_families(ref_dc);
     let mask_dc = CreateCompatibleDC(ref_dc);
-    let mut bmi: BITMAPINFO = zeroed();
-    bmi.bmiHeader.biSize = size_of::<BITMAPINFOHEADER>() as u32;
-    bmi.bmiHeader.biWidth = w;
-    bmi.bmiHeader.biHeight = -h;
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
-
-    let mut mask_ptr: *mut core::ffi::c_void = null_mut();
-    let mask_bmp = CreateDIBSection(mask_dc, &bmi, DIB_RGB_COLORS, &mut mask_ptr, null_mut(), 0);
-    if mask_bmp.is_null() || mask_ptr.is_null() {
-        DeleteDC(mask_dc);
+    if mask_dc.is_null() {
         return;
     }
-    let old_bmp = SelectObject(mask_dc, mask_bmp);
-    let mask_pixels = std::slice::from_raw_parts_mut(mask_ptr as *mut u32, (w * h) as usize);
-    mask_pixels.fill(0);
-
     SetBkMode(mask_dc, TRANSPARENT as i32);
     SetTextColor(mask_dc, 0x00FF_FFFF);
 
-    let s = |v: i32| ((v as f32) * scale).round() as i32;
-    let f_head = make_antialias_font("Microsoft YaHei UI", s(14), FW_SEMIBOLD as i32);
-    let f_title = make_antialias_font("Microsoft YaHei UI", s(13), FW_MEDIUM as i32);
-    let f_body = make_antialias_font("Microsoft YaHei UI", s(13), FW_NORMAL as i32);
-    let f_meta = make_antialias_font("Microsoft YaHei UI", s(11), FW_NORMAL as i32);
-    let f_badge = make_antialias_font("Microsoft YaHei UI", s(11), FW_SEMIBOLD as i32);
-    let f_keycap = make_antialias_font("Microsoft YaHei UI", s(10), FW_SEMIBOLD as i32);
-    let f_mono = make_antialias_font("Consolas", s(11), FW_MEDIUM as i32);
+    // 2x 超采样字号映射（配合 CLEARTYPE_NATURAL_QUALITY 3 通道亚像素 2x2 盒滤 = 有效 6x 横向 × 2x 纵向采样）
+    let s2 = |pt: f32| (pt * scale * 2.0).round() as i32;
+    let cjk_is_yahei = families.cjk_ui.eq_ignore_ascii_case("Microsoft YaHei UI");
+    let cjk_title_weight = if cjk_is_yahei {
+        FW_NORMAL as i32
+    } else {
+        FW_MEDIUM as i32
+    };
+    let cjk_head_weight = if cjk_is_yahei {
+        FW_BOLD as i32
+    } else {
+        FW_SEMIBOLD as i32
+    };
 
-    // 预计算 CoreText 级 gamma 0.82 查找表（256 项零浮点开销）
-    let mut gamma_lut = [0.0f32; 256];
-    for (i, slot) in gamma_lut.iter_mut().enumerate() {
-        if i > 0 {
-            *slot = ((i as f32) / 255.0).powf(0.82);
-        }
+    let f_disp_lat = make_cleartype_font(&families.latin_display, s2(16.5), FW_BOLD as i32);
+    let f_disp_cjk = make_cleartype_font(&families.cjk_ui, s2(16.0), cjk_head_weight);
+    let f_head_lat = make_cleartype_font(&families.latin_display, s2(15.0), FW_SEMIBOLD as i32);
+    let f_head_cjk = make_cleartype_font(&families.cjk_ui, s2(14.5), cjk_head_weight);
+    let f_title_lat = make_cleartype_font(&families.latin_ui, s2(13.5), FW_SEMIBOLD as i32);
+    let f_title_cjk = make_cleartype_font(&families.cjk_ui, s2(13.5), cjk_title_weight);
+    let f_body_lat = make_cleartype_font(&families.latin_ui, s2(13.0), FW_NORMAL as i32);
+    let f_body_cjk = make_cleartype_font(&families.cjk_ui, s2(13.0), FW_NORMAL as i32);
+    let f_meta_lat = make_cleartype_font(&families.latin_ui, s2(11.5), FW_NORMAL as i32);
+    let f_meta_cjk = make_cleartype_font(&families.cjk_ui, s2(11.5), FW_NORMAL as i32);
+    let f_badge_lat = make_cleartype_font(&families.latin_ui, s2(11.5), FW_SEMIBOLD as i32);
+    let f_badge_cjk = make_cleartype_font(&families.cjk_ui, s2(11.2), cjk_title_weight);
+    let f_keycap = make_cleartype_font(&families.mono, s2(10.5), FW_SEMIBOLD as i32);
+    let f_mono = make_cleartype_font(&families.mono, s2(11.5), FW_MEDIUM as i32);
+
+    // 三档感知 Gamma LUT：暗底浅字适度增肉(0.76)、浅底主标题自然微增墨(0.84 代替微软雅黑 700 糊块)、浅底常规正文锐利清透(0.95)
+    let mut lut_light_on_dark = [0.0f32; 256];
+    let mut lut_medium_ink = [0.0f32; 256];
+    let mut lut_crisp_dark = [0.0f32; 256];
+    for i in 1..256 {
+        let v = (i as f32) / 255.0;
+        lut_light_on_dark[i] = v.powf(0.76);
+        lut_medium_ink[i] = v.powf(0.82);
+        lut_crisp_dark[i] = v.powf(0.95);
     }
 
+    // 局部按需扩容复用的 2x 离屏光栅 DIB（远小于全屏 4x 缓冲，兼顾极致画质与毫秒级帧耗时）
+    let mut scratch_w: i32 = 0;
+    let mut scratch_h: i32 = 0;
+    let mut scratch_bmp: *mut core::ffi::c_void = null_mut();
+    let mut scratch_old: *mut core::ffi::c_void = null_mut();
+    let mut scratch_ptr: *mut u32 = null_mut();
+
     canvas.reset_vertical_clip();
-    let old_font = SelectObject(mask_dc, f_title);
+    let old_font = SelectObject(mask_dc, f_title_cjk);
     for (cmd_idx, cmd) in texts.iter().enumerate() {
         if let Some((start_idx, cy0, cy1)) = scroll_clip {
             if cmd_idx >= start_idx {
@@ -3541,43 +3976,113 @@ unsafe fn composite_texts_premultiplied_alpha(
         if x0 >= x1 || y0 >= y1 {
             continue;
         }
+        let rw = x1 - x0;
+        let rh = y1 - y0;
+        let sw = rw * 2;
+        let sh = rh * 2;
 
-        let font_handle = match cmd.font_kind {
-            FontKind::Headline => f_head,
-            FontKind::CardTitle => f_title,
-            FontKind::Body => f_body,
-            FontKind::Meta => f_meta,
-            FontKind::BadgeBold => f_badge,
-            FontKind::KeyCap => f_keycap,
-            FontKind::Mono => f_mono,
-        };
-        SelectObject(mask_dc, font_handle);
-        let mut wide = to_wide(&cmd.text);
-        let mut r = cmd.rect;
-        // 补偿 Microsoft YaHei UI 在单行垂直居中时的 tmInternalLeading 下沉偏差 (-1pt)
-        if (cmd.flags & DT_VCENTER) != 0 && (cmd.flags & DT_SINGLELINE) != 0 {
-            r.top -= (1.1 * scale).round() as i32;
+        if sw > scratch_w || sh > scratch_h {
+            if !scratch_bmp.is_null() {
+                SelectObject(mask_dc, scratch_old);
+                DeleteObject(scratch_bmp);
+                scratch_bmp = null_mut();
+                scratch_ptr = null_mut();
+            }
+            let nw = sw.max(scratch_w).max(256);
+            let nh = sh.max(scratch_h).max(96);
+            let mut bmi: BITMAPINFO = zeroed();
+            bmi.bmiHeader.biSize = size_of::<BITMAPINFOHEADER>() as u32;
+            bmi.bmiHeader.biWidth = nw;
+            bmi.bmiHeader.biHeight = -nh;
+            bmi.bmiHeader.biPlanes = 1;
+            bmi.bmiHeader.biBitCount = 32;
+            bmi.bmiHeader.biCompression = BI_RGB;
+            let mut raw_ptr: *mut core::ffi::c_void = null_mut();
+            let bmp = CreateDIBSection(mask_dc, &bmi, DIB_RGB_COLORS, &mut raw_ptr, null_mut(), 0);
+            if bmp.is_null() || raw_ptr.is_null() {
+                continue;
+            }
+            scratch_old = SelectObject(mask_dc, bmp);
+            scratch_bmp = bmp;
+            scratch_ptr = raw_ptr as *mut u32;
+            scratch_w = nw;
+            scratch_h = nh;
         }
-        let _ = DrawTextW(
-            mask_dc,
-            wide.as_mut_ptr(),
-            (wide.len().saturating_sub(1)) as i32,
-            &mut r,
-            cmd.flags | DT_NOPREFIX,
-        );
+
+        let buf = std::slice::from_raw_parts_mut(scratch_ptr, (scratch_w * scratch_h) as usize);
+        for row in 0..sh {
+            let start = (row * scratch_w) as usize;
+            buf[start..start + (sw as usize)].fill(0);
+        }
+
+        let (lat_f, cjk_f, is_mono_role) = match cmd.font_kind {
+            FontKind::Display => (f_disp_lat, f_disp_cjk, false),
+            FontKind::Headline => (f_head_lat, f_head_cjk, false),
+            FontKind::CardTitle => (f_title_lat, f_title_cjk, false),
+            FontKind::Body => (f_body_lat, f_body_cjk, false),
+            FontKind::Meta => (f_meta_lat, f_meta_cjk, false),
+            FontKind::BadgeBold => (f_badge_lat, f_badge_cjk, false),
+            FontKind::KeyCap => (f_keycap, f_keycap, true),
+            FontKind::Mono => (f_mono, f_mono, true),
+        };
+
+        let is_singleline = (cmd.flags & DT_SINGLELINE) != 0 && (cmd.flags & DT_WORDBREAK) == 0;
+        if is_singleline && !is_mono_role {
+            draw_mixed_singleline_2x(mask_dc, &cmd.text, lat_f, cjk_f, sw, sh, cmd.flags, scale);
+        } else {
+            SelectObject(mask_dc, if is_mono_role { lat_f } else { cjk_f });
+            let mut wide = to_wide(&cmd.text);
+            let mut r = RECT {
+                left: 0,
+                top: if (cmd.flags & DT_VCENTER) != 0 && is_singleline {
+                    -(1.0 * scale).round() as i32
+                } else {
+                    0
+                },
+                right: sw,
+                bottom: sh,
+            };
+            let _ = DrawTextW(
+                mask_dc,
+                wide.as_mut_ptr(),
+                (wide.len().saturating_sub(1)) as i32,
+                &mut r,
+                cmd.flags | DT_NOPREFIX,
+            );
+        }
         let _ = GdiFlush();
 
-        for py in y0..y1 {
-            let row_off = (py * w) as usize;
-            for px in x0..x1 {
-                let idx = row_off + (px as usize);
-                let raw = mask_pixels[idx];
-                if raw != 0 {
-                    let lum = ((raw >> 8) & 0xFF) as usize;
-                    if lum > 0 {
-                        canvas.blend_pixel(px, py, cmd.color, gamma_lut[lum]);
-                    }
-                    mask_pixels[idx] = 0;
+        let luma =
+            (cmd.color.r as u32 * 77 + cmd.color.g as u32 * 150 + cmd.color.b as u32 * 29) >> 8;
+        let lut = if luma > 155 {
+            &lut_light_on_dark
+        } else if cjk_is_yahei && matches!(cmd.font_kind, FontKind::CardTitle | FontKind::BadgeBold)
+        {
+            &lut_medium_ink
+        } else {
+            &lut_crisp_dark
+        };
+
+        let stride = scratch_w as usize;
+        for ly in 0..rh {
+            let py = y0 + ly;
+            let r0 = ((ly * 2) as usize) * stride;
+            let r1 = r0 + stride;
+            for lx in 0..rw {
+                let c0 = (lx * 2) as usize;
+                let p00 = buf[r0 + c0];
+                let p10 = buf[r0 + c0 + 1];
+                let p01 = buf[r1 + c0];
+                let p11 = buf[r1 + c0 + 1];
+                if (p00 | p10 | p01 | p11) == 0 {
+                    continue;
+                }
+                let rgb_sum =
+                    |p: u32| -> u32 { (p & 0xFF) + ((p >> 8) & 0xFF) + ((p >> 16) & 0xFF) };
+                let cov = ((rgb_sum(p00) + rgb_sum(p10) + rgb_sum(p01) + rgb_sum(p11) + 6) / 12)
+                    .min(255) as usize;
+                if cov > 0 {
+                    canvas.blend_pixel(x0 + lx, py, cmd.color, lut[cov]);
                 }
             }
         }
@@ -3585,15 +4090,28 @@ unsafe fn composite_texts_premultiplied_alpha(
     canvas.reset_vertical_clip();
 
     SelectObject(mask_dc, old_font);
-    DeleteObject(f_head);
-    DeleteObject(f_title);
-    DeleteObject(f_body);
-    DeleteObject(f_meta);
-    DeleteObject(f_badge);
-    DeleteObject(f_keycap);
-    DeleteObject(f_mono);
-    SelectObject(mask_dc, old_bmp);
-    DeleteObject(mask_bmp);
+    for f in [
+        f_disp_lat,
+        f_disp_cjk,
+        f_head_lat,
+        f_head_cjk,
+        f_title_lat,
+        f_title_cjk,
+        f_body_lat,
+        f_body_cjk,
+        f_meta_lat,
+        f_meta_cjk,
+        f_badge_lat,
+        f_badge_cjk,
+        f_keycap,
+        f_mono,
+    ] {
+        DeleteObject(f);
+    }
+    if !scratch_bmp.is_null() {
+        SelectObject(mask_dc, scratch_old);
+        DeleteObject(scratch_bmp);
+    }
     DeleteDC(mask_dc);
 }
 
@@ -3632,9 +4150,18 @@ unsafe fn render_panel_frame_dib(
             canvas.clear(Color4::rgba(0, 0, 0, 0));
         }
 
-        // 面板根液态玻璃表面（Win11 DWM 自动圆角合成，辅以连续曲率半透底与 0.8px 光学细边）
+        // 面板根液态玻璃表面（顶亮底暗 1px 镜面高光折射边，呈现真实液态玻璃厚度）
         canvas.fill_round_rect(0, 0, w, h, sf(18.0), palette.window_bg);
-        canvas.stroke_round_rect(0, 0, w, h, sf(18.0), sf(0.85), palette.window_border);
+        canvas.stroke_glass_bevel_round_rect(
+            0,
+            0,
+            w,
+            h,
+            sf(18.0),
+            sf(0.95),
+            palette.glass_top_highlight,
+            palette.window_border,
+        );
 
         match st.view_mode {
             ActiveViewMode::MainList => {
@@ -3982,7 +4509,7 @@ fn layout_and_draw_main_view(
     });
     bx += btn_sz + btn_gap;
 
-    // 偏好设置齿轮圆钮
+    // 偏好设置齿轮圆钮（检测到新版本时右上角亮起精致钴蓝更新微圆点）
     draw_header_circle_btn(
         canvas,
         bx,
@@ -4000,6 +4527,12 @@ fn layout_and_draw_main_view(
         sf(1.45),
         palette.text_secondary,
     );
+    if st.ota_state.available_version().is_some() {
+        let dot_cx = (bx + btn_sz - s(5)) as f32;
+        let dot_cy = (top_y + s(5)) as f32;
+        canvas.fill_circle(dot_cx, dot_cy, sf(4.4), palette.window_bg);
+        canvas.fill_circle(dot_cx, dot_cy, sf(3.2), palette.cobalt);
+    }
     st.hit_regions.push(HitRegion {
         rect: RECT {
             left: bx,
@@ -4054,15 +4587,16 @@ fn layout_and_draw_main_view(
         (pill_h as f32) * 0.5,
         palette.active_segment_fill,
     );
-    canvas.stroke_round_rect(
+    canvas.stroke_glass_bevel_round_rect(
         pill_x,
         pill_y,
         pill_w,
         pill_h,
         (pill_h as f32) * 0.5,
-        sf(0.75),
+        sf(0.85),
+        palette.glass_top_highlight,
         if st.is_dark_mode {
-            Color4::rgba(255, 255, 255, 68)
+            Color4::rgba(226, 232, 240, 26)
         } else {
             palette.track_border
         },
@@ -4083,26 +4617,83 @@ fn layout_and_draw_main_view(
             right: sx + sw,
             bottom: pill_y + pill_h,
         };
-        let label = if *tab == ClipFilterTab::Todo && pending_todos > 0 {
-            format!("{} {}", tab.title(), pending_todos.min(99))
+        if *tab == ClipFilterTab::Todo && pending_todos > 0 {
+            // 独立微圆计数徽章：文字与计数清晰分离，不再等大等重挤成一团
+            let cnt_str = format!("{}", pending_todos.min(99));
+            let badge_w = if pending_todos >= 10 { s(17) } else { s(14) };
+            let badge_h = s(14);
+            let txt_w = s(24);
+            let group_w = txt_w + s(3) + badge_w;
+            let gx = sx + (sw - group_w) / 2;
+            texts.push(TextDrawCmd {
+                text: tab.title().to_string(),
+                rect: RECT {
+                    left: gx,
+                    top: pill_y,
+                    right: gx + txt_w,
+                    bottom: pill_y + pill_h,
+                },
+                color: if active {
+                    palette.text_primary
+                } else {
+                    palette.text_secondary
+                },
+                font_kind: if active {
+                    FontKind::BadgeBold
+                } else {
+                    FontKind::Meta
+                },
+                flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            });
+            let bx_c = gx + txt_w + s(3);
+            let by_c = pill_y + (pill_h - badge_h) / 2;
+            canvas.fill_round_rect(
+                bx_c,
+                by_c,
+                badge_w,
+                badge_h,
+                sf(7.0),
+                if active {
+                    palette.cobalt
+                } else {
+                    palette
+                        .cobalt
+                        .with_alpha(if st.is_dark_mode { 46 } else { 26 })
+                },
+            );
+            texts.push(TextDrawCmd {
+                text: cnt_str,
+                rect: RECT {
+                    left: bx_c,
+                    top: by_c,
+                    right: bx_c + badge_w,
+                    bottom: by_c + badge_h,
+                },
+                color: if active {
+                    Color4::rgb(255, 255, 255)
+                } else {
+                    palette.cobalt_text
+                },
+                font_kind: FontKind::KeyCap,
+                flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            });
         } else {
-            tab.title().to_string()
-        };
-        texts.push(TextDrawCmd {
-            text: label,
-            rect: rc,
-            color: if active {
-                palette.text_primary
-            } else {
-                palette.text_secondary
-            },
-            font_kind: if active {
-                FontKind::BadgeBold
-            } else {
-                FontKind::Meta
-            },
-            flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-        });
+            texts.push(TextDrawCmd {
+                text: tab.title().to_string(),
+                rect: rc,
+                color: if active {
+                    palette.text_primary
+                } else {
+                    palette.text_secondary
+                },
+                font_kind: if active {
+                    FontKind::BadgeBold
+                } else {
+                    FontKind::Meta
+                },
+                flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            });
+        }
         st.hit_regions.push(HitRegion {
             rect: rc,
             interactive_cursor: true,
@@ -4140,7 +4731,7 @@ fn layout_and_draw_main_view(
             let btn_y = cur_y + (bh - btn_h) / 2;
             canvas.fill_round_rect(btn_x, btn_y, btn_w, btn_h, sf(12.0), palette.cobalt);
             texts.push(TextDrawCmd {
-                text: "采纳 ↵".to_string(),
+                text: "采纳".to_string(),
                 rect: RECT {
                     left: btn_x,
                     top: btn_y,
@@ -4201,7 +4792,7 @@ fn layout_and_draw_main_view(
             let btn_y = cur_y + (bh - btn_h) / 2;
             canvas.fill_round_rect(btn_x, btn_y, btn_w, btn_h, sf(12.0), acc);
             texts.push(TextDrawCmd {
-                text: "保存 ↵".to_string(),
+                text: "保存".to_string(),
                 rect: RECT {
                     left: btn_x,
                     top: btn_y,
@@ -4291,7 +4882,7 @@ fn layout_and_draw_main_view(
             let btn_y = cur_y + (bh - btn_h) / 2;
             canvas.fill_round_rect(btn_x, btn_y, btn_w, btn_h, sf(12.0), palette.cobalt);
             texts.push(TextDrawCmd {
-                text: "无痕键入 ↵".to_string(),
+                text: "无痕键入".to_string(),
                 rect: RECT {
                     left: btn_x,
                     top: btn_y,
@@ -4314,7 +4905,7 @@ fn layout_and_draw_main_view(
                 palette.cobalt.with_alpha(34),
             );
             texts.push(TextDrawCmd {
-                text: "收藏 ⇧↵".to_string(),
+                text: "收藏".to_string(),
                 rect: RECT {
                     left: pin_x,
                     top: btn_y,
@@ -4401,7 +4992,7 @@ fn layout_and_draw_main_view(
                         palette.cobalt,
                         format!("端到端加密（{src_lbl}）：{veiled}"),
                         "SHA256-CTR + HMAC 防篡改信封 · Mac/Win 互通 · 明文不入库".to_string(),
-                        Some("发送密文 ↵"),
+                        Some("发送密文"),
                         Some(HitAction::CommitLockedCapsule {
                             plain: plain_source.clone(),
                             passphrase: passphrase.clone(),
@@ -4422,8 +5013,8 @@ fn layout_and_draw_main_view(
                         "OK",
                         Color4::rgb(32, 178, 92),
                         single,
-                        "✓ HMAC 校验通过 · 无痕键入不落盘 · 30s擦除 (⇧↵收藏)".to_string(),
-                        Some("无痕键入 ↵"),
+                        "✓ HMAC 校验通过 · 无痕键入不落盘 · 30s 擦除".to_string(),
+                        Some("无痕键入"),
                         Some(HitAction::CommitEphemeralSecret {
                             secret: decrypted_plain.clone(),
                             toast: "已无痕键入解锁明文（不写入历史 · 30s后自动擦除）".to_string(),
@@ -4693,7 +5284,14 @@ fn layout_and_draw_main_view(
             );
             let ic_cx = (pad + s(24)) as f32;
             let ic_cy = (cur_y + bh / 2) as f32;
-            canvas.fill_circle(ic_cx, ic_cy, sf(13.0), palette.cobalt.with_alpha(36));
+            canvas.fill_circle(
+                ic_cx,
+                ic_cy,
+                sf(13.0),
+                palette
+                    .cobalt
+                    .with_alpha(if st.is_dark_mode { 48 } else { 28 }),
+            );
             texts.push(TextDrawCmd {
                 text: "fx".to_string(),
                 rect: RECT {
@@ -4702,18 +5300,18 @@ fn layout_and_draw_main_view(
                     right: pad + s(37),
                     bottom: cur_y + bh,
                 },
-                color: palette.cobalt,
-                font_kind: FontKind::BadgeBold,
+                color: palette.cobalt_text,
+                font_kind: FontKind::Mono,
                 flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
             });
 
-            let btn_w = s(62);
+            let btn_w = s(54);
             let btn_h = s(24);
             let btn_x = w - pad - btn_w - s(10);
             let btn_y = cur_y + (bh - btn_h) / 2;
             canvas.fill_round_rect(btn_x, btn_y, btn_w, btn_h, sf(12.0), palette.cobalt);
             texts.push(TextDrawCmd {
-                text: "键入 ↵".to_string(),
+                text: "键入".to_string(),
                 rect: RECT {
                     left: btn_x,
                     top: btn_y,
@@ -4727,7 +5325,7 @@ fn layout_and_draw_main_view(
 
             let mut text_right = btn_x - s(8);
             if let Some(rmb) = &math.rmb_uppercase {
-                let rmb_w = s(68);
+                let rmb_w = s(64);
                 let rmb_x = btn_x - s(6) - rmb_w;
                 canvas.fill_round_rect(
                     rmb_x,
@@ -4735,17 +5333,19 @@ fn layout_and_draw_main_view(
                     rmb_w,
                     btn_h,
                     sf(12.0),
-                    palette.cobalt.with_alpha(34),
+                    palette
+                        .cobalt
+                        .with_alpha(if st.is_dark_mode { 44 } else { 24 }),
                 );
                 texts.push(TextDrawCmd {
-                    text: "大写 ⇧↵".to_string(),
+                    text: "财务大写".to_string(),
                     rect: RECT {
                         left: rmb_x,
                         top: btn_y,
                         right: rmb_x + rmb_w,
                         bottom: btn_y + btn_h,
                     },
-                    color: palette.cobalt,
+                    color: palette.cobalt_text,
                     font_kind: FontKind::BadgeBold,
                     flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
                 });
@@ -4766,12 +5366,12 @@ fn layout_and_draw_main_view(
                 text: format!("= {}", math.plain_value),
                 rect: RECT {
                     left: pad + s(44),
-                    top: cur_y + s(5),
+                    top: cur_y + s(4),
                     right: text_right,
-                    bottom: cur_y + s(26),
+                    bottom: cur_y + s(27),
                 },
                 color: palette.text_primary,
-                font_kind: FontKind::Headline,
+                font_kind: FontKind::Display,
                 flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
             });
             let sub = math
@@ -5242,16 +5842,8 @@ fn layout_and_draw_main_view(
         cur_y += ah + s(8);
     }
 
-    // 列表顶部分隔微线
-    canvas.draw_line(
-        0.0,
-        cur_y as f32,
-        w as f32,
-        cur_y as f32,
-        sf(0.7),
-        palette.divider,
-    );
-    cur_y += s(10);
+    // 取消生硬横穿全宽的顶部分割线，靠留白呼吸自然过渡
+    cur_y += s(4);
 
     // 3. 剪贴卡片列表与 3 列相册网格
     let filtered = st.store.filtered_indices_ext(
@@ -5674,17 +6266,15 @@ fn layout_and_draw_main_view(
                         break;
                     }
 
-                    // 1:1 复刻 macOS ClipCardView 背景与边框（选中态带柔和蓝影，未选中为冰白/冷曜石玉片）
+                    // 现代液态玻璃卡片材质：选中态采用轻透冰蓝玻璃层 + 左侧 3px 圆头精选指示条（彻底消除塑料大蓝块与溢出阴影）
                     if is_selected {
-                        canvas.draw_soft_shadow_round_rect(
+                        canvas.fill_round_rect(
                             pad,
                             cur_y,
                             track_w,
                             card_h,
                             sf(14.0),
-                            sf(2.0),
-                            sf(5.5),
-                            palette.select_shadow,
+                            palette.card_bg,
                         );
                         canvas.fill_diag_grad_round_rect(
                             pad,
@@ -5695,14 +6285,25 @@ fn layout_and_draw_main_view(
                             palette.select_top,
                             palette.select_bottom,
                         );
-                        canvas.stroke_round_rect(
+                        canvas.stroke_glass_bevel_round_rect(
                             pad,
                             cur_y,
                             track_w,
                             card_h,
                             sf(14.0),
-                            sf(0.75),
+                            sf(0.95),
+                            palette.glass_top_highlight,
                             palette.select_border,
+                        );
+                        // 左侧 3px 圆头品牌电光钴蓝精选指示条
+                        let ind_h = (card_h - s(22)).max(s(20));
+                        canvas.fill_round_rect(
+                            pad + s(1),
+                            cur_y + (card_h - ind_h) / 2,
+                            s(3),
+                            ind_h,
+                            sf(1.5),
+                            palette.select_indicator,
                         );
                     } else if item.is_pinned {
                         let (pt, pb) = if is_hovered {
@@ -5722,13 +6323,14 @@ fn layout_and_draw_main_view(
                             pt,
                             pb,
                         );
-                        canvas.stroke_round_rect(
+                        canvas.stroke_glass_bevel_round_rect(
                             pad,
                             cur_y,
                             track_w,
                             card_h,
                             sf(14.0),
-                            sf(0.95),
+                            sf(0.85),
+                            palette.glass_top_highlight,
                             palette.card_pinned_border,
                         );
                     } else {
@@ -5743,13 +6345,14 @@ fn layout_and_draw_main_view(
                             palette.card_border
                         };
                         canvas.fill_round_rect(pad, cur_y, track_w, card_h, sf(14.0), bg);
-                        canvas.stroke_round_rect(
+                        canvas.stroke_glass_bevel_round_rect(
                             pad,
                             cur_y,
                             track_w,
                             card_h,
                             sf(14.0),
-                            sf(0.75),
+                            sf(0.80),
+                            palette.glass_top_highlight,
                             bd,
                         );
                     }
@@ -5769,21 +6372,13 @@ fn layout_and_draw_main_view(
                         let cbx = left_cursor;
                         let cby = content_center_y - cb_sz / 2;
                         let ring_c = if todo_done {
-                            if is_selected {
-                                Color4::rgb(255, 255, 255)
-                            } else {
-                                palette.emerald
-                            }
+                            palette.emerald
                         } else if is_selected {
-                            Color4::rgba(255, 255, 255, 224)
+                            palette.cobalt_text
                         } else {
                             palette.cobalt.with_alpha(185)
                         };
-                        let chk_c = if is_selected {
-                            palette.cobalt
-                        } else {
-                            Color4::rgb(255, 255, 255)
-                        };
+                        let chk_c = Color4::rgb(255, 255, 255);
                         canvas.draw_icon_check_circle(
                             (cbx + cb_sz / 2) as f32,
                             (cby + cb_sz / 2) as f32,
@@ -5815,55 +6410,42 @@ fn layout_and_draw_main_view(
                         let badge_hov = st.hovered_link_badge_store_idx == Some(store_idx);
 
                         if badge_hov {
-                            if is_selected {
-                                canvas.fill_round_rect(
-                                    bx,
-                                    by,
-                                    b_sz,
-                                    b_sz,
-                                    sf(11.0),
-                                    Color4::rgba(255, 255, 255, 244),
-                                );
-                            } else {
-                                canvas.draw_soft_shadow_round_rect(
-                                    bx,
-                                    by,
-                                    b_sz,
-                                    b_sz,
-                                    sf(11.0),
-                                    sf(2.0),
-                                    sf(5.0),
-                                    palette.cobalt.with_alpha(96),
-                                );
-                                canvas.fill_diag_grad_round_rect(
-                                    bx,
-                                    by,
-                                    b_sz,
-                                    b_sz,
-                                    sf(11.0),
-                                    palette.cobalt,
-                                    Color4::rgb(31, 163, 250),
-                                );
-                            }
+                            canvas.draw_soft_shadow_round_rect(
+                                bx,
+                                by,
+                                b_sz,
+                                b_sz,
+                                sf(11.0),
+                                sf(2.0),
+                                sf(5.0),
+                                palette.cobalt.with_alpha(86),
+                            );
+                            canvas.fill_diag_grad_round_rect(
+                                bx,
+                                by,
+                                b_sz,
+                                b_sz,
+                                sf(11.0),
+                                palette.cobalt,
+                                Color4::rgb(31, 163, 250),
+                            );
                         } else {
                             let bg = if is_selected {
-                                Color4::rgba(255, 255, 255, 56)
+                                palette
+                                    .cobalt
+                                    .with_alpha(if st.is_dark_mode { 54 } else { 32 })
                             } else {
-                                palette.cobalt.with_alpha(33)
+                                palette
+                                    .cobalt
+                                    .with_alpha(if st.is_dark_mode { 36 } else { 24 })
                             };
                             canvas.fill_round_rect(bx, by, b_sz, b_sz, sf(11.0), bg);
                         }
 
                         let ic_c = if badge_hov {
-                            if is_selected {
-                                palette.cobalt
-                            } else {
-                                Color4::rgb(255, 255, 255)
-                            }
-                        } else if is_selected {
                             Color4::rgb(255, 255, 255)
                         } else {
-                            palette.cobalt
+                            palette.cobalt_text
                         };
                         let ic_cx = (bx + b_sz / 2) as f32;
                         let ic_cy = (by + b_sz / 2) as f32;
@@ -5905,11 +6487,7 @@ fn layout_and_draw_main_view(
                         let b_sz = s(23);
                         let by = cur_y + s(8);
                         let mut rx = w - pad - s(9) - b_sz;
-                        let circle_bg = if is_selected {
-                            Color4::rgba(255, 255, 255, 48)
-                        } else {
-                            palette.chip_hover_bg
-                        };
+                        let circle_bg = palette.chip_hover_bg;
 
                         // 删除圆钮
                         canvas.fill_circle(
@@ -5923,11 +6501,7 @@ fn layout_and_draw_main_view(
                             (by + b_sz / 2) as f32,
                             sf(11.5),
                             sf(1.4),
-                            if is_selected {
-                                Color4::rgb(255, 255, 255)
-                            } else {
-                                palette.danger
-                            },
+                            palette.danger,
                         );
                         st.hit_regions.push(HitRegion {
                             rect: RECT {
@@ -5946,7 +6520,7 @@ fn layout_and_draw_main_view(
                             (rx + b_sz / 2) as f32,
                             (by + b_sz / 2) as f32,
                             (b_sz as f32) * 0.5,
-                            if item.is_pinned && !is_selected {
+                            if item.is_pinned {
                                 palette.amber.with_alpha(38)
                             } else {
                                 circle_bg
@@ -5958,13 +6532,7 @@ fn layout_and_draw_main_view(
                             sf(12.0),
                             sf(1.4),
                             if item.is_pinned {
-                                if is_selected {
-                                    Color4::rgb(255, 255, 255)
-                                } else {
-                                    palette.amber
-                                }
-                            } else if is_selected {
-                                Color4::rgb(255, 255, 255)
+                                palette.amber
                             } else {
                                 palette.text_secondary
                             },
@@ -5994,19 +6562,13 @@ fn layout_and_draw_main_view(
                                 (by + b_sz / 2) as f32,
                                 sf(12.0),
                                 sf(1.35),
-                                if is_selected {
-                                    Color4::rgb(255, 255, 255)
-                                } else if item.is_todo() {
+                                if item.is_todo() {
                                     palette.emerald
                                 } else {
                                     palette.text_secondary
                                 },
                                 item.is_todo(),
-                                if is_selected {
-                                    palette.cobalt
-                                } else {
-                                    Color4::rgb(255, 255, 255)
-                                },
+                                Color4::rgb(255, 255, 255),
                             );
                             st.hit_regions.push(HitRegion {
                                 rect: RECT {
@@ -6033,11 +6595,7 @@ fn layout_and_draw_main_view(
                                 (by + b_sz / 2) as f32,
                                 sf(11.0),
                                 sf(1.5),
-                                if is_selected {
-                                    Color4::rgb(255, 255, 255)
-                                } else {
-                                    palette.cobalt
-                                },
+                                palette.cobalt_text,
                             );
                             st.hit_regions.push(HitRegion {
                                 rect: RECT {
@@ -6055,18 +6613,7 @@ fn layout_and_draw_main_view(
                         let bh = s(18);
                         let bx = w - pad - bw - s(10);
                         let by = cur_y + s(9);
-                        canvas.fill_round_rect(
-                            bx,
-                            by,
-                            bw,
-                            bh,
-                            sf(9.0),
-                            if is_selected {
-                                Color4::rgba(255, 255, 255, 68)
-                            } else {
-                                palette.cobalt
-                            },
-                        );
+                        canvas.fill_round_rect(bx, by, bw, bh, sf(9.0), palette.cobalt);
                         texts.push(TextDrawCmd {
                             text: format!("#{q_rank}"),
                             rect: RECT {
@@ -6087,11 +6634,12 @@ fn layout_and_draw_main_view(
                         if is_selected {
                             let r_sz = s(20);
                             let rx = bx + bw - r_sz;
+                            // 选中卡片右侧确认键入圆钮承担唯一品牌电光钴蓝焦点
                             canvas.fill_circle(
                                 (rx + r_sz / 2) as f32,
                                 (by + bh / 2) as f32,
                                 (r_sz as f32) * 0.5,
-                                Color4::rgba(255, 255, 255, 62),
+                                palette.cobalt,
                             );
                             canvas.draw_icon_return_arrow(
                                 (rx + r_sz / 2) as f32,
@@ -6100,16 +6648,18 @@ fn layout_and_draw_main_view(
                                 sf(1.45),
                                 Color4::rgb(255, 255, 255),
                             );
-                            bx = rx - bw - s(5);
+                            bx = rx - bw - s(6);
                         }
                         canvas.fill_round_rect(
                             bx,
                             by,
                             bw,
                             bh,
-                            sf(9.0),
+                            sf(6.0),
                             if is_selected {
-                                Color4::rgba(255, 255, 255, 48)
+                                palette
+                                    .cobalt
+                                    .with_alpha(if st.is_dark_mode { 42 } else { 20 })
                             } else {
                                 palette.chip_bg
                             },
@@ -6123,7 +6673,7 @@ fn layout_and_draw_main_view(
                                 bottom: by + bh,
                             },
                             color: if is_selected {
-                                Color4::rgba(255, 255, 255, 232)
+                                palette.cobalt_text
                             } else {
                                 palette.text_muted
                             },
@@ -6132,7 +6682,7 @@ fn layout_and_draw_main_view(
                         });
                     }
 
-                    // 卡片主标题（未选中且未悬停时自动对高敏密钥应用防肩窥圆点遮罩，零高度抖动）
+                    // 卡片主标题（通透选中层下始终保持深海军蓝/纯白最高可读对比度）
                     let veil_on =
                         st.store.config.mask_sensitive_previews && !is_selected && !is_hovered;
                     let title_str = item.display_title(minimal, veil_on);
@@ -6144,9 +6694,7 @@ fn layout_and_draw_main_view(
                             right: w - pad - right_reserved,
                             bottom: cur_y + s(31),
                         },
-                        color: if is_selected {
-                            Color4::rgb(255, 255, 255)
-                        } else if todo_done {
+                        color: if todo_done {
                             palette.text_muted
                         } else {
                             palette.text_primary
@@ -6155,13 +6703,11 @@ fn layout_and_draw_main_view(
                         flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                     });
 
-                    // 副标题行（收藏星标 + 摘要元信息 + 右侧等宽相对时间）
+                    // 副标题行（收藏星标 + 独立分类徽章胶囊 + 降噪元信息 + 右侧等宽相对时间）
                     let mut meta_x = left_cursor;
                     let meta_cy = (cur_y + s(41)) as f32;
                     if item.is_pinned {
-                        let star_c = if is_selected {
-                            Color4::rgb(255, 255, 255)
-                        } else if !minimal {
+                        let star_c = if !minimal {
                             item.pin_category
                                 .map(GlassPalette::pin_category_color)
                                 .unwrap_or(palette.amber)
@@ -6179,13 +6725,45 @@ fn layout_and_draw_main_view(
                         meta_x += s(14);
                     } else if !minimal {
                         if let Some(cat) = item.pin_category {
-                            let dot_c = if is_selected {
-                                Color4::rgb(255, 255, 255)
-                            } else {
-                                GlassPalette::pin_category_color(cat)
-                            };
+                            let dot_c = GlassPalette::pin_category_color(cat);
                             canvas.fill_circle(meta_x as f32 + sf(3.0), meta_cy, sf(2.6), dot_c);
                             meta_x += s(8);
+                        }
+                    }
+
+                    // 收藏分类拆分为独立语义微胶囊（告别与正文摘要混排成一团！）
+                    if !minimal {
+                        if let Some(cat) = item.pin_category {
+                            let cat_lbl = cat.title();
+                            let cat_c = GlassPalette::pin_category_color(cat);
+                            let cw = estimate_text_px(cat_lbl, sf(10.5)) + s(10);
+                            let ch = s(15);
+                            let cy_b = cur_y + s(34);
+                            canvas.fill_round_rect(
+                                meta_x,
+                                cy_b,
+                                cw,
+                                ch,
+                                sf(7.5),
+                                cat_c.with_alpha(if st.is_dark_mode { 44 } else { 26 }),
+                            );
+                            texts.push(TextDrawCmd {
+                                text: cat_lbl.to_string(),
+                                rect: RECT {
+                                    left: meta_x,
+                                    top: cy_b,
+                                    right: meta_x + cw,
+                                    bottom: cy_b + ch,
+                                },
+                                color: if st.is_dark_mode {
+                                    cat_c.lerp(Color4::rgb(255, 255, 255), 0.28)
+                                } else {
+                                    cat_c.lerp(Color4::rgb(15, 23, 42), 0.22)
+                                },
+                                font_kind: FontKind::BadgeBold,
+                                flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                            });
+                            meta_x += cw + s(6);
                         }
                     }
 
@@ -6209,11 +6787,6 @@ fn layout_and_draw_main_view(
                             sub_parts.push(format!("{} · 24h自毁", sec_kind.badge_title()));
                         } else {
                             sub_parts.push(sec_kind.badge_title().to_string());
-                        }
-                    }
-                    if !minimal {
-                        if let Some(cat) = item.pin_category {
-                            sub_parts.push(cat.title().to_string());
                         }
                     }
                     sub_parts.push(item.subtitle_info_veiled(veil_on));
@@ -6248,13 +6821,7 @@ fn layout_and_draw_main_view(
                             bottom: cur_y + s(52),
                         },
                         color: if st.copied_flash_item_id.as_deref() == Some(item.id.as_str()) {
-                            if is_selected {
-                                Color4::rgb(255, 255, 255)
-                            } else {
-                                palette.emerald
-                            }
-                        } else if is_selected {
-                            Color4::rgba(255, 255, 255, 208)
+                            palette.emerald
                         } else {
                             palette.text_secondary
                         },
@@ -6269,46 +6836,88 @@ fn layout_and_draw_main_view(
                             right: w - pad - s(12),
                             bottom: cur_y + s(52),
                         },
-                        color: if is_selected {
-                            Color4::rgba(255, 255, 255, 204)
-                        } else {
-                            palette.text_muted
-                        },
+                        color: palette.text_muted,
                         font_kind: FontKind::Meta,
                         flags: DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
                     });
 
-                    // 常驻轻雾快捷胶囊条（复刻 ClipCardView.swift:212 — 精确字宽包裹 + 极淡 5.5% 雾面底）
+                    // 现代精致快捷转化胶囊（零低质 Unicode 符号、高辨识冷蓝/琥珀语义底、清晰 22px 舒展高度）
                     if has_chips {
                         let mut chip_x = left_cursor;
-                        let chip_top = cur_y + s(56);
-                        let chip_h = s(21);
+                        let chip_top = cur_y + s(55);
+                        let chip_h = s(22);
                         for (a_idx, act) in quick_actions.iter().enumerate() {
-                            let label = if a_idx == 0 {
-                                format!("{} ⇧↵", act.title)
-                            } else {
-                                act.title.clone()
-                            };
-                            let txt_w = estimate_text_px(&label, sf(11.0));
-                            let cw = (s(20) + txt_w + s(9)).min(w - pad - chip_x - s(10));
+                            let label = act.title.clone();
+                            let is_primary_chip = a_idx == 0;
+                            let txt_w = estimate_text_px(&label, sf(11.2));
+                            let extra_key_w = if is_primary_chip { s(16) } else { 0 };
+                            let cw =
+                                (s(22) + txt_w + extra_key_w + s(8)).min(w - pad - chip_x - s(10));
                             if cw < s(52) {
                                 break;
                             }
-                            let chip_bg = if is_selected {
-                                Color4::rgba(255, 255, 255, 52)
-                            } else if is_hovered {
-                                palette.chip_hover_bg
+                            let (chip_bg, chip_bd, chip_fg, bolt_c) = if is_primary_chip {
+                                if act.is_security {
+                                    (
+                                        palette.amber.with_alpha(if st.is_dark_mode {
+                                            42
+                                        } else {
+                                            22
+                                        }),
+                                        palette.amber.with_alpha(if st.is_dark_mode {
+                                            96
+                                        } else {
+                                            64
+                                        }),
+                                        if st.is_dark_mode {
+                                            Color4::rgb(253, 224, 138)
+                                        } else {
+                                            Color4::rgb(180, 83, 9)
+                                        },
+                                        palette.amber,
+                                    )
+                                } else {
+                                    (
+                                        palette.cobalt.with_alpha(if st.is_dark_mode {
+                                            44
+                                        } else {
+                                            20
+                                        }),
+                                        palette.cobalt.with_alpha(if st.is_dark_mode {
+                                            108
+                                        } else {
+                                            62
+                                        }),
+                                        palette.cobalt_text,
+                                        palette.cobalt_text,
+                                    )
+                                }
                             } else {
-                                palette.chip_bg
+                                (
+                                    if is_hovered {
+                                        palette.chip_hover_bg
+                                    } else {
+                                        palette.chip_bg
+                                    },
+                                    palette.card_border,
+                                    palette.text_secondary,
+                                    if act.is_security {
+                                        palette.amber
+                                    } else {
+                                        palette.cobalt_text
+                                    },
+                                )
                             };
-                            canvas.fill_round_rect(chip_x, chip_top, cw, chip_h, sf(10.5), chip_bg);
-                            let bolt_c = if is_selected {
-                                Color4::rgb(255, 255, 255)
-                            } else if act.is_security {
-                                palette.amber
-                            } else {
-                                palette.cobalt
-                            };
+                            canvas.fill_round_rect(chip_x, chip_top, cw, chip_h, sf(11.0), chip_bg);
+                            canvas.stroke_round_rect(
+                                chip_x,
+                                chip_top,
+                                cw,
+                                chip_h,
+                                sf(11.0),
+                                sf(0.65),
+                                chip_bd,
+                            );
                             canvas.draw_icon_bolt(
                                 (chip_x + s(11)) as f32,
                                 (chip_top + chip_h / 2) as f32,
@@ -6316,22 +6925,37 @@ fn layout_and_draw_main_view(
                                 sf(1.35),
                                 bolt_c,
                             );
+                            let text_right = if is_primary_chip {
+                                chip_x + cw - s(20)
+                            } else {
+                                chip_x + cw - s(8)
+                            };
                             texts.push(TextDrawCmd {
                                 text: label,
                                 rect: RECT {
-                                    left: chip_x + s(19),
+                                    left: chip_x + s(20),
                                     top: chip_top,
-                                    right: chip_x + cw - s(7),
+                                    right: text_right,
                                     bottom: chip_top + chip_h,
                                 },
-                                color: if is_selected {
-                                    Color4::rgb(255, 255, 255)
+                                color: chip_fg,
+                                font_kind: if is_primary_chip {
+                                    FontKind::BadgeBold
                                 } else {
-                                    palette.text_primary.with_alpha(206)
+                                    FontKind::Meta
                                 },
-                                font_kind: FontKind::Meta,
                                 flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                             });
+                            // 首枚胶囊右侧用像素对齐矢量回车图标替代歪斜 Unicode `⇧↵`
+                            if is_primary_chip && cw >= s(72) {
+                                canvas.draw_icon_return_arrow(
+                                    (chip_x + cw - s(11)) as f32,
+                                    (chip_top + chip_h / 2) as f32,
+                                    sf(8.8),
+                                    sf(1.25),
+                                    chip_fg.with_alpha(205),
+                                );
+                            }
                             st.hit_regions.push(HitRegion {
                                 rect: RECT {
                                     left: chip_x,
@@ -6365,28 +6989,21 @@ fn layout_and_draw_main_view(
         }
     }
 
-    // 4. 底部悬浮胶囊状态栏 `footerBar`（复刻 ClipboardPopoverView.swift:385-398 & 1320-1379）
-    canvas.draw_line(
-        0.0,
-        (h - footer_zone_h) as f32,
-        w as f32,
-        (h - footer_zone_h) as f32,
-        sf(0.7),
-        palette.divider,
-    );
-
+    // 4. 底部悬浮玻璃胶囊状态栏（去除多余顶线，全矢量键帽 + 隔离清空按钮防误触）
+    let _ = footer_zone_h;
     let fb_x = s(12);
     let fb_w = w - s(24);
-    let fb_h = s(28);
+    let fb_h = s(30);
     let fb_y = h - fb_h - s(8);
-    canvas.fill_round_rect(fb_x, fb_y, fb_w, fb_h, sf(14.0), palette.footer_backdrop);
-    canvas.stroke_round_rect(
+    canvas.fill_round_rect(fb_x, fb_y, fb_w, fb_h, sf(15.0), palette.footer_backdrop);
+    canvas.stroke_glass_bevel_round_rect(
         fb_x,
         fb_y,
         fb_w,
         fb_h,
-        sf(14.0),
-        sf(0.65),
+        sf(15.0),
+        sf(0.75),
+        palette.glass_top_highlight,
         palette.track_border,
     );
 
@@ -6410,7 +7027,7 @@ fn layout_and_draw_main_view(
         flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     });
 
-    // 右侧一键清空未收藏微圆钮
+    // 右侧一键清空未收藏微圆钮（左侧留细竖分隔线与键帽区清晰隔离防误触）
     let has_unpinned = st.store.items.iter().any(|it| !it.is_pinned);
     let mut hint_right_edge = fb_x + fb_w - s(10);
     if has_unpinned {
@@ -6440,43 +7057,76 @@ fn layout_and_draw_main_view(
             interactive_cursor: true,
             action: HitAction::ClearUnpinnedHistory,
         });
-        hint_right_edge = tbx - s(8);
+        let sep_x = (tbx - s(6)) as f32;
+        canvas.draw_line(
+            sep_x,
+            (fb_y + s(7)) as f32,
+            sep_x,
+            (fb_y + fb_h - s(7)) as f32,
+            sf(0.75),
+            palette.divider,
+        );
+        hint_right_edge = tbx - s(12);
     }
 
-    // 恒定键帽提示组（从右向左排布，零跳动）：[ESC] 关闭 · [Tab] 类目 · [⇧↵] 转换 · [↵] 键入
+    // 恒定全矢量键帽提示组（零低质 Unicode 符号）：[Esc] 关闭 · [Tab] 类目 · [Shift+Enter] 转换 · [Enter] 键入
     let tab_lbl = if st.store.paste_queue_ids.is_empty() {
         "类目"
     } else {
         "出队"
     };
-    let mut hints: Vec<(&str, &str)> = vec![("ESC", "关闭"), ("⇥", tab_lbl)];
+    let mut hints: Vec<(&str, &str)> = vec![("Esc", "关闭"), ("tab", tab_lbl)];
     if !minimal {
-        hints.push(("⇧↵", "转换"));
+        hints.push(("shift_ret", "转换"));
     }
-    hints.push(("↵", "键入"));
+    hints.push(("ret", "键入"));
 
     let mut cur_rx = hint_right_edge;
     for (k, lbl) in hints {
-        let lbl_w = s(24);
+        let lbl_w = s(25);
         let cap_w = match k {
-            "↵" | "⇥" => s(18),
-            "⇧↵" => s(26),
-            _ => (k.chars().count() as i32) * s(7) + s(9),
+            "ret" | "tab" => s(19),
+            "shift_ret" => s(28),
+            _ => s(27),
         };
-        let total_w = cap_w + s(3) + lbl_w;
+        let total_w = cap_w + s(4) + lbl_w;
         let start_x = cur_rx - total_w;
-        if start_x < fb_x + s(78) {
+        if start_x < fb_x + s(74) {
             break;
         }
-        let cap_h = s(15);
+        let cap_h = s(17);
         let cap_y = fb_y + (fb_h - cap_h) / 2;
-        canvas.fill_round_rect(start_x, cap_y, cap_w, cap_h, sf(4.5), palette.chip_bg);
+        canvas.fill_round_rect(start_x, cap_y, cap_w, cap_h, sf(4.8), palette.chip_bg);
+        canvas.stroke_round_rect(
+            start_x,
+            cap_y,
+            cap_w,
+            cap_h,
+            sf(4.8),
+            sf(0.65),
+            palette.card_border,
+        );
         let cap_cx = (start_x + cap_w / 2) as f32;
         let cap_cy = (cap_y + cap_h / 2) as f32;
-        if k == "↵" {
-            canvas.draw_icon_return_arrow(cap_cx, cap_cy, sf(9.5), sf(1.3), palette.text_secondary);
-        } else if k == "⇥" {
-            canvas.draw_icon_tab_arrow(cap_cx, cap_cy, sf(9.5), sf(1.25), palette.text_secondary);
+        if k == "ret" {
+            canvas.draw_icon_return_arrow(cap_cx, cap_cy, sf(9.2), sf(1.3), palette.text_secondary);
+        } else if k == "tab" {
+            canvas.draw_icon_tab_arrow(cap_cx, cap_cy, sf(9.2), sf(1.25), palette.text_secondary);
+        } else if k == "shift_ret" {
+            canvas.draw_icon_shift_arrow(
+                (start_x + s(8)) as f32,
+                cap_cy,
+                sf(8.6),
+                sf(1.2),
+                palette.text_secondary,
+            );
+            canvas.draw_icon_return_arrow(
+                (start_x + cap_w - s(8)) as f32,
+                cap_cy,
+                sf(8.6),
+                sf(1.2),
+                palette.text_secondary,
+            );
         } else {
             texts.push(TextDrawCmd {
                 text: k.to_string(),
@@ -6494,16 +7144,16 @@ fn layout_and_draw_main_view(
         texts.push(TextDrawCmd {
             text: lbl.to_string(),
             rect: RECT {
-                left: start_x + cap_w + s(3),
+                left: start_x + cap_w + s(4),
                 top: fb_y,
                 right: cur_rx,
                 bottom: fb_y + fb_h,
             },
             color: palette.text_secondary,
-            font_kind: FontKind::KeyCap,
+            font_kind: FontKind::Meta,
             flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE,
         });
-        cur_rx = start_x - s(7);
+        cur_rx = start_x - s(8);
     }
 }
 
@@ -6551,36 +7201,37 @@ fn layout_and_draw_settings_view(
     let pad = s(14);
     let content_w = w - pad * 2;
 
-    // 1. 设置页顶栏：左侧 `‹ 返回` 胶囊 + 居中 `iClip 设置 · 角色版`（复刻 ClipboardPopoverView.swift:547-579）
+    // 1. 设置页顶栏：左侧 `‹ 返回` 胶囊 + 居中 `iClip 设置` 与轻巧角色徽章（主副视觉清晰分层）
     let top_y = s(14);
     let back_w = s(58);
     let back_h = s(28);
     canvas.fill_round_rect(pad, top_y, back_w, back_h, sf(14.0), palette.search_bg);
-    canvas.stroke_round_rect(
+    canvas.stroke_glass_bevel_round_rect(
         pad,
         top_y,
         back_w,
         back_h,
         sf(14.0),
-        sf(0.75),
+        sf(0.8),
+        palette.glass_top_highlight,
         palette.search_border,
     );
     canvas.draw_icon_back(
         (pad + s(14)) as f32,
         (top_y + back_h / 2) as f32,
-        sf(11.0),
+        sf(10.5),
         sf(1.65),
-        palette.cobalt,
+        palette.cobalt_text,
     );
     texts.push(TextDrawCmd {
         text: "返回".to_string(),
         rect: RECT {
-            left: pad + s(21),
+            left: pad + s(22),
             top: top_y,
-            right: pad + back_w - s(6),
+            right: pad + back_w - s(5),
             bottom: top_y + back_h,
         },
-        color: palette.cobalt,
+        color: palette.cobalt_text,
         font_kind: FontKind::BadgeBold,
         flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     });
@@ -6595,20 +7246,53 @@ fn layout_and_draw_settings_view(
         action: HitAction::ToggleSettingsView,
     });
 
+    let ed_badge = if ClipboardStore::edition_key() == "flow" {
+        "办公版"
+    } else {
+        "极客版"
+    };
+    let head_txt = "iClip 设置";
+    let head_w = estimate_text_px(head_txt, sf(15.0)) + s(6);
+    let ed_w = estimate_text_px(ed_badge, sf(11.0)) + s(14);
+    let ed_h = s(19);
+    let grp_w = head_w + s(6) + ed_w;
+    let grp_x = ((w - grp_w) / 2).max(pad + back_w + s(8));
     texts.push(TextDrawCmd {
-        text: format!("iClip 设置 · {}", ClipboardStore::edition_title()),
+        text: head_txt.to_string(),
         rect: RECT {
-            left: pad + back_w + s(6),
+            left: grp_x,
             top: top_y,
-            right: w - pad - back_w,
+            right: grp_x + head_w,
             bottom: top_y + back_h,
         },
         color: palette.text_primary,
         font_kind: FontKind::Headline,
-        flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    });
+    let ed_x = grp_x + head_w + s(6);
+    let ed_y = top_y + (back_h - ed_h) / 2;
+    canvas.fill_round_rect(
+        ed_x,
+        ed_y,
+        ed_w,
+        ed_h,
+        sf(9.5),
+        palette.cobalt.with_alpha(if st.is_dark_mode { 42 } else { 22 }),
+    );
+    texts.push(TextDrawCmd {
+        text: ed_badge.to_string(),
+        rect: RECT {
+            left: ed_x,
+            top: ed_y,
+            right: ed_x + ed_w,
+            bottom: ed_y + ed_h,
+        },
+        color: palette.cobalt_text,
+        font_kind: FontKind::BadgeBold,
+        flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
     });
 
-    let view_top = top_y + back_h + s(8);
+    let view_top = top_y + back_h + s(14);
     let view_bottom = h - s(10);
     let mut y = view_top - st.settings_scroll_px;
 
@@ -6618,22 +7302,257 @@ fn layout_and_draw_settings_view(
 
     let visible_block = |by: i32, bh: i32| -> bool { (by + bh) > view_top && by < view_bottom };
 
-    // ── 分组 1：液态玻璃（含 Tahoe 实景流光色带折射预览窗 + 三档微刻度滑杆）──
-    if visible_block(y, s(17)) {
-        draw_group_header(texts, pad, y, content_w, s(17), "液态玻璃", palette);
+    // ── 分组 0：软件更新（Windows 原生 WinHTTP 双源校验 + 无感原地热替换 OTA）──
+    if visible_block(y, s(18)) {
+        draw_group_header(texts, pad, y, content_w, s(18), "软件更新", palette);
     }
-    y += s(19);
+    y += s(22);
 
-    let g1_h = s(184);
+    let ota_is_downloading = matches!(st.ota_state, OtaState::Downloading { .. });
+    let g0_h = if ota_is_downloading { s(76) } else { s(62) };
+    if visible_block(y, g0_h) {
+        canvas.fill_round_rect(pad, y, content_w, g0_h, sf(14.0), palette.group_fill);
+        canvas.stroke_glass_bevel_round_rect(
+            pad,
+            y,
+            content_w,
+            g0_h,
+            sf(14.0),
+            sf(0.85),
+            palette.glass_top_highlight,
+            palette.group_stroke,
+        );
+
+        let cur_ver = env!("CARGO_PKG_VERSION");
+        let (ota_title, ota_sub, btn_lbl, btn_primary, btn_action, prog_opt) = match &st.ota_state {
+            OtaState::Idle => (
+                format!("iClip v{cur_ver}"),
+                "原生 OTA 双源校验 · 无感原地更新免重装".to_string(),
+                "检查更新".to_string(),
+                false,
+                Some(HitAction::CheckForUpdates),
+                None,
+            ),
+            OtaState::Checking => (
+                format!("iClip v{cur_ver}"),
+                "正在连接发布源检测最新版本...".to_string(),
+                "检查中".to_string(),
+                false,
+                None,
+                None,
+            ),
+            OtaState::UpToDate { latest } => (
+                format!("iClip v{latest} · 已是最新"),
+                "当前为最新原生版本 · 启动时后台自动静默检测".to_string(),
+                "检查更新".to_string(),
+                false,
+                Some(HitAction::CheckForUpdates),
+                None,
+            ),
+            OtaState::Available(info) => (
+                format!("发现新版本 v{}", info.version),
+                format!("当前 v{cur_ver} · {}", info.release_notes),
+                "立即更新".to_string(),
+                true,
+                Some(HitAction::StartOtaDownload),
+                None,
+            ),
+            OtaState::Downloading {
+                info,
+                progress_pct,
+                downloaded_kb,
+                total_kb,
+            } => (
+                format!("正在下载 v{} · {progress_pct}%", info.version),
+                if *total_kb > 0 {
+                    format!("已下载 {downloaded_kb} KB / {total_kb} KB · 自动校验完整性")
+                } else {
+                    format!("已下载 {downloaded_kb} KB · 自动校验完整性")
+                },
+                "取消".to_string(),
+                false,
+                Some(HitAction::CancelOtaDownload),
+                Some(*progress_pct),
+            ),
+            OtaState::Installing(info) => (
+                format!("正在安装 v{}...", info.version),
+                "PE 签名校验通过，正在热替换并重启 iClip".to_string(),
+                "安装中".to_string(),
+                false,
+                None,
+                Some(100),
+            ),
+            OtaState::Failed(err) => (
+                format!("iClip v{cur_ver} · 更新中断"),
+                err.clone(),
+                "重试".to_string(),
+                false,
+                Some(HitAction::CheckForUpdates),
+                None,
+            ),
+        };
+
+        let ic_box = s(34);
+        let ic_x = pad + s(12);
+        let ic_y = y + (s(62) - ic_box) / 2;
+        let has_new = st.ota_state.available_version().is_some();
+        canvas.fill_round_rect(
+            ic_x,
+            ic_y,
+            ic_box,
+            ic_box,
+            sf(10.0),
+            if has_new {
+                palette.cobalt.with_alpha(if st.is_dark_mode { 56 } else { 28 })
+            } else {
+                palette.emerald.with_alpha(if st.is_dark_mode { 44 } else { 22 })
+            },
+        );
+        canvas.draw_icon_refresh_update(
+            (ic_x + ic_box / 2) as f32,
+            (ic_y + ic_box / 2) as f32,
+            sf(16.0),
+            sf(1.55),
+            if has_new {
+                palette.cobalt_text
+            } else {
+                palette.emerald
+            },
+        );
+
+        let ob_w = (estimate_text_px(&btn_lbl, sf(11.5)) + s(22)).clamp(s(66), s(96));
+        let ob_h = s(28);
+        let ob_x = w - pad - s(12) - ob_w;
+        let ob_y = y + (s(62) - ob_h) / 2;
+        if btn_primary {
+            canvas.fill_round_rect(ob_x, ob_y, ob_w, ob_h, sf(14.0), palette.cobalt);
+        } else {
+            canvas.fill_round_rect(
+                ob_x,
+                ob_y,
+                ob_w,
+                ob_h,
+                sf(14.0),
+                if btn_action.is_some() {
+                    palette.cobalt.with_alpha(if st.is_dark_mode { 38 } else { 18 })
+                } else {
+                    palette.chip_bg
+                },
+            );
+            canvas.stroke_round_rect(
+                ob_x,
+                ob_y,
+                ob_w,
+                ob_h,
+                sf(14.0),
+                sf(0.7),
+                if btn_action.is_some() {
+                    palette.cobalt.with_alpha(if st.is_dark_mode { 84 } else { 48 })
+                } else {
+                    palette.card_border
+                },
+            );
+        }
+        texts.push(TextDrawCmd {
+            text: btn_lbl,
+            rect: RECT {
+                left: ob_x,
+                top: ob_y,
+                right: ob_x + ob_w,
+                bottom: ob_y + ob_h,
+            },
+            color: if btn_primary {
+                Color4::rgb(255, 255, 255)
+            } else if btn_action.is_some() {
+                palette.cobalt_text
+            } else {
+                palette.text_muted
+            },
+            font_kind: FontKind::BadgeBold,
+            flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+        });
+        if let Some(act) = btn_action {
+            st.hit_regions.push(HitRegion {
+                rect: RECT {
+                    left: ob_x,
+                    top: ob_y,
+                    right: ob_x + ob_w,
+                    bottom: ob_y + ob_h,
+                },
+                interactive_cursor: true,
+                action: act,
+            });
+        }
+
+        let txt_left = ic_x + ic_box + s(11);
+        let txt_right = ob_x - s(10);
+        texts.push(TextDrawCmd {
+            text: ota_title,
+            rect: RECT {
+                left: txt_left,
+                top: y + s(10),
+                right: txt_right,
+                bottom: y + s(31),
+            },
+            color: palette.text_primary,
+            font_kind: FontKind::CardTitle,
+            flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        });
+        texts.push(TextDrawCmd {
+            text: ota_sub,
+            rect: RECT {
+                left: txt_left,
+                top: y + s(32),
+                right: txt_right,
+                bottom: y + s(52),
+            },
+            color: if matches!(st.ota_state, OtaState::Failed(_)) {
+                palette.danger
+            } else {
+                palette.text_secondary
+            },
+            font_kind: FontKind::Meta,
+            flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        });
+
+        if let Some(pct) = prog_opt {
+            let bar_x = pad + s(12);
+            let bar_w = content_w - s(24);
+            let bar_y = y + g0_h - s(11);
+            let bar_h = s(4);
+            canvas.fill_round_rect(bar_x, bar_y, bar_w, bar_h, sf(2.0), palette.chip_bg);
+            let fill_w = ((bar_w as f32) * (pct.min(100) as f32 / 100.0)).round() as i32;
+            if fill_w > 0 {
+                canvas.fill_round_rect(
+                    bar_x,
+                    bar_y,
+                    fill_w.max(bar_h),
+                    bar_h,
+                    sf(2.0),
+                    palette.cobalt,
+                );
+            }
+        }
+    }
+    y += g0_h + s(16);
+
+    // ── 分组 1：液态玻璃（纯通透折射预览窗 + 三档语义微刻度滑杆）──
+    if visible_block(y, s(18)) {
+        draw_group_header(texts, pad, y, content_w, s(18), "液态玻璃", palette);
+    }
+    y += s(22);
+
+    let g1_h = s(178);
     if visible_block(y, g1_h) {
         canvas.fill_round_rect(pad, y, content_w, g1_h, sf(14.0), palette.group_fill);
-        canvas.stroke_round_rect(
+        canvas.stroke_glass_bevel_round_rect(
             pad,
             y,
             content_w,
             g1_h,
             sf(14.0),
-            sf(0.75),
+            sf(0.85),
+            palette.glass_top_highlight,
             palette.group_stroke,
         );
 
@@ -6648,10 +7567,10 @@ fn layout_and_draw_settings_view(
         texts.push(TextDrawCmd {
             text: "背景模糊浓度".to_string(),
             rect: RECT {
-                left: pad + s(12),
-                top: y + s(8),
-                right: pad + s(160),
-                bottom: y + s(28),
+                left: pad + s(14),
+                top: y + s(10),
+                right: pad + s(164),
+                bottom: y + s(30),
             },
             color: palette.text_primary,
             font_kind: FontKind::CardTitle,
@@ -6660,21 +7579,21 @@ fn layout_and_draw_settings_view(
         texts.push(TextDrawCmd {
             text: stage_label,
             rect: RECT {
-                left: w - pad - s(140),
-                top: y + s(8),
-                right: w - pad - s(12),
-                bottom: y + s(28),
+                left: w - pad - s(146),
+                top: y + s(10),
+                right: w - pad - s(14),
+                bottom: y + s(30),
             },
             color: palette.text_secondary,
-            font_kind: FontKind::Meta,
+            font_kind: FontKind::Mono,
             flags: DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
         });
 
-        // 112px 实景流光色带折射预览舞台
-        let pv_x = pad + s(12);
-        let pv_y = y + s(32);
-        let pv_w = content_w - s(24);
-        let pv_h = s(112);
+        // 92px 纯粹通透流光折射预览窗（彻底移除底部割裂灰条）
+        let pv_x = pad + s(14);
+        let pv_y = y + s(36);
+        let pv_w = content_w - s(28);
+        let pv_h = s(90);
         canvas.draw_scenic_liquid_glass_preview(
             pv_x,
             pv_y,
@@ -6693,28 +7612,16 @@ fn layout_and_draw_settings_view(
                 bottom: pv_y + s(43),
             },
             color: if st.is_dark_mode {
-                Color4::rgba(255, 255, 255, 185)
+                Color4::rgba(255, 255, 255, 190)
             } else {
-                Color4::rgba(26, 28, 34, 180)
+                Color4::rgba(15, 23, 42, 180)
             },
-            font_kind: FontKind::Meta,
-            flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-        });
-        texts.push(TextDrawCmd {
-            text: "iClip 液态玻璃 · 实时背景柔焦预览".to_string(),
-            rect: RECT {
-                left: pv_x + s(12),
-                top: pv_y + pv_h - s(24),
-                right: pv_x + pv_w - s(12),
-                bottom: pv_y + pv_h,
-            },
-            color: palette.text_primary.with_alpha(225),
             font_kind: FontKind::Meta,
             flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE,
         });
 
-        // 底部官方单轴滑块：左清透双叠方框 + 三档刻度滑杆 + 右磨砂双叠方框
-        let sl_row_y = pv_y + pv_h + s(8);
+        // 底部单轴滑块 + 对称三档语义标注（清透 · 均衡 · 浓雾）
+        let sl_row_y = pv_y + pv_h + s(10);
         let gl_sz = s(18);
         let left_gx = pv_x;
         let right_gx = pv_x + pv_w - gl_sz;
@@ -6756,7 +7663,7 @@ fn layout_and_draw_settings_view(
 
         let track_x = left_gx + gl_sz + s(10);
         let track_w_sl = right_gx - s(10) - track_x;
-        canvas.draw_concentration_slider(track_x, sl_row_y, track_w_sl, s(24), pct, palette.cobalt);
+        canvas.draw_concentration_slider(track_x, sl_row_y, track_w_sl, s(22), pct, palette.cobalt);
         st.hit_regions.push(HitRegion {
             rect: RECT {
                 left: track_x - s(4),
@@ -6770,27 +7677,45 @@ fn layout_and_draw_settings_view(
                 track_width: track_w_sl,
             },
         });
-    }
-    y += g1_h + s(12);
 
-    // ── 分组 2：通用与快捷键（单张分组卡片 + 内部分割线，复刻 ClipboardPopoverView.swift:1435）──
-    if visible_block(y, s(17)) {
-        draw_group_header(texts, pad, y, content_w, s(17), "通用与快捷键", palette);
+        let lbl_y = sl_row_y + s(21);
+        for (anchor, name) in [(0.08f32, "清透"), (0.48f32, "均衡"), (0.88f32, "浓雾")] {
+            let cx_a = track_x + ((track_w_sl as f32) * anchor).round() as i32;
+            texts.push(TextDrawCmd {
+                text: name.to_string(),
+                rect: RECT {
+                    left: cx_a - s(20),
+                    top: lbl_y,
+                    right: cx_a + s(20),
+                    bottom: lbl_y + s(15),
+                },
+                color: palette.text_muted,
+                font_kind: FontKind::Meta,
+                flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            });
+        }
     }
-    y += s(19);
+    y += g1_h + s(16);
 
-    let row_h = s(42);
+    // ── 分组 2：通用与快捷键（大呼吸感 48px 行高 + 顶亮玻璃描边 + 自动微键帽）──
+    if visible_block(y, s(18)) {
+        draw_group_header(texts, pad, y, content_w, s(18), "通用与快捷键", palette);
+    }
+    y += s(22);
+
+    let row_h = s(48);
     let g2_rows = 6;
     let g2_h = s(8) + row_h * g2_rows;
     if visible_block(y, g2_h) {
         canvas.fill_round_rect(pad, y, content_w, g2_h, sf(14.0), palette.group_fill);
-        canvas.stroke_round_rect(
+        canvas.stroke_glass_bevel_round_rect(
             pad,
             y,
             content_w,
             g2_h,
             sf(14.0),
-            sf(0.75),
+            sf(0.85),
+            palette.glass_top_highlight,
             palette.group_stroke,
         );
 
@@ -6902,7 +7827,14 @@ fn layout_and_draw_settings_view(
                 right_edge = rst_x - s(6);
             }
 
-            let pill_w = s(112);
+            let pill_label = if has_conflict {
+                "冲突 · 请重按".to_string()
+            } else if is_rec {
+                "等待按键...".to_string()
+            } else {
+                cur_hk.display_string()
+            };
+            let pill_w = (estimate_text_px(&pill_label, sf(11.0)) + s(24)).clamp(s(76), s(122));
             let pill_h = s(26);
             let pill_x = right_edge - pill_w;
             let pill_y = ry + (row_h - pill_h) / 2;
@@ -6913,27 +7845,36 @@ fn layout_and_draw_settings_view(
             } else {
                 palette.chip_bg
             };
-            canvas.fill_round_rect(pill_x, pill_y, pill_w, pill_h, sf(13.0), pill_bg);
+            canvas.fill_round_rect(pill_x, pill_y, pill_w, pill_h, sf(8.0), pill_bg);
+            if !is_rec && !has_conflict {
+                canvas.stroke_round_rect(
+                    pill_x,
+                    pill_y,
+                    pill_w,
+                    pill_h,
+                    sf(8.0),
+                    sf(0.75),
+                    palette.card_border,
+                );
+            }
             texts.push(TextDrawCmd {
-                text: if has_conflict {
-                    "冲突 · 请重按".to_string()
-                } else if is_rec {
-                    "等待按键...".to_string()
-                } else {
-                    cur_hk.display_string()
-                },
+                text: pill_label,
                 rect: RECT {
                     left: pill_x + s(6),
                     top: pill_y,
                     right: pill_x + pill_w - s(6),
                     bottom: pill_y + pill_h,
                 },
-                color: if is_rec {
+                color: if is_rec || has_conflict {
                     Color4::rgb(255, 255, 255)
                 } else {
                     palette.text_primary
                 },
-                font_kind: FontKind::BadgeBold,
+                font_kind: if is_rec || has_conflict {
+                    FontKind::BadgeBold
+                } else {
+                    FontKind::KeyCap
+                },
                 flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
             });
             st.hit_regions.push(HitRegion {
@@ -6950,10 +7891,10 @@ fn layout_and_draw_settings_view(
             texts.push(TextDrawCmd {
                 text: title.to_string(),
                 rect: RECT {
-                    left: pad + s(12),
-                    top: ry + s(5),
-                    right: pill_x - s(8),
-                    bottom: ry + s(25),
+                    left: pad + s(14),
+                    top: ry + s(7),
+                    right: pill_x - s(10),
+                    bottom: ry + s(26),
                 },
                 color: palette.text_primary,
                 font_kind: FontKind::CardTitle,
@@ -6970,7 +7911,7 @@ fn layout_and_draw_settings_view(
                     st.hotkey_recording_hint
                         .clone()
                         .unwrap_or_else(|| "按下组合键，或双击单键（Esc 取消）".to_string()),
-                    palette.cobalt,
+                    palette.cobalt_text,
                 )
             } else {
                 (default_sub.to_string(), palette.text_secondary)
@@ -6978,10 +7919,10 @@ fn layout_and_draw_settings_view(
             texts.push(TextDrawCmd {
                 text: sub_txt,
                 rect: RECT {
-                    left: pad + s(12),
-                    top: ry + s(24),
-                    right: pill_x - s(8),
-                    bottom: ry + row_h - s(4),
+                    left: pad + s(14),
+                    top: ry + s(27),
+                    right: pill_x - s(10),
+                    bottom: ry + row_h - s(6),
                 },
                 color: sub_col,
                 font_kind: FontKind::Meta,
@@ -7381,8 +8322,8 @@ fn layout_and_draw_settings_view(
             "呼出 / 隐藏面板",
             st.store.config.hotkey_toggle.display_string(),
         ),
-        ("直接键入光标处", "双击 / ↵".to_string()),
-        ("左 / 右切换类目", "⇧⇥ / ⇥".to_string()),
+        ("直接键入光标处", "双击 / Enter".to_string()),
+        ("左 / 右切换类目", "Shift+Tab / Tab".to_string()),
         ("标记 / 完成待办事项", "Ctrl + T".to_string()),
         ("设为粘贴一次后无痕自毁", "Ctrl + B".to_string()),
         ("设置备注标题（自动收藏）", "Ctrl + R".to_string()),
@@ -7645,31 +8586,90 @@ fn draw_grouped_toggle_row(
     action: HitAction,
 ) {
     let s = |v: i32| ((v as f32) * scale).round() as i32;
+    let sf = |v: f32| v * scale;
     let sw_w = s(38);
     let sw_h = s(22);
-    let sw_x = x + w - s(12) - sw_w;
+    let sw_x = x + w - s(14) - sw_w;
     let sw_y = y + (h - sw_h) / 2;
     canvas.draw_toggle_switch(sw_x, sw_y, sw_w, sw_h, is_on, accent);
 
-    texts.push(TextDrawCmd {
-        text: title.to_string(),
-        rect: RECT {
-            left: x + s(12),
-            top: y + s(5),
-            right: sw_x - s(10),
-            bottom: y + s(24),
-        },
-        color: palette.text_primary,
-        font_kind: FontKind::CardTitle,
-        flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
-    });
+    // 自动剥离全角括号快捷键（如「窗口始终在前（Ctrl+P）」），转为标题右侧精致等宽物理微键帽！
+    let (clean_title, shortcut_cap) = if let (Some(open), Some(close)) =
+        (title.find('（'), title.rfind('）'))
+    {
+        if close > open {
+            let inner = title[open + '（'.len_utf8()..close].trim();
+            if inner.is_ascii() && !inner.is_empty() {
+                (title[..open].trim(), Some(inner))
+            } else {
+                (title, None)
+            }
+        } else {
+            (title, None)
+        }
+    } else {
+        (title, None)
+    };
+
+    let title_left = x + s(14);
+    let title_top = y + s(7);
+    let title_bot = y + s(26);
+    if let Some(key_txt) = shortcut_cap {
+        let tw = estimate_text_px(clean_title, sf(13.5)) + s(4);
+        let kw = (estimate_text_px(key_txt, sf(10.5)) + s(12)).max(s(36));
+        let max_tw = (sw_x - s(14) - title_left - kw - s(8)).max(s(60));
+        let used_tw = tw.min(max_tw);
+        texts.push(TextDrawCmd {
+            text: clean_title.to_string(),
+            rect: RECT {
+                left: title_left,
+                top: title_top,
+                right: title_left + used_tw,
+                bottom: title_bot,
+            },
+            color: palette.text_primary,
+            font_kind: FontKind::CardTitle,
+            flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        });
+        let kx = title_left + used_tw + s(6);
+        let kh = s(17);
+        let ky = title_top + (title_bot - title_top - kh) / 2;
+        canvas.fill_round_rect(kx, ky, kw, kh, sf(5.0), palette.chip_bg);
+        canvas.stroke_round_rect(kx, ky, kw, kh, sf(5.0), sf(0.65), palette.card_border);
+        texts.push(TextDrawCmd {
+            text: key_txt.to_string(),
+            rect: RECT {
+                left: kx,
+                top: ky,
+                right: kx + kw,
+                bottom: ky + kh,
+            },
+            color: palette.text_secondary,
+            font_kind: FontKind::KeyCap,
+            flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+        });
+    } else {
+        texts.push(TextDrawCmd {
+            text: clean_title.to_string(),
+            rect: RECT {
+                left: title_left,
+                top: title_top,
+                right: sw_x - s(10),
+                bottom: title_bot,
+            },
+            color: palette.text_primary,
+            font_kind: FontKind::CardTitle,
+            flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        });
+    }
+
     texts.push(TextDrawCmd {
         text: subtitle.to_string(),
         rect: RECT {
-            left: x + s(12),
-            top: y + s(24),
+            left: title_left,
+            top: y + s(27),
             right: sw_x - s(10),
-            bottom: y + h - s(4),
+            bottom: y + h - s(6),
         },
         color: palette.text_secondary,
         font_kind: FontKind::Meta,
@@ -7789,20 +8789,20 @@ fn layout_and_draw_toast_pill(
                 bottom: py + pill_h,
             },
             color: Color4::rgb(255, 255, 255),
-            font_kind: FontKind::BadgeBold,
+            font_kind: FontKind::Body,
             flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
         });
     } else {
         texts.push(TextDrawCmd {
             text: msg.to_string(),
             rect: RECT {
-                left: px + s(12),
+                left: px + s(14),
                 top: py,
-                right: px + pill_w - s(12),
+                right: px + pill_w - s(14),
                 bottom: py + pill_h,
             },
             color: Color4::rgb(255, 255, 255),
-            font_kind: FontKind::BadgeBold,
+            font_kind: FontKind::Body,
             flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
         });
     }
@@ -8136,7 +9136,7 @@ fn layout_and_draw_highlights_overlay(
             bottom: my + s(46),
         },
         color: palette.text_primary,
-        font_kind: FontKind::Headline,
+        font_kind: FontKind::Display,
         flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     });
     texts.push(TextDrawCmd {
@@ -8875,6 +9875,15 @@ unsafe fn handle_left_click(hwnd: HWND, x: i32, y: i32, is_double: bool) {
                 }
             });
             let _ = InvalidateRect(hwnd, null(), FALSE);
+        }
+        HitAction::CheckForUpdates => {
+            trigger_ota_check(hwnd, false);
+        }
+        HitAction::StartOtaDownload => {
+            trigger_ota_download_and_install(hwnd);
+        }
+        HitAction::CancelOtaDownload => {
+            cancel_ota_download(hwnd);
         }
         HitAction::ToggleShortcutRef => {
             APP_STATE.with(|c| {
@@ -10031,6 +11040,12 @@ unsafe fn show_tray_context_menu(hwnd: HWND) {
     AppendMenuW(
         hmenu,
         MF_STRING,
+        CMD_CHECK_UPDATES,
+        to_wide("检查软件更新 (OTA)...").as_ptr(),
+    );
+    AppendMenuW(
+        hmenu,
+        MF_STRING,
         CMD_QUIT_APP,
         to_wide("退出 iClip").as_ptr(),
     );
@@ -10095,6 +11110,17 @@ unsafe fn handle_menu_command(hwnd: HWND, cmd: usize) {
                 }
             });
             let _ = InvalidateRect(hwnd, null(), FALSE);
+        }
+        CMD_CHECK_UPDATES => {
+            show_panel_near_cursor(hwnd);
+            APP_STATE.with(|c| {
+                if let Some(st) = c.borrow_mut().as_mut() {
+                    st.view_mode = ActiveViewMode::Settings;
+                    st.settings_scroll_px = 0;
+                    st.autostart_cached = is_autostart_enabled();
+                }
+            });
+            trigger_ota_check(hwnd, false);
         }
         CMD_TOGGLE_PIN_WINDOW => {
             show_panel_near_cursor(hwnd);
@@ -10464,4 +11490,171 @@ unsafe fn install_self_to_system_and_shortcuts(hwnd: HWND) {
         .spawn();
 
     set_toast(hwnd, "已安装至本机并创建开始菜单图标".to_string());
+}
+
+unsafe fn trigger_ota_check(hwnd: HWND, silent: bool) {
+    let maybe_shared: Option<Arc<Mutex<OtaState>>> = APP_STATE.with(|c| {
+        let mut b = c.borrow_mut();
+        let st = b.as_mut()?;
+        if st.ota_state.is_busy() {
+            return None;
+        }
+        if !silent {
+            st.ota_state = OtaState::Checking;
+            if let Ok(mut g) = st.ota_shared.lock() {
+                *g = OtaState::Checking;
+            }
+        }
+        Some(Arc::clone(&st.ota_shared))
+    });
+    let Some(shared) = maybe_shared else {
+        return;
+    };
+    if !silent {
+        let _ = InvalidateRect(hwnd, null(), FALSE);
+    }
+
+    let hwnd_raw = hwnd as isize;
+    let current_ver = env!("CARGO_PKG_VERSION").to_string();
+    let edition = ClipboardStore::edition_key().to_string();
+    std::thread::spawn(move || {
+        let next =
+            match iclip_core::updater::win_runtime::check_latest_release(&current_ver, &edition) {
+                Ok(Some(info)) => OtaState::Available(info),
+                Ok(None) => OtaState::UpToDate {
+                    latest: current_ver,
+                },
+                Err(err) => {
+                    if silent {
+                        OtaState::Idle
+                    } else {
+                        OtaState::Failed(err)
+                    }
+                }
+            };
+        if let Ok(mut g) = shared.lock() {
+            *g = next;
+        }
+        let target = hwnd_raw as HWND;
+        if !target.is_null() {
+            let _ = PostMessageW(target, WM_APP_OTA_STATE, if silent { 1 } else { 0 }, 0);
+        }
+    });
+}
+
+unsafe fn trigger_ota_download_and_install(hwnd: HWND) {
+    let ctx: Option<(OtaReleaseInfo, Arc<Mutex<OtaState>>, Arc<AtomicBool>)> =
+        APP_STATE.with(|c| {
+            let mut b = c.borrow_mut();
+            let st = b.as_mut()?;
+            let info = match &st.ota_state {
+                OtaState::Available(info) => info.clone(),
+                _ => return None,
+            };
+            st.ota_cancel.store(false, Ordering::SeqCst);
+            let init = OtaState::Downloading {
+                info: info.clone(),
+                progress_pct: 0,
+                downloaded_kb: 0,
+                total_kb: 0,
+            };
+            st.ota_state = init.clone();
+            if let Ok(mut g) = st.ota_shared.lock() {
+                *g = init;
+            }
+            Some((info, Arc::clone(&st.ota_shared), Arc::clone(&st.ota_cancel)))
+        });
+    let Some((info, shared, cancel)) = ctx else {
+        return;
+    };
+    let _ = InvalidateRect(hwnd, null(), FALSE);
+
+    let hwnd_raw = hwnd as isize;
+    std::thread::spawn(move || {
+        let mut last_pct: u8 = 255;
+        let dl_res = iclip_core::updater::win_runtime::download_and_verify_release(
+            &info,
+            &cancel,
+            |downloaded, total| {
+                let pct = if total > 0 {
+                    ((downloaded.saturating_mul(100)) / total).min(100) as u8
+                } else {
+                    0
+                };
+                if pct != last_pct && (pct == 0 || pct == 100 || pct.abs_diff(last_pct) >= 3) {
+                    last_pct = pct;
+                    if let Ok(mut g) = shared.lock() {
+                        *g = OtaState::Downloading {
+                            info: info.clone(),
+                            progress_pct: pct,
+                            downloaded_kb: downloaded / 1024,
+                            total_kb: total / 1024,
+                        };
+                    }
+                    let target = hwnd_raw as HWND;
+                    if !target.is_null() {
+                        let _ = PostMessageW(target, WM_APP_OTA_STATE, 1, 0);
+                    }
+                }
+            },
+        );
+
+        let zip_bytes = match dl_res {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                if let Ok(mut g) = shared.lock() {
+                    if cancel.load(Ordering::Relaxed) {
+                        *g = OtaState::Available(info);
+                    } else {
+                        *g = OtaState::Failed(err);
+                    }
+                }
+                let target = hwnd_raw as HWND;
+                if !target.is_null() {
+                    let _ = PostMessageW(target, WM_APP_OTA_STATE, 0, 0);
+                }
+                return;
+            }
+        };
+
+        if let Ok(mut g) = shared.lock() {
+            *g = OtaState::Installing(info.clone());
+        }
+        let target = hwnd_raw as HWND;
+        if !target.is_null() {
+            let _ = PostMessageW(target, WM_APP_OTA_STATE, 1, 0);
+        }
+
+        match iclip_core::updater::win_runtime::apply_zip_and_restart(&zip_bytes) {
+            Ok(_) => {
+                if !target.is_null() {
+                    let _ = PostMessageW(target, WM_APP_OTA_RESTART, 0, 0);
+                }
+            }
+            Err(err) => {
+                if let Ok(mut g) = shared.lock() {
+                    *g = OtaState::Failed(err);
+                }
+                if !target.is_null() {
+                    let _ = PostMessageW(target, WM_APP_OTA_STATE, 0, 0);
+                }
+            }
+        }
+    });
+}
+
+unsafe fn cancel_ota_download(hwnd: HWND) {
+    APP_STATE.with(|c| {
+        if let Some(st) = c.borrow_mut().as_mut() {
+            st.ota_cancel.store(true, Ordering::SeqCst);
+            if let OtaState::Downloading { info, .. } = &st.ota_state {
+                let back = OtaState::Available(info.clone());
+                st.ota_state = back.clone();
+                if let Ok(mut g) = st.ota_shared.lock() {
+                    *g = back;
+                }
+            }
+        }
+    });
+    set_toast(hwnd, "已取消更新下载".to_string());
 }
