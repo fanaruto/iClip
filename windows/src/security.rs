@@ -1687,17 +1687,61 @@ pub struct ExternalImportCandidate {
     pub source_label: String,
 }
 
+const MAX_EXTERNAL_IMPORT_BYTES: usize = 32 * 1024 * 1024;
+const MAX_EXTERNAL_CANDIDATES: usize = 5_000;
+
+fn sanitize_external_candidates(
+    raw_list: Vec<ExternalImportCandidate>,
+) -> Vec<ExternalImportCandidate> {
+    let mut out = Vec::with_capacity(raw_list.len().min(MAX_EXTERNAL_CANDIDATES));
+    for mut item in raw_list.into_iter().take(MAX_EXTERNAL_CANDIDATES) {
+        if matches!(
+            inspect_clipboard_poison(&item.text),
+            Some(PoisonThreatKind::PastejackingOrBidi(_))
+        ) {
+            let cleaned = sanitize_clipboard_poison(&item.text);
+            let trimmed = cleaned.trim();
+            if !trimmed.is_empty() {
+                item.text = trimmed.to_string();
+            }
+        }
+        if item.text.trim().is_empty() {
+            continue;
+        }
+        if let Some(alias) = &item.alias {
+            if matches!(
+                inspect_clipboard_poison(alias),
+                Some(PoisonThreatKind::PastejackingOrBidi(_))
+            ) {
+                let ca = sanitize_clipboard_poison(alias);
+                let ct = ca.trim();
+                item.alias = if ct.is_empty() {
+                    None
+                } else {
+                    Some(ct.to_string())
+                };
+            }
+        }
+        out.push(item);
+    }
+    out
+}
+
 pub fn parse_external_competitor_data(
     data: &[u8],
     ext_hint: Option<&str>,
 ) -> Option<(Vec<ExternalImportCandidate>, String)> {
+    if data.is_empty() || data.len() > MAX_EXTERNAL_IMPORT_BYTES {
+        return None;
+    }
     let ext = ext_hint.unwrap_or("").to_ascii_lowercase();
 
     if ext != "csv" && ext != "tsv" && ext != "md" && ext != "markdown" {
         if let Ok(json_val) = serde_json::from_slice::<Value>(data) {
-            if let Some(res) = parse_json_competitor_payload(&json_val) {
-                if !res.0.is_empty() {
-                    return Some(res);
+            if let Some((entries, fmt)) = parse_json_competitor_payload(&json_val) {
+                let cleaned = sanitize_external_candidates(entries);
+                if !cleaned.is_empty() {
+                    return Some((cleaned, fmt));
                 }
             }
         }
@@ -1707,9 +1751,10 @@ pub fn parse_external_competitor_data(
         let trimmed = raw_str.trim();
         if !trimmed.is_empty() && !trimmed.starts_with('{') && !trimmed.starts_with('[') {
             if ext == "md" || ext == "markdown" || looks_like_markdown_snippet_note(trimmed) {
-                if let Some(md_res) = parse_markdown_snippets(trimmed) {
-                    if !md_res.0.is_empty() {
-                        return Some(md_res);
+                if let Some((entries, fmt)) = parse_markdown_snippets(trimmed) {
+                    let cleaned = sanitize_external_candidates(entries);
+                    if !cleaned.is_empty() {
+                        return Some((cleaned, fmt));
                     }
                 }
             }
@@ -1719,7 +1764,7 @@ pub fn parse_external_competitor_data(
                 ','
             };
             let rows = parse_delimited_rows(trimmed, delim);
-            let list = candidates_from_table_rows(&rows);
+            let list = sanitize_external_candidates(candidates_from_table_rows(&rows));
             if !list.is_empty() {
                 let name = if delim == '\t' {
                     "TSV 常用语表"

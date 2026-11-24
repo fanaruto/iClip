@@ -1223,18 +1223,50 @@ enum UniversalCompetitorImporter {
         let createdAt: Date?
     }
 
-    /// 尝试从常见竞品导出格式解析收藏/常用语条目（非 `.iclip` 时自动接管）
+    private static let maxImportPayloadBytes = 32 * 1_024 * 1_024
+    private static let maxImportedCandidates = 5_000
+
+    private static func sanitizeImportedCandidates(_ rawList: [ExternalCandidate]) -> [ExternalCandidate] {
+        var out: [ExternalCandidate] = []
+        out.reserveCapacity(min(rawList.count, maxImportedCandidates))
+        for item in rawList.prefix(maxImportedCandidates) {
+            var cleanText = item.text
+            if case .pastejackingOrBidi = ClipboardPoisonGuard.inspect(cleanText) {
+                let sanitized = ClipboardPoisonGuard.sanitize(cleanText).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !sanitized.isEmpty { cleanText = sanitized }
+            }
+            guard !cleanText.isEmpty else { continue }
+            var cleanAlias = item.alias
+            if let a = cleanAlias, case .pastejackingOrBidi = ClipboardPoisonGuard.inspect(a) {
+                let sa = ClipboardPoisonGuard.sanitize(a).trimmingCharacters(in: .whitespacesAndNewlines)
+                cleanAlias = sa.isEmpty ? nil : sa
+            }
+            out.append(ExternalCandidate(
+                text: cleanText,
+                alias: cleanAlias,
+                sourceLabel: item.sourceLabel,
+                createdAt: item.createdAt
+            ))
+        }
+        return out
+    }
+
+    /// 尝试从常见竞品导出格式解析收藏/常用语条目（非 `.iclip` 时自动接管，内置 32MB/5000条门控与 Bidi 净化）
     static func parseExternalData(
         _ data: Data,
         fileExtensionHint: String? = nil
     ) -> (entries: [ExternalCandidate], formatName: String)? {
+        guard !data.isEmpty, data.count <= maxImportPayloadBytes else { return nil }
         let ext = (fileExtensionHint ?? "").lowercased()
 
         // A. 优先尝试 JSON 结构（Raycast Snippets / Alfred / TextExpander / Maccy / Paste / CopyQ / 通用键值数组）
         if ext != "csv" && ext != "tsv" && ext != "md" && ext != "markdown",
            let jsonObj = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) {
-            if let parsed = parseJSONPayload(jsonObj), !parsed.entries.isEmpty {
-                return parsed
+            if let parsed = parseJSONPayload(jsonObj) {
+                let cleaned = sanitizeImportedCandidates(parsed.entries)
+                if !cleaned.isEmpty {
+                    return (cleaned, parsed.formatName)
+                }
             }
         }
 
@@ -1243,13 +1275,16 @@ enum UniversalCompetitorImporter {
             let trimmed = rawStr.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty && !trimmed.hasPrefix("{") && !trimmed.hasPrefix("[") {
                 if ext == "md" || ext == "markdown" || looksLikeMarkdownSnippetNote(trimmed) {
-                    if let mdParsed = parseMarkdownSnippets(trimmed), !mdParsed.entries.isEmpty {
-                        return mdParsed
+                    if let mdParsed = parseMarkdownSnippets(trimmed) {
+                        let cleaned = sanitizeImportedCandidates(mdParsed.entries)
+                        if !cleaned.isEmpty {
+                            return (cleaned, mdParsed.formatName)
+                        }
                     }
                 }
                 let delimiter: Character = (ext == "tsv" || (trimmed.contains("\t") && !trimmed.contains(","))) ? "\t" : ","
                 let rows = parseDelimitedRows(trimmed, delimiter: delimiter)
-                let candidates = buildCandidatesFromTableRows(rows)
+                let candidates = sanitizeImportedCandidates(buildCandidatesFromTableRows(rows))
                 if !candidates.isEmpty {
                     return (candidates, delimiter == "\t" ? "TSV 常用语表" : "CSV 常用语表")
                 }

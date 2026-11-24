@@ -34,6 +34,11 @@ enum InstantMathEvaluator {
             return temporalRes
         }
 
+        // 0.5 检测商业折扣、环比涨跌幅与程序员进制直算（如 `1280 85折`、`299 7.5折`、`12500 -> 16000`、`0xff`、`255 to hex`）
+        if let bizRes = evaluateBusinessAndRadixExpression(input, latestClipboardText: latestClipboardText) {
+            return bizRes
+        }
+
         // 1. 离线全能单位换算（存储 B/KB/MB/GB/TB、时长 ms/s/min/h/d、温度 C/F、重量长度 kg/lb、cm/in、km/mi）
         if let unitRes = evaluateUnitConversion(input, hasLeadingEquals: hasLeadingEquals) {
             return unitRes
@@ -801,6 +806,154 @@ enum InstantMathEvaluator {
                 rmbUppercase: nil,
                 isExplicitOrContextual: true
             )
+        }
+
+        return nil
+    }
+
+    // MARK: - 商业折扣（`1280 85折` / `7.5折`）、环比涨跌幅（`12500 -> 16000`）与进制双向直算（`0xff` / `255 to hex`）
+
+    private static let cnDiscountFullRegex = try! NSRegularExpression(
+        pattern: #"^(?:[¥￥$]?\s*(\d[\d,]*(?:\.\d+)?)\s*(?:[*×xX]\s*|\s+|打))?打?\s*(\d(?:\.\d{1,2})?|[1-9]\d)\s*折$"#
+    )
+    private static let pctDeltaRegex = try! NSRegularExpression(
+        pattern: #"^[¥￥$]?\s*(-?\d[\d,]*(?:\.\d+)?)\s*(?:->|=>|vs|VS)\s*[¥￥$]?\s*(-?\d[\d,]*(?:\.\d+)?)$"#
+    )
+    private static let radixConvertRegex = try! NSRegularExpression(
+        pattern: #"^(?:0x([0-9a-fA-F]{2,16})|0b([01]{4,63})|(\d{1,19})\s+(?:to|in|->|=>|转)\s*(hex|bin|binary|dec))$"#,
+        options: [.caseInsensitive]
+    )
+
+    private static func evaluateBusinessAndRadixExpression(
+        _ input: String,
+        latestClipboardText: String?
+    ) -> InstantMathResult? {
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fullRange = NSRange(trimmed.startIndex..<trimmed.endIndex, in: trimmed)
+
+        // 1. 中式商业折扣秒算：`1280 85折`、`299 7.5折`、或结合 `#1` 剪贴板金额免重敲输入 `85折`
+        if let dm = cnDiscountFullRegex.firstMatch(in: trimmed, range: fullRange),
+           let rateR = Range(dm.range(at: 2), in: trimmed) {
+            let rateRawStr = String(trimmed[rateR])
+            guard let rateVal = Double(rateRawStr), rateVal > 0 else { return nil }
+            let factor: Double
+            if rateRawStr.contains(".") || rateVal < 10.0 {
+                factor = rateVal / 10.0
+            } else {
+                factor = rateVal / 100.0
+            }
+            guard factor > 0 && factor < 1.0 else { return nil }
+
+            let baseAmount: Double
+            let baseDisplay: String
+            if dm.range(at: 1).location != NSNotFound,
+               let amtR = Range(dm.range(at: 1), in: trimmed) {
+                let amtStr = trimmed[amtR].replacingOccurrences(of: ",", with: "")
+                guard let v = Double(amtStr), v > 0 else { return nil }
+                baseAmount = v
+                baseDisplay = String(trimmed[amtR])
+            } else if let ctx = extractCleanClipboardNumber(from: latestClipboardText),
+                      let v = Double(ctx.plainNumeric), v > 0 {
+                baseAmount = v
+                baseDisplay = ctx.display
+            } else {
+                return nil
+            }
+
+            let discounted = baseAmount * factor
+            let plain = formatCleanDouble(discounted)
+            let parts = plain.split(separator: ".", omittingEmptySubsequences: false)
+            let intDigits = parts.first.map(String.init) ?? "0"
+            let fracDigits = parts.count > 1 ? String(parts[1]) : nil
+            let thousands = addThousandsGrouping(intDigits) + (fracDigits != nil ? ".\(fracDigits!)" : "")
+            let rmb = intDigits.count <= 12
+                ? FinanceNumberEngine.toChineseUppercaseRMB(intDigits: intDigits, fracDigits: fracDigits.map { String($0.prefix(2)) })
+                : nil
+            return InstantMathResult(
+                expressionDisplay: "\(baseDisplay) × \(rateRawStr)折",
+                plainValue: plain,
+                formattedThousands: thousands,
+                rmbUppercase: rmb,
+                isExplicitOrContextual: true
+            )
+        }
+
+        // 2. 两点涨跌幅与倍数秒算：`12500 -> 16000` / `200 vs 150`
+        if let pm = pctDeltaRegex.firstMatch(in: trimmed, range: fullRange),
+           let aR = Range(pm.range(at: 1), in: trimmed),
+           let bR = Range(pm.range(at: 2), in: trimmed),
+           let a = Double(trimmed[aR].replacingOccurrences(of: ",", with: "")),
+           let b = Double(trimmed[bR].replacingOccurrences(of: ",", with: "")),
+           abs(a) > 1e-9, a != b {
+            let pct = ((b - a) / abs(a)) * 100.0
+            let diff = b - a
+            let sign = pct > 0 ? "+" : ""
+            let pctPlain = "\(sign)\(formatCleanDouble(pct))%"
+            let diffSign = diff > 0 ? "+" : ""
+            let ratioStr = a > 0 && b >= 0 ? String(format: " · %.2fx", b / a) : ""
+            return InstantMathResult(
+                expressionDisplay: "\(trimmed[aR]) → \(trimmed[bR])",
+                plainValue: pctPlain,
+                formattedThousands: "\(pctPlain)（差额 \(diffSign)\(formatCleanDouble(diff))\(ratioStr)）",
+                rmbUppercase: nil,
+                isExplicitOrContextual: true
+            )
+        }
+
+        // 3. 程序员十六进制 / 二进制双向秒转：`0xff`、`0b101010`、`255 to hex`、`42 to bin`
+        if let rm = radixConvertRegex.firstMatch(in: trimmed, range: fullRange) {
+            if rm.range(at: 1).location != NSNotFound,
+               let hexR = Range(rm.range(at: 1), in: trimmed),
+               let val = UInt64(trimmed[hexR], radix: 16) {
+                let decStr = String(val)
+                let binSuffix = val <= 0xFFFF ? " · 0b\(String(val, radix: 2))" : ""
+                return InstantMathResult(
+                    expressionDisplay: "0x\(trimmed[hexR].uppercased())",
+                    plainValue: decStr,
+                    formattedThousands: "\(addThousandsGrouping(decStr))\(binSuffix)",
+                    rmbUppercase: nil,
+                    isExplicitOrContextual: true
+                )
+            }
+            if rm.range(at: 2).location != NSNotFound,
+               let binR = Range(rm.range(at: 2), in: trimmed),
+               let val = UInt64(trimmed[binR], radix: 2) {
+                let decStr = String(val)
+                let hexStr = "0x" + String(val, radix: 16, uppercase: true)
+                return InstantMathResult(
+                    expressionDisplay: "0b\(trimmed[binR])",
+                    plainValue: decStr,
+                    formattedThousands: "\(decStr) · \(hexStr)",
+                    rmbUppercase: nil,
+                    isExplicitOrContextual: true
+                )
+            }
+            if rm.range(at: 3).location != NSNotFound,
+               rm.range(at: 4).location != NSNotFound,
+               let decR = Range(rm.range(at: 3), in: trimmed),
+               let dstR = Range(rm.range(at: 4), in: trimmed),
+               let val = UInt64(trimmed[decR]) {
+                let dst = trimmed[dstR].lowercased()
+                if dst == "hex" {
+                    let hexOut = "0x" + String(val, radix: 16, uppercase: true)
+                    return InstantMathResult(
+                        expressionDisplay: "\(val) → HEX",
+                        plainValue: hexOut,
+                        formattedThousands: hexOut,
+                        rmbUppercase: nil,
+                        isExplicitOrContextual: true
+                    )
+                } else if dst == "bin" || dst == "binary" {
+                    let binOut = "0b" + String(val, radix: 2)
+                    return InstantMathResult(
+                        expressionDisplay: "\(val) → BIN",
+                        plainValue: binOut,
+                        formattedThousands: binOut,
+                        rmbUppercase: nil,
+                        isExplicitOrContextual: true
+                    )
+                }
+            }
         }
 
         return nil

@@ -417,6 +417,11 @@ pub fn evaluate_instant_math(
         return Some(temp_res);
     }
 
+    // 0.5 检测商业折扣、环比涨跌幅与程序员进制直算（如 `1280 85折`、`299 7.5折`、`12500 -> 16000`、`0xff`、`255 to hex`）
+    if let Some(biz_res) = evaluate_business_and_radix(clean_expr, latest_clip_text) {
+        return Some(biz_res);
+    }
+
     // 1. 离线全能单位换算（存储 B/KB/MB/GB/TB、时长 ms/s/min/h/d、温度 C/F、重量长度 kg/lb、cm/in、km/mi）
     if let Some(unit_res) = evaluate_unit_conversion(clean_expr, has_leading_eq) {
         return Some(unit_res);
@@ -764,6 +769,143 @@ fn evaluate_temporal_expression(input: &str, has_leading_eq: bool) -> Option<Ins
             rmb_uppercase: None,
             used_clipboard_context: false,
         });
+    }
+
+    None
+}
+
+fn evaluate_business_and_radix(
+    input: &str,
+    latest_clip_text: Option<&str>,
+) -> Option<InstantMathResult> {
+    use regex_lite::Regex;
+    use std::sync::OnceLock;
+
+    let trimmed = input.trim();
+    static CN_DISC_RE: OnceLock<Regex> = OnceLock::new();
+    static PCT_DELTA_RE: OnceLock<Regex> = OnceLock::new();
+    static RADIX_RE: OnceLock<Regex> = OnceLock::new();
+
+    // 1. 中式商业折扣秒算：`1280 85折`、`299 7.5折`、或结合剪贴板首条金额输入 `85折`
+    let disc_re = CN_DISC_RE.get_or_init(|| {
+        Regex::new(
+            r"^(?:[¥￥$]?\s*(\d[\d,]*(?:\.\d+)?)\s*(?:[*×xX]\s*|\s+|打))?打?\s*(\d(?:\.\d{1,2})?|[1-9]\d)\s*折$",
+        )
+        .unwrap()
+    });
+    if let Some(caps) = disc_re.captures(trimmed) {
+        let rate_str = caps.get(2)?.as_str();
+        let rate_val: f64 = rate_str.parse().ok()?;
+        let factor = if rate_str.contains('.') || rate_val < 10.0 {
+            rate_val / 10.0
+        } else {
+            rate_val / 100.0
+        };
+        if !(factor > 0.0 && factor < 1.0) {
+            return None;
+        }
+        let (base_amt, used_ctx) = if let Some(amt_m) = caps.get(1) {
+            let v: f64 = amt_m.as_str().replace(',', "").parse().ok()?;
+            if v <= 0.0 {
+                return None;
+            }
+            (v, false)
+        } else {
+            let ctx_num = latest_clip_text.and_then(extract_leading_amount)?;
+            let v: f64 = ctx_num.parse().ok()?;
+            if v <= 0.0 {
+                return None;
+            }
+            (v, true)
+        };
+        let discounted = base_amt * factor;
+        let plain = format_clean_decimal(discounted);
+        let rmb = if discounted >= 0.0 && discounted < 1_000_000_000_000.0 {
+            let abs_fixed = format!("{:.2}", discounted.abs());
+            let (i_part, f_part) = abs_fixed.split_once('.').unwrap_or((&abs_fixed, "00"));
+            to_chinese_uppercase_rmb(i_part, Some(f_part))
+        } else {
+            None
+        };
+        return Some(InstantMathResult {
+            expression_display: format!("{} × {rate_str}折", format_clean_decimal(base_amt)),
+            plain_value: plain,
+            rmb_uppercase: rmb,
+            used_clipboard_context: used_ctx,
+        });
+    }
+
+    // 2. 两点涨跌幅与倍数秒算：`12500 -> 16000` / `200 vs 150`
+    let delta_re = PCT_DELTA_RE.get_or_init(|| {
+        Regex::new(
+            r"^[¥￥$]?\s*(-?\d[\d,]*(?:\.\d+)?)\s*(?:->|=>|vs|VS)\s*[¥￥$]?\s*(-?\d[\d,]*(?:\.\d+)?)$",
+        )
+        .unwrap()
+    });
+    if let Some(caps) = delta_re.captures(trimmed) {
+        let a_str = caps.get(1)?.as_str();
+        let b_str = caps.get(2)?.as_str();
+        let a: f64 = a_str.replace(',', "").parse().ok()?;
+        let b: f64 = b_str.replace(',', "").parse().ok()?;
+        if a.abs() > 1e-9 && (a - b).abs() > 1e-12 {
+            let pct = ((b - a) / a.abs()) * 100.0;
+            let diff = b - a;
+            let sign = if pct > 0.0 { "+" } else { "" };
+            let pct_plain = format!("{sign}{}%", format_clean_decimal(pct));
+            let diff_sign = if diff > 0.0 { "+" } else { "" };
+            return Some(InstantMathResult {
+                expression_display: format!(
+                    "{a_str} -> {b_str} (差额 {diff_sign}{})",
+                    format_clean_decimal(diff)
+                ),
+                plain_value: pct_plain,
+                rmb_uppercase: None,
+                used_clipboard_context: false,
+            });
+        }
+    }
+
+    // 3. 程序员十六进制 / 二进制双向秒转：`0xff`、`0b101010`、`255 to hex`、`42 to bin`
+    let radix_re = RADIX_RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)^(?:0x([0-9a-f]{2,16})|0b([01]{4,63})|(\d{1,19})\s+(?:to|in|->|=>|转)\s*(hex|bin|binary))$",
+        )
+        .unwrap()
+    });
+    if let Some(caps) = radix_re.captures(trimmed) {
+        if let Some(hex_m) = caps.get(1) {
+            let val = u64::from_str_radix(hex_m.as_str(), 16).ok()?;
+            return Some(InstantMathResult {
+                expression_display: format!("0x{} -> DEC", hex_m.as_str().to_ascii_uppercase()),
+                plain_value: val.to_string(),
+                rmb_uppercase: None,
+                used_clipboard_context: false,
+            });
+        }
+        if let Some(bin_m) = caps.get(2) {
+            let val = u64::from_str_radix(bin_m.as_str(), 2).ok()?;
+            return Some(InstantMathResult {
+                expression_display: format!("0b{} -> DEC (0x{val:X})", bin_m.as_str()),
+                plain_value: val.to_string(),
+                rmb_uppercase: None,
+                used_clipboard_context: false,
+            });
+        }
+        if let (Some(dec_m), Some(dst_m)) = (caps.get(3), caps.get(4)) {
+            let val: u64 = dec_m.as_str().parse().ok()?;
+            let dst = dst_m.as_str().to_ascii_lowercase();
+            let out_str = if dst == "hex" {
+                format!("0x{val:X}")
+            } else {
+                format!("0b{val:b}")
+            };
+            return Some(InstantMathResult {
+                expression_display: format!("{val} -> {}", dst.to_ascii_uppercase()),
+                plain_value: out_str,
+                rmb_uppercase: None,
+                used_clipboard_context: false,
+            });
+        }
     }
 
     None

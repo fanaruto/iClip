@@ -2327,5 +2327,70 @@ mod tests {
                 .plain_value,
             "1763971200"
         );
+
+        // 12. 第 28 轮自省：验证 Markdown 常用语导入自动剥除 Bidi 毒字符、HTML 表格单引号/Bidi 转义，以及中式折扣、涨跌幅与进制互转直算
+        let poisoned_md = "## 部署命令\u{202e}evil\nsafe_cmd\u{202e}hidden\n";
+        let (md_items, _) =
+            crate::security::parse_external_competitor_data(poisoned_md.as_bytes(), Some("md"))
+                .unwrap();
+        assert!(!md_items[0].text.contains('\u{202e}'));
+        assert!(!md_items[0]
+            .alias
+            .as_deref()
+            .unwrap_or("")
+            .contains('\u{202e}'));
+
+        let html_tbl =
+            crate::engines::to_html_table_fragment("字段\t值\n姓名\tO'Connor\u{202e}<script>")
+                .unwrap();
+        assert!(html_tbl.contains("&#39;"));
+        assert!(html_tbl.contains("&lt;script&gt;"));
+        assert!(!html_tbl.contains('\u{202e}'));
+
+        let disc_res = crate::intelligence::evaluate_instant_math("1280 85折", None).unwrap();
+        assert_eq!(disc_res.plain_value, "1088");
+        assert_eq!(disc_res.rmb_uppercase.as_deref(), Some("壹仟零捌拾捌元整"));
+        assert_eq!(
+            crate::intelligence::evaluate_instant_math("299 7.5折", None)
+                .unwrap()
+                .plain_value,
+            "224.25"
+        );
+        assert_eq!(
+            crate::intelligence::evaluate_instant_math("85折", Some("¥2,000"))
+                .unwrap()
+                .plain_value,
+            "1700"
+        );
+        assert_eq!(
+            crate::intelligence::evaluate_instant_math("12500 -> 16000", None)
+                .unwrap()
+                .plain_value,
+            "+28%"
+        );
+        assert_eq!(
+            crate::intelligence::evaluate_instant_math("200 -> 150", None)
+                .unwrap()
+                .plain_value,
+            "-25%"
+        );
+        assert_eq!(
+            crate::intelligence::evaluate_instant_math("0xff", None)
+                .unwrap()
+                .plain_value,
+            "255"
+        );
+        assert_eq!(
+            crate::intelligence::evaluate_instant_math("255 to hex", None)
+                .unwrap()
+                .plain_value,
+            "0xFF"
+        );
+        assert_eq!(
+            crate::intelligence::evaluate_instant_math("42 to bin", None)
+                .unwrap()
+                .plain_value,
+            "0b101010"
+        );
     }
 }

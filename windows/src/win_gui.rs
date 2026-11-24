@@ -11546,7 +11546,13 @@ unsafe fn set_autostart_enabled(enable: bool) {
     }
     if enable {
         if let Ok(exe_path) = std::env::current_exe() {
-            let quoted = format!("\"{}\"", exe_path.display());
+            let clean_exe: String = exe_path
+                .display()
+                .to_string()
+                .chars()
+                .filter(|c| !c.is_control() && *c != '"')
+                .collect();
+            let quoted = format!("\"{clean_exe}\"");
             let wide = to_wide(&quoted);
             let _ = RegSetValueExW(
                 hkey,
@@ -11578,6 +11584,12 @@ unsafe fn install_self_to_system_and_shortcuts(hwnd: HWND) {
             return;
         }
     }
+    if let Ok(meta) = std::fs::symlink_metadata(&target_exe) {
+        if meta.file_type().is_symlink() {
+            set_toast(hwnd, "目标路径存在异常符号链接，已拒绝覆盖".to_string());
+            return;
+        }
+    }
     if !cur_exe
         .to_string_lossy()
         .eq_ignore_ascii_case(&target_exe.to_string_lossy())
@@ -11602,7 +11614,13 @@ unsafe fn install_self_to_system_and_shortcuts(hwnd: HWND) {
             &mut hkey,
         ) == 0
         {
-            let quoted = format!("\"{}\"", target_exe.display());
+            let clean_target: String = target_exe
+                .display()
+                .to_string()
+                .chars()
+                .filter(|c| !c.is_control() && *c != '"')
+                .collect();
+            let quoted = format!("\"{clean_target}\"");
             let wide = to_wide(&quoted);
             let _ = RegSetValueExW(
                 hkey,
@@ -11616,7 +11634,7 @@ unsafe fn install_self_to_system_and_shortcuts(hwnd: HWND) {
         }
     }
 
-    // 静默生成开始菜单快捷方式
+    // 静默生成开始菜单快捷方式（绑定 %SystemRoot%\System32 绝对路径阻断 CWE-426 同目录劫持）
     let target_escaped = target_exe.display().to_string().replace('\'', "''");
     let work_dir = target_exe
         .parent()
@@ -11625,7 +11643,15 @@ unsafe fn install_self_to_system_and_shortcuts(hwnd: HWND) {
     let ps_cmd = format!(
         "$s=(New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path ([Environment]::GetFolderPath('Programs')) 'iClip.lnk'));$s.TargetPath='{target_escaped}';$s.WorkingDirectory='{work_dir}';$s.IconLocation='{target_escaped},0';$s.Save()"
     );
-    let _ = std::process::Command::new("powershell")
+    let sys_root = std::env::var_os("SystemRoot")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    let ps_bin = sys_root
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+    let _ = std::process::Command::new(&ps_bin)
         .args([
             "-NoProfile",
             "-NonInteractive",

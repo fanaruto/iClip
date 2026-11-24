@@ -3186,5 +3186,27 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertEqual(InstantMathEvaluator.evaluate("ts 1763971200")?.plainValue, "2025-11-24 16:00:00")
         XCTAssertEqual(InstantMathEvaluator.evaluate("= 1763971200000")?.plainValue, "2025-11-24 16:00:00")
         XCTAssertEqual(InstantMathEvaluator.evaluate("ts 2025-11-24 16:00:00")?.plainValue, "1763971200")
+
+        // 11. 第 28 轮自省：验证 Markdown 常用语导入自动剥除 Bidi 毒字符、HTML 表格单引号/Bidi 转义，以及中式折扣、涨跌幅与进制互转直算
+        let poisonedMD = "## 部署命令\u{202E}evil\nsafe_cmd\u{202E}hidden\n"
+        let mdImported = try XCTUnwrap(UniversalCompetitorImporter.parseExternalData(Data(poisonedMD.utf8), fileExtensionHint: "md"))
+        XCTAssertFalse(mdImported.entries[0].text.contains("\u{202E}"))
+        XCTAssertFalse(mdImported.entries[0].alias?.contains("\u{202E}") ?? true)
+
+        let htmlTbl = try XCTUnwrap(TableBridgeEngine.toHTMLTable(fromTSV: "字段\t值\n姓名\tO'Connor\u{202E}<script>"))
+        XCTAssertTrue(htmlTbl.contains("&#39;"))
+        XCTAssertTrue(htmlTbl.contains("&lt;script&gt;"))
+        XCTAssertFalse(htmlTbl.contains("\u{202E}"))
+
+        let discRes = try XCTUnwrap(InstantMathEvaluator.evaluate("1280 85折"))
+        XCTAssertEqual(discRes.plainValue, "1088")
+        XCTAssertEqual(discRes.rmbUppercase, "壹仟零捌拾捌元整")
+        XCTAssertEqual(InstantMathEvaluator.evaluate("299 7.5折")?.plainValue, "224.25")
+        XCTAssertEqual(InstantMathEvaluator.evaluate("85折", latestClipboardText: "¥2,000")?.plainValue, "1700")
+        XCTAssertEqual(InstantMathEvaluator.evaluate("12500 -> 16000")?.plainValue, "+28%")
+        XCTAssertEqual(InstantMathEvaluator.evaluate("200 -> 150")?.plainValue, "-25%")
+        XCTAssertEqual(InstantMathEvaluator.evaluate("0xff")?.plainValue, "255")
+        XCTAssertEqual(InstantMathEvaluator.evaluate("255 to hex")?.plainValue, "0xFF")
+        XCTAssertEqual(InstantMathEvaluator.evaluate("42 to bin")?.plainValue, "0b101010")
     }
 }

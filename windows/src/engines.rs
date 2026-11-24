@@ -1335,10 +1335,21 @@ pub fn to_html_table_fragment(tsv: &str) -> Option<String> {
         let tag = if r_idx == 0 { "th" } else { "td" };
         for cell in row {
             let safe_cell = crate::security::sanitize_spreadsheet_cell(cell);
-            let escaped = safe_cell
+            let bidi_clean: String = safe_cell
+                .chars()
+                .filter(|&c| {
+                    let v = c as u32;
+                    !((0x202A..=0x202E).contains(&v)
+                        || (0x2066..=0x2069).contains(&v)
+                        || v == 0x061C)
+                })
+                .collect();
+            let escaped = bidi_clean
                 .replace('&', "&amp;")
                 .replace('<', "&lt;")
-                .replace('>', "&gt;");
+                .replace('>', "&gt;")
+                .replace('"', "&quot;")
+                .replace('\'', "&#39;");
             html.push_str(&format!("<{tag}>{escaped}</{tag}>"));
         }
         html.push_str("</tr>");
