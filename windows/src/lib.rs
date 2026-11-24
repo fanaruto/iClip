@@ -2803,5 +2803,27 @@ mod tests {
             classify_non_active_panel_key(0x41, MOD_CONTROL_BITS, true, true, false),
             NonActiveKeyRoute::DispatchPanelCommand
         );
+
+        use crate::hotkey::{MOD_ALT_BITS, MOD_SHIFT_BITS};
+        assert_eq!(
+            classify_non_active_panel_key(0x58, 0, true, true, false),
+            NonActiveKeyRoute::DispatchPanelCommand
+        );
+        assert_eq!(
+            classify_non_active_panel_key(0x58, MOD_SHIFT_BITS, true, true, false),
+            NonActiveKeyRoute::DispatchPanelCommand
+        );
+        assert_eq!(
+            classify_non_active_panel_key(0x09, MOD_ALT_BITS, true, true, false),
+            NonActiveKeyRoute::PassThrough
+        );
+        assert_eq!(
+            classify_non_active_panel_key(0x31, 0, true, true, false),
+            NonActiveKeyRoute::DispatchPanelCommand
+        );
+        assert_eq!(
+            classify_non_active_panel_key(0x4F, MOD_CONTROL_BITS | MOD_SHIFT_BITS, true, true, false),
+            NonActiveKeyRoute::PassThrough
+        );
     }
 }

@@ -3714,4 +3714,61 @@ final class CoreFeatureTests: XCTestCase {
             XCTAssertEqual(resignedMetrics.white, focusedMetrics.white, accuracy: 0.01)
         }
     }
+
+    func testVisionOCRNegativeCacheDistinctionTokenFrameSessionAndFullWidthFlowLayout() async throws {
+        // 1. TokenFrameRegistry 会话隔离：切换条目/粒度时绝不残留或错读陈旧矩形
+        let registry = TokenFrameRegistry()
+        registry.setFrame(CGRect(x: 12, y: 18, width: 48, height: 24), for: 0, session: "A-word-5")
+        XCTAssertEqual(registry.frames(for: "A-word-5").count, 1)
+        XCTAssertTrue(registry.frames(for: "B-word-5").isEmpty)
+        registry.setFrame(CGRect(x: 0, y: 0, width: 300, height: 28), for: 0, session: "B-line-2")
+        XCTAssertTrue(registry.frames(for: "A-word-5").isEmpty)
+        XCTAssertEqual(registry.frames(for: "B-line-2")[0]?.width, 300)
+
+        let rowLayout = BigBangFlowLayout(fullWidthRows: true)
+        XCTAssertTrue(rowLayout.fullWidthRows)
+
+        // 2. VisionOCRService 区分「读取/解码失败（不写负缓存）」与「真实无文字纯图（写空负缓存且可精确驱逐）」
+        let missingURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("iclip-missing-\(UUID().uuidString).png")
+        let missingRes = await VisionOCRService.recognizeWordBoxes(at: missingURL, granularity: .word)
+        XCTAssertNil(missingRes)
+        XCTAssertNil(VisionOCRService.cachedWordBoxes(at: missingURL, granularity: .word))
+
+        let blankURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("iclip-blank-\(UUID().uuidString).png")
+        defer { try? FileManager.default.removeItem(at: blankURL) }
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: 64,
+            pixelsHigh: 64,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ) else {
+            XCTFail("无法创建空白测试位图")
+            return
+        }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        NSColor.white.setFill()
+        NSBezierPath(rect: NSRect(x: 0, y: 0, width: 64, height: 64)).fill()
+        NSGraphicsContext.restoreGraphicsState()
+        let pngData = try XCTUnwrap(rep.representation(using: .png, properties: [:]))
+        try pngData.write(to: blankURL)
+
+        let blankRes = await VisionOCRService.recognizeWordBoxes(at: blankURL, granularity: .word)
+        XCTAssertNotNil(blankRes)
+        XCTAssertTrue(blankRes?.boxes.isEmpty == true)
+        let cachedBlank = VisionOCRService.cachedWordBoxes(at: blankURL, granularity: .word)
+        XCTAssertNotNil(cachedBlank)
+        XCTAssertTrue(cachedBlank?.boxes.isEmpty == true)
+
+        VisionOCRService.evictWordBoxCache(for: blankURL)
+        XCTAssertNil(VisionOCRService.cachedWordBoxes(at: blankURL, granularity: .word))
+    }
 }

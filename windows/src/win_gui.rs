@@ -76,10 +76,10 @@ use windows_sys::Win32::UI::HiDpi::{
     GetDpiForWindow, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, RegisterHotKey, ReleaseCapture, SendInput, SetFocus, UnregisterHotKey, INPUT,
-    INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, MOD_NOREPEAT, VK_BACK, VK_CONTROL,
-    VK_DELETE, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_MENU, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE,
-    VK_TAB, VK_UP,
+    GetKeyState, RegisterHotKey, ReleaseCapture, SendInput, SetFocus, TrackMouseEvent,
+    UnregisterHotKey, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, MOD_NOREPEAT,
+    TME_LEAVE, TRACKMOUSEEVENT, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_ESCAPE, VK_LEFT,
+    VK_MENU, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
 use windows_sys::Win32::UI::Shell::{
     DragQueryFileW, ShellExecuteW, Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD,
@@ -103,6 +103,7 @@ const WS_EX_NOACTIVATE_VAL: u32 = 0x0800_0000;
 const SWP_NOACTIVATE_VAL: u32 = 0x0010;
 const WM_MOUSEACTIVATE_MSG: u32 = 0x0021;
 const WM_NCACTIVATE_MSG: u32 = 0x0086;
+const WM_MOUSELEAVE_MSG: u32 = 0x02A3;
 const MA_NOACTIVATE_RES: LRESULT = 3;
 const WM_CLIPBOARDUPDATE_MSG: u32 = 0x031D;
 const WM_POWERBROADCAST_MSG: u32 = 0x0218;
@@ -326,6 +327,7 @@ struct WinAppState {
     ql_stage_ocr_selected: HashSet<usize>,
     ql_stage_sweep_target: Option<bool>,
     ql_stage_hit_regions: Vec<HitRegion>,
+    tracking_mouse_leave: bool,
     hovered_link_badge_store_idx: Option<usize>,
     copied_flash_item_id: Option<String>,
     recording_slot: Option<WinHotKeySlot>,
@@ -561,6 +563,7 @@ pub fn run_windows_app() -> i32 {
                 ql_stage_ocr_selected: HashSet::new(),
                 ql_stage_sweep_target: None,
                 ql_stage_hit_regions: Vec::new(),
+                tracking_mouse_leave: false,
                 hovered_link_badge_store_idx: None,
                 copied_flash_item_id: None,
                 recording_slot: None,
@@ -742,6 +745,7 @@ pub fn run_windows_self_test() -> Result<(), String> {
             ql_stage_ocr_selected: HashSet::new(),
             ql_stage_sweep_target: None,
             ql_stage_hit_regions: Vec::new(),
+            tracking_mouse_leave: false,
             hovered_link_badge_store_idx: None,
             copied_flash_item_id: None,
             recording_slot: None,
@@ -1448,7 +1452,8 @@ unsafe extern "system" fn ll_kbd_proc(code: i32, wparam: WPARAM, lparam: LPARAM)
                         match route {
                             NonActiveKeyRoute::PassThrough => {}
                             NonActiveKeyRoute::DispatchPanelCommand => {
-                                let _ = PostMessageW(hwnd, WM_APP_PANEL_KEY, vk as usize, 0);
+                                let packed_mods = ((mod_bits as usize) | 0x1_0000) as LPARAM;
+                                let _ = PostMessageW(hwnd, WM_APP_PANEL_KEY, vk as usize, packed_mods);
                                 return 1;
                             }
                             NonActiveKeyRoute::ActivateAndTypeChar(ch) => {
@@ -1742,7 +1747,10 @@ unsafe fn hide_panel(hwnd: HWND, restore_focus: bool) {
     APP_STATE.with(|cell| {
         if let Some(st) = cell.borrow_mut().as_mut() {
             st.visible = false;
+            st.tracking_mouse_leave = false;
             st.hovered_visible_pos = None;
+            st.hover_card_nx = 0.0;
+            st.hover_card_ny = 0.0;
             st.pressed_visible_pos = None;
             st.hovered_link_badge_store_idx = None;
             st.dragging_slider_track = None;
@@ -1886,13 +1894,21 @@ unsafe extern "system" fn wnd_proc(
         WM_MOUSEACTIVATE_MSG => MA_NOACTIVATE_RES,
         WM_APP_PANEL_KEY => {
             let vk = wparam as u32;
-            let ctrl_down = (GetKeyState(VK_CONTROL as i32) as u16 & 0x8000) != 0;
+            let packed = lparam as usize;
+            let hook_mods = if (packed & 0x1_0000) != 0 {
+                Some((packed & 0xFFFF) as u32)
+            } else {
+                None
+            };
+            let ctrl_down = hook_mods
+                .map(|m| (m & MOD_CONTROL_BITS) != 0)
+                .unwrap_or_else(|| (GetKeyState(VK_CONTROL as i32) as u16 & 0x8000) != 0);
             if vk == VK_BACK as u32 && !ctrl_down {
                 handle_char_input(hwnd, VK_BACK as u32);
             } else if vk == 0x46 && ctrl_down {
                 activate_panel_for_input(hwnd);
             } else {
-                handle_key_down(hwnd, vk);
+                handle_key_down(hwnd, vk, hook_mods);
                 let entered_alias = APP_STATE.with(|c| {
                     c.borrow()
                         .as_ref()
@@ -2172,10 +2188,81 @@ unsafe extern "system" fn wnd_proc(
             0
         }
         WM_MOUSEMOVE => {
+            let need_track = APP_STATE.with(|c| {
+                if let Some(st) = c.borrow_mut().as_mut() {
+                    if !st.tracking_mouse_leave {
+                        st.tracking_mouse_leave = true;
+                        return true;
+                    }
+                }
+                false
+            });
+            if need_track {
+                let mut tme = TRACKMOUSEEVENT {
+                    cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+                    dwFlags: TME_LEAVE,
+                    hwndTrack: hwnd,
+                    dwHoverTime: 0,
+                };
+                if TrackMouseEvent(&mut tme) == FALSE {
+                    APP_STATE.with(|c| {
+                        if let Some(st) = c.borrow_mut().as_mut() {
+                            st.tracking_mouse_leave = false;
+                        }
+                    });
+                }
+            }
             let x = (lparam & 0xFFFF) as i16 as i32;
             let y = ((lparam >> 16) & 0xFFFF) as i16 as i32;
             let left_held = (wparam & 0x0001) != 0;
             handle_mouse_move(hwnd, x, y, left_held);
+            0
+        }
+        WM_MOUSELEAVE_MSG => {
+            let dpi_scale = get_dpi_scale(hwnd);
+            let m = (34.0 * dpi_scale).ceil() as i32;
+            let mut dirty_rect: Option<RECT> = None;
+            let mut full_repaint = false;
+            let mut need_redraw = false;
+            APP_STATE.with(|c| {
+                if let Some(st) = c.borrow_mut().as_mut() {
+                    st.tracking_mouse_leave = false;
+                    st.big_bang_sweep_target = None;
+                    let old_hovered = st.hovered_visible_pos.take();
+                    if let Some(old_pos) = old_hovered {
+                        need_redraw = true;
+                        dirty_rect = st.hit_regions.iter().find_map(|r| match r.action {
+                            HitAction::SelectCard(p) if p == old_pos => Some(RECT {
+                                left: r.rect.left - m,
+                                top: r.rect.top - m,
+                                right: r.rect.right + m,
+                                bottom: r.rect.bottom + m,
+                            }),
+                            _ => None,
+                        });
+                    }
+                    st.hover_card_nx = 0.0;
+                    st.hover_card_ny = 0.0;
+                    if st.hovered_link_badge_store_idx.take().is_some() {
+                        need_redraw = true;
+                    }
+                    let old_pressed = st.pressed_visible_pos.take();
+                    if let Some(pr) = old_pressed {
+                        need_redraw = true;
+                        if Some(pr) != old_hovered {
+                            full_repaint = true;
+                        }
+                    }
+                }
+            });
+            if need_redraw {
+                let ptr = if full_repaint {
+                    null()
+                } else {
+                    dirty_rect.as_ref().map_or(null(), |r| r as *const RECT)
+                };
+                let _ = InvalidateRect(hwnd, ptr, FALSE);
+            }
             0
         }
         WM_LBUTTONUP => {
@@ -2260,7 +2347,7 @@ unsafe extern "system" fn wnd_proc(
             0
         }
         WM_KEYDOWN | WM_SYSKEYDOWN => {
-            handle_key_down(hwnd, wparam as u32);
+            handle_key_down(hwnd, wparam as u32, None);
             0
         }
         WM_CHAR => {
@@ -11750,12 +11837,23 @@ unsafe fn apply_image_studio_transform(hwnd: HWND, store_idx: usize, to_jpeg: bo
     }
 }
 
-unsafe fn handle_key_down(hwnd: HWND, vk: u32) {
-    let ctrl_down = (GetKeyState(VK_CONTROL as i32) as u16 & 0x8000) != 0;
-    let alt_down = (GetKeyState(VK_MENU as i32) as u16 & 0x8000) != 0;
-    let shift_down = (GetKeyState(VK_SHIFT as i32) as u16 & 0x8000) != 0;
-    let win_down =
-        ((GetKeyState(0x5B) as u16 & 0x8000) != 0) || ((GetKeyState(0x5C) as u16 & 0x8000) != 0);
+unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
+    let (ctrl_down, alt_down, shift_down, win_down) = if let Some(m) = mod_override {
+        (
+            (m & MOD_CONTROL_BITS) != 0,
+            (m & MOD_ALT_BITS) != 0,
+            (m & MOD_SHIFT_BITS) != 0,
+            (m & MOD_WIN_BITS) != 0,
+        )
+    } else {
+        (
+            (GetKeyState(VK_CONTROL as i32) as u16 & 0x8000) != 0,
+            (GetKeyState(VK_MENU as i32) as u16 & 0x8000) != 0,
+            (GetKeyState(VK_SHIFT as i32) as u16 & 0x8000) != 0,
+            ((GetKeyState(0x5B) as u16 & 0x8000) != 0)
+                || ((GetKeyState(0x5C) as u16 & 0x8000) != 0),
+        )
+    };
 
     let active_rec_slot = APP_STATE.with(|c| c.borrow().as_ref().and_then(|s| s.recording_slot));
     if let Some(slot) = active_rec_slot {
@@ -12225,7 +12323,7 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32) {
         }
     }
 
-    if !ctrl_down && !alt_down && (vk == 0x4F || vk == 0x42) {
+    if !ctrl_down && !alt_down && !shift_down && (vk == 0x4F || vk == 0x42) {
         let ql_toggled = APP_STATE.with(|c| {
             let mut b = c.borrow_mut();
             let Some(st) = b.as_mut() else { return false };
@@ -12302,7 +12400,7 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32) {
         }
     }
 
-    if !ctrl_down && !alt_down && vk == 0x47 {
+    if !ctrl_down && !alt_down && !shift_down && vk == 0x47 {
         let cycled = APP_STATE.with(|c| {
             let mut b = c.borrow_mut();
             let Some(st) = b.as_mut() else { return false };

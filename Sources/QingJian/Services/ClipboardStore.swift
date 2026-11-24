@@ -536,7 +536,7 @@ final class ClipboardStore: ObservableObject {
         thumbnailCache.countLimit = 80
         thumbnailCache.totalCostLimit = 24 * 1024 * 1024
         previewCache.countLimit = 12
-        previewCache.totalCostLimit = 36 * 1024 * 1024
+        previewCache.totalCostLimit = 72 * 1024 * 1024
         fileIconCache.countLimit = 128
 
         // 启动时立即将历史可能残留的 0755 拖拽临时目录收紧为 0700 并擦除上次异常退出残留的明文文件
@@ -1040,7 +1040,7 @@ final class ClipboardStore: ObservableObject {
         thumbnailCache.countLimit = 80
         thumbnailCache.totalCostLimit = 24 * 1024 * 1024
         prewarmThumbnails(for: visibleItems, limit: 18)
-        prewarmPreviewImages(for: visibleItems, limit: 6)
+        prewarmPreviewImages(for: visibleItems, limit: 3)
         if !minimalModeEnabled {
             for item in visibleItems.prefix(24) where item.type == .text || item.type == .link {
                 _ = semanticSnapshot(for: item)

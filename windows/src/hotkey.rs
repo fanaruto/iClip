@@ -546,9 +546,10 @@ pub fn classify_non_active_panel_key(
         return NonActiveKeyRoute::DispatchPanelCommand;
     }
 
-    // 预览/大爆炸态（QuickLook 或独立大图舞台）下拦截无修饰 B / G / O 及 Ctrl+A，禁止透传给宿主前台应用
+    // 预览/大爆炸态（QuickLook 或独立大图舞台）下拦截无修饰及 Shift 可打印键（含 B/G/O 与 Ctrl+A），禁止透传误打进前台宿主窗口
     if in_main_list && show_quick_look {
-        if (clean_mods == 0 && matches!(vk, 0x42 | 0x47 | 0x4F))
+        if ((clean_mods == 0 || clean_mods == MOD_SHIFT_BITS)
+            && vk_to_search_ascii(vk, clean_mods == MOD_SHIFT_BITS).is_some())
             || (clean_mods == MOD_CONTROL_BITS && vk == 0x41)
         {
             return NonActiveKeyRoute::DispatchPanelCommand;

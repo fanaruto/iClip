@@ -22,14 +22,29 @@ private final class FirstMouseStageHostingView<Content: View>: NSHostingView<Con
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
-private final class TokenFrameRegistry {
-    var frames: [Int: CGRect] = [:]
+final class TokenFrameRegistry {
+    private var activeSession: String = ""
+    private var frames: [Int: CGRect] = [:]
+
+    func setFrame(_ rect: CGRect, for id: Int, session: String) {
+        if session != activeSession {
+            activeSession = session
+            frames.removeAll(keepingCapacity: true)
+        }
+        frames[id] = rect
+    }
+
+    func frames(for session: String) -> [Int: CGRect] {
+        guard session == activeSession else { return [:] }
+        return frames
+    }
 }
 
 /// SwiftUI 原生 Layout 流式分词排布（zero-jitter、零 GeometryReader 反馈环）
 struct BigBangFlowLayout: Layout {
     var spacing: CGFloat = 7
     var lineSpacing: CGFloat = 8
+    var fullWidthRows: Bool = false
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         let maxW = max(160, proposal.width ?? 620)
@@ -37,10 +52,11 @@ struct BigBangFlowLayout: Layout {
         var y: CGFloat = 0
         var rowH: CGFloat = 0
         var usedW: CGFloat = 0
+        var hasRow = false
 
         for sub in subviews {
-            let size = sub.sizeThatFits(.unspecified)
-            let isBreak = size.width <= 0.5 && size.height <= 0.5
+            let ideal = sub.sizeThatFits(.unspecified)
+            let isBreak = ideal.width <= 0.5 && ideal.height <= 0.5
             if isBreak {
                 usedW = max(usedW, x)
                 x = 0
@@ -48,29 +64,44 @@ struct BigBangFlowLayout: Layout {
                 rowH = 0
                 continue
             }
-            if x > 0 && x + size.width > maxW {
+            if fullWidthRows {
+                let rowSize = sub.sizeThatFits(ProposedViewSize(width: maxW, height: nil))
+                if hasRow {
+                    y += lineSpacing
+                }
+                y += rowSize.height
+                hasRow = true
+                usedW = maxW
+                continue
+            }
+            let size: CGSize = ideal.width > maxW
+                ? sub.sizeThatFits(ProposedViewSize(width: maxW, height: nil))
+                : ideal
+            let clampedW = min(size.width, maxW)
+            if x > 0 && x + clampedW > maxW {
                 usedW = max(usedW, x)
                 x = 0
                 y += rowH + lineSpacing
                 rowH = 0
             }
-            x += size.width + spacing
+            x += clampedW + spacing
             rowH = max(rowH, size.height)
             usedW = max(usedW, x - spacing)
         }
-        let totalH = y + rowH
+        let totalH = fullWidthRows ? y : (y + rowH)
         return CGSize(width: min(maxW, max(usedW, maxW)), height: totalH)
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        let maxW = bounds.width
+        let maxW = max(1, bounds.width)
         var x = bounds.minX
         var y = bounds.minY
         var rowH: CGFloat = 0
+        var hasRow = false
 
         for sub in subviews {
-            let size = sub.sizeThatFits(.unspecified)
-            let isBreak = size.width <= 0.5 && size.height <= 0.5
+            let ideal = sub.sizeThatFits(.unspecified)
+            let isBreak = ideal.width <= 0.5 && ideal.height <= 0.5
             if isBreak {
                 sub.place(at: CGPoint(x: bounds.minX, y: y), proposal: ProposedViewSize(.zero))
                 x = bounds.minX
@@ -78,7 +109,25 @@ struct BigBangFlowLayout: Layout {
                 rowH = 0
                 continue
             }
-            if x > bounds.minX && (x - bounds.minX) + size.width > maxW {
+            if fullWidthRows {
+                let rowSize = sub.sizeThatFits(ProposedViewSize(width: maxW, height: nil))
+                if hasRow {
+                    y += lineSpacing
+                }
+                sub.place(
+                    at: CGPoint(x: bounds.minX, y: y),
+                    anchor: .topLeading,
+                    proposal: ProposedViewSize(width: maxW, height: rowSize.height)
+                )
+                y += rowSize.height
+                hasRow = true
+                continue
+            }
+            let size: CGSize = ideal.width > maxW
+                ? sub.sizeThatFits(ProposedViewSize(width: maxW, height: nil))
+                : ideal
+            let clampedW = min(size.width, maxW)
+            if x > bounds.minX && (x - bounds.minX) + clampedW > maxW {
                 x = bounds.minX
                 y += rowH + lineSpacing
                 rowH = 0
@@ -86,9 +135,9 @@ struct BigBangFlowLayout: Layout {
             sub.place(
                 at: CGPoint(x: x, y: y),
                 anchor: .topLeading,
-                proposal: ProposedViewSize(size)
+                proposal: ProposedViewSize(width: clampedW, height: size.height)
             )
-            x += size.width + spacing
+            x += clampedW + spacing
             rowH = max(rowH, size.height)
         }
     }
@@ -900,7 +949,6 @@ struct BigBangStageRootView: View {
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.45 : 0.22), radius: 28, y: 12)
         .onChange(of: controller.currentItem?.id) { _, _ in
-            tokenFrameStore.frames.removeAll()
             hoveredBoxID = nil
             boxDragTargetSelect = nil
             boxSweepVisited = []
@@ -910,7 +958,6 @@ struct BigBangStageRootView: View {
             lastTextSweepPoint = nil
         }
         .onChange(of: controller.granularity) { _, _ in
-            tokenFrameStore.frames.removeAll()
             tokenDragTargetSelect = nil
             tokenSweepVisited = []
             lastTextSweepPoint = nil
@@ -1271,8 +1318,13 @@ struct BigBangStageRootView: View {
                     .padding(.horizontal, 16)
                     .padding(.top, 10)
 
+                    let sessionKey = textCanvasSessionKey
                     ScrollView(.vertical, showsIndicators: true) {
-                        BigBangFlowLayout(spacing: 7, lineSpacing: 8) {
+                        BigBangFlowLayout(
+                            spacing: 7,
+                            lineSpacing: 8,
+                            fullWidthRows: controller.granularity == .line
+                        ) {
                             ForEach(controller.textTokens) { tok in
                                 if tok.isLineBreak {
                                     Color.clear.frame(width: 0, height: 0)
@@ -1309,10 +1361,10 @@ struct BigBangStageRootView: View {
                                                 let rect = g.frame(in: .named("bigBangTextCanvas"))
                                                 Color.clear
                                                     .onAppear {
-                                                        tokenFrameStore.frames[tok.id] = rect
+                                                        tokenFrameStore.setFrame(rect, for: tok.id, session: sessionKey)
                                                     }
                                                     .onChange(of: rect) { _, newRect in
-                                                        tokenFrameStore.frames[tok.id] = newRect
+                                                        tokenFrameStore.setFrame(newRect, for: tok.id, session: sessionKey)
                                                     }
                                             }
                                         )
@@ -1328,7 +1380,7 @@ struct BigBangStageRootView: View {
                                 }
                             }
                         }
-                        .id("\(controller.currentItem?.id.uuidString ?? "none")-\(controller.granularity.rawValue)-\(controller.textTokens.count)")
+                        .id(sessionKey)
                         .padding(.horizontal, 16)
                         .padding(.vertical, 10)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1382,8 +1434,12 @@ struct BigBangStageRootView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    private var textCanvasSessionKey: String {
+        "\(controller.currentItem?.id.uuidString ?? "none")-\(controller.granularity.rawValue)-\(controller.textTokens.count)"
+    }
+
     private func handleTextSweepChanged(location: CGPoint) {
-        for (id, rect) in tokenFrameStore.frames {
+        for (id, rect) in tokenFrameStore.frames(for: textCanvasSessionKey) {
             guard rect.insetBy(dx: -3, dy: -4).contains(location) else { continue }
             guard !tokenSweepVisited.contains(id) else { return }
             tokenSweepVisited.insert(id)

@@ -225,28 +225,40 @@ enum VisionOCRService {
                 guard shouldEnqueue else { return }
 
                 wordBoxQueue.async {
-                    let hasActiveWaiter: Bool = {
+                    let earlyExitWaiters: [CheckedContinuation<(fullText: String, boxes: [BigBangImageWordBox])?, Never>]? = {
                         stateLock.lock()
                         defer { stateLock.unlock() }
                         let waiters = pendingWordBoxWaiters[keyString] ?? []
-                        return waiters.contains { !$0.1.cancelled }
+                        if waiters.contains(where: { !$0.1.cancelled }) {
+                            return nil
+                        }
+                        let removed = pendingWordBoxWaiters.removeValue(forKey: keyString) ?? []
+                        return removed.map { $0.0 }
                     }()
 
+                    if let earlyWaiters = earlyExitWaiters {
+                        for w in earlyWaiters {
+                            w.resume(returning: nil)
+                        }
+                        return
+                    }
+
+                    let nsKey = keyString as NSString
                     let computed: (fullText: String, boxes: [BigBangImageWordBox])?
-                    if hasActiveWaiter {
-                        let nsKey = keyString as NSString
-                        if let cached = wordBoxCache.object(forKey: nsKey) {
-                            computed = (cached.fullText, cached.boxes)
-                        } else if let res = performSyncWordBoxRecognition(at: imageURL, granularity: granularity) {
-                            wordBoxCache.setObject(WordBoxCacheEntry(fullText: res.fullText, boxes: res.boxes), forKey: nsKey)
-                            computed = res
-                        } else {
-                            // 无文字纯图同步写入空负缓存，避免上下翻阅重复重算 Vision
+                    if let cached = wordBoxCache.object(forKey: nsKey) {
+                        computed = (cached.fullText, cached.boxes)
+                    } else {
+                        switch performSyncWordBoxRecognition(at: imageURL, granularity: granularity) {
+                        case .recognized(let fullText, let boxes):
+                            wordBoxCache.setObject(WordBoxCacheEntry(fullText: fullText, boxes: boxes), forKey: nsKey)
+                            computed = (fullText, boxes)
+                        case .emptyImage:
+                            // 仅图像解码成功且确认无字时写入空负缓存；解密或磁盘读取失败绝不负缓存以便后续重试
                             wordBoxCache.setObject(WordBoxCacheEntry(fullText: "", boxes: []), forKey: nsKey)
                             computed = ("", [])
+                        case .failed:
+                            computed = nil
                         }
-                    } else {
-                        computed = nil
                     }
 
                     let waitersToResume: [CheckedContinuation<(fullText: String, boxes: [BigBangImageWordBox])?, Never>] = {
@@ -267,15 +279,21 @@ enum VisionOCRService {
         }
     }
 
+    private enum WordBoxRecognitionOutcome {
+        case recognized(String, [BigBangImageWordBox])
+        case emptyImage
+        case failed
+    }
+
     private static func performSyncWordBoxRecognition(
         at url: URL,
         granularity: BigBangGranularity
-    ) -> (fullText: String, boxes: [BigBangImageWordBox])? {
+    ) -> WordBoxRecognitionOutcome {
         autoreleasepool {
             guard let imgData = LocalVaultCrypto.readDecryptedImageData(at: url),
                   let source = CGImageSourceCreateWithData(imgData as CFData, nil),
                   ImageStudioEngine.hasSafeImageDimensions(source) else {
-                return nil
+                return .failed
             }
             let thumbOptions: [CFString: Any] = [
                 kCGImageSourceCreateThumbnailFromImageAlways: true,
@@ -284,7 +302,7 @@ enum VisionOCRService {
                 kCGImageSourceThumbnailMaxPixelSize: maxOCREdgePixelSize
             ]
             guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbOptions as CFDictionary) else {
-                return nil
+                return .failed
             }
             return recognizeWordBoxes(in: cgImage, granularity: granularity)
         }
@@ -293,7 +311,7 @@ enum VisionOCRService {
     private static func recognizeWordBoxes(
         in cgImage: CGImage,
         granularity: BigBangGranularity
-    ) -> (fullText: String, boxes: [BigBangImageWordBox])? {
+    ) -> WordBoxRecognitionOutcome {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = true
@@ -303,11 +321,11 @@ enum VisionOCRService {
         do {
             try handler.perform([request])
         } catch {
-            return nil
+            return .failed
         }
 
         guard let observations = request.results, !observations.isEmpty else {
-            return nil
+            return .emptyImage
         }
 
         func clamp01(_ v: CGFloat) -> CGFloat {
@@ -380,7 +398,7 @@ enum VisionOCRService {
         }
 
         let fullText = lineTexts.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !fullText.isEmpty || !boxes.isEmpty else { return nil }
-        return (fullText, boxes)
+        guard !fullText.isEmpty || !boxes.isEmpty else { return .emptyImage }
+        return .recognized(fullText, boxes)
     }
 }
