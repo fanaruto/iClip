@@ -2312,8 +2312,18 @@ pub fn redact_secrets(text: &str) -> String {
             "${1}***REDACTED***${3}",
         ),
         (
+            "://",
+            r"(?i)\b(https?://)([A-Za-z0-9._~-]{16,})(@[A-Za-z0-9.-]+)",
+            "${1}***REDACTED***${3}",
+        ),
+        (
             "=",
             r"(?i)([?&](?:api_key|apikey|access_token|auth_token|id_token|refresh_token|session_token|jwt|client_secret|secret|password|passwd|x-amz-signature|x-amz-security-token|x-goog-signature|q-signature|ossaccesskeyid|signature)=)([^&\s#*]{8,})",
+            "${1}***REDACTED***",
+        ),
+        (
+            "sig=",
+            r"(?i)([?&]sig=)([A-Za-z0-9%/+=_-]{24,})",
             "${1}***REDACTED***",
         ),
     ];
@@ -2334,12 +2344,15 @@ pub fn redact_secrets(text: &str) -> String {
             .into_owned();
 
         let env_re = Regex::new(
-            r##"(?im)^(\s*(?:export\s+)?[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY|AUTH_TOKEN|CLIENT_SECRET)[A-Z0-9_]*\s*[:=]\s*['"]?)([^\s'"#]{6,})(['"]?)"##,
+            r##"(?im)^(\s*(?:export\s+)?[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY|SIGNING_KEY|MASTER_KEY|ENCRYPTION_KEY|ACCOUNT_KEY|(?:AUTH|ACCESS|REFRESH|SESSION|API|WEBHOOK|BOT|DEPLOY|GITLAB|GITHUB|VERCEL|CLOUDFLARE|RAILWAY|FLY|SUPABASE)_TOKEN)[A-Z0-9_]*\s*[:=]\s*['"]?)([^\s'"#]{6,})(['"]?)"##,
         )
         .unwrap();
         out = env_re
             .replace_all(&out, "${1}***REDACTED***${3}")
             .into_owned();
+
+        let az_re = Regex::new(r"(?i)(\bAccountKey\s*=\s*)([A-Za-z0-9+/=]{20,})").unwrap();
+        out = az_re.replace_all(&out, "${1}***REDACTED***").into_owned();
 
         let http_hdr_re = Regex::new(
             r##"(?i)(\b(?:cookie|set-cookie|x-api-key|x-auth-token|x-csrf-token)\s*:\s*)([^\r\n'"]{8,})"##,

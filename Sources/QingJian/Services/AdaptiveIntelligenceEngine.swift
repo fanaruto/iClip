@@ -778,9 +778,9 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
     }
 
     private func evaluateTextOrLinkCandidate(for item: ClipItem) -> AdaptiveSparkCandidate? {
+        // 当剪贴板包含本会话主动脱敏生成的 `[ICLIP_*_N]` 替身时，无视普通忽略冷却期直接弹出回填胶囊，确保 AI 提问→回填真值闭环永不断链
         if let raw = item.text,
-           let restored = ReversiblePrivacyTwin.inspectRestorableTwins(in: raw),
-           !isCategoryCoolingDown("security") {
+           let restored = ReversiblePrivacyTwin.inspectRestorableTwins(in: raw) {
             return AdaptiveSparkCandidate(
                 actionID: "restore-privacy-twin",
                 categoryKey: "security",

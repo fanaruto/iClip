@@ -534,13 +534,22 @@ enum SensitiveCredentialVeil {
         pattern: #"(?i)(https?://(?:open\.(?:feishu\.cn|larksuite\.com)/open-apis/bot/v2/hook/|qyapi\.weixin\.qq\.com/cgi-bin/webhook/send\?(?:[^&#\s]+&)*key=|hooks\.slack\.com/services/[A-Z0-9]{8,}/[A-Z0-9]{8,}/|(?:ptb\.|canary\.)?discord(?:app)?\.com/api/webhooks/\d{10,}/))([A-Za-z0-9_\-]{12,})"#
     )
     private static let envSecretRegex = try! NSRegularExpression(
-        pattern: ##"(?im)^(\s*(?:export\s+)?[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY|AUTH_TOKEN|CLIENT_SECRET)[A-Z0-9_]*\s*[:=]\s*['"]?)([^\s'"#]{6,})(['"]?)"##
+        pattern: ##"(?im)^(\s*(?:export\s+)?[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY|SIGNING_KEY|MASTER_KEY|ENCRYPTION_KEY|ACCOUNT_KEY|(?:AUTH|ACCESS|REFRESH|SESSION|API|WEBHOOK|BOT|DEPLOY|GITLAB|GITHUB|VERCEL|CLOUDFLARE|RAILWAY|FLY|SUPABASE)_TOKEN)[A-Z0-9_]*\s*[:=]\s*['"]?)([^\s'"#]{6,})(['"]?)"##
+    )
+    private static let azureAccountKeyRegex = try! NSRegularExpression(
+        pattern: #"(?i)(\bAccountKey\s*=\s*)([A-Za-z0-9+/=]{20,})"#
     )
     private static let urlQuerySecretRegex = try! NSRegularExpression(
         pattern: #"(?i)([?&](?:api_key|apikey|access_token|auth_token|id_token|refresh_token|session_token|jwt|client_secret|secret|password|passwd|x-amz-signature|x-amz-security-token|x-goog-signature|q-signature|ossaccesskeyid|signature)=)([^&\s#]{8,})"#
     )
+    private static let urlSigSecretRegex = try! NSRegularExpression(
+        pattern: #"(?i)([?&]sig=)([A-Za-z0-9%/+=_-]{24,})"#
+    )
     private static let httpBasicAuthRegex = try! NSRegularExpression(
         pattern: #"(?i)\b(https?://[^:\s/@]+:)([^@\s/]{4,})(@)"#
+    )
+    private static let httpSingleTokenAuthRegex = try! NSRegularExpression(
+        pattern: #"(?i)\b(https?://)([A-Za-z0-9._~-]{16,})(@[A-Za-z0-9.-]+)"#
     )
     private static let httpHeaderAuthCookieRegex = try! NSRegularExpression(
         pattern: ##"(?i)(\b(?:cookie|set-cookie|x-api-key|x-auth-token|x-csrf-token)\s*:\s*)([^\r\n'"]{8,})"##
@@ -583,6 +592,9 @@ enum SensitiveCredentialVeil {
             return true
         }
         if Set(lower).count <= 1 { return true }
+        if lower.allSatisfy({ $0.isASCII && $0.isNumber }) || lower == "true" || lower == "false" || lower == "null" || lower == "none" {
+            return true
+        }
         return false
     }
 
@@ -618,7 +630,10 @@ enum SensitiveCredentialVeil {
 
     private static func hasRealEnvSecretAssignment(in sample: String, lowerSample: String, nsRange: NSRange) -> Bool {
         guard sample.contains("=") || sample.contains(":") else { return false }
-        let envKeywords = ["password", "passwd", "secret", "api_key", "access_key", "private_key", "auth_token"]
+        if lowerSample.contains("accountkey=") && azureAccountKeyRegex.firstMatch(in: sample, range: nsRange) != nil {
+            return true
+        }
+        let envKeywords = ["password", "passwd", "secret", "_key", "_token"]
         guard envKeywords.contains(where: { lowerSample.contains($0) }) else { return false }
         for match in envSecretRegex.matches(in: sample, range: nsRange) {
             if match.numberOfRanges >= 3, let valRange = Range(match.range(at: 2), in: sample) {
@@ -677,12 +692,16 @@ enum SensitiveCredentialVeil {
             if (hasScheme && (
                 connUriRegex.firstMatch(in: sample, range: nsRange) != nil
                 || httpBasicAuthRegex.firstMatch(in: sample, range: nsRange) != nil
+                || httpSingleTokenAuthRegex.firstMatch(in: sample, range: nsRange) != nil
                 || webhookSecretRegex.firstMatch(in: sample, range: nsRange) != nil
                 || (lowerSample.contains("jdbc:") && jdbcPasswordRegex.firstMatch(in: sample, range: nsRange) != nil)
             ))
             || (lowerSample.contains("bearer") && bearerRegex.firstMatch(in: sample, range: nsRange) != nil)
             || (lowerSample.contains("curl") && curlInlineCredentialRegex.firstMatch(in: sample, range: nsRange) != nil)
-            || ((sample.contains("?") || sample.contains("&")) && urlQuerySecretRegex.firstMatch(in: sample, range: nsRange) != nil)
+            || ((sample.contains("?") || sample.contains("&")) && (
+                urlQuerySecretRegex.firstMatch(in: sample, range: nsRange) != nil
+                || (lowerSample.contains("sig=") && urlSigSecretRegex.firstMatch(in: sample, range: nsRange) != nil)
+            ))
             || (hasColon && (
                 httpHeaderAuthCookieRegex.firstMatch(in: sample, range: nsRange) != nil
                 || (lowerSample.contains("basic") && httpBasicHeaderRegex.firstMatch(in: sample, range: nsRange) != nil)
@@ -845,6 +864,11 @@ enum SensitiveCredentialVeil {
                 range: NSRange(out.startIndex..<out.endIndex, in: out),
                 withTemplate: "$1***REDACTED***$3"
             )
+            out = httpSingleTokenAuthRegex.stringByReplacingMatches(
+                in: out,
+                range: NSRange(out.startIndex..<out.endIndex, in: out),
+                withTemplate: "$1***REDACTED***$3"
+            )
             out = webhookSecretRegex.stringByReplacingMatches(
                 in: out,
                 range: NSRange(out.startIndex..<out.endIndex, in: out),
@@ -867,6 +891,11 @@ enum SensitiveCredentialVeil {
         }
         if out.contains("?") || out.contains("&") {
             out = urlQuerySecretRegex.stringByReplacingMatches(
+                in: out,
+                range: NSRange(out.startIndex..<out.endIndex, in: out),
+                withTemplate: "$1***REDACTED***"
+            )
+            out = urlSigSecretRegex.stringByReplacingMatches(
                 in: out,
                 range: NSRange(out.startIndex..<out.endIndex, in: out),
                 withTemplate: "$1***REDACTED***"
@@ -904,6 +933,11 @@ enum SensitiveCredentialVeil {
                 in: out,
                 range: NSRange(out.startIndex..<out.endIndex, in: out),
                 withTemplate: "$1***REDACTED***$3"
+            )
+            out = azureAccountKeyRegex.stringByReplacingMatches(
+                in: out,
+                range: NSRange(out.startIndex..<out.endIndex, in: out),
+                withTemplate: "$1***REDACTED***"
             )
             out = httpHeaderAuthCookieRegex.stringByReplacingMatches(
                 in: out,
@@ -2252,8 +2286,11 @@ enum ReversiblePrivacyTwin {
     private static let uriPasswordGroupRegex = try! NSRegularExpression(
         pattern: #"(?i)\b((?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|rediss?|amqps?|clickhouse|https?)://[^:\s/@]*:)([^@\s/]{4,})(@)"#
     )
+    private static let uriSingleTokenGroupRegex = try! NSRegularExpression(
+        pattern: #"(?i)\b(https?://)([A-Za-z0-9._~-]{16,})(@[A-Za-z0-9.-]+)"#
+    )
     private static let envOrBearerGroupRegex = try! NSRegularExpression(
-        pattern: ##"(?im)((?:^\s*(?:export\s+)?[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY|AUTH_TOKEN|CLIENT_SECRET)[A-Z0-9_]*\s*[:=]\s*['"]?)|(?:\bBearer\s+))([^\s'"#\[\]]{6,})"##
+        pattern: ##"(?im)((?:^\s*(?:export\s+)?[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY|SIGNING_KEY|MASTER_KEY|ENCRYPTION_KEY|ACCOUNT_KEY|(?:AUTH|ACCESS|REFRESH|SESSION|API|WEBHOOK|BOT|DEPLOY|GITLAB|GITHUB|VERCEL|CLOUDFLARE|RAILWAY|FLY|SUPABASE)_TOKEN)[A-Z0-9_]*\s*[:=]\s*['"]?)|(?:\bAccountKey\s*=\s*)|(?:\bBearer\s+))([^\s'"#\[\];]{6,})"##
     )
     private static let privateIPv4Regex = try! NSRegularExpression(
         pattern: #"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3})\b"#
@@ -2353,6 +2390,7 @@ enum ReversiblePrivacyTwin {
         replaceFullMatches(regex: standaloneSecretRegex, category: "KEY")
         if out.contains("://") {
             replaceGroup2Matches(regex: uriPasswordGroupRegex, category: "SEC")
+            replaceGroup2Matches(regex: uriSingleTokenGroupRegex, category: "SEC")
         }
         if out.contains("=") || out.contains(":") || out.lowercased().contains("bearer ") {
             replaceGroup2Matches(regex: envOrBearerGroupRegex, category: "SEC")
@@ -2378,7 +2416,17 @@ enum ReversiblePrivacyTwin {
             replaceFullMatches(regex: privateIPv4Regex, category: "IP")
         }
         if out.contains("@") {
-            replaceFullMatches(regex: emailRegex, category: "EMAIL")
+            let emailMatches = emailRegex.matches(in: out, range: NSRange(out.startIndex..<out.endIndex, in: out))
+            for m in emailMatches.reversed() {
+                guard let r = Range(m.range, in: out) else { continue }
+                // 豁免紧跟在协议头 `://` 后的 URL userinfo@host（如 ssh://git@github.com/org/repo），防止破坏仓库 URL 结构
+                if out[..<r.lowerBound].hasSuffix("://") { continue }
+                let val = String(out[r])
+                if val.hasPrefix("[ICLIP_") { continue }
+                let tok = assignTokenLocked(category: "EMAIL", realValue: val, now: now)
+                out.replaceSubrange(r, with: tok)
+                count += 1
+            }
         }
         if out.contains("1") {
             replaceFullMatches(regex: cnPhoneRegex, category: "PHONE")

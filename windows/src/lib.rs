@@ -6,6 +6,7 @@ pub mod intelligence;
 pub mod model;
 pub mod security;
 pub mod store;
+pub mod updater;
 
 #[cfg(test)]
 mod tests {
@@ -2042,5 +2043,54 @@ mod tests {
         assert_eq!(crate::store::CORE_HIGHLIGHTS_V27.len(), 4);
         assert_eq!(crate::store::CORE_HIGHLIGHTS_V27[0].0, "唤醒零失焦直贴");
         assert!(!crate::store::StoreConfig::default().has_seen_highlights_v27);
+
+        // 6. 第 22 轮自省：验证单段 HTTPS Git Token URL、`.env` *_TOKEN / SIGNING_KEY、Azure AccountKey/SAS 脱敏与 SSH URL userinfo 替身保护
+        let git_tok_url =
+            "https://oauth9f8a7b6c5d4e3f2a1b0c9988@git.internal.corp/platform/core.git";
+        assert_eq!(
+            classify_sensitive_text(git_tok_url),
+            Some(SensitiveSecretKind::ConnectionSecret)
+        );
+        let red_git = crate::engines::redact_secrets(git_tok_url);
+        assert!(!red_git.contains("oauth9f8a7b6c5d4e3f2a1b0c9988"));
+        assert!(red_git.contains("https://***REDACTED***@git.internal.corp"));
+
+        let env_toks =
+            "VERCEL_TOKEN=vcp_alpha998877665544\nJWT_SIGNING_KEY=hmac_prod_key_2026_secure";
+        assert_eq!(
+            classify_sensitive_text(env_toks),
+            Some(SensitiveSecretKind::ConnectionSecret)
+        );
+        let red_env = crate::engines::redact_secrets(env_toks);
+        assert!(
+            !red_env.contains("vcp_alpha998877665544")
+                && !red_env.contains("hmac_prod_key_2026_secure")
+        );
+
+        let az_conn = "DefaultEndpointsProtocol=https;AccountName=prodstore;AccountKey=QmFzZTY0QXp1cmVLZXlTYW1wbGUxMjM0NTY3ODkw==;EndpointSuffix=core.windows.net";
+        let az_sas = "https://prodstore.blob.core.windows.net/docs/q4.pdf?sv=2022-11-02&sp=r&sig=AbCdEfGhIjKlMnOpQrStUvWxYz0123456789%2B%3D";
+        assert_eq!(
+            classify_sensitive_text(az_conn),
+            Some(SensitiveSecretKind::ConnectionSecret)
+        );
+        assert_eq!(
+            classify_sensitive_text(az_sas),
+            Some(SensitiveSecretKind::ConnectionSecret)
+        );
+        assert!(!crate::engines::redact_secrets(az_conn)
+            .contains("QmFzZTY0QXp1cmVLZXlTYW1wbGUxMjM0NTY3ODkw=="));
+        assert!(!crate::engines::redact_secrets(az_sas)
+            .contains("AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"));
+
+        crate::security::wipe_privacy_twins();
+        let ssh_and_tok = format!("git clone ssh://git@github.com/org/repo.git && git pull {git_tok_url} && notify ops@company.com");
+        let (masked_s, _) = crate::security::mask_with_privacy_twins(&ssh_and_tok).unwrap();
+        assert!(masked_s.contains("ssh://git@github.com/org/repo.git"));
+        assert!(masked_s.contains("@git.internal.corp/platform/core.git"));
+        assert!(!masked_s.contains("oauth9f8a7b6c5d4e3f2a1b0c9988"));
+        assert!(!masked_s.contains("ops@company.com"));
+        let (restored_s, _) = crate::security::inspect_restorable_privacy_twins(&masked_s).unwrap();
+        assert_eq!(restored_s, ssh_and_tok);
+        crate::security::wipe_privacy_twins();
     }
 }

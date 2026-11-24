@@ -2990,5 +2990,35 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertTrue(stripAct.resultText.contains("☑ 核心优化：已完成 零失焦唤醒 重构"))
         XCTAssertTrue(stripAct.resultText.contains("☐ 查看 线上地址 (https://app.webfooo.com/iClip)"))
         XCTAssertTrue(stripAct.resultText.contains("2 * 3 * 4 = 24"))
+
+        // 5. 验证单段无冒号 HTTPS Git Token URL、`.env` *_TOKEN / SIGNING_KEY、Azure AccountKey/SAS 脱敏与 SSH URL userinfo 替身保护
+        let gitSingleTokenURL = "https://oauth9f8a7b6c5d4e3f2a1b0c9988@git.internal.corp/platform/core.git"
+        XCTAssertEqual(SensitiveCredentialVeil.classify(gitSingleTokenURL), .connectionSecret)
+        let redactedGit = SensitiveCredentialVeil.redactForExternalSharing(gitSingleTokenURL)
+        XCTAssertFalse(redactedGit.contains("oauth9f8a7b6c5d4e3f2a1b0c9988"))
+        XCTAssertTrue(redactedGit.contains("https://***REDACTED***@git.internal.corp"))
+
+        let envTokenBlock = "VERCEL_TOKEN=vcp_alpha998877665544\nJWT_SIGNING_KEY=hmac_prod_key_2026_secure"
+        XCTAssertEqual(SensitiveCredentialVeil.classify(envTokenBlock), .connectionSecret)
+        XCTAssertFalse(SensitiveCredentialVeil.redactForExternalSharing(envTokenBlock).contains("vcp_alpha998877665544"))
+        XCTAssertFalse(SensitiveCredentialVeil.redactForExternalSharing(envTokenBlock).contains("hmac_prod_key_2026_secure"))
+
+        let azureConn = "DefaultEndpointsProtocol=https;AccountName=prodstore;AccountKey=QmFzZTY0QXp1cmVLZXlTYW1wbGUxMjM0NTY3ODkw==;EndpointSuffix=core.windows.net"
+        let azureSAS = "https://prodstore.blob.core.windows.net/docs/q4.pdf?sv=2022-11-02&sp=r&sig=AbCdEfGhIjKlMnOpQrStUvWxYz0123456789%2B%3D"
+        XCTAssertEqual(SensitiveCredentialVeil.classify(azureConn), .connectionSecret)
+        XCTAssertEqual(SensitiveCredentialVeil.classify(azureSAS), .connectionSecret)
+        XCTAssertFalse(SensitiveCredentialVeil.redactForExternalSharing(azureConn).contains("QmFzZTY0QXp1cmVLZXlTYW1wbGUxMjM0NTY3ODkw=="))
+        XCTAssertFalse(SensitiveCredentialVeil.redactForExternalSharing(azureSAS).contains("AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"))
+
+        ReversiblePrivacyTwin.wipeAll()
+        let sshAndToken = "git clone ssh://git@github.com/org/repo.git && git pull \(gitSingleTokenURL) && notify ops@company.com"
+        let twinRes2 = try XCTUnwrap(ReversiblePrivacyTwin.maskWithTwins(sshAndToken))
+        XCTAssertTrue(twinRes2.maskedText.contains("ssh://git@github.com/org/repo.git"))
+        XCTAssertTrue(twinRes2.maskedText.contains("@git.internal.corp/platform/core.git"))
+        XCTAssertFalse(twinRes2.maskedText.contains("oauth9f8a7b6c5d4e3f2a1b0c9988"))
+        XCTAssertFalse(twinRes2.maskedText.contains("ops@company.com"))
+        let restored2 = try XCTUnwrap(ReversiblePrivacyTwin.inspectRestorableTwins(in: twinRes2.maskedText))
+        XCTAssertEqual(restored2.restoredText, sshAndToken)
+        ReversiblePrivacyTwin.wipeAll()
     }
 }

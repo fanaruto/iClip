@@ -842,20 +842,28 @@ fn is_placeholder_secret_value(val: &str) -> bool {
         return true;
     }
     let bytes = lower.as_bytes();
-    if bytes.iter().all(|&b| b == bytes[0]) {
+    if bytes.iter().all(|&b| b == bytes[0]) || bytes.iter().all(|b| b.is_ascii_digit()) {
         return true;
     }
-    false
+    matches!(lower.as_str(), "true" | "false" | "null" | "none")
 }
 
 fn has_real_env_secret_assignment(sample: &str) -> bool {
     if !sample.contains('=') && !sample.contains(':') {
         return false;
     }
+    static AZURE_ACC_KEY_RE: OnceLock<Regex> = OnceLock::new();
+    if sample.to_ascii_lowercase().contains("accountkey=") {
+        let az_re = AZURE_ACC_KEY_RE
+            .get_or_init(|| Regex::new(r"(?i)\bAccountKey\s*=\s*[A-Za-z0-9+/=]{20,}").unwrap());
+        if az_re.is_match(sample) {
+            return true;
+        }
+    }
     static ENV_SEC_DETECT_RE: OnceLock<Regex> = OnceLock::new();
     let re = ENV_SEC_DETECT_RE.get_or_init(|| {
         Regex::new(
-            r##"(?im)^(?:\s*(?:export\s+)?[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY|AUTH_TOKEN|CLIENT_SECRET)[A-Z0-9_]*\s*[:=]\s*['"]?)([^\s'"#]{6,})"##,
+            r##"(?im)^(?:\s*(?:export\s+)?[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY|SIGNING_KEY|MASTER_KEY|ENCRYPTION_KEY|ACCOUNT_KEY|(?:AUTH|ACCESS|REFRESH|SESSION|API|WEBHOOK|BOT|DEPLOY|GITLAB|GITHUB|VERCEL|CLOUDFLARE|RAILWAY|FLY|SUPABASE)_TOKEN)[A-Z0-9_]*\s*[:=]\s*['"]?)([^\s'"#]{6,})"##,
         )
         .unwrap()
     });
@@ -983,9 +991,15 @@ pub fn classify_sensitive_text(raw: &str) -> Option<SensitiveSecretKind> {
         )
         .unwrap()
     });
+    static URL_SIG_SEC_RE: OnceLock<Regex> = OnceLock::new();
+    let url_sig_re =
+        URL_SIG_SEC_RE.get_or_init(|| Regex::new(r"(?i)[?&]sig=[A-Za-z0-9%/+=_-]{24,}").unwrap());
     static BASIC_AUTH_RE: OnceLock<Regex> = OnceLock::new();
     let basic_re =
         BASIC_AUTH_RE.get_or_init(|| Regex::new(r"(?i)\bhttps?://[^:\s/@]+:[^@\s/]{4,}@").unwrap());
+    static SINGLE_TOK_URL_RE: OnceLock<Regex> = OnceLock::new();
+    let single_tok_url_re = SINGLE_TOK_URL_RE
+        .get_or_init(|| Regex::new(r"(?i)\bhttps?://[A-Za-z0-9._~-]{16,}@[A-Za-z0-9.-]+").unwrap());
     static HTTP_HDR_SEC_RE: OnceLock<Regex> = OnceLock::new();
     let http_hdr_re = HTTP_HDR_SEC_RE.get_or_init(|| {
         Regex::new(
@@ -1021,7 +1035,9 @@ pub fn classify_sensitive_text(raw: &str) -> Option<SensitiveSecretKind> {
         || bearer_re.is_match(sample)
         || (sample.to_ascii_lowercase().contains("curl") && curl_cred_re.is_match(sample))
         || url_q_re.is_match(sample)
+        || url_sig_re.is_match(sample)
         || basic_re.is_match(sample)
+        || single_tok_url_re.is_match(sample)
         || (sample.to_ascii_lowercase().contains("jdbc:") && jdbc_re.is_match(sample))
         || is_webhook_url(sample)
         || http_hdr_re.is_match(sample)
@@ -2941,6 +2957,7 @@ pub fn mask_with_privacy_twins(raw: &str) -> Option<(String, usize)> {
         static PEM_RE: OnceLock<Regex> = OnceLock::new();
         static KEY_RE: OnceLock<Regex> = OnceLock::new();
         static URI_PW_RE: OnceLock<Regex> = OnceLock::new();
+        static URI_SINGLE_TOK_RE: OnceLock<Regex> = OnceLock::new();
         static ENV_BEARER_RE: OnceLock<Regex> = OnceLock::new();
         static PRIV_IP_RE: OnceLock<Regex> = OnceLock::new();
         static EMAIL_RE: OnceLock<Regex> = OnceLock::new();
@@ -2955,8 +2972,11 @@ pub fn mask_with_privacy_twins(raw: &str) -> Option<(String, usize)> {
         let uri_pw_re = URI_PW_RE.get_or_init(|| {
             Regex::new(r"(?i)\b((?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|rediss?|amqps?|clickhouse|https?)://[^:\s/@]*:)([^@\s/]{4,})(@)").unwrap()
         });
+        let uri_single_tok_re = URI_SINGLE_TOK_RE.get_or_init(|| {
+            Regex::new(r"(?i)\b(https?://)([A-Za-z0-9._~-]{16,})(@[A-Za-z0-9.-]+)").unwrap()
+        });
         let env_bearer_re = ENV_BEARER_RE.get_or_init(|| {
-            Regex::new(r##"(?im)((?:^\s*(?:export\s+)?[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY|AUTH_TOKEN|CLIENT_SECRET)[A-Z0-9_]*\s*[:=]\s*['"]?)|(?:\bBearer\s+))([^\s'"#\[\]]{6,})"##).unwrap()
+            Regex::new(r##"(?im)((?:^\s*(?:export\s+)?[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY|SIGNING_KEY|MASTER_KEY|ENCRYPTION_KEY|ACCOUNT_KEY|(?:AUTH|ACCESS|REFRESH|SESSION|API|WEBHOOK|BOT|DEPLOY|GITLAB|GITHUB|VERCEL|CLOUDFLARE|RAILWAY|FLY|SUPABASE)_TOKEN)[A-Z0-9_]*\s*[:=]\s*['"]?)|(?:\bAccountKey\s*=\s*)|(?:\bBearer\s+))([^\s'"#\[\];]{6,})"##).unwrap()
         });
         let priv_ip_re = PRIV_IP_RE.get_or_init(|| {
             Regex::new(r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3})\b").unwrap()
@@ -2978,6 +2998,9 @@ pub fn mask_with_privacy_twins(raw: &str) -> Option<(String, usize)> {
         if out.contains("://") {
             out = replace_group2_matches_with_twins(
                 &out, uri_pw_re, "SEC", &mut state, now_secs, &mut count,
+            );
+            out = replace_group2_matches_with_twins(
+                &out, uri_single_tok_re, "SEC", &mut state, now_secs, &mut count,
             );
         }
         if out.contains('=') || out.contains(':') || out.to_ascii_lowercase().contains("bearer ") {
@@ -3038,9 +3061,24 @@ pub fn mask_with_privacy_twins(raw: &str) -> Option<(String, usize)> {
             );
         }
         if out.contains('@') {
-            out = replace_full_matches_with_twins(
-                &out, email_re, "EMAIL", &mut state, now_secs, &mut count,
-            );
+            let mut rebuilt = String::with_capacity(out.len());
+            let mut last = 0usize;
+            for m in email_re.find_iter(&out) {
+                if m.start() >= 3 && &out.as_bytes()[m.start() - 3..m.start()] == b"://" {
+                    continue;
+                }
+                if m.as_str().starts_with("[ICLIP_") {
+                    continue;
+                }
+                rebuilt.push_str(&out[last..m.start()]);
+                rebuilt.push_str(&state.assign_token("EMAIL", m.as_str(), now_secs));
+                last = m.end();
+                count += 1;
+            }
+            if last > 0 {
+                rebuilt.push_str(&out[last..]);
+                out = rebuilt;
+            }
         }
         if out.contains('1') {
             let mut rebuilt = String::with_capacity(out.len());
