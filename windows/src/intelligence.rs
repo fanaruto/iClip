@@ -2844,3 +2844,311 @@ pub fn parse_shipping_contact(raw: &str) -> Option<ShippingContact> {
         clean_address,
     })
 }
+
+// ============================================================================
+// 13. 锤子大爆炸（Big Bang）跨端对齐智能分词与选区组装引擎
+// ============================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BigBangGranularity {
+    Word,
+    Char,
+    Line,
+}
+
+impl BigBangGranularity {
+    pub fn title(self) -> &'static str {
+        match self {
+            BigBangGranularity::Word => "按词",
+            BigBangGranularity::Char => "按字",
+            BigBangGranularity::Line => "按行",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            BigBangGranularity::Word => BigBangGranularity::Char,
+            BigBangGranularity::Char => BigBangGranularity::Line,
+            BigBangGranularity::Line => BigBangGranularity::Word,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BigBangToken {
+    pub id: usize,
+    pub text: String,
+    pub line_index: usize,
+    pub is_line_break: bool,
+    pub byte_start: usize,
+    pub byte_end: usize,
+    pub granularity: BigBangGranularity,
+}
+
+fn is_big_bang_ascii_word_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '/')
+}
+
+fn is_big_bang_ascii_boundary_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'_' | b'/')
+}
+
+fn is_cjk_char(c: char) -> bool {
+    ('\u{4E00}'..='\u{9FFF}').contains(&c)
+        || ('\u{3400}'..='\u{4DBF}').contains(&c)
+        || ('\u{3040}'..='\u{30FF}').contains(&c)
+}
+
+fn big_bang_protected_spans(line: &str) -> Vec<(usize, usize)> {
+    static ENTITY_RE: std::sync::OnceLock<regex_lite::Regex> = std::sync::OnceLock::new();
+    let re = ENTITY_RE.get_or_init(|| {
+        regex_lite::Regex::new(
+            r#"https?://[^\s\x{4E00}-\x{9FFF}\x{3000}-\x{303F}\x{FF00}-\x{FFEF}<>"'`()\[\]{}（）【】]+|[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}|\b[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\b|\b(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?\b|1[3-9]\d(?:[- ]?\d{4}){2}|\b[A-Za-z0-9]+(?:[_\-.][A-Za-z0-9]+)+\b"#,
+        )
+        .unwrap()
+    });
+    let bytes = line.as_bytes();
+    let mut out = Vec::new();
+    let mut last_end = 0usize;
+    for m in re.find_iter(line) {
+        if m.start() < last_end {
+            continue;
+        }
+        let raw_slice = &line[m.start()..m.end()];
+        // 手机号子支（regex_lite 不支持零宽断言，手动检验前后数字边界防 13+ 位长整数被误裁）
+        if raw_slice.starts_with('1')
+            && !raw_slice.starts_with("http")
+            && !raw_slice.contains('@')
+            && !raw_slice.contains('.')
+            && raw_slice.chars().all(|c| c.is_ascii_digit() || c == '-' || c == ' ')
+        {
+            let prev_digit = m.start() > 0 && bytes[m.start() - 1].is_ascii_digit();
+            let next_digit = m.end() < bytes.len() && bytes[m.end()].is_ascii_digit();
+            if prev_digit || next_digit {
+                continue;
+            }
+        }
+        let mut end = m.end();
+        if raw_slice.starts_with("http") {
+            while end > m.start() {
+                let Some(ch) = line[m.start()..end].chars().next_back() else {
+                    break;
+                };
+                if matches!(
+                    ch,
+                    '.' | ',' | ';' | ':' | '!' | '?' | '。' | '，' | '；' | '：' | '！' | '？' | '）' | ')' | ']' | '}' | '"'
+                ) {
+                    end -= ch.len_utf8();
+                } else {
+                    break;
+                }
+            }
+        }
+        if end > m.start() {
+            out.push((m.start(), end));
+            last_end = end;
+        }
+    }
+    out
+}
+
+fn push_word_segment_tokens(
+    seg: &str,
+    seg_offset: usize,
+    line_index: usize,
+    next_id: &mut usize,
+    out: &mut Vec<BigBangToken>,
+) {
+    let mut chars = seg.char_indices().peekable();
+    while let Some((idx, ch)) = chars.peek().copied() {
+        if ch.is_whitespace() {
+            chars.next();
+            continue;
+        }
+        if is_cjk_char(ch) {
+            let mut end = idx + ch.len_utf8();
+            chars.next();
+            // 双字常见词平滑聚合或按单字可点击：单汉字保证 Windows 无外置词典下任意中文词组都能精确切选
+            while let Some(&(_, next_ch)) = chars.peek() {
+                if next_ch == 'ー' {
+                    end += next_ch.len_utf8();
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            out.push(BigBangToken {
+                id: *next_id,
+                text: seg[idx..end].to_string(),
+                line_index,
+                is_line_break: false,
+                byte_start: seg_offset + idx,
+                byte_end: seg_offset + end,
+                granularity: BigBangGranularity::Word,
+            });
+            *next_id += 1;
+            continue;
+        }
+        if is_big_bang_ascii_word_char(ch) || ch.is_alphanumeric() {
+            let start = idx;
+            let mut end = idx + ch.len_utf8();
+            chars.next();
+            while let Some(&(nidx, nch)) = chars.peek() {
+                if !nch.is_whitespace()
+                    && !is_cjk_char(nch)
+                    && (is_big_bang_ascii_word_char(nch) || nch.is_alphanumeric())
+                {
+                    end = nidx + nch.len_utf8();
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            out.push(BigBangToken {
+                id: *next_id,
+                text: seg[start..end].to_string(),
+                line_index,
+                is_line_break: false,
+                byte_start: seg_offset + start,
+                byte_end: seg_offset + end,
+                granularity: BigBangGranularity::Word,
+            });
+            *next_id += 1;
+            continue;
+        }
+        chars.next();
+    }
+}
+
+pub fn tokenize_big_bang(text: &str, granularity: BigBangGranularity) -> Vec<BigBangToken> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    let mut result = Vec::new();
+    let mut next_id = 0usize;
+
+    for (line_idx, raw_line) in normalized.split('\n').enumerate() {
+        if line_idx > 0 && granularity != BigBangGranularity::Line {
+            result.push(BigBangToken {
+                id: next_id,
+                text: "\n".to_string(),
+                line_index: line_idx,
+                is_line_break: true,
+                byte_start: 0,
+                byte_end: 0,
+                granularity,
+            });
+            next_id += 1;
+        }
+
+        let trimmed = raw_line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        match granularity {
+            BigBangGranularity::Line => {
+                result.push(BigBangToken {
+                    id: next_id,
+                    text: trimmed.to_string(),
+                    line_index: line_idx,
+                    is_line_break: false,
+                    byte_start: 0,
+                    byte_end: trimmed.len(),
+                    granularity,
+                });
+                next_id += 1;
+            }
+            BigBangGranularity::Char => {
+                for (bidx, ch) in raw_line.char_indices() {
+                    if !ch.is_whitespace() {
+                        result.push(BigBangToken {
+                            id: next_id,
+                            text: ch.to_string(),
+                            line_index: line_idx,
+                            is_line_break: false,
+                            byte_start: bidx,
+                            byte_end: bidx + ch.len_utf8(),
+                            granularity,
+                        });
+                        next_id += 1;
+                    }
+                }
+            }
+            BigBangGranularity::Word => {
+                let spans = big_bang_protected_spans(raw_line);
+                let mut cursor = 0usize;
+                for (s, e) in spans {
+                    if cursor < s {
+                        push_word_segment_tokens(
+                            &raw_line[cursor..s],
+                            cursor,
+                            line_idx,
+                            &mut next_id,
+                            &mut result,
+                        );
+                    }
+                    result.push(BigBangToken {
+                        id: next_id,
+                        text: raw_line[s..e].to_string(),
+                        line_index: line_idx,
+                        is_line_break: false,
+                        byte_start: s,
+                        byte_end: e,
+                        granularity,
+                    });
+                    next_id += 1;
+                    cursor = e;
+                }
+                if cursor < raw_line.len() {
+                    push_word_segment_tokens(
+                        &raw_line[cursor..],
+                        cursor,
+                        line_idx,
+                        &mut next_id,
+                        &mut result,
+                    );
+                }
+            }
+        }
+    }
+    result
+}
+
+pub fn assemble_big_bang_selection(
+    tokens: &[BigBangToken],
+    selected_ids: &std::collections::HashSet<usize>,
+) -> String {
+    let picked: Vec<&BigBangToken> = tokens
+        .iter()
+        .filter(|t| !t.is_line_break && selected_ids.contains(&t.id))
+        .collect();
+    let Some(first) = picked.first() else {
+        return String::new();
+    };
+
+    let mut out = first.text.clone();
+    let mut prev = *first;
+
+    for cur in picked.into_iter().skip(1) {
+        if cur.line_index > prev.line_index {
+            out.push('\n');
+        } else {
+            let adj_char = cur.granularity == BigBangGranularity::Char
+                && prev.granularity == BigBangGranularity::Char
+                && cur.byte_start == prev.byte_end;
+            if !adj_char {
+                if let (Some(&lb), Some(&fb)) = (prev.text.as_bytes().last(), cur.text.as_bytes().first())
+                {
+                    if is_big_bang_ascii_boundary_byte(lb) && is_big_bang_ascii_boundary_byte(fb) {
+                        out.push(' ');
+                    }
+                }
+            }
+        }
+        out.push_str(&cur.text);
+        prev = cur;
+    }
+    out
+}

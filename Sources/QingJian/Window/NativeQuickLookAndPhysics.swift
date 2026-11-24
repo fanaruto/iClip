@@ -286,7 +286,7 @@ final class SystemQuickLookController: NSObject, QLPreviewPanelDataSource, QLPre
     }
 
     /// 实时计算当前卡片在屏幕上的可见矩形；若已滚出列表视口则返回 `.zero`（由系统优雅退化为中心淡入）
-    private func liveVisibleScreenRect(for itemID: UUID) -> NSRect? {
+    func liveVisibleScreenRect(for itemID: UUID) -> NSRect? {
         guard let view = probeViews[itemID]?.view,
               let win = view.window,
               view.bounds.width > 4,
@@ -588,6 +588,7 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
         private var didFireDeepPress = false
         private var downPointInWindow: NSPoint = .zero
         private var lastReportedProgress: CGFloat = 0
+        private var maxStageTransition: CGFloat = 0
 
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
@@ -655,10 +656,11 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
         }
 
         private func resetPressState() {
-            if isMouseDownInside || lastReportedProgress != 0 {
+            if isMouseDownInside || lastReportedProgress != 0 || maxStageTransition != 0 {
                 isMouseDownInside = false
                 didFireDeepPress = false
                 lastReportedProgress = 0
+                maxStageTransition = 0
                 coordinator?.onPressStateChange(0, 0)
             }
         }
@@ -696,6 +698,7 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
                 isMouseDownInside = true
                 didFireDeepPress = false
                 lastReportedProgress = 0
+                maxStageTransition = 0
                 downPointInWindow = event.locationInWindow
                 coordinator?.onPressStateChange(1, 0)
 
@@ -704,6 +707,7 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
                 if event.stage >= 2 {
                     triggerDeepPop()
                 } else if event.stage == 1 {
+                    maxStageTransition = max(maxStageTransition, CGFloat(event.stageTransition))
                     // 优先融合连续 pressure 与 stageTransition，让一段轻按后持续加压的每克力度都实时驱动卡片蓄力胀大
                     let progress = max(0, min(1, max(CGFloat(event.pressure), CGFloat(event.stageTransition))))
                     if abs(progress - lastReportedProgress) >= 0.025 || progress == 0 || progress >= 0.95 {
@@ -723,6 +727,13 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
                 }
 
             case .leftMouseUp:
+                // 若用户在卡片内一段加压深入（stageTransition ≥ 0.48）后松手取消，仍同步拦截当次松手单击防误贴；拖离卡片外则不再误伤后续点击
+                if isMouseDownInside && inside && !didFireDeepPress && maxStageTransition >= 0.48,
+                   let currentID = coordinator?.itemID {
+                    MainActor.assumeIsolated {
+                        ForceTouchSuppressionRegistry.markDeepPopTriggered(for: currentID)
+                    }
+                }
                 resetPressState()
 
             default:

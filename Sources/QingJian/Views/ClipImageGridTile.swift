@@ -16,6 +16,7 @@ struct ClipImageGridTile: View {
     var onRemoveTodo: (() -> Void)? = nil
     var onEditAlias: (() -> Void)? = nil
     var onOpenQuickLook: (() -> Void)? = nil
+    var onOpenOCRBigBang: (() -> Void)? = nil
     let onDelete: () -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -148,7 +149,7 @@ struct ClipImageGridTile: View {
         .overlay(alignment: .topTrailing) {
             if isHovered {
                 HStack(spacing: 4) {
-                    if !ClipboardStore.shared.minimalModeEnabled, let onExtractOCR {
+                    if !ClipboardStore.shared.minimalModeEnabled, (onExtractOCR != nil || onOpenOCRBigBang != nil) {
                         let hasQR = !(item.qrCodePayload?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
                         let isTOTPQR = TOTPAuthenticator.isTOTPURI(item.qrCodePayload)
                         HoverActionCircleButton(
@@ -157,8 +158,14 @@ struct ClipImageGridTile: View {
                             iconSize: 10,
                             surface: .onImageTile,
                             kind: .ocr,
-                            helpText: isTOTPQR ? "实时算出 2FA 动态验证码并键入（⇧↵）" : (hasQR ? "提取二维码内容并键入（⇧↵）" : "提取图中文字并键入（⇧↵）"),
-                            action: { onExtractOCR(true) }
+                            helpText: isTOTPQR ? "实时算出 2FA 动态验证码并键入（⇧↵）" : (hasQR ? "提取二维码内容并键入（⇧↵）" : "大图原位大爆炸选字（OCR）"),
+                            action: {
+                                if !hasQR, let onOpenOCRBigBang {
+                                    onOpenOCRBigBang()
+                                } else {
+                                    onExtractOCR?(true)
+                                }
+                            }
                         )
                     }
 
@@ -306,18 +313,34 @@ struct ClipImageGridTile: View {
             ClipboardStore.shared.makeDragItemProvider(for: item)
         }
         .onTapGesture {
-            if ForceTouchSuppressionRegistry.consumeSuppressionIfNeeded(for: item.id) {
-                return
-            }
+            let suppressed = ForceTouchSuppressionRegistry.consumeSuppressionIfNeeded(for: item.id)
             let now = ProcessInfo.processInfo.systemUptime
             let clickCount = (NSApp.currentEvent?.type == .leftMouseUp) ? (NSApp.currentEvent?.clickCount ?? 1) : 1
             let isDouble = clickCount >= 2 || (now - lastTapUptime) <= min(NSEvent.doubleClickInterval, 0.32)
-            lastTapUptime = isDouble ? 0 : now
-            if !isHovered { isHovered = true }
-            if isDouble {
+            let mode = ClipboardStore.shared.cardClickPasteMode
+            let outcome = CardClickGestureResolver.resolve(
+                mode: mode,
+                clickCount: isDouble ? 2 : 1,
+                modifiers: NSEvent.modifierFlags,
+                isLink: false,
+                isForceTouchSuppressed: suppressed
+            )
+            switch outcome {
+            case .ignore:
+                lastTapUptime = 0
+                return
+            case .openExternalLink:
+                lastTapUptime = 0
+                if !isHovered { isHovered = true }
+                onSelect()
+            case .paste:
+                lastTapUptime = 0
+                if !isHovered { isHovered = true }
                 onSelect()
                 onPaste()
-            } else {
+            case .copyOnly:
+                lastTapUptime = (mode == .doubleClick) ? now : 0
+                if !isHovered { isHovered = true }
                 onSelect()
                 onCopyOnly()
                 withAnimation(.easeOut(duration: 0.14)) { showCopiedInlineFlash = true }
@@ -327,15 +350,21 @@ struct ClipImageGridTile: View {
             }
         }
         .contextMenu {
-            Button("键入光标处（双击）") {
+            let clickMode = ClipboardStore.shared.cardClickPasteMode
+            Button(clickMode == .singleClick ? "键入光标处（单击）" : "键入光标处（双击）") {
                 onPaste()
             }
-            Button("仅复制到剪贴板（⌘C）") {
+            Button(clickMode == .singleClick ? "仅复制到剪贴板（⌥单击 / ⌘C）" : "仅复制到剪贴板（单击 / ⌘C）") {
                 onCopyOnly()
             }
             if let onOpenQuickLook {
-                Button("系统大屏预览原图（Space / 重按）") {
+                Button("全图大屏预览（Space / 重按）") {
                     onOpenQuickLook()
+                }
+            }
+            if !ClipboardStore.shared.minimalModeEnabled, let onOpenOCRBigBang {
+                Button("大爆炸原位选字（OCR）") {
+                    onOpenOCRBigBang()
                 }
             }
             Button("在访达中显示（⌘O）") {
@@ -357,10 +386,10 @@ struct ClipImageGridTile: View {
                             onExtractOCR(false)
                         }
                     } else {
-                        Button("提取图中文字并键入（⇧↵）") {
+                        Button("提取全部文字并键入（⇧↵）") {
                             onExtractOCR(true)
                         }
-                        Button("仅复制图中文字") {
+                        Button("仅复制图中全部文字") {
                             onExtractOCR(false)
                         }
                     }

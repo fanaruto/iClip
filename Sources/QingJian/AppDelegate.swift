@@ -39,6 +39,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         HotKeyManager.shared.unregister()
         CursorDropPodController.shared.stopMonitoring()
+        BigBangStageController.shared.dismissImmediatelyAndPurge()
         SystemQuickLookController.shared.dismissAndPurge(appSupportURL: ClipboardStore.shared.appSupportURL)
         ClipboardStore.shared.stopMonitoring()
     }

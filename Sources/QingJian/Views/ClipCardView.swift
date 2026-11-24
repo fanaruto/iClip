@@ -274,28 +274,40 @@ struct ClipCardView: View {
     }
 
     private func handleCardTap() {
-        if ForceTouchSuppressionRegistry.consumeSuppressionIfNeeded(for: item.id) {
-            return
-        }
+        let suppressed = ForceTouchSuppressionRegistry.consumeSuppressionIfNeeded(for: item.id)
         let now = ProcessInfo.processInfo.systemUptime
         let eventClickCount = (NSApp.currentEvent?.type == .leftMouseUp) ? (NSApp.currentEvent?.clickCount ?? 1) : 1
         let isDoubleTap = eventClickCount >= 2 || (now - lastTapUptime) <= min(NSEvent.doubleClickInterval, 0.32)
-        lastTapUptime = isDoubleTap ? 0 : now
-
-        if !isHovered { isHovered = true }
-        if isDoubleTap {
-            onSelect()
-            onPaste(false)
+        let effectiveClickCount = isDoubleTap ? 2 : 1
+        let mode = ClipboardStore.shared.cardClickPasteMode
+        let outcome = CardClickGestureResolver.resolve(
+            mode: mode,
+            clickCount: effectiveClickCount,
+            modifiers: NSEvent.modifierFlags,
+            isLink: (item.type == .link || hasEmbeddedWebLink),
+            isForceTouchSuppressed: suppressed
+        )
+        switch outcome {
+        case .ignore:
+            lastTapUptime = 0
             return
-        }
-        if (item.type == .link || hasEmbeddedWebLink) && NSEvent.modifierFlags.contains(.command) {
+        case .openExternalLink:
+            lastTapUptime = 0
+            if !isHovered { isHovered = true }
             onSelect()
             _ = ClipboardStore.shared.openItemExternally(item)
-            return
+        case .paste(let plainTextOnly):
+            lastTapUptime = 0
+            if !isHovered { isHovered = true }
+            onSelect()
+            onPaste(plainTextOnly)
+        case .copyOnly:
+            lastTapUptime = (mode == .doubleClick) ? now : 0
+            if !isHovered { isHovered = true }
+            onSelect()
+            onCopyOnly(false)
+            triggerCopiedInlineFlash()
         }
-        onSelect()
-        onCopyOnly(false)
-        triggerCopiedInlineFlash()
     }
 
     private func triggerCopiedInlineFlash() {
@@ -597,12 +609,19 @@ struct ClipCardView: View {
 
     @ViewBuilder
     private var contextMenuItems: some View {
-        Button("键入光标处（双击）") {
+        let clickMode = ClipboardStore.shared.cardClickPasteMode
+        Button(clickMode == .singleClick ? "键入光标处（单击）" : "键入光标处（双击）") {
             onPaste(false)
         }
 
-        Button("仅复制到剪贴板（⌘C）") {
+        Button(clickMode == .singleClick ? "仅复制到剪贴板（⌥单击 / ⌘C）" : "仅复制到剪贴板（单击 / ⌘C）") {
             onCopyOnly(false)
+        }
+
+        if let onOpenQuickLook {
+            Button(item.type == .image ? "大屏预览 / 大爆炸选字（Space / 重按）" : "大爆炸分词速览（Space / 重按）") {
+                onOpenQuickLook()
+            }
         }
 
         if !ClipboardStore.shared.minimalModeEnabled && CopyAppendHelper.extractAppendableText(from: item) != nil {

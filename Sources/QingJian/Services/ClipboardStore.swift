@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import AppKit
 import Combine
 import ImageIO
@@ -257,6 +258,28 @@ enum HistoryPersistenceHelper {
     }
 }
 
+/// 默认卡片点击键入方式（支持在首次引导与偏好设置随时切换，Companion 手势自动零冲突适配）
+enum CardClickPasteMode: String, CaseIterable, Codable {
+    case singleClick = "single"
+    case doubleClick = "double"
+
+    var title: String {
+        switch self {
+        case .singleClick: return "单击直接粘贴"
+        case .doubleClick: return "双击直接粘贴"
+        }
+    }
+
+    var companionGestureSummary: String {
+        switch self {
+        case .singleClick:
+            return "单击直接粘贴 · 按住 ⌥ 单击仅复制 · ⇧单击贴纯文本 · Space 大爆炸预览"
+        case .doubleClick:
+            return "双击直接粘贴 · 单击静默复制 · ⇧双击贴纯文本 · Space 大爆炸预览"
+        }
+    }
+}
+
 /// 剪贴板核心管理与持久化服务（支持极客开发版 / 心流办公版编译期隔离与跨版本无损存储）
 @MainActor
 final class ClipboardStore: ObservableObject {
@@ -264,6 +287,7 @@ final class ClipboardStore: ObservableObject {
 
     @Published private(set) var items: [ClipItem] = []
     @Published private(set) var isAccessibilityGranted: Bool = false
+    @Published private(set) var isFullDiskAccessGranted: Bool = false
     @Published var isPaused: Bool = false {
         didSet {
             if !isPaused {
@@ -313,6 +337,9 @@ final class ClipboardStore: ObservableObject {
     }
     @Published var autoPasteEnabled: Bool {
         didSet { UserDefaults.standard.set(autoPasteEnabled, forKey: "autoPasteEnabled") }
+    }
+    @Published var cardClickPasteMode: CardClickPasteMode {
+        didSet { UserDefaults.standard.set(cardClickPasteMode.rawValue, forKey: "cardClickPasteMode") }
     }
     /// 交互微音效开关（关闭后静默无声，但仍保留细腻触控板震动）
     @Published var soundEffectsEnabled: Bool {
@@ -454,6 +481,12 @@ final class ClipboardStore: ObservableObject {
         self.alwaysOnTop = UserDefaults.standard.bool(forKey: "alwaysOnTop")
 
         self.autoPasteEnabled = true
+        if let rawClickMode = UserDefaults.standard.string(forKey: "cardClickPasteMode"),
+           let parsedClickMode = CardClickPasteMode(rawValue: rawClickMode) {
+            self.cardClickPasteMode = parsedClickMode
+        } else {
+            self.cardClickPasteMode = .doubleClick
+        }
         self.soundEffectsEnabled = UserDefaults.standard.object(forKey: TactileFeedbackEngine.soundEnabledDefaultsKey) as? Bool ?? true
         self.autoExpireOTP = UserDefaults.standard.object(forKey: "autoExpireOTP") as? Bool ?? true
         self.screenSharePrivacyEnabled = UserDefaults.standard.object(forKey: "screenSharePrivacyEnabled") as? Bool ?? true
@@ -484,6 +517,7 @@ final class ClipboardStore: ObservableObject {
         self.maxHistoryCount = savedMax > 0 ? savedMax : 200
         self.lastChangeCount = pasteboard.changeCount
         self.isAccessibilityGranted = AXIsProcessTrusted()
+        self.isFullDiskAccessGranted = Self.hasFullDiskAccess()
         self.launchAtLoginEnabled = (SMAppService.mainApp.status == .enabled)
 
         if let ignoredData = UserDefaults.standard.data(forKey: "ignoredApps"),
@@ -524,6 +558,7 @@ final class ClipboardStore: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.refreshAccessibilityStatus()
+                self?.refreshFullDiskAccessStatus()
                 self?.healPermissionBlockedChatImageFilesIfAuthorized()
                 self?.bumpPollingActivity()
             }
@@ -991,6 +1026,7 @@ final class ClipboardStore: ObservableObject {
         clearTransientDragImageBuffers()
         ReversiblePrivacyTwin.wipeAll()
         semanticCache.removeAllObjects()
+        VisionOCRService.clearWordBoxCache()
     }
 
     func onPanelShown(visibleItems: [ClipItem]) {
@@ -999,6 +1035,7 @@ final class ClipboardStore: ObservableObject {
         archiveExpiredCompletedTodos()
         bumpPollingActivity()
         refreshAccessibilityStatus()
+        refreshFullDiskAccessStatus()
         healPermissionBlockedChatImageFilesIfAuthorized()
         thumbnailCache.countLimit = 80
         thumbnailCache.totalCostLimit = 24 * 1024 * 1024
@@ -1679,7 +1716,7 @@ final class ClipboardStore: ObservableObject {
                 guard let self else { return }
                 if isBlockedChat, let chatApp {
                     self.blockedChatImageAppName = chatApp
-                    self.showToast("\(chatApp)图片因系统隐私限制暂存为文件 · 点顶部提示去设置开启即可回显图片", duration: 4.2)
+                    self.showToast("未能直接读取\(chatApp)图片 · 点顶部指引完成系统授权后自动显示原图", duration: 4.2)
                 }
                 self.ingestFilePathsRecord(paths: [path], sourceApp: sourceApp, effectiveBundleID: effectiveBundleID)
             }
@@ -4571,7 +4608,7 @@ final class ClipboardStore: ObservableObject {
             return cached
         }
         let decoded = await Task.detached(priority: .userInitiated) {
-            Self.decodeImage(at: url, maxPixelSize: 1080)
+            Self.decodeImage(at: url, maxPixelSize: 2048)
         }.value
         if let decoded {
             previewCache.setObject(decoded, forKey: cacheKey, cost: Self.estimatedCost(of: decoded))
@@ -4602,7 +4639,7 @@ final class ClipboardStore: ObservableObject {
         Task.detached(priority: .utility) { [weak self] in
             var results: [(String, NSImage)] = []
             for (name, url) in targets {
-                if let img = Self.decodeImage(at: url, maxPixelSize: 1080) {
+                if let img = Self.decodeImage(at: url, maxPixelSize: 2048) {
                     results.append((name, img))
                 }
             }
@@ -4671,6 +4708,9 @@ final class ClipboardStore: ObservableObject {
         let extKey = "\(item.contentHash)|\(appPart)|ext" as NSString
         semanticCache.removeObject(forKey: stdKey)
         semanticCache.removeObject(forKey: extKey)
+        if let imgURL = imageURL(for: item) {
+            VisionOCRService.evictWordBoxCache(for: imgURL)
+        }
     }
 
     private func deleteImageFileIfNeeded(for item: ClipItem) {
@@ -4726,6 +4766,33 @@ final class ClipboardStore: ObservableObject {
         if loginEnabled != launchAtLoginEnabled {
             launchAtLoginEnabled = loginEnabled
         }
+    }
+
+    /// 零弹窗检测是否已获得完全磁盘访问权限（直接探测系统 TCC 数据库可读性）
+    nonisolated static func hasFullDiskAccess() -> Bool {
+        let fd = Darwin.open("/Library/Application Support/com.apple.TCC/TCC.db", O_RDONLY)
+        if fd >= 0 {
+            Darwin.close(fd)
+            return true
+        }
+        return false
+    }
+
+    func refreshFullDiskAccessStatus() {
+        let granted = Self.hasFullDiskAccess()
+        if granted != isFullDiskAccessGranted {
+            isFullDiskAccessGranted = granted
+        }
+        if granted {
+            if blockedChatImageAppName != nil {
+                blockedChatImageAppName = nil
+            }
+            healPermissionBlockedChatImageFilesIfAuthorized()
+        }
+    }
+
+    func revealAppInFinder() {
+        NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL])
     }
 
     func setLaunchAtLogin(_ enabled: Bool) {

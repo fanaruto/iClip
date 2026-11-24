@@ -424,6 +424,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
                 guard let self, !ProcessInfo.processInfo.arguments.contains("--demo") else { return }
                 let targetSharing: NSWindow.SharingType = shielded ? .none : .readOnly
                 self.panel?.sharingType = targetSharing
+                BigBangStageController.shared.syncSharingType(targetSharing)
                 SystemQuickLookController.shared.syncSharingType(targetSharing)
             }
             .store(in: &cancellables)
@@ -468,6 +469,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         nav.isQuickLookEditing = false
         nav.quickLookDraftText = ""
         nav.selectedIndex = 0
+        BigBangStageController.shared.dismissImmediatelyAndPurge()
         SystemQuickLookController.shared.dismiss()
         if panel?.isVisible == true {
             nav.isPresented = false
@@ -616,6 +618,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         hideWorkItem?.cancel()
 
         nav.isPresented = false
+        BigBangStageController.shared.dismissImmediatelyAndPurge()
         SystemQuickLookController.shared.dismiss()
         NotificationCenter.default.post(name: .iClipPanelDidHide, object: nil)
         store.onPanelHidden()
@@ -707,7 +710,10 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     }
 
     func windowDidResignKey(_ notification: Notification) {
-        if SystemQuickLookController.shared.isVisible {
+        if BigBangStageController.shared.isVisible || SystemQuickLookController.shared.isVisible {
+            return
+        }
+        if InteractivePlaygroundController.shared.isActive && InteractivePlaygroundController.shared.phase == .permissionsSetup {
             return
         }
         if store.alwaysOnTop || nav.suppressAutoHide || nav.isRecordingHotKey {
@@ -736,7 +742,14 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             },
             onOutsideMouseDown: { [weak self] mouseLoc in
                 guard let self, self.isVisible else { return }
+                if InteractivePlaygroundController.shared.isActive && InteractivePlaygroundController.shared.phase == .permissionsSetup {
+                    return
+                }
                 if self.store.alwaysOnTop || self.nav.suppressAutoHide || self.nav.isRecordingHotKey {
+                    return
+                }
+                if let bbFrame = BigBangStageController.shared.visiblePanelScreenFrame,
+                   bbFrame.insetBy(dx: -10, dy: -10).contains(mouseLoc) {
                     return
                 }
                 if let qlFrame = SystemQuickLookController.shared.visiblePanelScreenFrame,
@@ -759,6 +772,9 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         if panel.isKeyWindow {
             return false
         }
+        if InteractivePlaygroundController.shared.isActive && InteractivePlaygroundController.shared.phase == .permissionsSetup {
+            return false
+        }
         if nav.isRecordingHotKey {
             _ = handleHotKeyRecording(event)
             return true
@@ -770,6 +786,9 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         guard event.type == .keyDown else { return false }
         if handleKeyDown(event) == nil {
             return true
+        }
+        if BigBangStageController.shared.isVisible && BigBangStageController.shared.isEditingText {
+            return false
         }
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         if event.keyCode == 51 && !flags.contains(.command) && !flags.contains(.option) && !flags.contains(.control) {
@@ -783,7 +802,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             flags: event.modifierFlags,
             charactersIgnoringModifiers: event.charactersIgnoringModifiers,
             showSettings: nav.showSettings,
-            showQuickLook: nav.showQuickLook
+            showQuickLook: nav.showQuickLook || BigBangStageController.shared.isVisible || SystemQuickLookController.shared.isVisible
         ) {
             beginSearchTypingFromNonKeyPanel(event)
             return true
@@ -875,8 +894,89 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         }
 
         if InteractivePlaygroundController.shared.isActive, !nav.showSettings {
-            if event.keyCode == 53 || event.keyCode == 36 || event.keyCode == 76 || event.keyCode == 49 || (flags == .command && event.keyCode == 13) {
+            if event.keyCode == 53 || (flags == .command && event.keyCode == 13) {
                 InteractivePlaygroundController.shared.dismiss(in: store)
+            } else if InteractivePlaygroundController.shared.phase == .featureHighlights,
+                      (event.keyCode == 36 || event.keyCode == 76 || event.keyCode == 49) {
+                InteractivePlaygroundController.shared.dismiss(in: store)
+            }
+            return nil
+        }
+
+        // 独立 Big Bang 大爆炸 / 丝滑全图预览舞台激活态
+        if BigBangStageController.shared.isVisible {
+            let bb = BigBangStageController.shared
+            if bb.isEditingText {
+                if event.keyCode == 53 {
+                    bb.isEditingText = false
+                    return nil
+                }
+                if flags.contains(.command), (event.keyCode == 36 || event.keyCode == 76) {
+                    bb.commitPrimaryPaste()
+                    return nil
+                }
+                if flags == .command, event.keyCode == 1 {
+                    bb.saveDraftBackToItem()
+                    return nil
+                }
+                return event
+            }
+            if event.keyCode == 53
+                || (flags.isEmpty && event.keyCode == 49)
+                || (flags == .command && (event.keyCode == 16 || event.keyCode == 13)) {
+                bb.dismiss()
+                return nil
+            }
+            if flags == .option, event.keyCode == 49, !bb.activeModeIsImage, let current = bb.currentItem {
+                _ = bb.presentOrToggle(for: current, in: store, hostWindow: panel, initialMode: .textDiff)
+                return nil
+            }
+            if flags.isEmpty, (event.keyCode == 31 || event.keyCode == 11), bb.activeModeIsImage {
+                bb.toggleImageBigBangMode()
+                return nil
+            }
+            if flags.isEmpty, event.keyCode == 5 {
+                bb.cycleGranularity()
+                return nil
+            }
+            if flags == .command, event.keyCode == 0 {
+                bb.selectAllTokens()
+                return nil
+            }
+            if flags == .command, event.keyCode == 14, !bb.activeModeIsImage {
+                _ = bb.enterTextEditMode()
+                return nil
+            }
+            if flags == .command, event.keyCode == 37, bb.activeModeIsImage {
+                bb.handoffToSystemQuickLook()
+                return nil
+            }
+            if flags == .command, event.keyCode == 8, !editorHasSelectedText {
+                bb.commitCopyOnly()
+                return nil
+            }
+            if flags == .command, event.keyCode == 31 {
+                _ = rootView.openSelectedExternally()
+                return nil
+            }
+            if event.keyCode == 126 || event.keyCode == 125 {
+                bb.stepSelection(direction: event.keyCode == 126 ? .up : .down)
+                return nil
+            }
+            if event.keyCode == 123 || event.keyCode == 124 {
+                if bb.activeModeIsImage {
+                    bb.stepSelection(direction: event.keyCode == 123 ? .left : .right)
+                } else {
+                    bb.stepTab(delta: event.keyCode == 123 ? -1 : 1)
+                }
+                return nil
+            }
+            if event.keyCode == 36 || event.keyCode == 76 {
+                bb.commitPrimaryPaste()
+                return nil
+            }
+            if flags.contains(.command) || flags.contains(.control) {
+                return event
             }
             return nil
         }
@@ -913,12 +1013,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
                         _ = SystemQuickLookController.shared.presentOrUpdate(for: nextItem, in: store, hostWindow: panel)
                     } else {
                         SystemQuickLookController.shared.dismiss()
-                        if !store.minimalModeEnabled {
-                            nav.quickLookPreferDiff = false
-                            withAnimation(.spring(response: 0.24, dampingFraction: 0.88)) {
-                                nav.showQuickLook = true
-                            }
-                        }
+                        rootView.triggerQuickLookForSelected(initialMode: .autoDefault)
                     }
                 }
                 return nil
@@ -1016,54 +1111,31 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             return nil
         }
 
-        // ⌥Space (keyCode 49)：一键打开速览并直定位至「对比最新剪贴 #1」行级差异标签页
+        // ⌥Space (keyCode 49)：一键打开独立速览并直定位至「对比最新剪贴 #1」行级差异页签
         if !store.minimalModeEnabled, flags == .option, event.keyCode == 49 {
             if let fieldEditor = panel.firstResponder as? NSTextView, fieldEditor.hasMarkedText() {
                 return event
             }
-            nav.quickLookPreferDiff = true
-            withAnimation(.spring(response: 0.24, dampingFraction: 0.88)) {
-                nav.showQuickLook = true
-            }
+            rootView.triggerQuickLookForSelected(initialMode: .textDiff)
             return nil
         }
 
-        // ⌘Y (keyCode 16) 或搜索框为空时按 Space (keyCode 49)：图片/文件唤起系统官方大屏 QLPreviewPanel，文本/链接唤起语义速览与编辑舱
+        // ⌘Y (keyCode 16) 或搜索框为空时按 Space (keyCode 49)：图片丝滑全图+大爆炸选字、文本默认大爆炸、本地文件走系统 QLPreviewPanel
         if (flags == .command && event.keyCode == 16) ||
            (flags.isEmpty && event.keyCode == 49 && nav.searchText.isEmpty) {
             if let fieldEditor = panel.firstResponder as? NSTextView, fieldEditor.hasMarkedText() {
                 return event
             }
+            if BigBangStageController.shared.isVisible {
+                BigBangStageController.shared.dismiss()
+                return nil
+            }
             if SystemQuickLookController.shared.isVisible {
                 SystemQuickLookController.shared.dismiss()
                 return nil
             }
-            let visible = nav.cachedFilteredItems
-            if nav.selectedIndex >= 0, nav.selectedIndex < visible.count {
-                let target = visible[nav.selectedIndex]
-                if SystemQuickLookController.supportsNativeLargePreview(target) {
-                    SystemQuickLookController.shared.onStepSelection = { [weak self] dir in
-                        guard let self else { return nil }
-                        self.rootView.moveSelection(direction: dir)
-                        let items = self.nav.cachedFilteredItems
-                        guard self.nav.selectedIndex >= 0, self.nav.selectedIndex < items.count else { return nil }
-                        return items[self.nav.selectedIndex]
-                    }
-                    SystemQuickLookController.shared.onCommitPasteFromPreview = { [weak self] in
-                        self?.rootView.pasteSelected()
-                    }
-                    if SystemQuickLookController.shared.presentOrToggle(for: target, in: store, hostWindow: panel) {
-                        return nil
-                    }
-                }
-            }
-            if !store.minimalModeEnabled {
-                nav.quickLookPreferDiff = false
-                withAnimation(.spring(response: 0.24, dampingFraction: 0.88)) {
-                    nav.showQuickLook = true
-                }
-                return nil
-            }
+            rootView.triggerQuickLookForSelected(initialMode: .autoDefault)
+            return nil
         }
 
         // ⌘R (keyCode 15)：对当前选中条目设置/修改记忆备注标题

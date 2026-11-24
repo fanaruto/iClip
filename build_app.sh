@@ -9,8 +9,23 @@ DIST_DIR="$PROJECT_DIR/dist"
 BRAND_DIR="$PROJECT_DIR/assets/brand"
 
 SIGN_IDENTITY="${CODESIGN_IDENTITY:-}"
-if [ -z "$SIGN_IDENTITY" ]; then
-  SIGN_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | awk -F'"' '/Developer ID Application/{print $2; exit}' || true)"
+SIGN_USE_HARDENED_RUNTIME="0"
+if [ -n "$SIGN_IDENTITY" ]; then
+  if [[ "$SIGN_IDENTITY" == *"Developer ID Application"* ]]; then
+    SIGN_USE_HARDENED_RUNTIME="1"
+  fi
+else
+  DEV_ID_APP="$(security find-identity -v -p codesigning 2>/dev/null | awk -F'"' '/Developer ID Application/{print $2; exit}' || true)"
+  if [ -n "$DEV_ID_APP" ]; then
+    SIGN_IDENTITY="$DEV_ID_APP"
+    SIGN_USE_HARDENED_RUNTIME="1"
+  else
+    APPLE_DEV_CERT="$(security find-identity -v -p codesigning 2>/dev/null | awk -F'"' '/Apple Development/{print $2; exit}' || true)"
+    if [ -n "$APPLE_DEV_CERT" ]; then
+      SIGN_IDENTITY="$APPLE_DEV_CERT"
+      SIGN_USE_HARDENED_RUNTIME="0"
+    fi
+  fi
 fi
 
 if [ ! -f "$BRAND_DIR/AppIcon.icns" ]; then
@@ -105,14 +120,19 @@ EOF
 
 xattr -cr "$STAGED_APP" 2>/dev/null || true
 if [ -n "$SIGN_IDENTITY" ]; then
-  echo "使用分发证书签名：$SIGN_IDENTITY"
-  codesign --force --deep --options runtime --identifier com.qingjian.clipboard --sign "$SIGN_IDENTITY" "$STAGED_APP"
+  echo "使用证书签名：$SIGN_IDENTITY（Hardened Runtime=${SIGN_USE_HARDENED_RUNTIME}）"
+  if [ "$SIGN_USE_HARDENED_RUNTIME" = "1" ]; then
+    codesign --force --deep --options runtime --identifier com.qingjian.clipboard --sign "$SIGN_IDENTITY" "$STAGED_APP"
+  else
+    codesign --force --deep --identifier com.qingjian.clipboard --sign "$SIGN_IDENTITY" "$STAGED_APP"
+  fi
 else
-  echo "使用跨机通用免证书 Ad-hoc 签名..."
+  echo "未发现开发者签名证书，回退跨机通用 Ad-hoc 签名..."
   codesign --force --deep --identifier com.qingjian.clipboard --sign - "$STAGED_APP"
 fi
 
 codesign --verify --deep --strict "$STAGED_APP"
+codesign -dv --requirements - "$STAGED_APP" 2>&1 | grep -E "Authority=|Signature=|designated" || true
 
 ditto -c -k --sequesterRsrc --keepParent "$STAGED_APP" "$ZIP_OUT"
 ditto "$STAGED_APP" "$FINAL_APP"

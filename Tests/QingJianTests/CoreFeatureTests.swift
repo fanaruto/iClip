@@ -570,7 +570,7 @@ final class CoreFeatureTests: XCTestCase {
     func testCoreHighlightsShowAndDismiss() {
         let ctrl = InteractivePlaygroundController.shared
         XCTAssertEqual(InteractivePlaygroundController.coreHighlights.count, 4)
-        XCTAssertEqual(InteractivePlaygroundController.coreHighlights.first?.title, "唤醒零失焦直贴")
+        XCTAssertEqual(InteractivePlaygroundController.coreHighlights.first?.title, "唤醒零失焦直贴与大爆炸选字")
         ctrl.showHighlights()
         XCTAssertTrue(ctrl.isActive)
         ctrl.dismiss()
@@ -3492,5 +3492,132 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertEqual(parsedAlfred.entries.first?.categoryHint, "SQL 常用脚本")
         let (mergedAlfred, _) = ArchiveBackupService.mergeExternalCompetitorCandidates(parsedAlfred.entries, formatLabel: parsedAlfred.formatName, into: [])
         XCTAssertEqual(mergedAlfred.first?.pinCategory, .template)
+    }
+
+    func testBigBangEngineClickGestureMatrixAndFullDiskAccess() throws {
+        // 1. 大爆炸按词拆分：保护 URL / 邮箱 / 手机号 / 版本标识符并保留换行边界
+        let sample = "联系 ops-team@example.com 或致电 13800138000 打开 https://app.webfooo.com/iClip 核对 v3.0.1 发版\nHello World 测试"
+        let wordTokens = BigBangTokenizer.tokenize(sample, granularity: .word)
+        let texts = wordTokens.filter { !$0.isLineBreak }.map(\.text)
+        XCTAssertTrue(texts.contains("ops-team@example.com"))
+        XCTAssertTrue(texts.contains("13800138000"))
+        XCTAssertTrue(texts.contains("https://app.webfooo.com/iClip"))
+        XCTAssertTrue(texts.contains("v3.0.1"))
+        XCTAssertTrue(wordTokens.contains(where: { $0.isLineBreak && $0.lineIndex == 1 }))
+
+        let selectedSubset = Set(
+            wordTokens
+                .filter { $0.text == "Hello" || $0.text == "World" || $0.text == "v3.0.1" }
+                .map(\.id)
+        )
+        XCTAssertEqual(BigBangTokenizer.assembleSelected(wordTokens, selectedIDs: selectedSubset), "v3.0.1\nHello World")
+
+        // 2. 按字拆分：连续拉丁字符拼合不额外插空格，按行拆分跳过空白行并换行拼合
+        let charTokens = BigBangTokenizer.tokenize("Hello 世界", granularity: .character)
+        XCTAssertEqual(charTokens.map(\.text), ["H", "e", "l", "l", "o", "世", "界"])
+        XCTAssertEqual(
+            BigBangTokenizer.assembleSelected(charTokens, selectedIDs: Set(charTokens.map(\.id))),
+            "Hello世界"
+        )
+
+        let lineTokens = BigBangTokenizer.tokenize("  第一行内容  \n\n   第二行内容 ", granularity: .line)
+        XCTAssertEqual(lineTokens.map(\.text), ["第一行内容", "第二行内容"])
+        XCTAssertEqual(
+            BigBangTokenizer.assembleSelected(lineTokens, selectedIDs: Set(lineTokens.map(\.id))),
+            "第一行内容\n第二行内容"
+        )
+
+        // 3. AspectFit 原位 OCR 坐标映射与图片词框智能拼接
+        let fitRect = BigBangTokenizer.aspectFitImageRect(
+            imageSize: CGSize(width: 1920, height: 1080),
+            in: CGSize(width: 800, height: 600)
+        )
+        XCTAssertEqual(fitRect.origin.x, 0, accuracy: 0.01)
+        XCTAssertEqual(fitRect.origin.y, 75, accuracy: 0.01)
+        XCTAssertEqual(fitRect.width, 800, accuracy: 0.01)
+        XCTAssertEqual(fitRect.height, 450, accuracy: 0.01)
+
+        let mappedBox = BigBangTokenizer.mapNormalizedBox(
+            CGRect(x: 0.25, y: 0.2, width: 0.5, height: 0.4),
+            into: fitRect
+        )
+        XCTAssertEqual(mappedBox.origin.x, 200, accuracy: 0.01)
+        XCTAssertEqual(mappedBox.origin.y, 165, accuracy: 0.01)
+        XCTAssertEqual(mappedBox.width, 400, accuracy: 0.01)
+        XCTAssertEqual(mappedBox.height, 180, accuracy: 0.01)
+
+        let imageBoxes = [
+            BigBangImageWordBox(id: 0, text: "Hello", normalizedRect: .zero, lineIndex: 0, granularity: .word),
+            BigBangImageWordBox(id: 1, text: "World", normalizedRect: .zero, lineIndex: 0, granularity: .word),
+            BigBangImageWordBox(id: 2, text: "测试", normalizedRect: .zero, lineIndex: 1, granularity: .word)
+        ]
+        XCTAssertEqual(
+            BigBangTokenizer.assembleSelectedImageBoxes(imageBoxes, selectedIDs: [0, 1, 2]),
+            "Hello World\n测试"
+        )
+
+        // 4. 默认键入方式（单击/双击）零冲突手势解析矩阵与 Force Touch 抑制保护
+        XCTAssertEqual(
+            CardClickGestureResolver.resolve(mode: .singleClick, clickCount: 1, modifiers: [], isLink: false, isForceTouchSuppressed: false),
+            .paste(plainTextOnly: false)
+        )
+        XCTAssertEqual(
+            CardClickGestureResolver.resolve(mode: .singleClick, clickCount: 1, modifiers: [.shift], isLink: false, isForceTouchSuppressed: false),
+            .paste(plainTextOnly: true)
+        )
+        XCTAssertEqual(
+            CardClickGestureResolver.resolve(mode: .singleClick, clickCount: 1, modifiers: [.option], isLink: false, isForceTouchSuppressed: false),
+            .copyOnly
+        )
+        XCTAssertEqual(
+            CardClickGestureResolver.resolve(mode: .singleClick, clickCount: 1, modifiers: [.command], isLink: true, isForceTouchSuppressed: false),
+            .openExternalLink
+        )
+        XCTAssertEqual(
+            CardClickGestureResolver.resolve(mode: .singleClick, clickCount: 1, modifiers: [], isLink: false, isForceTouchSuppressed: true),
+            .ignore
+        )
+
+        XCTAssertEqual(
+            CardClickGestureResolver.resolve(mode: .doubleClick, clickCount: 1, modifiers: [], isLink: false, isForceTouchSuppressed: false),
+            .copyOnly
+        )
+        XCTAssertEqual(
+            CardClickGestureResolver.resolve(mode: .doubleClick, clickCount: 2, modifiers: [], isLink: false, isForceTouchSuppressed: false),
+            .paste(plainTextOnly: false)
+        )
+        XCTAssertEqual(
+            CardClickGestureResolver.resolve(mode: .doubleClick, clickCount: 2, modifiers: [.shift], isLink: false, isForceTouchSuppressed: false),
+            .paste(plainTextOnly: true)
+        )
+        XCTAssertEqual(
+            CardClickGestureResolver.resolve(mode: .doubleClick, clickCount: 1, modifiers: [.command], isLink: true, isForceTouchSuppressed: false),
+            .openExternalLink
+        )
+
+        XCTAssertEqual(CardClickPasteMode(rawValue: "single"), .singleClick)
+        XCTAssertEqual(CardClickPasteMode(rawValue: "double"), .doubleClick)
+        XCTAssertEqual(
+            CardClickGestureResolver.resolve(mode: .singleClick, clickCount: 2, modifiers: [], isLink: false, isForceTouchSuppressed: false),
+            .ignore
+        )
+
+        // 5. UTF-16 字素簇安全截断回归（emoji 代理对、CRLF、组合附加符号不可截断归零）
+        let emojiText = String(repeating: "🎉", count: 25)
+        let emojiCut = BigBangTokenizer.utf16Prefix(emojiText, maxUTF16: 15)
+        XCTAssertEqual(emojiCut.utf16.count, 14)
+        XCTAssertFalse(emojiCut.isEmpty)
+
+        let crlfText = "A\r\nB\r\nC"
+        let crlfCut = BigBangTokenizer.utf16Prefix(crlfText, maxUTF16: 2)
+        XCTAssertEqual(crlfCut, "A")
+
+        let combiningText = "e\u{0301}x"
+        let combCut = BigBangTokenizer.utf16Prefix(combiningText, maxUTF16: 1)
+        XCTAssertEqual(combCut, "")
+        let combKeep = BigBangTokenizer.utf16Prefix(combiningText, maxUTF16: 2)
+        XCTAssertEqual(combKeep, "e\u{0301}")
+
+        _ = ClipboardStore.hasFullDiskAccess()
     }
 }

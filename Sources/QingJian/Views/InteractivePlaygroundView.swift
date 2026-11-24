@@ -23,8 +23,12 @@ final class InteractivePlaygroundController: ObservableObject {
         case tryDefaultHotKey
         /// 第 2 步：选择沿用 `⌥V` 还是自定义习惯手势
         case chooseGestureHabit
-        /// 第 3 步：原位录制专属手势 + 顺势从原剪贴板工具分类导入
+        /// 第 3 步（可选）：原位录制专属手势 + 顺势从原剪贴板工具分类导入
         case customizeAndImport
+        /// 第 4 步：选择默认卡片键入方式（单击 vs 双击，零冲突配套）
+        case chooseClickMode
+        /// 第 5 步：辅助功能 + 完全磁盘访问可拖入式权限引导
+        case permissionsSetup
         /// 从菜单栏或设置页主动查看核心功能亮点
         case featureHighlights
     }
@@ -34,8 +38,8 @@ final class InteractivePlaygroundController: ObservableObject {
             id: "zero-blur-paste",
             symbol: "bolt.horizontal.fill",
             tint: Color(red: 0.12, green: 0.37, blue: 1.0),
-            title: "唤醒零失焦直贴",
-            detail: "在任何输入框内呼出不丢焦点，按 ↵ 顺手贴入，Space 独立大屏预览原图。"
+            title: "唤醒零失焦直贴与大爆炸选字",
+            detail: "不打断当前输入框，支持 Space 全图预览原图、原位大爆炸选字与文本炸词。"
         ),
         HighlightFeatureItem(
             id: "zero-trust-shield",
@@ -78,6 +82,7 @@ final class InteractivePlaygroundController: ObservableObject {
             || ud.bool(forKey: "hasSeenCoreHighlights_v27")
             || ud.bool(forKey: "hasConfirmedRoleEdition")
             || ud.data(forKey: "hotKeyShortcut") != nil
+            || ud.string(forKey: "cardClickPasteMode") != nil
         if isReturningUser && !completed {
             ud.set(true, forKey: seenOnboardingKey)
             return
@@ -115,12 +120,44 @@ final class InteractivePlaygroundController: ObservableObject {
         }
     }
 
+    func advanceFromGestureChoice() {
+        TactileFeedbackEngine.shared.perform(.tabSwitch)
+        stopModifierTracking()
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.85)) {
+            phase = .chooseClickMode
+        }
+    }
+
     func enterCustomizeAndImport() {
         TactileFeedbackEngine.shared.perform(.tabSwitch)
         stopModifierTracking()
         lastImportFeedback = nil
         withAnimation(.spring(response: 0.34, dampingFraction: 0.84)) {
             phase = .customizeAndImport
+        }
+    }
+
+    func completeClickModeSelection(in store: ClipboardStore) {
+        store.refreshAccessibilityStatus()
+        store.refreshFullDiskAccessStatus()
+        if store.isAccessibilityGranted && store.isFullDiskAccessGranted {
+            TactileFeedbackEngine.shared.perform(.pasteCommit)
+            dismiss(in: store)
+            return
+        }
+        TactileFeedbackEngine.shared.perform(.tabSwitch)
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.84)) {
+            phase = .permissionsSetup
+        }
+    }
+
+    func showPermissionGuidance() {
+        didHitTrialHotKey = false
+        lastImportFeedback = nil
+        stopModifierTracking()
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
+            phase = .permissionsSetup
+            isActive = true
         }
     }
 
@@ -253,6 +290,20 @@ struct CoreHighlightsOverlay: View {
                     step3CustomizeAndImportView
                         .transition(.asymmetric(
                             insertion: .move(edge: .trailing).combined(with: .opacity),
+                            removal: .move(edge: .leading).combined(with: .opacity)
+                        ))
+
+                case .chooseClickMode:
+                    step4ChooseClickModeView
+                        .transition(.asymmetric(
+                            insertion: .move(edge: .trailing).combined(with: .opacity),
+                            removal: .move(edge: .leading).combined(with: .opacity)
+                        ))
+
+                case .permissionsSetup:
+                    step5PermissionsSetupView
+                        .transition(.asymmetric(
+                            insertion: .move(edge: .trailing).combined(with: .opacity),
                             removal: .opacity.combined(with: .scale(scale: 0.96))
                         ))
 
@@ -261,8 +312,8 @@ struct CoreHighlightsOverlay: View {
                         .transition(.opacity.combined(with: .scale(scale: 0.96)))
                 }
             }
-            .padding(22)
-            .frame(width: 372)
+            .padding(20)
+            .frame(width: controller.phase == .chooseClickMode || controller.phase == .permissionsSetup ? 388 : 372)
             .background(
                 RoundedRectangle(cornerRadius: 22, style: .continuous)
                     .fill(.regularMaterial)
@@ -275,6 +326,16 @@ struct CoreHighlightsOverlay: View {
         }
         .onAppear {
             installedCompetitors = UniversalCompetitorImporter.detectInstalledCompetitorApps()
+            if controller.phase == .permissionsSetup {
+                store.refreshAccessibilityStatus()
+                store.refreshFullDiskAccessStatus()
+            }
+        }
+        .onReceive(Timer.publish(every: 1.0, on: .main, in: .common).autoconnect()) { _ in
+            if controller.isActive && controller.phase == .permissionsSetup {
+                store.refreshAccessibilityStatus()
+                store.refreshFullDiskAccessStatus()
+            }
         }
         .onDisappear {
             if isRecordingHotKey {
@@ -413,8 +474,7 @@ struct CoreHighlightsOverlay: View {
 
             VStack(spacing: 9) {
                 Button {
-                    TactileFeedbackEngine.shared.perform(.pasteCommit)
-                    controller.dismiss(in: store)
+                    controller.advanceFromGestureChoice()
                 } label: {
                     HStack(spacing: 11) {
                         ZStack {
@@ -651,10 +711,9 @@ struct CoreHighlightsOverlay: View {
                 if isRecordingHotKey {
                     onStopHotKeyRecording?()
                 }
-                TactileFeedbackEngine.shared.perform(.pasteCommit)
-                controller.dismiss(in: store)
+                controller.advanceFromGestureChoice()
             } label: {
-                Text("完成设置，开始使用")
+                Text("下一步：选择键入方式")
                     .font(.system(size: 13.5, weight: .semibold))
                     .foregroundStyle(.white)
                     .frame(maxWidth: .infinity)
@@ -667,12 +726,298 @@ struct CoreHighlightsOverlay: View {
         }
     }
 
+    // MARK: - Step 4：选择默认键入方式（单击 vs 双击，零冲突配套手势）
+
+    private var step4ChooseClickModeView: some View {
+        VStack(alignment: .leading, spacing: 13) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("选择最顺手的卡片键入方式")
+                        .font(.system(size: 17.5, weight: .bold))
+                    Text("已自动配好整套无冲突副手势，随时可在设置中切换。")
+                        .font(.system(size: 11.2))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("上一步") {
+                    withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
+                        controller.phase = .chooseGestureHabit
+                    }
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 10) {
+                clickModeOptionCard(
+                    mode: .singleClick,
+                    badge: "极速高效",
+                    headline: "单击直接粘贴",
+                    bullets: [
+                        "单击卡片：直接粘贴上屏",
+                        "按住 ⌥ 单击：仅复制不关闭",
+                        "Space / 重按：大爆炸与预览"
+                    ]
+                )
+
+                clickModeOptionCard(
+                    mode: .doubleClick,
+                    badge: "稳健防误触",
+                    headline: "双击直接粘贴",
+                    bullets: [
+                        "双击卡片：直接粘贴上屏",
+                        "单击卡片：选中并静默复制",
+                        "Space / 重按：大爆炸与预览"
+                    ]
+                )
+            }
+
+            Button {
+                controller.completeClickModeSelection(in: store)
+            } label: {
+                Text("下一步")
+                    .font(.system(size: 13.5, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 9.5)
+                    .background(Capsule().fill(brandCobalt))
+                    .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 2)
+        }
+    }
+
+    private func clickModeOptionCard(
+        mode: CardClickPasteMode,
+        badge: String,
+        headline: String,
+        bullets: [String]
+    ) -> some View {
+        let selected = (store.cardClickPasteMode == mode)
+        return Button {
+            store.cardClickPasteMode = mode
+            TactileFeedbackEngine.shared.perform(.tabSwitch)
+        } label: {
+            VStack(alignment: .leading, spacing: 7) {
+                HStack {
+                    Text(badge)
+                        .font(.system(size: 9.8, weight: .semibold))
+                        .foregroundStyle(selected ? .white : brandCobalt)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2.5)
+                        .background(Capsule().fill(selected ? brandCobalt : brandCobalt.opacity(0.14)))
+                    Spacer()
+                    Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(selected ? brandCobalt : .secondary.opacity(0.45))
+                }
+
+                Text(headline)
+                    .font(.system(size: 13.5, weight: .bold))
+                    .foregroundStyle(.primary)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(bullets, id: \.self) { line in
+                        Text("· \(line)")
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+            .padding(11)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(selected ? brandCobalt.opacity(colorScheme == .dark ? 0.16 : 0.08) : Color.primary.opacity(colorScheme == .dark ? 0.06 : 0.04))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(selected ? brandCobalt : Color.primary.opacity(0.10), lineWidth: selected ? 1.5 : 0.8)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: - Step 5：到位的系统权限授权引导（可拖入实体徽章 + 更新自动复用）
+
+    private var step5PermissionsSetupView: some View {
+        let allGranted = store.isAccessibilityGranted && store.isFullDiskAccessGranted
+        return VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("开启系统权限，获取更完整体验")
+                    .font(.system(size: 17.5, weight: .bold))
+                Text("一次授权，后续版本更新自动复用，无需重新配置。")
+                    .font(.system(size: 11.2))
+                    .foregroundStyle(.secondary)
+            }
+
+            // 1. 辅助功能权限
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text("辅助功能")
+                            .font(.system(size: 13, weight: .semibold))
+                        permissionStatusPill(granted: store.isAccessibilityGranted, grantedLabel: "已就绪", pendingLabel: "待开启")
+                    }
+                    Text("开启后可从\(store.cardClickPasteMode == .singleClick ? "单击" : "双击")或 ↵ 直接贴入当前光标框")
+                        .font(.system(size: 10.8))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if !store.isAccessibilityGranted {
+                    Button("前往开启") {
+                        store.requestAccessibilityPermission()
+                        store.openAccessibilitySettings()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                }
+            }
+            .padding(11)
+            .background(
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .fill(Color.primary.opacity(colorScheme == .dark ? 0.06 : 0.04))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .strokeBorder(store.isAccessibilityGranted ? Color.green.opacity(0.42) : Color.primary.opacity(0.08), lineWidth: 0.85)
+            )
+
+            // 2. 完全磁盘访问（支持直接拖入系统设置列表，获取更完整的跨应用与本地资源体验）
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 6) {
+                    Text("完全磁盘访问")
+                        .font(.system(size: 13, weight: .semibold))
+                    permissionStatusPill(granted: store.isFullDiskAccessGranted, grantedLabel: "已就绪", pendingLabel: "推荐开启")
+                    Spacer()
+                    if !store.isFullDiskAccessGranted {
+                        Button("打开系统设置") {
+                            store.openFullDiskAccessSettings()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                    }
+                }
+
+                Text(
+                    store.isFullDiskAccessGranted
+                        ? "已获取完整访问权限，可顺畅读取跨应用缓存图片与本地资源。"
+                        : "macOS 不会自动将应用加入此列表：按住下方图标直接拖入「完全磁盘访问权限」列表，或点列表左下角 + 号选取应用程序中的 iClip。"
+                )
+                .font(.system(size: 10.8))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+                if !store.isFullDiskAccessGranted {
+                    HStack(spacing: 10) {
+                        HStack(spacing: 8) {
+                            Image(nsImage: NSApp.applicationIconImage)
+                                .resizable()
+                                .frame(width: 28, height: 28)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("iClip.app")
+                                    .font(.system(size: 11.5, weight: .semibold))
+                                Text("按住我，直接拖进右侧权限列表")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(brandCobalt)
+                            }
+                            Spacer()
+                            Image(systemName: "hand.draw.fill")
+                                .font(.system(size: 12))
+                                .foregroundStyle(brandCobalt)
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 7)
+                        .background(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .fill(brandCobalt.opacity(colorScheme == .dark ? 0.14 : 0.08))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .strokeBorder(brandCobalt.opacity(0.65), style: StrokeStyle(lineWidth: 1.1, dash: [4, 3]))
+                        )
+                        .onDrag {
+                            NSItemProvider(object: Bundle.main.bundleURL as NSURL)
+                        }
+
+                        Button("访达定位") {
+                            store.revealAppInFinder()
+                        }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.primary)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 7)
+                        .background(
+                            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                .fill(Color.primary.opacity(0.07))
+                        )
+                    }
+                }
+            }
+            .padding(11)
+            .background(
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .fill(Color.primary.opacity(colorScheme == .dark ? 0.06 : 0.04))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .strokeBorder(store.isFullDiskAccessGranted ? Color.green.opacity(0.42) : Color.primary.opacity(0.08), lineWidth: 0.85)
+            )
+
+            HStack(spacing: 8) {
+                Button {
+                    controller.dismiss(in: store)
+                } label: {
+                    Text("暂不开启，先使用")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 9)
+                        .background(Capsule().fill(Color.primary.opacity(0.07)))
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    TactileFeedbackEngine.shared.perform(.pasteCommit)
+                    controller.dismiss(in: store)
+                } label: {
+                    Text(allGranted ? "权限全部就绪，开始使用" : "完成设置，开始使用")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 9)
+                        .background(Capsule().fill(allGranted ? Color.green : brandCobalt))
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.top, 2)
+        }
+    }
+
+    private func permissionStatusPill(granted: Bool, grantedLabel: String, pendingLabel: String) -> some View {
+        Text(granted ? grantedLabel : pendingLabel)
+            .font(.system(size: 9.5, weight: .semibold))
+            .foregroundStyle(granted ? Color.green : brandCobalt)
+            .padding(.horizontal, 6.5)
+            .padding(.vertical, 2)
+            .background(
+                Capsule()
+                    .fill((granted ? Color.green : brandCobalt).opacity(0.14))
+            )
+    }
+
     private func importFromLocalMaccy() {
         Task.detached(priority: .userInitiated) {
             let parsed = UniversalCompetitorImporter.readLocalMaccyDatabaseCandidates()
             await MainActor.run {
                 guard let parsed else {
-                    store.showToast("需完全磁盘访问权限或导出 Maccy 文件后导入", duration: 2.8)
+                    store.showToast("开启完全磁盘访问或导出 Maccy 文件后即可一键导入", duration: 2.8)
                     return
                 }
                 let summary = store.mergeExternalCompetitorEntries(parsed.entries, formatLabel: parsed.formatName)
@@ -684,7 +1029,7 @@ struct CoreHighlightsOverlay: View {
         }
     }
 
-    // MARK: - 核心亮点复盘视图（从设置页/菜单栏打开时呈现，附「重设快捷键与导入」入口）
+    // MARK: - 核心亮点复盘视图（从设置页/菜单栏打开时呈现，附「手势、键入方式与权限引导」入口）
 
     private var featureHighlightsView: some View {
         VStack(alignment: .leading, spacing: 15) {
@@ -729,8 +1074,8 @@ struct CoreHighlightsOverlay: View {
                 Button {
                     controller.restartInteractiveSetup()
                 } label: {
-                    Text("体验手势与数据导入")
-                        .font(.system(size: 12.5, weight: .medium))
+                    Text("重温手势、键入与权限")
+                        .font(.system(size: 12.2, weight: .medium))
                         .foregroundStyle(.primary)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 8.5)

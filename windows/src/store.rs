@@ -111,6 +111,8 @@ pub struct StoreConfig {
     #[serde(default = "default_max_history")]
     pub max_history_count: usize,
     #[serde(default)]
+    pub single_click_paste: bool,
+    #[serde(default)]
     pub has_seen_highlights_v27: bool,
 }
 
@@ -161,6 +163,7 @@ impl Default for StoreConfig {
             glass_appearance: GlassAppearance::Tinted,
             blur_concentration_pct: 38,
             max_history_count: 200,
+            single_click_paste: false,
             has_seen_highlights_v27: false,
         }
     }

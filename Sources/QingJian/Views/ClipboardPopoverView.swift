@@ -564,12 +564,14 @@ struct ClipboardPopoverView: View {
                 nav.selectedIndex = idx
                 triggerSmartQuickLook(for: item)
             } else {
+                BigBangStageController.shared.dismiss()
                 SystemQuickLookController.shared.dismiss()
             }
         }
         .onChange(of: nav.showSettings) { _, showing in
             if showing {
                 store.refreshAccessibilityStatus()
+                store.refreshFullDiskAccessStatus()
                 store.pruneUnavailableIgnoredApps()
             } else if nav.isRecordingHotKey {
                 nav.isRecordingHotKey = false
@@ -1529,6 +1531,10 @@ struct ClipboardPopoverView: View {
                                                     nav.selectedIndex = entry.index
                                                     triggerSmartQuickLook(for: entry.item)
                                                 },
+                                                onOpenOCRBigBang: {
+                                                    nav.selectedIndex = entry.index
+                                                    triggerSmartQuickLook(for: entry.item, initialMode: .imageBigBangOCR)
+                                                },
                                                 onDelete: {
                                                     withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
                                                         store.delete(entry.item)
@@ -1700,7 +1706,7 @@ struct ClipboardPopoverView: View {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("开启一键直接键入权限")
                                     .font(.system(size: 13.5, weight: .medium))
-                                Text("授权后双击或按回车即可直接粘贴至当前光标位置")
+                                Text(store.cardClickPasteMode == .singleClick ? "授权后单击或按回车即可直接粘贴至当前光标位置" : "授权后双击或按回车即可直接粘贴至当前光标位置")
                                     .font(.system(size: 11.5))
                                     .foregroundStyle(.orange)
                             }
@@ -1732,49 +1738,6 @@ struct ClipboardPopoverView: View {
                     }
                 }
 
-                if store.blockedChatImageAppName != nil || ClipboardStore.installedChatImageAppsSummary != nil {
-                    let isCurrentlyBlocked = (store.blockedChatImageAppName != nil)
-                    settingsGroup(title: "微信 / 飞书图片直显") {
-                        HStack(spacing: 8) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("允许读取\(ClipboardStore.installedChatImageAppsSummary ?? "微信 / 飞书")临时图片")
-                                    .font(.system(size: 13.5, weight: .medium))
-                                Text(
-                                    isCurrentlyBlocked
-                                        ? "当前复制聊天图片被系统拦截为文件 · 开启完全磁盘访问并重开 iClip 后自动恢复高清缩略图"
-                                        : "若微信/飞书复制图片变成文件，点击右侧前往开启完全磁盘访问即可直显高清原图"
-                                )
-                                    .font(.system(size: 11.5))
-                                    .foregroundStyle(isCurrentlyBlocked ? Color.orange : Color.secondary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                            Spacer()
-                            Button {
-                                let ok = store.healPermissionBlockedChatImageFilesIfAuthorized(manualTrigger: true)
-                                if ok {
-                                    store.showToast("✓ 微信 / 飞书图片直显权限已就绪")
-                                } else {
-                                    store.showToast("若刚勾选完全磁盘访问，请退出并重新打开 iClip 生效", duration: 3.2)
-                                }
-                            } label: {
-                                Image(systemName: "arrow.clockwise")
-                                    .font(.system(size: 11.5, weight: .semibold))
-                                    .foregroundStyle(.secondary)
-                                    .frame(width: 24, height: 24)
-                                    .background(Circle().fill(Color.primary.opacity(0.07)))
-                            }
-                            .buttonStyle(.plain)
-                            .help("检测聊天图片读取权限并自动恢复此前变成文件的图片")
-
-                            Button(isCurrentlyBlocked ? "前往开启" : "打开设置") {
-                                store.openFullDiskAccessSettings()
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.small)
-                        }
-                    }
-                }
-
                 // 苹果官方风格液态玻璃背景模糊浓度（单一滑块 + 实时实景折射预览）
                 settingsGroup(title: "液态玻璃") {
                     LiquidGlassBlurStyleCard(blurConcentration: $store.liquidGlassMaskOpacity)
@@ -1787,6 +1750,26 @@ struct ClipboardPopoverView: View {
 
                 // 通用与快捷键
                 settingsGroup(title: "通用与快捷键") {
+                    VStack(alignment: .leading, spacing: 7) {
+                        HStack {
+                            Text("默认键入方式")
+                                .font(.system(size: 13.5, weight: .medium))
+                            Spacer()
+                        }
+                        Picker("", selection: $store.cardClickPasteMode) {
+                            Text("单击直接粘贴").tag(CardClickPasteMode.singleClick)
+                            Text("双击直接粘贴").tag(CardClickPasteMode.doubleClick)
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        Text(store.cardClickPasteMode.companionGestureSummary)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    Divider().opacity(0.35)
+
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("窗口始终在前（⌘P）")
@@ -2790,9 +2773,104 @@ struct ClipboardPopoverView: View {
         }
     }
 
-    private func triggerSmartQuickLook(for item: ClipItem) {
-        if SystemQuickLookController.supportsNativeLargePreview(item) {
+    func triggerQuickLookForSelected(initialMode: BigBangInitialPreviewMode = .autoDefault) {
+        guard nav.selectedIndex >= 0, nav.selectedIndex < filteredItems.count else { return }
+        triggerSmartQuickLook(for: filteredItems[nav.selectedIndex], initialMode: initialMode)
+    }
+
+    private func wireBigBangCallbacks(for controller: BigBangStageController) {
+        controller.onStepSelection = { dir in
+            self.moveSelection(direction: dir)
+            let visible = self.filteredItems
+            guard self.nav.selectedIndex >= 0, self.nav.selectedIndex < visible.count else { return nil }
+            return visible[self.nav.selectedIndex]
+        }
+        controller.onAdjacentItemsProvider = { target in
+            let visible = self.filteredItems
+            guard let idx = visible.firstIndex(where: { $0.id == target.id }) else { return [] }
+            var neighbors: [ClipItem] = []
+            if idx + 1 < visible.count { neighbors.append(visible[idx + 1]) }
+            if idx - 1 >= 0 { neighbors.append(visible[idx - 1]) }
+            return neighbors
+        }
+        controller.onCommitPasteText = { content, sourceItem, toast, isDiffTab in
+            let latestSensitiveDiff: Bool = {
+                guard isDiffTab,
+                      let latest = self.store.items.first(where: {
+                          ($0.type == .text || $0.type == .link)
+                              && !$0.isBurnAfterPaste
+                              && !SecretCapsuleMessenger.containsCapsule($0.text)
+                      }) else {
+                    return false
+                }
+                return latest.detectedSensitiveKind != nil
+            }()
+            self.store.pasteCustomString(
+                content,
+                sourceItem: sourceItem,
+                toast: toast,
+                shouldAutoPaste: true,
+                extraForceProtected: latestSensitiveDiff,
+                onBeforePaste: self.onDismiss
+            )
+        }
+        controller.onCommitPasteImage = { target in
+            self.store.copyAndOptionallyPaste(
+                target,
+                plainTextOnly: false,
+                shouldAutoPaste: true,
+                onBeforePaste: self.onDismiss
+            )
+        }
+        controller.onCopyText = { content, target, toast in
+            self.store.pasteCustomString(
+                content,
+                sourceItem: target,
+                toast: toast,
+                shouldAutoPaste: false,
+                onBeforePaste: nil
+            )
+        }
+        controller.onCopyFullItem = { target in
+            self.store.copyAndOptionallyPaste(
+                target,
+                plainTextOnly: false,
+                shouldAutoPaste: false,
+                onBeforePaste: nil
+            )
+            self.store.showToast("✓ 已复制到剪贴板")
+        }
+        controller.onSaveToItem = { updatedText, target in
+            _ = self.store.updateItemText(updatedText, for: target)
+        }
+        controller.onHandoffToSystemQuickLook = { target in
             let host = NSApp.windows.first(where: { $0 is KeyableFloatingPanel })
+            SystemQuickLookController.shared.onStepSelection = { dir in
+                self.moveSelection(direction: dir)
+                let visible = self.filteredItems
+                guard self.nav.selectedIndex >= 0, self.nav.selectedIndex < visible.count else { return nil }
+                return visible[self.nav.selectedIndex]
+            }
+            SystemQuickLookController.shared.onCommitPasteFromPreview = {
+                self.pasteSelected()
+            }
+            _ = SystemQuickLookController.shared.presentOrUpdate(for: target, in: self.store, hostWindow: host)
+        }
+        controller.onDismissHostPanel = {
+            self.onDismiss()
+        }
+    }
+
+    private func triggerSmartQuickLook(for item: ClipItem, initialMode: BigBangInitialPreviewMode = .autoDefault) {
+        let host = NSApp.windows.first(where: { $0 is KeyableFloatingPanel })
+        if item.type == .image || ((item.type == .text || item.type == .link) && !store.minimalModeEnabled) {
+            let bb = BigBangStageController.shared
+            wireBigBangCallbacks(for: bb)
+            if bb.presentOrToggle(for: item, in: store, hostWindow: host, initialMode: initialMode) {
+                return
+            }
+        }
+        if SystemQuickLookController.supportsNativeLargePreview(item) {
             SystemQuickLookController.shared.onStepSelection = { dir in
                 self.moveSelection(direction: dir)
                 guard self.nav.selectedIndex >= 0, self.nav.selectedIndex < self.filteredItems.count else { return nil }
@@ -2816,7 +2894,7 @@ struct ClipboardPopoverView: View {
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(Color.orange)
 
-            Text("\(appName)图片因系统权限变成文件 · 开启后直接回显高清图片")
+            Text("未能直接读取\(appName)图片原图 · 开启完全磁盘访问后自动显示")
                 .font(.system(size: 11.2, weight: .medium))
                 .foregroundStyle(.primary)
                 .lineLimit(1)
@@ -2824,12 +2902,10 @@ struct ClipboardPopoverView: View {
             Spacer(minLength: 4)
 
             Button {
-                withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
-                    nav.showSettings = true
-                }
-                store.openFullDiskAccessSettings()
+                nav.showSettings = false
+                InteractivePlaygroundController.shared.showPermissionGuidance()
             } label: {
-                Text("去设置")
+                Text("开启权限")
                     .font(.system(size: 10.5, weight: .semibold))
                     .foregroundStyle(.white)
                     .padding(.horizontal, 8.5)

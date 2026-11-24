@@ -2716,4 +2716,92 @@ mod tests {
         assert!(!cq_ents[0].is_pinned_hint);
         assert!(cq_ents[1].is_pinned_hint);
     }
+
+    #[test]
+    fn test_big_bang_tokenizer_assembly_and_single_click_config() {
+        use crate::intelligence::{
+            assemble_big_bang_selection, tokenize_big_bang, BigBangGranularity,
+        };
+        use crate::store::StoreConfig;
+        use std::collections::HashSet;
+
+        let sample = "访问 https://app.webfooo.com/iClip 联系 dev-ops@example.com 或 138-0013-8000 升级 v3.0.1\nHello World";
+        let tokens = tokenize_big_bang(sample, BigBangGranularity::Word);
+        let word_texts: Vec<&str> = tokens
+            .iter()
+            .filter(|t| !t.is_line_break)
+            .map(|t| t.text.as_str())
+            .collect();
+        assert!(word_texts.contains(&"https://app.webfooo.com/iClip"));
+        assert!(word_texts.contains(&"dev-ops@example.com"));
+        assert!(word_texts.contains(&"138-0013-8000"));
+        assert!(word_texts.contains(&"v3.0.1"));
+        assert!(tokens.iter().any(|t| t.is_line_break && t.line_index == 1));
+
+        let picked_ids: HashSet<usize> = tokens
+            .iter()
+            .filter(|t| matches!(t.text.as_str(), "v3.0.1" | "Hello" | "World"))
+            .map(|t| t.id)
+            .collect();
+        assert_eq!(
+            assemble_big_bang_selection(&tokens, &picked_ids),
+            "v3.0.1\nHello World"
+        );
+
+        let char_tokens = tokenize_big_bang("Rust 世界", BigBangGranularity::Char);
+        let char_ids: HashSet<usize> = char_tokens.iter().map(|t| t.id).collect();
+        assert_eq!(
+            assemble_big_bang_selection(&char_tokens, &char_ids),
+            "Rust世界"
+        );
+
+        let line_tokens = tokenize_big_bang("  Line A  \n\n  Line B  ", BigBangGranularity::Line);
+        assert_eq!(line_tokens.len(), 2);
+        let line_ids: HashSet<usize> = line_tokens.iter().map(|t| t.id).collect();
+        assert_eq!(
+            assemble_big_bang_selection(&line_tokens, &line_ids),
+            "Line A\nLine B"
+        );
+
+        let legacy_cfg: StoreConfig = serde_json::from_str("{}").unwrap();
+        assert!(!legacy_cfg.single_click_paste);
+        assert!(!StoreConfig::default().single_click_paste);
+        let mut custom_cfg = StoreConfig::default();
+        custom_cfg.single_click_paste = true;
+        let json = serde_json::to_string(&custom_cfg).unwrap();
+        let decoded: StoreConfig = serde_json::from_str(&json).unwrap();
+        assert!(decoded.single_click_paste);
+
+        // 全角中文标点不黏连 URL，13+ 位数字不被误判为 11 位手机号，且预览态 O/B/G/Ctrl+A 正确路由
+        use crate::hotkey::{classify_non_active_panel_key, NonActiveKeyRoute, MOD_CONTROL_BITS};
+        let url_punct_tokens = tokenize_big_bang(
+            "访问 https://a.com，联系 或 https://b.com。 长号1380013800099",
+            BigBangGranularity::Word,
+        );
+        let up_texts: Vec<&str> = url_punct_tokens
+            .iter()
+            .filter(|t| !t.is_line_break)
+            .map(|t| t.text.as_str())
+            .collect();
+        assert!(up_texts.contains(&"https://a.com"));
+        assert!(up_texts.contains(&"https://b.com"));
+        assert!(!up_texts.contains(&"13800138000"));
+
+        assert_eq!(
+            classify_non_active_panel_key(0x4F, 0, true, true, false),
+            NonActiveKeyRoute::DispatchPanelCommand
+        );
+        assert_eq!(
+            classify_non_active_panel_key(0x42, 0, true, true, false),
+            NonActiveKeyRoute::DispatchPanelCommand
+        );
+        assert_eq!(
+            classify_non_active_panel_key(0x47, 0, true, true, false),
+            NonActiveKeyRoute::DispatchPanelCommand
+        );
+        assert_eq!(
+            classify_non_active_panel_key(0x41, MOD_CONTROL_BITS, true, true, false),
+            NonActiveKeyRoute::DispatchPanelCommand
+        );
+    }
 }
