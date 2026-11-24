@@ -4247,4 +4247,104 @@ final class CoreFeatureTests: XCTestCase {
         )
         XCTAssertEqual(restored10, .zero)
     }
+
+    @MainActor
+    func testOnboardingBackNavigationAndQuickLookExternalCallbacks() async {
+        let ctrl = InteractivePlaygroundController.shared
+        ctrl.restartInteractiveSetup()
+        ctrl.advanceFromGestureChoice()
+        XCTAssertFalse(ctrl.cameFromCustomizeStep)
+        XCTAssertEqual(ctrl.phase, .chooseClickMode)
+
+        ctrl.enterCustomizeAndImport()
+        ctrl.advanceFromCustomizeToClickMode()
+        XCTAssertTrue(ctrl.cameFromCustomizeStep)
+        XCTAssertEqual(ctrl.phase, .chooseClickMode)
+
+        ctrl.dismiss()
+        XCTAssertFalse(ctrl.cameFromCustomizeStep)
+
+        let ql = SystemQuickLookController.shared
+        defer {
+            ql.onOpenExternalFromPreview = nil
+            ql.onCommitPasteRawFromPreview = nil
+            ql.onCommitPasteFromPreview = nil
+        }
+
+        var openCount = 0
+        var rawPasteCount = 0
+        var normalPasteCount = 0
+        ql.onOpenExternalFromPreview = { openCount += 1 }
+        ql.onCommitPasteRawFromPreview = { rawPasteCount += 1 }
+        ql.onCommitPasteFromPreview = { normalPasteCount += 1 }
+
+        if let cmdO = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [.command, .capsLock],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: "o",
+            charactersIgnoringModifiers: "o",
+            isARepeat: false,
+            keyCode: 31
+        ) {
+            XCTAssertTrue(ql.previewPanel(nil, handle: cmdO))
+        } else {
+            XCTFail("Failed to construct Cmd+O NSEvent")
+        }
+
+        if let optEnter = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: .option,
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: "\r",
+            charactersIgnoringModifiers: "\r",
+            isARepeat: false,
+            keyCode: 36
+        ) {
+            XCTAssertTrue(ql.previewPanel(nil, handle: optEnter))
+        }
+
+        if let optShiftEnter = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [.option, .shift, .capsLock],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: "\r",
+            charactersIgnoringModifiers: "\r",
+            isARepeat: false,
+            keyCode: 36
+        ) {
+            XCTAssertTrue(ql.previewPanel(nil, handle: optShiftEnter))
+        }
+
+        if let plainEnter = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: .capsLock,
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: "\r",
+            charactersIgnoringModifiers: "\r",
+            isARepeat: false,
+            keyCode: 36
+        ) {
+            XCTAssertTrue(ql.previewPanel(nil, handle: plainEnter))
+        }
+
+        for _ in 0..<6 where (openCount < 1 || rawPasteCount < 2 || normalPasteCount < 1) {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(openCount, 1)
+        XCTAssertEqual(rawPasteCount, 2)
+        XCTAssertEqual(normalPasteCount, 1)
+    }
 }

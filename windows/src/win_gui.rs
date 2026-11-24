@@ -10,10 +10,11 @@ use iclip_core::engines::{
     render_dynamic_template, render_mockup_frame_png, strip_file_metadata_to_clean_png,
 };
 use iclip_core::hotkey::{
-    classify_non_active_panel_key_ext, should_restore_foreground_window,
-    static_hotkey_conflict_reason, DoubleTapOutcome, NonActiveKeyRoute, WinHotKeyShortcut,
-    WinHotKeySlot, WinModifierDoubleTapMachine, WinSingleModifier, MOD_ALT_BITS, MOD_CONTROL_BITS,
-    MOD_SHIFT_BITS, MOD_WIN_BITS,
+    classify_non_active_panel_key_ext, resolve_onboarding_step3_back_target,
+    resolve_preview_step_transition, should_restore_foreground_window,
+    static_hotkey_conflict_reason, DoubleTapOutcome, NonActiveKeyRoute, PreviewStepTarget,
+    WinHotKeyShortcut, WinHotKeySlot, WinModifierDoubleTapMachine, WinSingleModifier, MOD_ALT_BITS,
+    MOD_CONTROL_BITS, MOD_SHIFT_BITS, MOD_WIN_BITS,
 };
 use iclip_core::intelligence::{
     assemble_big_bang_selection, compute_clipboard_diff, evaluate_instant_math,
@@ -325,6 +326,7 @@ struct WinAppState {
     onboarding_step: u8,
     onboarding_hit_trial: bool,
     onboarding_import_feedback: Option<String>,
+    onboarding_from_customize: bool,
     ql_stage_visible: bool,
     ql_stage_rgba: Option<(u32, u32, Vec<u8>, String)>,
     ql_stage_hi_rgba: Option<(String, u32, u32, Vec<u8>)>,
@@ -574,6 +576,7 @@ pub fn run_windows_app() -> i32 {
                 onboarding_step: init_onboard_step,
                 onboarding_hit_trial: false,
                 onboarding_import_feedback: None,
+                onboarding_from_customize: false,
                 ql_stage_visible: false,
                 ql_stage_rgba: None,
                 ql_stage_hi_rgba: None,
@@ -765,6 +768,7 @@ pub fn run_windows_self_test() -> Result<(), String> {
             onboarding_step: 0,
             onboarding_hit_trial: false,
             onboarding_import_feedback: None,
+            onboarding_from_customize: false,
             ql_stage_visible: false,
             ql_stage_rgba: None,
             ql_stage_hi_rgba: None,
@@ -2441,11 +2445,13 @@ unsafe extern "system" fn wnd_proc(
             let y = ((lparam >> 16) & 0xFFFF) as i16 as i32;
             APP_STATE.with(|c| {
                 if let Some(st) = c.borrow_mut().as_mut() {
-                    for reg in &st.hit_regions {
-                        if let HitAction::SelectCard(pos) = reg.action {
-                            if point_in_rect(x, y, &reg.rect) {
+                    if !st.show_highlights_overlay
+                        && !st.show_quick_look
+                        && st.view_mode == ActiveViewMode::MainList
+                    {
+                        if let Some(reg) = st.hit_regions.iter().find(|r| point_in_rect(x, y, &r.rect)) {
+                            if let HitAction::SelectCard(pos) = reg.action {
                                 st.pressed_visible_pos = Some(pos);
-                                break;
                             }
                         }
                     }
@@ -5021,41 +5027,70 @@ fn draw_image_grid_tile(
     let is_hov = st.hovered_visible_pos == Some(vis_pos);
     let is_tile_pressed = st.pressed_visible_pos == Some(vis_pos);
 
-    if is_hov {
+    let d = if is_tile_pressed { s(1) } else { 0 };
+    let dx = tx + d;
+    let dy = tile_y + d;
+    let dw = (tw - 2 * d).max(1);
+    let dh = (row_h - 2 * d).max(1);
+
+    if is_hov || is_tile_pressed {
         canvas.draw_soft_shadow_round_rect_xy(
-            tx,
-            tile_y,
-            tw,
-            row_h,
+            dx,
+            dy,
+            dw,
+            dh,
             sf(13.0),
-            (sf(-7.0) * st.hover_card_nx).round(),
-            sf(5.5) - (sf(4.0) * st.hover_card_ny).round(),
-            sf(11.0),
-            Color4::rgba(0, 0, 0, if st.is_dark_mode { 84 } else { 42 }),
+            if is_tile_pressed {
+                0.0
+            } else {
+                (sf(-7.0) * st.hover_card_nx).round()
+            },
+            if is_tile_pressed {
+                sf(2.0)
+            } else {
+                sf(5.5) - (sf(4.0) * st.hover_card_ny).round()
+            },
+            if is_tile_pressed {
+                sf(5.0)
+            } else {
+                sf(11.0)
+            },
+            Color4::rgba(
+                0,
+                0,
+                0,
+                if is_tile_pressed {
+                    48
+                } else if st.is_dark_mode {
+                    84
+                } else {
+                    42
+                },
+            ),
         );
     }
-    canvas.fill_round_rect(tx, tile_y, tw, row_h, sf(13.0), palette.card_bg);
+    canvas.fill_round_rect(dx, dy, dw, dh, sf(13.0), palette.card_bg);
     if let Some(fname) = &item.image_file_name {
         if let Some((iw, ih, rgba)) = load_or_get_thumbnail(&mut st.thumb_cache, images_dir, fname)
         {
-            canvas.blit_rgba_round_rect(tx, tile_y, tw, row_h, sf(13.0), rgba, iw, ih);
+            canvas.blit_rgba_round_rect(dx, dy, dw, dh, sf(13.0), rgba, iw, ih);
             if st.store.config.mask_sensitive_previews
                 && !is_sel
                 && !is_hov
                 && item.detected_sensitive_kind().is_some()
             {
                 canvas.fill_round_rect(
-                    tx,
-                    tile_y,
-                    tw,
-                    row_h,
+                    dx,
+                    dy,
+                    dw,
+                    dh,
                     sf(13.0),
                     Color4::rgba(18, 20, 28, 212),
                 );
                 let pill_w = s(64);
                 let pill_h = s(20);
-                let px = tx + (tw - pill_w) / 2;
-                let py = tile_y + (row_h - pill_h) / 2 - s(4);
+                let px = dx + (dw - pill_w) / 2;
+                let py = dy + (dh - pill_h) / 2 - s(4);
                 canvas.fill_round_rect(
                     px,
                     py,
@@ -5083,9 +5118,9 @@ fn draw_image_grid_tile(
     // 底部 30px 渐变暗带（显示分辨率 / 备注）
     let grad_h = s(30);
     canvas.fill_vgrad_round_rect(
-        tx,
-        tile_y + row_h - grad_h,
-        tw,
+        dx,
+        dy + dh - grad_h,
+        dw,
         grad_h,
         sf(13.0),
         Color4::rgba(0, 0, 0, 0),
@@ -5105,22 +5140,22 @@ fn draw_image_grid_tile(
     texts.push(TextDrawCmd {
         text: dim_txt,
         rect: RECT {
-            left: tx + s(7),
-            top: tile_y + row_h - s(20),
-            right: tx + tw - s(7),
-            bottom: tile_y + row_h - s(3),
+            left: dx + s(7),
+            top: dy + dh - s(20),
+            right: dx + dw - s(7),
+            bottom: dy + dh - s(3),
         },
         color: Color4::rgba(255, 255, 255, 236),
         font_kind: FontKind::KeyCap,
         flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
     });
 
-    // 左上角 ^1 胶囊（复刻 ClipImageGridTile.swift:125）
-    if vis_pos < 9 {
+    // 左上角 ^1 胶囊（悬停时让位给顶部动作与完整画面，1:1 对齐 macOS ClipImageGridTile）
+    if !is_hov && vis_pos < 9 {
         let bw = s(28);
         let bh = s(17);
-        let bx = tx + s(6);
-        let by = tile_y + s(6);
+        let bx = dx + s(6);
+        let by = dy + s(6);
         canvas.fill_round_rect(
             bx,
             by,
@@ -5228,10 +5263,10 @@ fn draw_image_grid_tile(
 
     if is_hov {
         canvas.draw_apple_tv_glare_round_rect(
-            tx,
-            tile_y,
-            tw,
-            row_h,
+            dx,
+            dy,
+            dw,
+            dh,
             sf(13.0),
             st.hover_card_nx,
             st.hover_card_ny,
@@ -5245,35 +5280,45 @@ fn draw_image_grid_tile(
         );
     }
 
-    // 外白内蓝双环选中框（复刻 ClipImageGridTile.swift:204）
+    // 外白内蓝双环选中框（复刻 ClipImageGridTile.swift:204），左键蓄力按压态附加微缩下沉充电环
     if is_sel {
         canvas.stroke_round_rect(
-            tx,
-            tile_y,
-            tw,
-            row_h,
+            dx,
+            dy,
+            dw,
+            dh,
             sf(13.0),
             sf(3.2),
             Color4::rgba(255, 255, 255, 232),
         );
         canvas.stroke_round_rect(
-            tx,
-            tile_y,
-            tw,
-            row_h,
+            dx,
+            dy,
+            dw,
+            dh,
             sf(13.0),
             sf(2.0),
             palette.cobalt,
         );
     } else {
-        let bd = if item.is_pinned {
+        let bd = if is_tile_pressed {
+            palette.cobalt.with_alpha(180)
+        } else if item.is_pinned {
             palette.amber.with_alpha(190)
         } else if is_hov {
             palette.card_hover_border
         } else {
             palette.card_border
         };
-        canvas.stroke_round_rect(tx, tile_y, tw, row_h, sf(13.0), sf(0.85), bd);
+        canvas.stroke_round_rect(
+            dx,
+            dy,
+            dw,
+            dh,
+            sf(13.0),
+            sf(if is_tile_pressed { 1.4 } else { 0.85 }),
+            bd,
+        );
     }
 
     let _ = w;
@@ -7092,53 +7137,80 @@ fn layout_and_draw_main_view(
                         break;
                     }
 
-                    // 现代液态玻璃卡片材质：悬停动态视差投影 + 选中态冰蓝玻璃层 + 左侧 3px 圆头精选指示条
-                    if is_hovered {
+                    // 现代液态玻璃卡片材质：悬停动态视差投影 + 左键物理下沉充电环 + 选中态冰蓝玻璃层
+                    let is_pressed = st.pressed_visible_pos == Some(vis_pos);
+                    let cd = if is_pressed { s(1) } else { 0 };
+                    let (cx, cy, cw, ch) = (
+                        pad + cd,
+                        cur_y + cd,
+                        (track_w - 2 * cd).max(1),
+                        (card_h - 2 * cd).max(1),
+                    );
+                    if is_hovered || is_pressed {
                         canvas.draw_soft_shadow_round_rect_xy(
-                            pad,
-                            cur_y,
-                            track_w,
-                            card_h,
+                            cx,
+                            cy,
+                            cw,
+                            ch,
                             sf(14.0),
-                            (sf(-6.0) * st.hover_card_nx).round(),
-                            sf(5.0) - (sf(3.5) * st.hover_card_ny).round(),
-                            sf(10.0),
-                            Color4::rgba(0, 0, 0, if st.is_dark_mode { 76 } else { 36 }),
+                            if is_pressed {
+                                0.0
+                            } else {
+                                (sf(-6.0) * st.hover_card_nx).round()
+                            },
+                            if is_pressed {
+                                sf(2.0)
+                            } else {
+                                sf(5.0) - (sf(3.5) * st.hover_card_ny).round()
+                            },
+                            if is_pressed { sf(5.0) } else { sf(10.0) },
+                            Color4::rgba(
+                                0,
+                                0,
+                                0,
+                                if is_pressed {
+                                    44
+                                } else if st.is_dark_mode {
+                                    76
+                                } else {
+                                    36
+                                },
+                            ),
                         );
                     }
                     if is_selected {
                         canvas.fill_round_rect(
-                            pad,
-                            cur_y,
-                            track_w,
-                            card_h,
+                            cx,
+                            cy,
+                            cw,
+                            ch,
                             sf(14.0),
                             palette.card_bg,
                         );
                         canvas.fill_diag_grad_round_rect(
-                            pad,
-                            cur_y,
-                            track_w,
-                            card_h,
+                            cx,
+                            cy,
+                            cw,
+                            ch,
                             sf(14.0),
                             palette.select_top,
                             palette.select_bottom,
                         );
                         canvas.stroke_glass_bevel_round_rect(
-                            pad,
-                            cur_y,
-                            track_w,
-                            card_h,
+                            cx,
+                            cy,
+                            cw,
+                            ch,
                             sf(14.0),
                             sf(0.95),
                             palette.glass_top_highlight,
                             palette.select_border,
                         );
                         // 左侧 3px 圆头品牌电光钴蓝精选指示条（上下收紧至卡片高度 58%，远离卡片外圆角拐点）
-                        let ind_h = ((card_h as f32) * 0.58).round() as i32;
+                        let ind_h = ((ch as f32) * 0.58).round() as i32;
                         canvas.fill_round_rect(
-                            pad + s(1),
-                            cur_y + (card_h - ind_h) / 2,
+                            cx + s(1),
+                            cy + (ch - ind_h) / 2,
                             s(3),
                             ind_h.max(s(22)),
                             sf(1.5),
@@ -7154,23 +7226,27 @@ fn layout_and_draw_main_view(
                             (palette.card_pinned_top, palette.card_pinned_bottom)
                         };
                         canvas.fill_diag_grad_round_rect(
-                            pad,
-                            cur_y,
-                            track_w,
-                            card_h,
+                            cx,
+                            cy,
+                            cw,
+                            ch,
                             sf(14.0),
                             pt,
                             pb,
                         );
                         canvas.stroke_glass_bevel_round_rect(
-                            pad,
-                            cur_y,
-                            track_w,
-                            card_h,
+                            cx,
+                            cy,
+                            cw,
+                            ch,
                             sf(14.0),
-                            sf(0.85),
+                            sf(if is_pressed { 1.25 } else { 0.85 }),
                             palette.glass_top_highlight,
-                            palette.card_pinned_border,
+                            if is_pressed {
+                                palette.cobalt.with_alpha(150)
+                            } else {
+                                palette.card_pinned_border
+                            },
                         );
                     } else {
                         let bg = if is_hovered {
@@ -7178,30 +7254,31 @@ fn layout_and_draw_main_view(
                         } else {
                             palette.card_bg
                         };
-                        let bd = if is_hovered {
+                        let bd = if is_pressed {
+                            palette.cobalt.with_alpha(150)
+                        } else if is_hovered {
                             palette.card_hover_border
                         } else {
                             palette.card_border
                         };
-                        canvas.fill_round_rect(pad, cur_y, track_w, card_h, sf(14.0), bg);
+                        canvas.fill_round_rect(cx, cy, cw, ch, sf(14.0), bg);
                         canvas.stroke_glass_bevel_round_rect(
-                            pad,
-                            cur_y,
-                            track_w,
-                            card_h,
+                            cx,
+                            cy,
+                            cw,
+                            ch,
                             sf(14.0),
-                            sf(0.80),
+                            sf(if is_pressed { 1.25 } else { 0.80 }),
                             palette.glass_top_highlight,
                             bd,
                         );
                     }
-                    let is_pressed = st.pressed_visible_pos == Some(vis_pos);
                     if is_hovered {
                         canvas.draw_apple_tv_glare_round_rect(
-                            pad + if is_pressed { s(1) } else { 0 },
-                            cur_y + if is_pressed { s(1) } else { 0 },
-                            track_w - if is_pressed { s(2) } else { 0 },
-                            card_h - if is_pressed { s(2) } else { 0 },
+                            cx,
+                            cy,
+                            cw,
+                            ch,
                             sf(14.0),
                             st.hover_card_nx,
                             st.hover_card_ny,
@@ -7660,6 +7737,11 @@ fn layout_and_draw_main_view(
                     }
 
                     let mut sub_parts: Vec<String> = Vec::new();
+                    let is_copied_flash =
+                        st.copied_flash_item_id.as_deref() == Some(item.id.as_str());
+                    if is_copied_flash {
+                        sub_parts.push("✓ 已复制".to_string());
+                    }
                     if item.is_burn_after_paste() {
                         sub_parts.push("粘贴即焚".to_string());
                     } else if matches!(
@@ -7687,9 +7769,7 @@ fn layout_and_draw_main_view(
                             sub_parts.push(app.clone());
                         }
                     }
-                    if st.copied_flash_item_id.as_deref() == Some(item.id.as_str()) {
-                        sub_parts.push("✓ 已复制".to_string());
-                    } else if !minimal {
+                    if !is_copied_flash && !minimal {
                         if let Some(badge) = st.store.preferred_target_badge(
                             &item.content_hash,
                             st.active_target_app_name.as_deref(),
@@ -10956,7 +11036,9 @@ fn layout_and_draw_highlights_overlay(
         st.hit_regions.push(HitRegion {
             rect: back3_rc,
             interactive_cursor: true,
-            action: HitAction::OnboardingSetStep(1),
+            action: HitAction::OnboardingSetStep(resolve_onboarding_step3_back_target(
+                st.onboarding_from_customize,
+            )),
         });
         texts.push(TextDrawCmd {
             text: "已配套好零冲突副手势，后续随时可在设置中切换".to_string(),
@@ -12080,6 +12162,7 @@ unsafe fn handle_left_click(hwnd: HWND, x: i32, y: i32, is_double: bool) {
                 if let Some(st) = c.borrow_mut().as_mut() {
                     st.view_mode = ActiveViewMode::MainList;
                     st.onboarding_step = if st.store.config.has_seen_highlights_v27 { 4 } else { 0 };
+                    st.onboarding_from_customize = false;
                     st.show_highlights_overlay = true;
                 }
             });
@@ -12091,6 +12174,7 @@ unsafe fn handle_left_click(hwnd: HWND, x: i32, y: i32, is_double: bool) {
                     st.show_highlights_overlay = false;
                     st.recording_slot = None;
                     st.onboarding_import_feedback = None;
+                    st.onboarding_from_customize = false;
                     if !st.store.config.has_seen_highlights_v27 {
                         st.store.config.has_seen_highlights_v27 = true;
                         st.store.save_config();
@@ -12107,6 +12191,11 @@ unsafe fn handle_left_click(hwnd: HWND, x: i32, y: i32, is_double: bool) {
                 if let Some(st) = c.borrow_mut().as_mut() {
                     let was_recording = st.recording_slot.is_some();
                     st.onboarding_step = step;
+                    if step == 2 {
+                        st.onboarding_from_customize = true;
+                    } else if step <= 1 {
+                        st.onboarding_from_customize = false;
+                    }
                     if step == 0 {
                         st.onboarding_hit_trial = false;
                         st.onboarding_import_feedback = None;
@@ -13162,20 +13251,53 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
                         st.scroll_row_offset = r_idx - 4;
                     }
                 }
-                if st.ql_stage_visible {
+                if st.selected_visible_pos != prev_pos {
                     if let Some(&next_idx) = filtered.get(st.selected_visible_pos) {
-                        if st.store.items[next_idx].kind == ClipContentType::Image {
-                            let _ = present_or_update_large_ql_stage(hwnd, st, next_idx);
-                        } else {
-                            st.ql_stage_visible = false;
-                            st.ql_stage_rgba = None;
-                            st.ql_stage_hi_rgba = None;
-                            st.ql_stage_orig_dims = None;
-                            st.ql_stage_hi_loading_key = None;
-                            st.ql_stage_cached_key = None;
-                            st.ql_stage_big_bang = false;
-                            st.ql_stage_sweep_target = None;
-                            need_dismiss_ql_stage = true;
+                        let next_is_image = st.store.items[next_idx].kind == ClipContentType::Image;
+                        match resolve_preview_step_transition(
+                            st.ql_stage_visible,
+                            st.show_quick_look,
+                            next_is_image,
+                        ) {
+                            PreviewStepTarget::PromoteToImageStage => {
+                                st.show_quick_look = false;
+                                st.quick_look_diff_mode = false;
+                                st.big_bang_selected_ids.clear();
+                                if !present_or_update_large_ql_stage(hwnd, st, next_idx) {
+                                    if st.ql_stage_visible {
+                                        st.ql_stage_visible = false;
+                                        st.ql_stage_rgba = None;
+                                        st.ql_stage_hi_rgba = None;
+                                        st.ql_stage_orig_dims = None;
+                                        st.ql_stage_hi_loading_key = None;
+                                        st.ql_stage_cached_key = None;
+                                        st.ql_stage_big_bang = false;
+                                        st.ql_stage_sweep_target = None;
+                                        need_dismiss_ql_stage = true;
+                                    }
+                                    st.show_quick_look = true;
+                                    st.quick_look_tab = 0;
+                                    st.quick_look_scroll = 0;
+                                }
+                            }
+                            PreviewStepTarget::SwitchToInlineQuickLook => {
+                                st.ql_stage_visible = false;
+                                st.ql_stage_rgba = None;
+                                st.ql_stage_hi_rgba = None;
+                                st.ql_stage_orig_dims = None;
+                                st.ql_stage_hi_loading_key = None;
+                                st.ql_stage_cached_key = None;
+                                st.ql_stage_big_bang = false;
+                                st.ql_stage_sweep_target = None;
+                                need_dismiss_ql_stage = true;
+                                st.show_quick_look = true;
+                                st.quick_look_diff_mode = false;
+                                st.quick_look_tab = 0;
+                                st.quick_look_scroll = 0;
+                                st.big_bang_selected_ids.clear();
+                                st.big_bang_sweep_target = None;
+                            }
+                            PreviewStepTarget::KeepCurrent => {}
                         }
                     }
                 }

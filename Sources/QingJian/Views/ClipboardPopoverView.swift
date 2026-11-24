@@ -2875,8 +2875,14 @@ struct ClipboardPopoverView: View {
         ql.onCommitPasteFromPreview = {
             self.pasteSelected()
         }
+        ql.onCommitPasteRawFromPreview = {
+            self.pasteSelected(forceRawSecret: true)
+        }
         ql.onCopySelectedFromPreview = {
             _ = self.copySelectedOnly(plainPathOrText: false)
+        }
+        ql.onOpenExternalFromPreview = {
+            _ = self.openSelectedExternally()
         }
         ql.onFallbackPreviewItem = { nextItem in
             self.triggerSmartQuickLook(for: nextItem, initialMode: .autoDefault)

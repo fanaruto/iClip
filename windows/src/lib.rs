@@ -2853,6 +2853,32 @@ mod tests {
             classify_non_active_panel_key_ext(0x30, MOD_CONTROL_BITS, true, true, true, false),
             NonActiveKeyRoute::DispatchPanelCommand
         );
+
+        use crate::hotkey::{
+            resolve_onboarding_step3_back_target, resolve_preview_step_transition, PreviewStepTarget,
+        };
+        assert_eq!(resolve_onboarding_step3_back_target(false), 1);
+        assert_eq!(resolve_onboarding_step3_back_target(true), 2);
+        assert_eq!(
+            resolve_preview_step_transition(true, false, true),
+            PreviewStepTarget::PromoteToImageStage
+        );
+        assert_eq!(
+            resolve_preview_step_transition(true, false, false),
+            PreviewStepTarget::SwitchToInlineQuickLook
+        );
+        assert_eq!(
+            resolve_preview_step_transition(false, true, true),
+            PreviewStepTarget::PromoteToImageStage
+        );
+        assert_eq!(
+            resolve_preview_step_transition(false, true, false),
+            PreviewStepTarget::KeepCurrent
+        );
+        assert_eq!(
+            resolve_preview_step_transition(false, false, true),
+            PreviewStepTarget::KeepCurrent
+        );
     }
 
     #[test]

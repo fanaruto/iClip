@@ -59,10 +59,12 @@ final class SystemQuickLookController: NSObject, QLPreviewPanelDataSource, QLPre
     private var probeViews: [UUID: WeakViewBox] = [:]
     private var ephemeralFilesToScrub: Set<URL> = []
 
-    /// 键盘联动回调：方向键切换条目、复制选中与回车直接上屏粘贴
+    /// 键盘联动回调：方向键切换条目、复制选中、外部打开与回车直接上屏粘贴
     var onStepSelection: ((PanelNavigationDirection) -> ClipItem?)?
     var onCommitPasteFromPreview: (() -> Void)?
+    var onCommitPasteRawFromPreview: (() -> Void)?
     var onCopySelectedFromPreview: (() -> Void)?
+    var onOpenExternalFromPreview: (() -> Void)?
     var onFallbackPreviewItem: ((ClipItem) -> Void)?
 
     private override init() {
@@ -352,10 +354,23 @@ final class SystemQuickLookController: NSObject, QLPreviewPanelDataSource, QLPre
             return true
         }
 
-        if flags.isEmpty && (event.keyCode == 36 || event.keyCode == 76) {
+        if flags == .command, event.keyCode == 31 {
             dismiss()
             Task { @MainActor in
-                self.onCommitPasteFromPreview?()
+                self.onOpenExternalFromPreview?()
+            }
+            return true
+        }
+
+        if !flags.contains(.command) && !flags.contains(.control) && (event.keyCode == 36 || event.keyCode == 76) {
+            let forceRaw = flags.contains(.option)
+            dismiss()
+            Task { @MainActor in
+                if forceRaw, let rawHandler = self.onCommitPasteRawFromPreview {
+                    rawHandler()
+                } else {
+                    self.onCommitPasteFromPreview?()
+                }
             }
             return true
         }
@@ -899,8 +914,9 @@ struct AppleTVPhysicalCardModifier: ViewModifier {
         let tilt = combinedTilt
         let transformed = content
             .overlay {
-                if isHovered || (pressStage == 1 && pressureProgress > 0.04) {
-                    GeometryReader { geo in
+                ZStack {
+                    if isHovered || (pressStage == 1 && pressureProgress > 0.04) {
+                        GeometryReader { geo in
                         let w = max(1, geo.size.width)
                         let h = max(1, geo.size.height)
                         let nx = reduceMotion ? 0 : activeNorm.x
@@ -987,8 +1003,11 @@ struct AppleTVPhysicalCardModifier: ViewModifier {
                         }
                         .drawingGroup()
                     }
-                    .allowsHitTesting(false)
+                    .transition(.opacity)
+                    }
                 }
+                .animation(.easeOut(duration: 0.14), value: isHovered)
+                .allowsHitTesting(false)
             }
             .background(
                 ForceTouchWindowProbe(
@@ -1054,6 +1073,7 @@ struct AppleTVPhysicalCardModifier: ViewModifier {
                 perspective: 0.44
             )
             .animation(.interpolatingSpring(mass: 0.58, stiffness: 360, damping: 24), value: effectiveScale)
+            .animation(.interpolatingSpring(mass: 0.58, stiffness: 360, damping: 24), value: pressStage)
             .animation(.interactiveSpring(response: 0.18, dampingFraction: 0.84), value: activeNorm)
             .onChange(of: isHovered) { _, hovering in
                 if !hovering {

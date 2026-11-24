@@ -613,6 +613,41 @@ pub fn classify_non_active_panel_key_ext(
     NonActiveKeyRoute::PassThrough
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PreviewStepTarget {
+    KeepCurrent,
+    PromoteToImageStage,
+    SwitchToInlineQuickLook,
+}
+
+/// 决定方向键在预览开启态切换条目时的双视图无缝衔接策略（独立大图舞台 ↔ 内联大爆炸速览）。
+pub fn resolve_preview_step_transition(
+    ql_stage_visible: bool,
+    inline_quick_look_visible: bool,
+    next_is_image: bool,
+) -> PreviewStepTarget {
+    if ql_stage_visible {
+        if next_is_image {
+            PreviewStepTarget::PromoteToImageStage
+        } else {
+            PreviewStepTarget::SwitchToInlineQuickLook
+        }
+    } else if inline_quick_look_visible && next_is_image {
+        PreviewStepTarget::PromoteToImageStage
+    } else {
+        PreviewStepTarget::KeepCurrent
+    }
+}
+
+/// 计算新手引导步骤 3（点击习惯选择）点「上一步」时应返回步骤 2（定制手势/导入）还是步骤 1。
+pub fn resolve_onboarding_step3_back_target(came_from_customize: bool) -> u8 {
+    if came_from_customize {
+        2
+    } else {
+        1
+    }
+}
+
 fn vk_to_search_ascii(vk: u32, shift: bool) -> Option<char> {
     match vk {
         0x41..=0x5A => {

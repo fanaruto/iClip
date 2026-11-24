@@ -41,8 +41,9 @@ struct ClipImageGridTile: View {
                             .resizable()
                             .interpolation(.high)
                             .scaledToFill()
-                            .scaleEffect(isHovered && !reduceMotion ? 1.07 : 1.0)
+                            .scaleEffect((isHovered && !isDeepPressFlat && !reduceMotion) ? 1.07 : 1.0)
                             .offset(x: -pnx * 3.0, y: -pny * 2.8)
+                            .animation(.spring(response: 0.2, dampingFraction: 0.88), value: isDeepPressFlat)
                             .blur(radius: veilImg ? 11 : 0)
                             .overlay {
                                 if veilImg {

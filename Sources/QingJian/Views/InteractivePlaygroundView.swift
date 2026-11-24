@@ -72,6 +72,7 @@ final class InteractivePlaygroundController: ObservableObject {
     @Published var didHitTrialHotKey: Bool = false
     @Published var isOptionModifierDown: Bool = false
     @Published var lastImportFeedback: String? = nil
+    @Published private(set) var cameFromCustomizeStep: Bool = false
 
     private var flagsMonitor: Any?
 
@@ -123,6 +124,7 @@ final class InteractivePlaygroundController: ObservableObject {
     func advanceFromGestureChoice() {
         TactileFeedbackEngine.shared.perform(.tabSwitch)
         stopModifierTracking()
+        cameFromCustomizeStep = false
         withAnimation(.spring(response: 0.32, dampingFraction: 0.85)) {
             phase = .chooseClickMode
         }
@@ -132,8 +134,18 @@ final class InteractivePlaygroundController: ObservableObject {
         TactileFeedbackEngine.shared.perform(.tabSwitch)
         stopModifierTracking()
         lastImportFeedback = nil
+        cameFromCustomizeStep = true
         withAnimation(.spring(response: 0.34, dampingFraction: 0.84)) {
             phase = .customizeAndImport
+        }
+    }
+
+    func advanceFromCustomizeToClickMode() {
+        TactileFeedbackEngine.shared.perform(.tabSwitch)
+        stopModifierTracking()
+        cameFromCustomizeStep = true
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.85)) {
+            phase = .chooseClickMode
         }
     }
 
@@ -178,6 +190,7 @@ final class InteractivePlaygroundController: ObservableObject {
     func restartInteractiveSetup() {
         didHitTrialHotKey = false
         lastImportFeedback = nil
+        cameFromCustomizeStep = false
         startModifierTrackingIfNeeded()
         withAnimation(.spring(response: 0.30, dampingFraction: 0.85)) {
             phase = .tryDefaultHotKey
@@ -187,6 +200,7 @@ final class InteractivePlaygroundController: ObservableObject {
 
     func dismiss(in store: ClipboardStore? = nil) {
         stopModifierTracking()
+        cameFromCustomizeStep = false
         if let store {
             cleanupLegacySamplesIfAny(in: store)
         }
@@ -751,7 +765,7 @@ struct CoreHighlightsOverlay: View {
                 if isRecordingHotKey {
                     onStopHotKeyRecording?()
                 }
-                controller.advanceFromGestureChoice()
+                controller.advanceFromCustomizeToClickMode()
             } label: {
                 Text("下一步：选择键入方式")
                     .font(.system(size: 13.5, weight: .semibold))
@@ -781,7 +795,7 @@ struct CoreHighlightsOverlay: View {
                 Spacer()
                 Button("上一步") {
                     withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
-                        controller.phase = .chooseGestureHabit
+                        controller.phase = controller.cameFromCustomizeStep ? .customizeAndImport : .chooseGestureHabit
                     }
                 }
                 .buttonStyle(.plain)

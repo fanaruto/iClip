@@ -898,7 +898,9 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     }
 
     private func handleKeyDown(_ event: NSEvent) -> NSEvent? {
-        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let flags = event.modifierFlags
+            .intersection(.deviceIndependentFlagsMask)
+            .intersection([.command, .option, .control, .shift])
 
         if nav.isEditingAlias {
             if event.keyCode == 53 {
@@ -1025,6 +1027,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
                 return nil
             }
             if flags == .command, event.keyCode == 31 {
+                SystemQuickLookController.shared.dismiss()
                 _ = rootView.openSelectedExternally()
                 return nil
             }
