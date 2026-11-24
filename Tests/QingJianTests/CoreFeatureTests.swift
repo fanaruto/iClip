@@ -498,7 +498,6 @@ final class CoreFeatureTests: XCTestCase {
 
     // MARK: - 12. 语义脱敏、净链与动态模板回归测试
 
-    #if !ICLIP_EDITION_FLOW
     func testSemanticRedactionAndTemplateInterpolation() {
         let envText = "OPENAI_API_KEY=sk-proj-1234567890abcdefghijklmnop\nDB_PASSWORD=\"superSecret999\""
         let redacted = SemanticEngine.redactSecrets(in: envText)
@@ -513,7 +512,6 @@ final class CoreFeatureTests: XCTestCase {
         let rendered = SnippetTemplateEngine.render(template: tpl, latestContextText: "token: sk-1234567890abcdefghij1234")
         XCTAssertTrue(rendered.contains("sk-***REDACTED***"))
     }
-    #endif
 
     // MARK: - 13. 图片 3 列网格二维方向键导航（↑↓←→）回归测试
 
@@ -874,7 +872,6 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertTrue(engine.copyAppendEnabled)
     }
 
-    #if !ICLIP_EDITION_FLOW
     // MARK: - 24. JWT 本地零上传 Base64URL 解码与 exp 过期诊断测试
 
     func testJWTOfflineBase64URLDecodeAndExpirationCheck() throws {
@@ -902,7 +899,6 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertEqual(snap.actions.first?.id, "redact-secrets")
         XCTAssertTrue(snap.actions.contains(where: { $0.id == "jwt-decode" }))
     }
-    #endif
 
     // MARK: - 25. 自然情景时间窗（今天/昨天/1h/7d/收藏）与 `!排除词` 零歧义组合检索测试
 
@@ -2285,7 +2281,6 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertTrue(redactedCurl.contains("-H 'cookie: ***REDACTED***'"))
         XCTAssertTrue(redactedCurl.contains("\"refresh_token\": \"***REDACTED***\""))
 
-        #if !ICLIP_EDITION_FLOW
         // 5. 验证 JWT 离线过期状态透视（有效 vs 已过期）
         // Header: {"alg":"HS256","typ":"JWT"} -> eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9
         // Payload: {"sub":"u1","exp":2000000000} -> eyJzdWIiOiJ1MSIsImV4cCI6MjAwMDAwMDAwMH0
@@ -2300,7 +2295,6 @@ final class CoreFeatureTests: XCTestCase {
             referenceDate: Date(timeIntervalSince1970: 2_100_000_000)
         ))
         XCTAssertEqual(expiredCheck.isUnexpired, false)
-        #endif
     }
 
     // MARK: - 47. 跨设备通用剪贴板（Handoff）隔离、全平台群机器人 Webhook / PGP / Age 私钥脱敏与细分 `@标签` 检索测试
@@ -2967,7 +2961,6 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: otaDir.path))
 
         // 3. 验证 Base64 解码内联剥除暗藏 U+202E Trojan Bidi 木马符（防 Base64 Smuggling）
-        #if !ICLIP_EDITION_FLOW
         let smuggledRaw = "echo safe\u{202E}evil_payload"
         let smuggledB64 = Data(smuggledRaw.utf8).base64EncodedString()
         let b64Item = ClipItem(type: .text, text: smuggledB64, contentHash: "text:b64poison")
@@ -2975,7 +2968,6 @@ final class CoreFeatureTests: XCTestCase {
         let b64Act = try XCTUnwrap(snap.actions.first(where: { $0.id == "base64-decode" }))
         XCTAssertFalse(b64Act.resultText.contains("\u{202E}"))
         XCTAssertTrue(b64Act.isSecurityAction)
-        #endif
 
         // 4. 验证 AI 回复「去 Markdown 纯文本」（剥除 ###、**加粗**、[链接](url)、任务框并保护算式乘号）
         let aiMarkdown = """

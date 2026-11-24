@@ -568,23 +568,6 @@ struct AdaptiveIntelligenceSettingsSection: View {
                     .labelsHidden()
             }
 
-            #if ICLIP_EDITION_FLOW
-            Divider().opacity(0.35)
-
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("顺序出队后自动按 Tab 跳格")
-                        .font(.system(size: 13.5, weight: .medium))
-                    Text("连续按 \(store.queuePopShortcut.compactDisplayString) 填表时自动跳往下一个输入框")
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Toggle("", isOn: $store.queueAutoTabEnabled)
-                    .toggleStyle(.switch)
-                    .labelsHidden()
-            }
-            #else
             Divider().opacity(0.35)
 
             HStack {
@@ -616,7 +599,6 @@ struct AdaptiveIntelligenceSettingsSection: View {
                     .toggleStyle(.switch)
                     .labelsHidden()
             }
-            #endif
 
             if !engine.mutedSourceApps.isEmpty {
                 Divider().opacity(0.35)
@@ -668,11 +650,9 @@ struct AdaptiveIntelligenceSettingsSection: View {
                                 get: { engine.enabledAutoRules.contains(rule) },
                                 set: { newVal in
                                     engine.setAutoRule(rule, enabled: newVal)
-                                    #if !ICLIP_EDITION_FLOW
                                     if rule == .cleanTrackingURL {
                                         store.autoCleanTrackingURL = newVal
                                     }
-                                    #endif
                                 }
                             ))
                             .toggleStyle(.switch)

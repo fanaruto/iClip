@@ -510,7 +510,6 @@ impl ClipItem {
                 "网页链接".to_string()
             }
             ClipContentType::Image => {
-                #[cfg(feature = "flow")]
                 if let Some(ocr) = &self.ocr_text {
                     let clean = ocr.trim();
                     if !clean.is_empty() {

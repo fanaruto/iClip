@@ -57,7 +57,6 @@ enum LiquidGlassAppearance: String, CaseIterable, Identifiable {
     }
 }
 
-#if !ICLIP_EDITION_FLOW
 /// NSCache 包装盒：缓存单条记录的语义识别快照
 private final class SemanticSnapshotBox {
     let snapshot: SemanticSnapshot
@@ -65,35 +64,8 @@ private final class SemanticSnapshotBox {
         self.snapshot = snapshot
     }
 }
-#endif
 
-#if ICLIP_EDITION_FLOW
-/// 多选摘录合并拼接格式
-enum MergeJoinStyle: String, CaseIterable, Identifiable {
-    case paragraphs
-    case numberedList
-    case singleLine
 
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .paragraphs: return "段落合并"
-        case .numberedList: return "编号清单"
-        case .singleLine: return "单行汇总"
-        }
-    }
-}
-#endif
-
-#if ICLIP_EDITION_FLOW
-private final class FinanceActionsBox {
-    let actions: [FinanceQuickAction]
-    init(_ actions: [FinanceQuickAction]) {
-        self.actions = actions
-    }
-}
-#endif
 
 /// 跨处选段「续接复制（Copy-Append）」纯函数文本衔接器
 enum CopyAppendHelper {
@@ -388,7 +360,6 @@ final class ClipboardStore: ObservableObject {
         }
     }
 
-    #if !ICLIP_EDITION_FLOW
     /// [极客开发版] 复制含营销追踪尾巴的链接时自动净链
     @Published var autoCleanTrackingURL: Bool {
         didSet { UserDefaults.standard.set(autoCleanTrackingURL, forKey: "autoCleanTrackingURL") }
@@ -397,29 +368,7 @@ final class ClipboardStore: ObservableObject {
     @Published var autoRedactOnPaste: Bool {
         didSet { UserDefaults.standard.set(autoRedactOnPaste, forKey: "autoRedactOnPaste") }
     }
-    #endif
 
-    #if ICLIP_EDITION_FLOW
-    /// [心流办公版] FIFO 顺序粘贴队列采集开关
-    @Published var isQueueModeActive: Bool = false
-    /// [心流办公版] 待顺序吐出的记录 ID 队列
-    @Published private(set) var pasteQueueIDs: [UUID] = []
-    /// [心流办公版] 待合并粘贴的有序勾选记录 ID 列表
-    @Published private(set) var selectedMergeIDs: [UUID] = []
-    /// [心流办公版] 免开面板直接按 FIFO 吐出队列下一项的全局快捷键（默认 ⌃⌥V）
-    @Published var queuePopShortcut: HotKeyShortcut {
-        didSet {
-            if let data = try? JSONEncoder().encode(queuePopShortcut) {
-                UserDefaults.standard.set(data, forKey: "queuePopShortcut")
-            }
-            _ = HotKeyManager.shared.updateQueueShortcut(queuePopShortcut)
-        }
-    }
-    /// [心流办公版] 顺序出队键入后是否自动按下 Tab 跳到下一个表单输入框
-    @Published var queueAutoTabEnabled: Bool {
-        didSet { UserDefaults.standard.set(queueAutoTabEnabled, forKey: "queueAutoTabEnabled") }
-    }
-    #endif
 
     @Published private(set) var ignoredApps: [IgnoredAppEntry] = []
     private var ignoredBundleIDSet: Set<String> = []
@@ -447,11 +396,7 @@ final class ClipboardStore: ObservableObject {
     private let thumbnailCache = NSCache<NSString, NSImage>()
     private let previewCache = NSCache<NSString, NSImage>()
     private let fileIconCache = NSCache<NSString, NSImage>()
-    #if !ICLIP_EDITION_FLOW
     private let semanticCache = NSCache<NSString, SemanticSnapshotBox>()
-    #else
-    private let financeCache = NSCache<NSString, FinanceActionsBox>()
-    #endif
     private var inFlightThumbnails = Set<String>()
     private var inFlightPreviews = Set<String>()
 
@@ -527,22 +472,10 @@ final class ClipboardStore: ObservableObject {
             self.hotKeyShortcut = .defaultShortcut
         }
 
-        #if !ICLIP_EDITION_FLOW
         self.autoCleanTrackingURL = UserDefaults.standard.object(forKey: "autoCleanTrackingURL") as? Bool ?? false
         self.autoRedactOnPaste = UserDefaults.standard.object(forKey: "autoRedactOnPaste") as? Bool ?? false
         self.semanticCache.countLimit = 256
-        #endif
 
-        #if ICLIP_EDITION_FLOW
-        if let qShortcutData = UserDefaults.standard.data(forKey: "queuePopShortcut"),
-           let decodedQShortcut = try? JSONDecoder().decode(HotKeyShortcut.self, from: qShortcutData) {
-            self.queuePopShortcut = decodedQShortcut
-        } else {
-            self.queuePopShortcut = .defaultQueueShortcut
-        }
-        self.queueAutoTabEnabled = UserDefaults.standard.object(forKey: "queueAutoTabEnabled") as? Bool ?? false
-        self.financeCache.countLimit = 256
-        #endif
 
         let savedMax = UserDefaults.standard.integer(forKey: "maxHistoryCount")
         self.maxHistoryCount = savedMax > 0 ? savedMax : 200
@@ -577,11 +510,7 @@ final class ClipboardStore: ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
                 guard let self else { return }
-                #if !ICLIP_EDITION_FLOW
                 self.semanticCache.removeAllObjects()
-                #else
-                self.financeCache.removeAllObjects()
-                #endif
             }
 
         NotificationCenter.default.addObserver(
@@ -635,7 +564,7 @@ final class ClipboardStore: ObservableObject {
             ActionSparkController.shared.dismissImmediately()
         }
         TactileFeedbackEngine.shared.perform(.tabSwitch)
-        showToast(minimalModeEnabled ? "已开启极简纯净模式（基础功能版）" : "已恢复「\(AppRoleEdition.installed.title)」进阶功能")
+        showToast(minimalModeEnabled ? "已开启极简纯净模式" : "已恢复智能自感知功能")
     }
 
     /// 切换窗口「始终在前（Always on Top）」（⌘P）
@@ -868,15 +797,6 @@ final class ClipboardStore: ObservableObject {
 
         guard !purged.isEmpty else { return 0 }
         items = kept
-        #if ICLIP_EDITION_FLOW
-        let deadPurgedIDs = Set(purged.map(\.id))
-        if !pasteQueueIDs.isEmpty {
-            pasteQueueIDs.removeAll { deadPurgedIDs.contains($0) }
-        }
-        if !selectedMergeIDs.isEmpty {
-            selectedMergeIDs.removeAll { deadPurgedIDs.contains($0) }
-        }
-        #endif
         let activeHashes = Set(items.map(\.contentHash))
         let deadHashes = Set(purged.map(\.contentHash)).subtracting(activeHashes)
         AdaptiveIntelligenceEngine.shared.forgetContentHashes(deadHashes)
@@ -936,15 +856,6 @@ final class ClipboardStore: ObservableObject {
         guard !removed.isEmpty else { return 0 }
 
         items = kept
-        #if ICLIP_EDITION_FLOW
-        let deadRemovedIDs = Set(removed.map(\.id))
-        if !pasteQueueIDs.isEmpty {
-            pasteQueueIDs.removeAll { deadRemovedIDs.contains($0) }
-        }
-        if !selectedMergeIDs.isEmpty {
-            selectedMergeIDs.removeAll { deadRemovedIDs.contains($0) }
-        }
-        #endif
         let activeHashes = Set(items.map(\.contentHash))
         let deadHashes = Set(removed.map(\.contentHash)).subtracting(activeHashes)
         AdaptiveIntelligenceEngine.shared.forgetContentHashes(deadHashes)
@@ -1073,11 +984,7 @@ final class ClipboardStore: ObservableObject {
         flushPendingUndoImages()
         clearTransientDragImageBuffers()
         ReversiblePrivacyTwin.wipeAll()
-        #if !ICLIP_EDITION_FLOW
         semanticCache.removeAllObjects()
-        #else
-        financeCache.removeAllObjects()
-        #endif
     }
 
     func onPanelShown(visibleItems: [ClipItem]) {
@@ -1090,13 +997,11 @@ final class ClipboardStore: ObservableObject {
         thumbnailCache.totalCostLimit = 24 * 1024 * 1024
         prewarmThumbnails(for: visibleItems, limit: 18)
         prewarmPreviewImages(for: visibleItems, limit: 6)
-        #if !ICLIP_EDITION_FLOW
         if !minimalModeEnabled {
             for item in visibleItems.prefix(24) where item.type == .text || item.type == .link {
                 _ = semanticSnapshot(for: item)
             }
         }
-        #endif
     }
 
     func onPanelHidden() {
@@ -1229,11 +1134,6 @@ final class ClipboardStore: ObservableObject {
                             var existing = self.items.remove(at: existingIndex)
                             existing.createdAt = Date()
                             existing.sourceAppName = sourceApp ?? existing.sourceAppName
-                            #if ICLIP_EDITION_FLOW
-                            if self.isQueueModeActive && !self.pasteQueueIDs.contains(existing.id) {
-                                self.pasteQueueIDs.append(existing.id)
-                            }
-                            #endif
                             self.items.insert(existing, at: 0)
                             self.items = self.sortItems(self.items)
                             self.saveHistory()
@@ -1358,7 +1258,6 @@ final class ClipboardStore: ObservableObject {
                 didAutoApplyRule = true
                 showToast(LearnedAutoRuleKind.stripRichTextFormatting.shortToast)
             }
-            #if !ICLIP_EDITION_FLOW
             if !didAutoApplyRule && !minimalModeEnabled && isLink && autoCleanTrackingURL,
                let cleaned = SemanticEngine.cleanTrackingURL(trimmed) {
                 text = cleaned
@@ -1367,7 +1266,6 @@ final class ClipboardStore: ObservableObject {
                 commitOutboundPasteboardGuard(for: cleaned, forceProtected: false, isPinnedSource: false)
                 didAutoApplyRule = true
             }
-            #endif
 
             let finalIsLink = isValidWebURL(text.trimmingCharacters(in: .whitespacesAndNewlines))
             let hash = Self.sha256(text)
@@ -1785,11 +1683,9 @@ final class ClipboardStore: ObservableObject {
            let urlString = draggingPasteboard.string(forType: .URL)?.trimmingCharacters(in: .whitespacesAndNewlines),
            !urlString.isEmpty {
             var finalLink = urlString
-            #if !ICLIP_EDITION_FLOW
             if !minimalModeEnabled && autoCleanTrackingURL, let cleaned = SemanticEngine.cleanTrackingURL(urlString) {
                 finalLink = cleaned
             }
-            #endif
             pasteboard.clearContents()
             pasteboard.setString(finalLink, forType: .string)
             if SensitiveCredentialVeil.classify(finalLink) == nil {
@@ -1817,11 +1713,9 @@ final class ClipboardStore: ObservableObject {
 
             var finalText = rawText
             let isLink = isValidWebURL(trimmed)
-            #if !ICLIP_EDITION_FLOW
             if !minimalModeEnabled && isLink && autoCleanTrackingURL, let cleaned = SemanticEngine.cleanTrackingURL(trimmed) {
                 finalText = cleaned
             }
-            #endif
 
             pasteboard.clearContents()
             pasteboard.setString(finalText, forType: .string)
@@ -2051,11 +1945,6 @@ final class ClipboardStore: ObservableObject {
                     var existing = self.items.remove(at: existingIndex)
                     existing.createdAt = Date()
                     existing.sourceAppName = sourceApp
-                    #if ICLIP_EDITION_FLOW
-                    if !self.minimalModeEnabled && self.isQueueModeActive && !self.pasteQueueIDs.contains(existing.id) {
-                        self.pasteQueueIDs.append(existing.id)
-                    }
-                    #endif
                     self.items.insert(existing, at: 0)
                     self.items = self.sortItems(self.items)
                     self.saveHistory()
@@ -2113,13 +2002,7 @@ final class ClipboardStore: ObservableObject {
             items.insert(newItem, at: 0)
         }
 
-        #if ICLIP_EDITION_FLOW
-        if !minimalModeEnabled && isQueueModeActive && !pasteQueueIDs.contains(finalID) {
-            pasteQueueIDs.append(finalID)
-        }
-        #else
         _ = finalID
-        #endif
 
         items = sortItems(items)
         trimHistoryIfNeeded()
@@ -2138,21 +2021,12 @@ final class ClipboardStore: ObservableObject {
             if !deadHashes.isEmpty {
                 AdaptiveIntelligenceEngine.shared.forgetContentHashes(deadHashes)
             }
-            let removedIDs = Set(removed.map(\.id))
             for item in removed {
                 pendingOTPExpirationTasks[item.id]?.cancel()
                 pendingOTPExpirationTasks.removeValue(forKey: item.id)
                 evictItemMemoryCaches(for: item)
                 deleteImageFileIfNeeded(for: item)
             }
-            #if ICLIP_EDITION_FLOW
-            if !pasteQueueIDs.isEmpty {
-                pasteQueueIDs.removeAll { removedIDs.contains($0) }
-            }
-            if !selectedMergeIDs.isEmpty {
-                selectedMergeIDs.removeAll { removedIDs.contains($0) }
-            }
-            #endif
             items = nextItems
             saveHistory()
         }
@@ -2182,7 +2056,6 @@ final class ClipboardStore: ObservableObject {
             return
         }
 
-        #if !ICLIP_EDITION_FLOW
         if !minimalModeEnabled && autoRedactOnPaste && !forceRawSecret {
             let snap = semanticSnapshot(for: item)
             if let secAction = snap.actions.first(where: { $0.isSecurityAction }) {
@@ -2190,7 +2063,6 @@ final class ClipboardStore: ObservableObject {
                 return
             }
         }
-        #endif
 
         // 终端粘贴劫持（Pastejacking / Trojan Bidi）实时主动防御：无论是否开启极简界面，目标窗口为终端且含高危隐藏控制符时一律强制剥离
         if !forceRawSecret,
@@ -2435,6 +2307,12 @@ final class ClipboardStore: ObservableObject {
     }
 
     /// 一键将指定记录的来源应用加入隐私忽略黑名单（支持 Bundle ID 精确匹配或运行中应用反查）
+    func setPinCategory(_ category: PinCategory?, for item: ClipItem) {
+        guard let idx = items.firstIndex(where: { $0.id == item.id }) else { return }
+        items[idx].pinCategory = category
+        saveHistory()
+    }
+
     @discardableResult
     func ignoreSourceApp(of item: ClipItem) -> Bool {
         if let bid = item.sourceAppBundleID, !bid.isEmpty {
@@ -2567,10 +2445,6 @@ final class ClipboardStore: ObservableObject {
             clearTransientDragImageBuffers()
         }
         evictItemMemoryCaches(for: removed)
-        #if ICLIP_EDITION_FLOW
-        pasteQueueIDs.removeAll { $0 == removed.id }
-        selectedMergeIDs.removeAll { $0 == removed.id }
-        #endif
         saveHistory(allowEmptyBackup: true)
 
         // 「所删即所净」：若当前系统剪贴板正好停留在该被删敏感/即焚内容上，同步清空系统剪贴板残留
@@ -2633,11 +2507,6 @@ final class ClipboardStore: ObservableObject {
         DragFileExportHelper.wipeAllExports()
         ReversiblePrivacyTwin.wipeAll()
         clearTransientDragImageBuffers()
-        #if ICLIP_EDITION_FLOW
-        let removedIDs = Set(toRemove.map(\.id))
-        pasteQueueIDs.removeAll { removedIDs.contains($0) }
-        selectedMergeIDs.removeAll { removedIDs.contains($0) }
-        #endif
         items = items.filter { $0.isPinned || $0.isPendingTodo }
         saveHistory(allowEmptyBackup: true)
         TactileFeedbackEngine.shared.perform(.deleteItem)
@@ -2867,7 +2736,6 @@ final class ClipboardStore: ObservableObject {
 
     // MARK: - 极客开发版专属能力（微秒级语义总线 + 密钥脱敏 + 动态模板）
 
-    #if !ICLIP_EDITION_FLOW
     func semanticSnapshot(for item: ClipItem) -> SemanticSnapshot {
         guard !minimalModeEnabled, (item.type == .text || item.type == .link) else { return .empty }
         let isExternalAI = SensitiveCredentialVeil.isExternalAIOrChatApp(activeTargetAppName)
@@ -3076,7 +2944,6 @@ final class ClipboardStore: ObservableObject {
     func addPinnedTemplate(_ content: String) {
         captureQuickNote(body: content, alias: nil, pin: true)
     }
-    #endif
 
     // MARK: - 双角色共享：一行闪念速记、动态模板求值、自定义串键入与备注别名
 
@@ -3417,11 +3284,7 @@ final class ClipboardStore: ObservableObject {
 
         items = sortItems(items)
         trimHistoryIfNeeded()
-        #if !ICLIP_EDITION_FLOW
         semanticCache.removeAllObjects()
-        #else
-        financeCache.removeAllObjects()
-        #endif
         saveHistory()
         TactileFeedbackEngine.shared.perform(.magicTransform)
         showToast("✓ 已拆解为 \(createdCount) 条待办（按 ⌥2 查看）")
@@ -3749,669 +3612,6 @@ final class ClipboardStore: ObservableObject {
 
     // MARK: - 心流办公版专属能力（顺序队列 + 离线实况识图 + 多选合并 + 场景分组）
 
-    #if ICLIP_EDITION_FLOW
-    func financeActions(for item: ClipItem) -> [FinanceQuickAction] {
-        guard !minimalModeEnabled, item.type == .text, let raw = item.text else { return [] }
-        let isExternalAI = SensitiveCredentialVeil.isExternalAIOrChatApp(activeTargetAppName)
-        let cacheKey = "\(item.contentHash)|\(item.sourceAppName ?? "")|\(isExternalAI ? "ext" : "std")" as NSString
-        if let cached = financeCache.object(forKey: cacheKey) {
-            if let restored = ReversiblePrivacyTwin.inspectRestorableTwins(in: raw) {
-                var live = cached.actions
-                live.insert(
-                    FinanceQuickAction(
-                        id: "restore-privacy-twin",
-                        title: "还原 \(restored.restoredCount) 处真值",
-                        symbolName: "arrow.uturn.backward.circle.fill",
-                        resultText: restored.restoredText,
-                        toastText: "已无损还原 \(restored.restoredCount) 处脱敏真值（本机隔离 · 45s自动擦除）"
-                    ),
-                    at: 0
-                )
-                return live
-            }
-            return cached.actions
-        }
-        var analyzed = MeetingAndEphemeralEngine.analyze(raw)
-        if analyzed.isEmpty {
-            analyzed = ComplianceCodeEngine.analyze(raw)
-        }
-        if analyzed.isEmpty {
-            analyzed = TableBridgeEngine.analyze(raw)
-        }
-        if analyzed.isEmpty {
-            analyzed = FinanceNumberEngine.analyze(raw)
-        }
-        if analyzed.isEmpty {
-            analyzed = DocumentTypographyEngine.analyze(raw)
-        }
-        if let shipping = SmartFieldExtractor.parseShippingContact(raw) {
-            analyzed.insert(
-                FinanceQuickAction(
-                    id: "contact-clean-card",
-                    title: "净提收件卡",
-                    symbolName: "shippingbox",
-                    resultText: shipping.cleanCardText,
-                    toastText: "已剥离闲聊噪音提纯标准收件信息"
-                ),
-                at: 0
-            )
-            analyzed.insert(
-                FinanceQuickAction(
-                    id: "contact-split-queue",
-                    title: "拆入连填(名→号→址)",
-                    symbolName: "list.number",
-                    resultText: shipping.cleanCardText,
-                    toastText: "已拆入顺序队列（连按 ⌃⌥V 依次填入姓名/手机/地址）"
-                ),
-                at: 0
-            )
-        } else if analyzed.count < 3 {
-            if let cleanPhone = SmartFieldExtractor.extractNormalizedSinglePhone(raw),
-               !MeetingAndEphemeralEngine.isOTPMessage(raw) {
-                analyzed.append(
-                    FinanceQuickAction(
-                        id: "extract-clean-phone",
-                        title: "纯手机号 \(cleanPhone)",
-                        symbolName: "phone.fill",
-                        resultText: cleanPhone,
-                        toastText: "已提取纯手机号 \(cleanPhone)"
-                    )
-                )
-            }
-            let uniqueEmails = SmartFieldExtractor.extractUniqueEmails(raw)
-            if uniqueEmails.count >= 2 {
-                analyzed.append(
-                    FinanceQuickAction(
-                        id: "extract-unique-emails",
-                        title: "提取 \(uniqueEmails.count) 个邮箱",
-                        symbolName: "envelope.fill",
-                        resultText: uniqueEmails.joined(separator: "\n"),
-                        toastText: "已去重净提 \(uniqueEmails.count) 个邮箱"
-                    )
-                )
-            }
-            let uniqueIPs = SmartFieldExtractor.extractUniqueIPv4s(raw)
-            if uniqueIPs.count >= 2 {
-                analyzed.append(
-                    FinanceQuickAction(
-                        id: "extract-unique-ips",
-                        title: "提取 \(uniqueIPs.count) 个 IP",
-                        symbolName: "network",
-                        resultText: uniqueIPs.joined(separator: "\n"),
-                        toastText: "已去重净提 \(uniqueIPs.count) 个 IP"
-                    )
-                )
-            }
-            let uniqueURLs = SmartFieldExtractor.extractUniqueCleanURLs(raw)
-            if uniqueURLs.count >= 2 {
-                analyzed.append(
-                    FinanceQuickAction(
-                        id: "extract-clean-urls",
-                        title: "提取 \(uniqueURLs.count) 条净链",
-                        symbolName: "link.badge.plus",
-                        resultText: uniqueURLs.joined(separator: "\n"),
-                        toastText: "已去重提取并净化 \(uniqueURLs.count) 条链接"
-                    )
-                )
-            }
-        }
-        let trimmedFlowRaw = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmedFlowRaw.lowercased().hasPrefix("curl ") || trimmedFlowRaw.lowercased().hasPrefix("curl\t"),
-           let sanitizedCurl = CurlAndJSONCSanitizer.sanitizeCurlForReproduction(raw) {
-            let isSec = sanitizedCurl.redactedSecrets > 0
-            analyzed.insert(
-                FinanceQuickAction(
-                    id: isSec ? "curl-safe-repro" : "curl-slim-clean",
-                    title: isSec ? "安全复现 cURL" : "精简纯净 cURL",
-                    symbolName: isSec ? "checkmark.shield" : "sparkles",
-                    resultText: sanitizedCurl.cleanedCurl,
-                    toastText: isSec
-                        ? "已脱敏 \(sanitizedCurl.redactedSecrets) 处凭据并剥除 \(sanitizedCurl.removedNoiseHeaders) 个浏览器噪音头"
-                        : "已剥除 \(sanitizedCurl.removedNoiseHeaders) 个浏览器指纹噪音头"
-                ),
-                at: 0
-            )
-        } else if raw.utf8.count <= 65_536,
-                  let strictJSON = CurlAndJSONCSanitizer.cleanJSONCToStrictJSON(raw) {
-            analyzed.insert(
-                FinanceQuickAction(
-                    id: "jsonc-clean-strict",
-                    title: "净化为标准 JSON",
-                    symbolName: "curlybraces.square",
-                    resultText: strictJSON,
-                    toastText: "已剥除注释与尾随逗号，转为标准合法 JSON"
-                ),
-                at: 0
-            )
-        }
-        if analyzed.count < 3, raw.utf8.count <= 32_768,
-           let decoded = UniversalEscapeDecoder.decodeIfApplicable(raw) {
-            analyzed.append(
-                FinanceQuickAction(
-                    id: "decode-escaped-text",
-                    title: decoded.chipTitle,
-                    symbolName: "character.bubble",
-                    resultText: decoded.decodedText,
-                    toastText: decoded.toastText
-                )
-            )
-        }
-        if analyzed.count < 3, raw.utf8.count <= 65_536,
-           let dedup = UniversalEscapeDecoder.deduplicateListLines(raw) {
-            analyzed.append(
-                FinanceQuickAction(
-                    id: "dedup-list-lines",
-                    title: "去重净列(剩\(dedup.remainingCount)行)",
-                    symbolName: "line.3.horizontal.decrease.circle",
-                    resultText: dedup.cleanedText,
-                    toastText: "已按原序剔除 \(dedup.removedCount) 行重复项，保留 \(dedup.remainingCount) 行"
-                )
-            )
-        }
-        if analyzed.count < 3, raw.utf8.count <= 32_768 {
-            if let wifi = UniversalEscapeDecoder.parseWiFiQRCode(raw) {
-                let lbl = wifi.ssid.isEmpty ? "提取 Wi-Fi 密码" : "Wi-Fi 密码 · \(wifi.ssid)"
-                analyzed.insert(
-                    FinanceQuickAction(
-                        id: "wifi-extract-password",
-                        title: lbl,
-                        symbolName: "wifi",
-                        resultText: wifi.password,
-                        toastText: "已提取纯 Wi-Fi 密码（本机隔离保护）"
-                    ),
-                    at: 0
-                )
-            }
-            let qjActs = UniversalEscapeDecoder.analyzeQueryJSONBridge(raw)
-                + UniversalEscapeDecoder.analyzeKeyValueBlockToJSON(raw)
-            for qa in qjActs where analyzed.count < 3 {
-                analyzed.append(
-                    FinanceQuickAction(
-                        id: qa.id,
-                        title: qa.title,
-                        symbolName: qa.symbolName,
-                        resultText: qa.resultText,
-                        toastText: qa.toastText
-                    )
-                )
-            }
-        }
-        if analyzed.count < 3, raw.utf8.count <= 65_536 {
-            let listActs = UniversalEscapeDecoder.analyzeListNumberingToggle(raw)
-                + UniversalEscapeDecoder.analyzeListBatchConversion(raw, includeSQLIn: false)
-            for la in listActs where analyzed.count < 3 {
-                analyzed.append(
-                    FinanceQuickAction(
-                        id: la.id,
-                        title: la.title,
-                        symbolName: la.symbolName,
-                        resultText: la.resultText,
-                        toastText: la.toastText
-                    )
-                )
-            }
-        }
-        if analyzed.count < 3, !raw.contains("\n"), raw.utf8.count <= 512 {
-            if let cronDesc = CronAndPathHelper.explainCronExpression(raw) {
-                analyzed.append(
-                    FinanceQuickAction(
-                        id: "cron-explain",
-                        title: "Cron：\(cronDesc.shortSummary)",
-                        symbolName: "calendar.badge.clock",
-                        resultText: cronDesc.annotatedComment,
-                        toastText: "已生成 Cron 定时说明：\(cronDesc.shortSummary)"
-                    )
-                )
-            } else if let pathAct = CronAndPathHelper.analyzePathAction(raw) {
-                analyzed.append(
-                    FinanceQuickAction(
-                        id: pathAct.id,
-                        title: pathAct.title,
-                        symbolName: "folder.badge.gearshape",
-                        resultText: pathAct.resultText,
-                        toastText: pathAct.toastText
-                    )
-                )
-            }
-        }
-        if !raw.contains("\n"),
-           let publicURL = URLTrackingCleaner.sanitizeURLForPublicShare(raw.trimmingCharacters(in: .whitespacesAndNewlines)) {
-            analyzed.insert(
-                FinanceQuickAction(
-                    id: "sanitize-auth-url",
-                    title: "去鉴权净链",
-                    symbolName: "link.badge.plus",
-                    resultText: publicURL,
-                    toastText: "已剥离 URL 鉴权令牌与追踪尾巴，可安全外发"
-                ),
-                at: 0
-            )
-        }
-        if item.detectedSensitiveKind != nil {
-            if let envExample = EnvTemplateSanitizer.generateExampleTemplate(from: raw) {
-                analyzed.insert(
-                    FinanceQuickAction(
-                        id: "env-to-example",
-                        title: "生成 .env.example",
-                        symbolName: "doc.badge.gearshape",
-                        resultText: envExample,
-                        toastText: "已生成安全的 .env.example 净模板"
-                    ),
-                    at: 0
-                )
-            }
-            let redacted = SensitiveCredentialVeil.redactForExternalSharing(raw)
-            if redacted != raw {
-                if let twin = ReversiblePrivacyTwin.maskWithTwins(raw) {
-                    analyzed.insert(
-                        FinanceQuickAction(
-                            id: "redact-reversible-twin",
-                            title: "AI 替身脱敏",
-                            symbolName: "person.2.badge.key.fill",
-                            resultText: twin.maskedText,
-                            toastText: "已生成 \(twin.replacedCount) 处可逆替身（复制 AI 回复可一键还原真值）"
-                        ),
-                        at: 0
-                    )
-                }
-                analyzed.insert(
-                    FinanceQuickAction(
-                        id: "redact-secrets",
-                        title: isExternalAI ? "防泄密脱敏" : "脱敏粘贴",
-                        symbolName: "lock.shield",
-                        resultText: redacted,
-                        toastText: "已自动掩码密钥与敏感隐私"
-                    ),
-                    at: 0
-                )
-            }
-        }
-        if let threat = item.detectedPoisonThreat {
-            let cleanText = ClipboardPoisonGuard.sanitize(raw)
-            if cleanText != raw && !cleanText.isEmpty {
-                let title: String = {
-                    switch threat {
-                    case .pastejackingOrBidi: return "净化隐藏控制符"
-                    case .zeroWidthGhost(let n): return "清除 \(n) 个零宽字符"
-                    }
-                }()
-                analyzed.insert(
-                    FinanceQuickAction(
-                        id: "sanitize-invisible-poison",
-                        title: title,
-                        symbolName: "exclamationmark.shield.fill",
-                        resultText: cleanText,
-                        toastText: "已清除隐藏控制符与零宽幽灵字符"
-                    ),
-                    at: 0
-                )
-            }
-        }
-        if !item.isTodo {
-            let checklist = TodoChecklistExtractor.extractChecklistItems(from: raw)
-            if checklist.count >= 2 {
-                analyzed.insert(
-                    FinanceQuickAction(
-                        id: "todo-split-checklist",
-                        title: "拆为 \(checklist.count) 条待办",
-                        symbolName: "checklist",
-                        resultText: raw,
-                        toastText: "已拆解为 \(checklist.count) 条待办"
-                    ),
-                    at: 0
-                )
-            }
-        }
-        var ranked = AdaptiveIntelligenceEngine.shared.rankActions(
-            analyzed,
-            idOf: \.id,
-            sourceApp: item.sourceAppName
-        )
-        if isExternalAI, let secIdx = ranked.firstIndex(where: { $0.id == "redact-secrets" }) {
-            let sec = ranked.remove(at: secIdx)
-            ranked.insert(sec, at: 0)
-        }
-        if let totp = TOTPAuthenticator.evaluate(uri: raw) {
-            let totpAction = FinanceQuickAction(
-                id: "totp-live-code",
-                title: "动态码 \(totp.formattedCode) · \(totp.remainingSeconds)s",
-                symbolName: "key.viewfinder",
-                resultText: totp.code,
-                toastText: "已算出 2FA 动态码 \(totp.formattedCode)"
-            )
-            if isExternalAI, !ranked.isEmpty, ranked[0].id == "redact-secrets" {
-                ranked.insert(totpAction, at: 1)
-            } else {
-                ranked.insert(totpAction, at: 0)
-            }
-            return ranked
-        }
-        financeCache.setObject(FinanceActionsBox(ranked), forKey: cacheKey)
-        if let restored = ReversiblePrivacyTwin.inspectRestorableTwins(in: raw) {
-            var live = ranked
-            live.insert(
-                FinanceQuickAction(
-                    id: "restore-privacy-twin",
-                    title: "还原 \(restored.restoredCount) 处真值",
-                    symbolName: "arrow.uturn.backward.circle.fill",
-                    resultText: restored.restoredText,
-                    toastText: "已无损还原 \(restored.restoredCount) 处脱敏真值（本机隔离 · 45s自动擦除）"
-                ),
-                at: 0
-            )
-            return live
-        }
-        return ranked
-    }
-
-    func applyFinanceAction(
-        _ action: FinanceQuickAction,
-        for item: ClipItem,
-        shouldAutoPaste: Bool = true,
-        onBeforePaste: (() -> Void)? = nil
-    ) {
-        AdaptiveIntelligenceEngine.shared.recordActionUsed(
-            actionID: action.id,
-            sourceApp: item.sourceAppName
-        )
-        if action.id == "todo-split-checklist" {
-            _ = splitChecklistIntoTodos(from: item)
-            return
-        }
-        if action.id == "contact-split-queue", let raw = item.text, let shipping = SmartFieldExtractor.parseShippingContact(raw) {
-            enqueueContactFieldsForSequentialPaste(shipping.queueFields)
-            return
-        }
-        if action.id == "totp-live-code", let raw = item.text, let fresh = TOTPAuthenticator.evaluate(uri: raw) {
-            pasteEphemeralSecret(
-                fresh.code,
-                toast: "已键入 2FA 动态码 \(fresh.formattedCode)（剩 \(fresh.remainingSeconds)s · 30s 后擦除）",
-                scrubDelaySeconds: 30.0,
-                shouldAutoPaste: shouldAutoPaste,
-                onBeforePaste: onBeforePaste
-            )
-            return
-        }
-        if action.id == "wifi-extract-password" {
-            pasteEphemeralSecret(
-                action.resultText,
-                toast: "已键入纯 Wi-Fi 密码（本机隔离 · 30s 后擦除）",
-                scrubDelaySeconds: 30.0,
-                shouldAutoPaste: shouldAutoPaste,
-                onBeforePaste: onBeforePaste
-            )
-            return
-        }
-        pasteboard.clearContents()
-        pasteboard.setString(action.resultText, forType: .string)
-        if action.id == "tbl-md-to-excel", let html = TableBridgeEngine.toHTMLTable(fromTSV: action.resultText) {
-            pasteboard.setString(action.resultText, forType: .tabularText)
-            pasteboard.setString(html, forType: .html)
-        }
-        let policy = Self.ephemeralScrubPolicy(forActionID: action.id)
-        commitOutboundPasteboardGuard(
-            for: action.resultText,
-            forceProtected: item.isBurnAfterPaste || (policy?.forceProtected ?? false),
-            isPinnedSource: item.isPinned && policy == nil,
-            scrubDelay: item.isBurnAfterPaste ? 5.0 : (policy?.scrubSeconds ?? 45.0)
-        )
-
-        if shouldAutoPaste {
-            recordTargetAppPasteIfAppropriate(for: item)
-        }
-        if let idx = items.firstIndex(where: { $0.id == item.id }) {
-            items[idx].createdAt = Date()
-            items = sortItems(items)
-            saveHistory()
-        }
-
-        TactileFeedbackEngine.shared.perform(.magicTransform)
-        onBeforePaste?()
-        scheduleBurnAfterPasteIfNeeded(for: item, delaySeconds: 5.0)
-        scheduleOTPAutoExpireIfNeeded(for: item)
-        refreshAccessibilityStatus()
-        if shouldAutoPaste && autoPasteEnabled && isAccessibilityGranted {
-            Self.schedulePasteWhenTargetReady()
-            showToast(action.toastText)
-        } else {
-            showToast("\(action.toastText)（已复制）")
-        }
-    }
-
-    func setPinCategory(_ category: PinCategory?, for item: ClipItem) {
-        guard let idx = items.firstIndex(where: { $0.id == item.id }) else { return }
-        items[idx].isPinned = true
-        items[idx].pinCategory = category
-        items = sortItems(items)
-        saveHistory()
-        if let category {
-            showToast("已归入「\(category.title)」收藏槽")
-        } else {
-            showToast("已设为普通收藏")
-        }
-    }
-
-    func queuePosition(for item: ClipItem) -> Int? {
-        guard let idx = pasteQueueIDs.firstIndex(of: item.id) else { return nil }
-        return idx + 1
-    }
-
-    var nextQueuedItem: ClipItem? {
-        for id in pasteQueueIDs {
-            if let found = items.first(where: { $0.id == id }) {
-                return found
-            }
-        }
-        return nil
-    }
-
-    func toggleQueueMembership(_ item: ClipItem) {
-        if let idx = pasteQueueIDs.firstIndex(of: item.id) {
-            pasteQueueIDs.remove(at: idx)
-            TactileFeedbackEngine.shared.perform(.queueToggle(added: false))
-            showToast("已移出顺序队列")
-        } else {
-            pasteQueueIDs.append(item.id)
-            TactileFeedbackEngine.shared.perform(.queueToggle(added: true))
-            showToast("已加入顺序队列 #\(pasteQueueIDs.count)")
-        }
-    }
-
-    func clearPasteQueue() {
-        pasteQueueIDs.removeAll()
-        showToast("已清空顺序粘贴队列")
-    }
-
-    /// 将收件名片拆出的 `[姓名, 11位纯手机号, 详细地址]` 按序注入 FIFO 连填队列，支持连按 ⌃⌥V 依次填入表单
-    func enqueueContactFieldsForSequentialPaste(_ fields: [String]) {
-        let valid = fields.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
-        guard !valid.isEmpty else { return }
-        pasteQueueIDs.removeAll()
-        var queuedIDs: [UUID] = []
-        let baseDate = Date()
-        for (offset, fieldText) in valid.enumerated() {
-            let hash = "text:\(Self.sha256(fieldText))"
-            if let existing = items.first(where: { $0.contentHash == hash }) {
-                queuedIDs.append(existing.id)
-            } else {
-                let entry = ClipItem(
-                    type: .text,
-                    text: fieldText,
-                    contentHash: hash,
-                    sourceAppName: "收件连填",
-                    createdAt: baseDate.addingTimeInterval(Double(valid.count - offset) * 0.001)
-                )
-                items.insert(entry, at: 0)
-                queuedIDs.append(entry.id)
-            }
-        }
-        items = sortItems(items)
-        pasteQueueIDs = queuedIDs
-        saveHistory()
-        TactileFeedbackEngine.shared.perform(.queueToggle(added: true))
-        showToast("已拆入连填队列（共 \(queuedIDs.count) 项 · 连按 ⌃⌥V 依次填入表单）", duration: 3.4)
-    }
-
-    func dequeueAndPasteNext(showGlobalHUD: Bool = false, onBeforePaste: (() -> Void)? = nil) {
-        while let firstID = pasteQueueIDs.first {
-            pasteQueueIDs.removeFirst()
-            if let target = items.first(where: { $0.id == firstID }) {
-                let remaining = pasteQueueIDs.count
-                let nextVeiled = nextQueuedItem?.displayTitle(minimalMode: minimalModeEnabled, veilActive: true)
-
-                if !minimalModeEnabled,
-                   let raw = target.text,
-                   case .pastejackingOrBidi = target.detectedPoisonThreat,
-                   ClipboardPoisonGuard.isTerminalApp(activeTargetAppName) {
-                    let safeCmd = ClipboardPoisonGuard.sanitize(raw)
-                    if safeCmd != raw && !safeCmd.isEmpty {
-                        pasteboard.clearContents()
-                        pasteboard.setString(safeCmd, forType: .string)
-                        commitOutboundPasteboardGuard(
-                            for: safeCmd,
-                            forceProtected: target.detectedSensitiveKind != nil || target.isBurnAfterPaste,
-                            isPinnedSource: target.isPinned
-                        )
-                    } else {
-                        writeToPasteboard(target, plainTextOnly: false)
-                    }
-                } else {
-                    writeToPasteboard(target, plainTextOnly: false)
-                }
-
-                recordTargetAppPasteIfAppropriate(for: target)
-                onBeforePaste?()
-                scheduleOTPAutoExpireIfNeeded(for: target)
-                scheduleBurnAfterPasteIfNeeded(for: target)
-                refreshAccessibilityStatus()
-                let sendTabAfter = queueAutoTabEnabled
-                if autoPasteEnabled && isAccessibilityGranted {
-                    Self.schedulePasteWhenTargetReady(autoTabAfter: sendTabAfter)
-                }
-
-                if showGlobalHUD {
-                    let veiledTarget = target.displayTitle(minimalMode: minimalModeEnabled, veilActive: true)
-                    let shortTitle = veiledTarget.count > 18
-                        ? String(veiledTarget.prefix(18)) + "…"
-                        : veiledTarget
-                    let sub: String
-                    if let nextVeiled {
-                        let cleanNext = nextVeiled.count > 16 ? String(nextVeiled.prefix(16)) + "…" : nextVeiled
-                        sub = "下一项：\(cleanNext)（剩 \(remaining) 项）"
-                    } else {
-                        sub = "队列已全部键入完毕"
-                    }
-                    QueueHUDController.shared.show(
-                        symbol: "checkmark.circle.fill",
-                        title: "已键入：\(shortTitle)",
-                        subtitle: sub,
-                        tint: .green
-                    )
-                } else {
-                    showToast(remaining > 0 ? "已键入队首 · 剩余 \(remaining) 项" : "顺序队列已全部键入完毕")
-                }
-                return
-            }
-        }
-        if showGlobalHUD {
-            QueueHUDController.shared.show(
-                symbol: "list.number",
-                title: "顺序粘贴队列为空",
-                subtitle: "打开 iClip 开启队列后连续 ⌘C 即可按序采集",
-                tint: .orange
-            )
-        } else {
-            showToast("顺序队列当前为空")
-        }
-    }
-
-    func mergeSelectionRank(for item: ClipItem) -> Int? {
-        guard let idx = selectedMergeIDs.firstIndex(of: item.id) else { return nil }
-        return idx + 1
-    }
-
-    func toggleMergeSelection(_ item: ClipItem) {
-        if let idx = selectedMergeIDs.firstIndex(of: item.id) {
-            selectedMergeIDs.remove(at: idx)
-            TactileFeedbackEngine.shared.perform(.queueToggle(added: false))
-        } else {
-            selectedMergeIDs.append(item.id)
-            TactileFeedbackEngine.shared.perform(.queueToggle(added: true))
-        }
-    }
-
-    func ensureMergeSelected(_ item: ClipItem) {
-        if !selectedMergeIDs.contains(item.id) {
-            selectedMergeIDs.append(item.id)
-        }
-    }
-
-    func clearMergeSelection() {
-        selectedMergeIDs.removeAll()
-    }
-
-    func mergeAndPasteSelected(
-        style: MergeJoinStyle = .paragraphs,
-        shouldAutoPaste: Bool = true,
-        onBeforePaste: (() -> Void)? = nil
-    ) {
-        let sourceItems = selectedMergeIDs.compactMap { id in items.first(where: { $0.id == id }) }
-        let anySourceSensitive = sourceItems.contains { $0.detectedSensitiveKind != nil || $0.isBurnAfterPaste }
-        let segments: [String] = sourceItems.compactMap { item in
-            switch item.type {
-            case .text, .link:
-                let t = (item.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                return t.isEmpty ? nil : t
-            case .image:
-                let ocr = (item.ocrText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                return ocr.isEmpty ? nil : ocr
-            case .file:
-                let paths = (item.filePaths ?? []).joined(separator: "\n")
-                return paths.isEmpty ? nil : paths
-            }
-        }
-
-        guard !segments.isEmpty else {
-            showToast("所选记录不含可合并文本")
-            return
-        }
-
-        let merged: String
-        switch style {
-        case .paragraphs:
-            merged = segments.joined(separator: "\n\n")
-        case .numberedList:
-            merged = segments.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n")
-        case .singleLine:
-            let flat = segments.map { $0.replacingOccurrences(of: "\n", with: " ") }
-            merged = flat.joined(separator: "；")
-        }
-
-        let count = segments.count
-        let burnSources = sourceItems.filter(\.isBurnAfterPaste)
-        selectedMergeIDs.removeAll()
-        pasteboard.clearContents()
-        pasteboard.setString(merged, forType: .string)
-        commitOutboundPasteboardGuard(
-            for: merged,
-            forceProtected: anySourceSensitive,
-            isPinnedSource: false,
-            scrubDelay: burnSources.isEmpty ? 45.0 : 5.0
-        )
-        for burnItem in burnSources {
-            scheduleBurnAfterPasteIfNeeded(for: burnItem, delaySeconds: 5.0)
-        }
-
-        onBeforePaste?()
-        refreshAccessibilityStatus()
-        if shouldAutoPaste && autoPasteEnabled && isAccessibilityGranted {
-            Self.schedulePasteWhenTargetReady()
-            showToast("已按「\(style.title)」合并 \(count) 条并键入")
-        } else {
-            showToast("已合并 \(count) 条到剪贴板")
-        }
-    }
-    #endif
 
     // MARK: - 双角色共享：离线二维码直解与实况文本识别（Apple Vision）
 
@@ -4970,13 +4170,8 @@ final class ClipboardStore: ObservableObject {
         let appPart = item.sourceAppName ?? ""
         let stdKey = "\(item.contentHash)|\(appPart)|std" as NSString
         let extKey = "\(item.contentHash)|\(appPart)|ext" as NSString
-        #if !ICLIP_EDITION_FLOW
         semanticCache.removeObject(forKey: stdKey)
         semanticCache.removeObject(forKey: extKey)
-        #else
-        financeCache.removeObject(forKey: stdKey)
-        financeCache.removeObject(forKey: extKey)
-        #endif
     }
 
     private func deleteImageFileIfNeeded(for item: ClipItem) {

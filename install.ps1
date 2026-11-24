@@ -1,20 +1,10 @@
-﻿# iClip for Windows 10/11 — 免证书零 SmartScreen 拦截一键丝滑安装脚本
-# 用法（PowerShell）：
-#   极客开发版（默认）：irm https://app.webfooo.com/iClip/install.ps1 | iex
-#   心流办公版（Flow）：$env:EDITION='flow'; irm https://app.webfooo.com/iClip/install.ps1 | iex
+# iClip for Windows 10/11 — 免 SmartScreen 安全拦截一键丝滑安装脚本（One iClip 唯一主线）
+# 用法（PowerShell）：irm https://app.webfooo.com/iClip/install.ps1 | iex
 
 $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$Edition = if ($env:EDITION -and $env:EDITION.ToLower() -eq "flow") { "flow" } else { "dev" }
-if ($Edition -eq "flow") {
-    $ZipName = "iClip-Flow-Windows-x64.zip"
-    $EditionLabel = "商务与心流办公版 (Flow)"
-} else {
-    $ZipName = "iClip-Dev-Windows-x64.zip"
-    $EditionLabel = "极客开发与 AI 版 (Dev)"
-}
-
+$ZipName     = "iClip-Windows-x64.zip"
 $PrimaryUrl  = "https://app.webfooo.com/iClip/downloads/$ZipName"
 $FallbackUrl = "https://github.com/fanaruto/iClip/releases/latest/download/$ZipName"
 
@@ -24,17 +14,17 @@ New-Item -ItemType Directory -Force -Path $StageDir | Out-Null
 
 try {
     Write-Host ""
-    Write-Host "==> 正在安装 iClip · $EditionLabel" -ForegroundColor Cyan
-    Write-Host "    原生单文件架构，自动解除安全流标记，零 SmartScreen 蓝屏弹窗..." -ForegroundColor DarkGray
+    Write-Host "==> 正在安装 iClip for Windows" -ForegroundColor Cyan
+    Write-Host "    自动解除安全流标记，零 SmartScreen 蓝屏拦截..." -ForegroundColor DarkGray
 
     $ZipPath = Join-Path $StageDir $ZipName
     try {
         Invoke-WebRequest -Uri $PrimaryUrl -OutFile $ZipPath -UseBasicParsing -TimeoutSec 20
-        Write-Host "  [OK] 已从国内高速源下载安装包" -ForegroundColor Green
+        Write-Host "  [OK] 已从国内高速源获取安装包" -ForegroundColor Green
     } catch {
-        Write-Host "  [!] 正在切换至 GitHub Releases 备用源下载..." -ForegroundColor Yellow
+        Write-Host "  [!] 正在切换至备用源获取安装包..." -ForegroundColor Yellow
         Invoke-WebRequest -Uri $FallbackUrl -OutFile $ZipPath -UseBasicParsing -TimeoutSec 45
-        Write-Host "  [OK] 已从 GitHub Releases 下载安装包" -ForegroundColor Green
+        Write-Host "  [OK] 安装包下载完成" -ForegroundColor Green
     }
 
     $ZipInfo = Get-Item -LiteralPath $ZipPath -ErrorAction Stop
@@ -72,14 +62,13 @@ try {
     Copy-Item -LiteralPath $ExeSrc -Destination $TargetExe -Force
     Unblock-File -LiteralPath $TargetExe -ErrorAction SilentlyContinue
 
-    # 创建开始菜单与桌面快捷方式（自动读取内置高清图标）
     $WshShell = New-Object -ComObject WScript.Shell
     $StartMenuLnk = Join-Path ([Environment]::GetFolderPath("Programs")) "iClip.lnk"
     $Shortcut = $WshShell.CreateShortcut($StartMenuLnk)
     $Shortcut.TargetPath = $TargetExe
     $Shortcut.WorkingDirectory = $InstallDir
     $Shortcut.IconLocation = "$TargetExe,0"
-    $Shortcut.Description = "iClip 轻量纯原生剪贴板 ($EditionLabel)"
+    $Shortcut.Description = "iClip 原生剪贴板"
     $Shortcut.Save()
 
     $DesktopLnk = Join-Path ([Environment]::GetFolderPath("Desktop")) "iClip.lnk"
@@ -87,7 +76,7 @@ try {
     $DesktopShortcut.TargetPath = $TargetExe
     $DesktopShortcut.WorkingDirectory = $InstallDir
     $DesktopShortcut.IconLocation = "$TargetExe,0"
-    $DesktopShortcut.Description = "iClip 轻量纯原生剪贴板 ($EditionLabel)"
+    $DesktopShortcut.Description = "iClip 原生剪贴板"
     $DesktopShortcut.Save()
 
     Start-Process -FilePath $TargetExe

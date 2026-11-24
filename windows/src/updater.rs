@@ -89,12 +89,14 @@ pub fn is_version_newer(lhs: &str, rhs: &str) -> bool {
     false
 }
 
-/// 当前编译角色期望匹配的 Windows 发行包名称
+/// 当前版本期望匹配的 Windows 发行包名称（One iClip 默认优先统一包名，兼容历史包名）
 pub fn expected_windows_asset_name(edition_key: &str) -> &'static str {
     if edition_key.eq_ignore_ascii_case("flow") {
         "iClip-Flow-Windows-x64.zip"
-    } else {
+    } else if edition_key.eq_ignore_ascii_case("dev") {
         "iClip-Dev-Windows-x64.zip"
+    } else {
+        "iClip-Windows-x64.zip"
     }
 }
 
@@ -233,6 +235,11 @@ pub fn parse_github_release_json(
             dto.assets
                 .iter()
                 .find(|a| a.name.eq_ignore_ascii_case("iClip-Windows-x64.zip"))
+        })
+        .or_else(|| {
+            dto.assets
+                .iter()
+                .find(|a| a.name.eq_ignore_ascii_case("iClip-Dev-Windows-x64.zip"))
         })
         .ok_or_else(|| format!("最新发行版 v{version} 尚未包含 Windows 安装包（{preferred}）"))?;
 

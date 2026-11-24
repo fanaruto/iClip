@@ -1,5 +1,4 @@
 use crate::model::{safe_utf8_prefix, QuickAction};
-#[cfg(feature = "dev")]
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use image::{
@@ -9,7 +8,7 @@ use regex_lite::Regex;
 use serde_json::Value;
 
 // ============================================================================
-// 统一快捷动作调度器（区分 Dev 极客开发版 与 Flow 心流办公版）
+// 统一快捷动作调度器（One iClip 单一主线：融合全场景高价值自感知动作）
 // ============================================================================
 
 pub fn analyze_text_actions(raw: &str, minimal_mode: bool) -> Vec<QuickAction> {
@@ -167,7 +166,6 @@ pub fn analyze_text_actions(raw: &str, minimal_mode: bool) -> Vec<QuickAction> {
                 toast_text: "已生成安全的 .env.example 净模板".to_string(),
             });
         }
-        #[cfg(feature = "dev")]
         {
             let deep = redact_pii_and_private_ip(&redacted);
             if deep != redacted {
@@ -339,7 +337,6 @@ pub fn analyze_text_actions(raw: &str, minimal_mode: bool) -> Vec<QuickAction> {
         }
     }
 
-    #[cfg(feature = "dev")]
     {
         if trimmed.len() >= 11 && !actions.iter().any(|a| a.id.starts_with("redact-")) {
             let pii = redact_pii_and_private_ip(raw);
@@ -573,7 +570,7 @@ pub fn analyze_text_actions(raw: &str, minimal_mode: bool) -> Vec<QuickAction> {
     }
 
     if actions.len() < 3 && raw.len() <= 65_536 {
-        let include_sql = cfg!(feature = "dev");
+        let include_sql = true;
         let mut list_acts = crate::security::analyze_list_numbering_toggle(raw);
         list_acts.extend(crate::security::analyze_list_batch_conversion(
             raw,
@@ -598,9 +595,8 @@ pub fn analyze_text_actions(raw: &str, minimal_mode: bool) -> Vec<QuickAction> {
         }
     }
 
-    #[cfg(feature = "dev")]
     if actions.is_empty() {
-        // Dev 5: Base64 解码（含 URL-Safe 兼容与内联防 Bidi/终端投毒护盾）
+        // Base64 解码（含 URL-Safe 兼容与内联防 Bidi/终端投毒护盾）
         if (12..=4096).contains(&trimmed.len())
             && !trimmed.contains(' ')
             && !trimmed.contains('\n')

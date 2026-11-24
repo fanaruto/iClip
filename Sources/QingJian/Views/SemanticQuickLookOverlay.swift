@@ -410,24 +410,6 @@ enum QuickLookTabBuilder {
             )
         ]
 
-        #if ICLIP_EDITION_FLOW
-        if !store.minimalModeEnabled && (item.type == .text || item.type == .link) {
-            let ranked = store.financeActions(for: item).filter {
-                $0.id != "todo-split-checklist" && $0.id != "contact-split-queue"
-            }
-            for action in ranked {
-                list.append(
-                    QuickLookTabItem(
-                        id: action.id,
-                        title: action.title,
-                        payload: .text(action.resultText),
-                        toast: action.toastText,
-                        supportsSaveBack: canSaveBack
-                    )
-                )
-            }
-        }
-        #else
         if !store.minimalModeEnabled {
             for action in store.semanticSnapshot(for: item).actions {
                 list.append(
@@ -441,7 +423,6 @@ enum QuickLookTabBuilder {
                 )
             }
         }
-        #endif
 
         // 历史文本/链接条目自动挂载「与最新剪贴 #1 行级差异比对」标签页（严格隔离粘贴即焚机密与 ICLPMSG1 密文信封防旁路泄露）
         if !store.minimalModeEnabled,

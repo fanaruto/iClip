@@ -7351,17 +7351,9 @@ fn layout_and_draw_settings_view(
         action: HitAction::ToggleSettingsView,
     });
 
-    let ed_badge = if ClipboardStore::edition_key() == "flow" {
-        "办公版"
-    } else {
-        "极客版"
-    };
-    let head_txt = "iClip 设置";
-    let head_w = estimate_text_px(head_txt, sf(15.0)) + s(6);
-    let ed_w = estimate_text_px(ed_badge, sf(11.0)) + s(14);
-    let ed_h = s(19);
-    let grp_w = head_w + s(6) + ed_w;
-    let grp_x = ((w - grp_w) / 2).max(pad + back_w + s(8));
+    let head_txt = "iClip 偏好设置";
+    let head_w = estimate_text_px(head_txt, sf(15.0)) + s(8);
+    let grp_x = ((w - head_w) / 2).max(pad + back_w + s(8));
     texts.push(TextDrawCmd {
         text: head_txt.to_string(),
         rect: RECT {
@@ -7372,30 +7364,6 @@ fn layout_and_draw_settings_view(
         },
         color: palette.text_primary,
         font_kind: FontKind::Headline,
-        flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-    });
-    let ed_x = grp_x + head_w + s(6);
-    let ed_y = top_y + (back_h - ed_h) / 2;
-    canvas.fill_round_rect(
-        ed_x,
-        ed_y,
-        ed_w,
-        ed_h,
-        sf(9.5),
-        palette
-            .cobalt
-            .with_alpha(if st.is_dark_mode { 42 } else { 22 }),
-    );
-    texts.push(TextDrawCmd {
-        text: ed_badge.to_string(),
-        rect: RECT {
-            left: ed_x,
-            top: ed_y,
-            right: ed_x + ed_w,
-            bottom: ed_y + ed_h,
-        },
-        color: palette.cobalt_text,
-        font_kind: FontKind::BadgeBold,
         flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
     });
 
@@ -11062,10 +11030,7 @@ unsafe fn install_or_update_tray_icon(hwnd: HWND, is_modify: bool) {
     nid.uCallbackMessage = WM_TRAYICON;
     let hinst = GetModuleHandleW(null());
     nid.hIcon = load_embedded_app_icon(hinst, SM_CXSMICON);
-    let tip = to_wide(&format!(
-        "iClip · {} ({hk_disp} 呼出)",
-        ClipboardStore::edition_title()
-    ));
+    let tip = to_wide(&format!("iClip ({hk_disp} 光标旁呼出)"));
     let copy_len = tip.len().min(nid.szTip.len());
     nid.szTip[..copy_len].copy_from_slice(&tip[..copy_len]);
     let _ = Shell_NotifyIconW(if is_modify { NIM_MODIFY } else { NIM_ADD }, &nid);
@@ -11106,12 +11071,7 @@ unsafe fn show_tray_context_menu(hwnd: HWND) {
         hmenu,
         MF_STRING | MF_GRAYED,
         0,
-        to_wide(&format!(
-            "iClip v{} · {}",
-            env!("CARGO_PKG_VERSION"),
-            ClipboardStore::edition_title()
-        ))
-        .as_ptr(),
+        to_wide(&format!("iClip v{}", env!("CARGO_PKG_VERSION"))).as_ptr(),
     );
     AppendMenuW(
         hmenu,

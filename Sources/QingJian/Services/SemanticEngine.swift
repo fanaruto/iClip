@@ -1,4 +1,3 @@
-#if !ICLIP_EDITION_FLOW
 import Foundation
 import AppKit
 
@@ -1461,4 +1460,3 @@ enum SemanticEngine {
         return String(format: "1MB 超长日志嗅探平均耗时: %.3f ms (目标 < 0.300 ms) | 常规 JSON/URL 平均耗时: %.4f ms", avg1MBMs, avgSmallMs)
     }
 }
-#endif

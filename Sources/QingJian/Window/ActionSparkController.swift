@@ -408,11 +408,9 @@ final class ActionSparkController {
 
         if promoteToAuto, let rule = candidate.promotableRule {
             AdaptiveIntelligenceEngine.shared.setAutoRule(rule, enabled: true)
-            #if !ICLIP_EDITION_FLOW
             if rule == .cleanTrackingURL {
                 store.autoCleanTrackingURL = true
             }
-            #endif
         }
 
         store.executeSparkCandidate(candidate)

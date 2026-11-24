@@ -376,27 +376,8 @@ enum SnippetTemplateEngine {
                 boundedCtx = contextRaw
             }
             let computed: String
-            #if !ICLIP_EDITION_FLOW
             let step1 = SemanticEngine.redactSecrets(in: boundedCtx)
             computed = SemanticEngine.redactPIIAndPrivateIP(in: SensitiveCredentialVeil.redactForExternalSharing(step1))
-            #else
-            var veiled = SensitiveCredentialVeil.redactForExternalSharing(boundedCtx)
-            veiled = fallbackPhoneRegex.stringByReplacingMatches(
-                in: veiled,
-                range: NSRange(veiled.startIndex..<veiled.endIndex, in: veiled),
-                withTemplate: "$1****$2"
-            )
-            veiled = fallbackEmailRegex.stringByReplacingMatches(
-                in: veiled,
-                range: NSRange(veiled.startIndex..<veiled.endIndex, in: veiled),
-                withTemplate: "$1***$2"
-            )
-            computed = fallbackPrivateIPRegex.stringByReplacingMatches(
-                in: veiled,
-                range: NSRange(veiled.startIndex..<veiled.endIndex, in: veiled),
-                withTemplate: "[INTERNAL_IP]"
-            )
-            #endif
             cachedRedacted = computed
             return computed
         }

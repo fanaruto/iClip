@@ -366,19 +366,11 @@ impl ClipboardStore {
     }
 
     pub fn edition_key() -> &'static str {
-        if cfg!(feature = "flow") {
-            "flow"
-        } else {
-            "dev"
-        }
+        "unified"
     }
 
     pub fn edition_title() -> &'static str {
-        if cfg!(feature = "flow") {
-            "商务与心流办公版"
-        } else {
-            "极客开发与 AI 版"
-        }
+        "原生剪贴板"
     }
 
     pub fn save_config(&self) {

@@ -3,12 +3,10 @@ import AppKit
 @main
 enum iClipLauncher {
     static func main() {
-        #if !ICLIP_EDITION_FLOW
         if CommandLine.arguments.contains("--bench-semantic") {
             print(SemanticEngine.runMicroBenchmark())
             exit(0)
         }
-        #endif
 
         MainActor.assumeIsolated {
             let app = NSApplication.shared

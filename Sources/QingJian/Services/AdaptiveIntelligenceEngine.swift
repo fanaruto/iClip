@@ -844,7 +844,6 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
                 )
             )
         }
-        #if !ICLIP_EDITION_FLOW
         let snap = SemanticEngine.analyze(item)
         let sparkEligible = snap.actions.filter {
             $0.id != "query-to-json"
@@ -902,84 +901,6 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
             )
         }
         return nil
-        #else
-        if item.type == .link, let raw = item.text?.trimmingCharacters(in: .whitespacesAndNewlines),
-           let cleaned = URLTrackingCleaner.cleanTrackingURL(raw), cleaned != raw {
-            let cat = "url_tracking"
-            guard !isCategoryCoolingDown(cat) else { return nil }
-            let promo = promotableRuleIfEligible(forActionID: "clean-url")
-            return AdaptiveSparkCandidate(
-                actionID: "clean-url",
-                categoryKey: cat,
-                sourceApp: item.sourceAppName,
-                symbolName: "sparkles",
-                shortTitle: "剥离追踪参数",
-                badgeHint: isHabitPreferred(actionID: "clean-url", sourceApp: item.sourceAppName) ? "习惯首选" : nil,
-                promotableRule: promo,
-                payload: .replaceClipboardText(text: cleaned, htmlTable: nil, toast: "已净化追踪链接")
-            )
-        }
-
-        guard let raw = item.text else { return nil }
-        if !item.isTodo {
-            let checklist = TodoChecklistExtractor.extractChecklistItems(from: raw)
-            if checklist.count >= 2, !isCategoryCoolingDown("todo_capture") {
-                return AdaptiveSparkCandidate(
-                    actionID: "todo-split-checklist",
-                    categoryKey: "todo_capture",
-                    sourceApp: item.sourceAppName,
-                    symbolName: "checklist",
-                    shortTitle: "拆为 \(checklist.count) 条待办",
-                    badgeHint: nil,
-                    promotableRule: nil,
-                    payload: .splitChecklistIntoTodos(itemID: item.id)
-                )
-            }
-        }
-
-        var actions = MeetingAndEphemeralEngine.analyze(raw)
-        if actions.isEmpty { actions = ComplianceCodeEngine.analyze(raw) }
-        if actions.isEmpty { actions = TableBridgeEngine.analyze(raw) }
-        if actions.isEmpty { actions = FinanceNumberEngine.analyze(raw) }
-        if actions.isEmpty { actions = DocumentTypographyEngine.analyze(raw) }
-
-        let ranked = rankActions(actions, idOf: \.id, sourceApp: item.sourceAppName)
-        if let top = ranked.first {
-            let cat = Self.categoryKey(forActionID: top.id)
-            guard !isCategoryCoolingDown(cat) else { return nil }
-
-            let html = (top.id == "tbl-md-to-excel") ? TableBridgeEngine.toHTMLTable(fromTSV: top.resultText) : nil
-            let promo = promotableRuleIfEligible(forActionID: top.id)
-            let preferred = isHabitPreferred(actionID: top.id, sourceApp: item.sourceAppName)
-
-            return AdaptiveSparkCandidate(
-                actionID: top.id,
-                categoryKey: cat,
-                sourceApp: item.sourceAppName,
-                symbolName: top.symbolName,
-                shortTitle: top.title,
-                badgeHint: preferred ? "习惯首选" : nil,
-                promotableRule: promo,
-                payload: .replaceClipboardText(text: top.resultText, htmlTable: html, toast: top.toastText)
-            )
-        }
-
-        if item.type == .text, !item.isTodo,
-           TodoChecklistExtractor.hasActionableSingleTodoIntent(raw),
-           !isCategoryCoolingDown("todo_capture") {
-            return AdaptiveSparkCandidate(
-                actionID: "todo-mark-item",
-                categoryKey: "todo_capture",
-                sourceApp: item.sourceAppName,
-                symbolName: "checkmark.circle",
-                shortTitle: "设为待办",
-                badgeHint: nil,
-                promotableRule: nil,
-                payload: .markAsTodo(itemID: item.id)
-            )
-        }
-        return nil
-        #endif
     }
 
     private func isCategoryCoolingDown(_ categoryKey: String) -> Bool {
@@ -1093,9 +1014,7 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
         if Self.containsAny(lower, urlKeys) {
             let neg = Self.isClauseNegated(matching: urlKeys, in: clauses)
             setAutoRule(.cleanTrackingURL, enabled: !neg)
-            #if !ICLIP_EDITION_FLOW
             store.autoCleanTrackingURL = !neg
-            #endif
             adoptedEffects.append(!neg ? "已开启「复制链接自动剥离追踪尾巴」" : "已关闭自动净链")
         }
 
@@ -1190,11 +1109,9 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
         let redactKeys = ["脱敏", "打码", "隐藏密钥", "掩码"]
         if Self.containsAny(lower, redactKeys) && !Self.isClauseNegated(matching: redactKeys, in: clauses) {
             boostPreferredAction("redact-secrets", competingIDs: ["redact-deep"])
-            #if !ICLIP_EDITION_FLOW
             if Self.containsAny(lower, ["自动", "默认"]) {
                 store.autoRedactOnPaste = true
             }
-            #endif
             adoptedEffects.append("已强化敏感密钥脱敏守护优先级")
         }
 

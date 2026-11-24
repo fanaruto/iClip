@@ -31,10 +31,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        // 启动后按用户绑定的目标角色检查对应通道的 GitHub Releases 更新
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-            let target = ClipboardStore.shared.targetRoleEdition
-            UpdateManager.shared.checkForUpdates(targetEdition: target, silent: target == AppRoleEdition.installed)
+            UpdateManager.shared.checkForUpdates(silent: true)
         }
     }
 
@@ -47,11 +45,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - 菜单栏图标
 
     private func setupStatusItem() {
-        #if ICLIP_EDITION_FLOW
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        #else
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        #endif
         guard let button = statusItem.button else { return }
 
         let logoImage = BrandLogo.menuBarTemplateImage(pointSize: 17)
@@ -64,23 +58,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         button.target = self
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
 
-        #if ICLIP_EDITION_FLOW
-        Publishers.CombineLatest(ClipboardStore.shared.$pasteQueueIDs, ClipboardStore.shared.$minimalModeEnabled)
-            .receive(on: RunLoop.main)
-            .sink { [weak self] queueIDs, minimal in
-                guard let btn = self?.statusItem.button else { return }
-                btn.title = (minimal || queueIDs.isEmpty) ? "" : " \(queueIDs.count)"
-            }
-            .store(in: &cancellables)
-
-        Publishers.CombineLatest(ClipboardStore.shared.$hotKeyShortcut, ClipboardStore.shared.$queuePopShortcut)
-            .dropFirst()
-            .receive(on: RunLoop.main)
-            .sink { [weak self] _, _ in
-                self?.updateStatusTooltip()
-            }
-            .store(in: &cancellables)
-        #else
         ClipboardStore.shared.$hotKeyShortcut
             .dropFirst()
             .receive(on: RunLoop.main)
@@ -88,18 +65,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.updateStatusTooltip()
             }
             .store(in: &cancellables)
-        #endif
     }
 
     private func updateStatusTooltip() {
-        let editionName = AppRoleEdition.installed.title
         let hk = ClipboardStore.shared.hotKeyShortcut.compactDisplayString
-        #if ICLIP_EDITION_FLOW
-        let qk = ClipboardStore.shared.queuePopShortcut.compactDisplayString
-        statusItem.button?.toolTip = "iClip · \(editionName)（\(hk) 呼出 · \(qk) 顺序出队）"
-        #else
-        statusItem.button?.toolTip = "iClip · \(editionName)（\(hk) 鼠标旁呼出）"
-        #endif
+        statusItem.button?.toolTip = "iClip（\(hk) 光标旁呼出）"
     }
 
     @objc private func statusItemClicked(_ sender: NSStatusBarButton) {
@@ -130,20 +100,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func showContextMenu(for button: NSStatusBarButton) {
         let menu = NSMenu()
-        let installed = AppRoleEdition.installed
 
-        let roleHeader = NSMenuItem(title: "当前角色：\(installed.title)", action: nil, keyEquivalent: "")
-        roleHeader.isEnabled = false
-        menu.addItem(roleHeader)
+        let versionHeader = NSMenuItem(title: "iClip v\(AppRoleEdition.currentVersionString)", action: nil, keyEquivalent: "")
+        versionHeader.isEnabled = false
+        menu.addItem(versionHeader)
 
         let shortcutText = ClipboardStore.shared.hotKeyShortcut.compactDisplayString
         let openItem = NSMenuItem(title: "打开 iClip（\(shortcutText)）", action: #selector(menuOpenPanel), keyEquivalent: "")
         openItem.target = self
         menu.addItem(openItem)
 
-        let switchRoleItem = NSMenuItem(title: "切换角色版本 / OTA 更新...", action: #selector(menuOpenRoleSettings), keyEquivalent: "")
-        switchRoleItem.target = self
-        menu.addItem(switchRoleItem)
+        let checkUpdateItem = NSMenuItem(title: "偏好设置与检查更新...", action: #selector(menuOpenRoleSettings), keyEquivalent: ",")
+        checkUpdateItem.target = self
+        menu.addItem(checkUpdateItem)
 
         let onboardingItem = NSMenuItem(title: "查看新手与新功能引导...", action: #selector(menuShowOnboardingHighlights), keyEquivalent: "")
         onboardingItem.target = self
@@ -245,7 +214,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func menuOpenRoleSettings() {
         showFromStatusItem()
         panelController.nav.showSettings = true
-        UpdateManager.shared.checkForUpdates(targetEdition: ClipboardStore.shared.targetRoleEdition, silent: false)
+        UpdateManager.shared.checkForUpdates(silent: false)
     }
 
     @objc private func menuShowOnboardingHighlights() {
@@ -308,16 +277,5 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
-        #if ICLIP_EDITION_FLOW
-        HotKeyManager.shared.registerQueuePopHotKey(shortcut: ClipboardStore.shared.queuePopShortcut) { [weak self] in
-            Task { @MainActor [weak self] in
-                guard let self, !ClipboardStore.shared.minimalModeEnabled else { return }
-                if self.panelController.isVisible {
-                    self.panelController.hide(restoreFocus: true)
-                }
-                ClipboardStore.shared.dequeueAndPasteNext(showGlobalHUD: true)
-            }
-        }
-        #endif
     }
 }

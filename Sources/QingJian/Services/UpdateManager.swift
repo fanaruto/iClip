@@ -36,7 +36,8 @@ final class UpdateManager: NSObject, ObservableObject {
 
     private let repoOwner = "fanaruto"
     private let repoName = "iClip"
-    private let legacyAssetName = "iClip-macOS.zip"
+    private let primaryAssetName = "iClip-macOS.zip"
+    private let fallbackDevAssetName = "iClip-Dev-macOS.zip"
 
     private var checkRequestEpoch: Int = 0
     private var activeDownloadTask: URLSessionDownloadTask?
@@ -60,7 +61,7 @@ final class UpdateManager: NSObject, ObservableObject {
         super.init()
     }
 
-    /// 检查目标角色的 GitHub 最新 Release（支持同角色升级检查与跨角色专属包切换）
+    /// 检查最新 GitHub Release（One iClip 唯一标准主线）
     func checkForUpdates(targetEdition: AppRoleEdition? = nil, silent: Bool = false) {
         if case .installing = state { return }
         if case .downloading = state {
@@ -68,34 +69,11 @@ final class UpdateManager: NSObject, ObservableObject {
             cancelDownload()
         }
 
-        let desiredEdition = targetEdition ?? ClipboardStore.shared.targetRoleEdition
-        let isSwitchingEdition = (desiredEdition != installedEdition)
-
         checkRequestEpoch &+= 1
         let requestID = checkRequestEpoch
         Self.pruneStaleLocalOTACache(currentVersion: currentVersion)
 
-        // 优先检测同级目录或本地 LocalOTA 缓存中是否存在与当前版本一致的目标角色签名包（零流量秒切且严防被远端旧 Release 降级覆盖）
-        if isSwitchingEdition,
-           let localArchive = Self.findLocalSiblingArchive(assetName: desiredEdition.expectedAssetName, matchingVersion: currentVersion) {
-            let size = ((try? FileManager.default.attributesOfItem(atPath: localArchive.path))?[.size] as? Int64) ?? 0
-            let localInfo = ReleaseInfo(
-                version: currentVersion,
-                tagName: "v\(currentVersion)",
-                notes: "检测到本机已就绪同版本 v\(currentVersion)「\(desiredEdition.title)」签名包，支持离线秒速无损切换。",
-                edition: desiredEdition,
-                isEditionSwitch: true,
-                assetName: desiredEdition.expectedAssetName,
-                assetSize: size,
-                expectedSHA256: nil,
-                downloadURL: localArchive,
-                htmlURL: URL(string: "https://github.com/\(repoOwner)/\(repoName)")!
-            )
-            state = .available(localInfo)
-            return
-        }
-
-        if !silent || isSwitchingEdition {
+        if !silent {
             state = .checking
         }
 
@@ -106,7 +84,7 @@ final class UpdateManager: NSObject, ObservableObject {
 
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-        request.setValue("iClip-\(installedEdition.rawValue)/\(currentVersion)", forHTTPHeaderField: "User-Agent")
+        request.setValue("iClip/\(currentVersion)", forHTTPHeaderField: "User-Agent")
 
         Task {
             do {
@@ -114,7 +92,7 @@ final class UpdateManager: NSObject, ObservableObject {
                 guard requestID == self.checkRequestEpoch else { return }
 
                 guard let http = response as? HTTPURLResponse else {
-                    if !silent || isSwitchingEdition { state = .failed("网络响应异常") }
+                    if !silent { state = .failed("网络响应异常") }
                     return
                 }
                 if http.statusCode == 404 {
@@ -122,64 +100,25 @@ final class UpdateManager: NSObject, ObservableObject {
                     return
                 }
                 guard (200..<300).contains(http.statusCode) else {
-                    if !silent || isSwitchingEdition { state = .failed("检查失败（HTTP \(http.statusCode)）") }
+                    if !silent { state = .failed("检查失败（HTTP \(http.statusCode)）") }
                     return
                 }
 
                 let decoded = try JSONDecoder().decode(GitHubReleaseDTO.self, from: data)
                 let latestVer = Self.normalizeVersion(decoded.tagName)
-                let expectedAsset = desiredEdition.expectedAssetName
 
-                if isSwitchingEdition {
-                    // 防降级护栏：若当前本机版本超前于 GitHub Latest Release，严禁拉取线上旧包覆盖本地新版功能
-                    if Self.isVersion(currentVersion, newerThan: latestVer) {
-                        state = .failed("当前本机版本 v\(currentVersion) 高于线上 Release v\(latestVer)，已拦截降级覆盖")
-                        return
-                    }
-                    // 跨角色切换：严格匹配目标角色专属安装包，禁止回退到其他角色的压缩包
-                    guard let roleAsset = decoded.assets.first(where: { $0.name == expectedAsset }),
-                          Self.isSafeAssetFileName(roleAsset.name),
-                          let downloadURL = URL(string: roleAsset.browserDownloadURL),
-                          Self.isTrustedRemoteDownloadURL(downloadURL),
-                          let htmlURL = URL(string: decoded.htmlURL) else {
-                        state = .failed("GitHub Release v\(latestVer) 尚未上传可信「\(desiredEdition.title)」专属包（\(expectedAsset)）")
-                        return
-                    }
-
-                    let info = ReleaseInfo(
-                        version: latestVer,
-                        tagName: decoded.tagName,
-                        notes: (decoded.body ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
-                        edition: desiredEdition,
-                        isEditionSwitch: true,
-                        assetName: roleAsset.name,
-                        assetSize: roleAsset.size,
-                        expectedSHA256: Self.parseExpectedSHA256(
-                            assetDigest: roleAsset.digest,
-                            releaseBody: decoded.body,
-                            assetName: roleAsset.name
-                        ),
-                        downloadURL: downloadURL,
-                        htmlURL: htmlURL
-                    )
-                    state = .available(info)
-                    return
-                }
-
-                // 同角色常规版本升级检查
                 guard Self.isVersion(latestVer, newerThan: currentVersion) else {
                     if !silent { state = .upToDate(latestVersion: latestVer, edition: installedEdition) }
                     return
                 }
 
-                // 优先下载当前角色专属包，仅在远端未分包时兼容通用包名
-                guard let asset = decoded.assets.first(where: { $0.name == expectedAsset })
-                        ?? decoded.assets.first(where: { $0.name == legacyAssetName }),
+                guard let asset = decoded.assets.first(where: { $0.name == primaryAssetName })
+                        ?? decoded.assets.first(where: { $0.name == fallbackDevAssetName }),
                       Self.isSafeAssetFileName(asset.name),
                       let downloadURL = URL(string: asset.browserDownloadURL),
                       Self.isTrustedRemoteDownloadURL(downloadURL),
                       let htmlURL = URL(string: decoded.htmlURL) else {
-                    if !silent { state = .failed("新版本 v\(latestVer) 尚未上传可信安装包 \(expectedAsset)") }
+                    if !silent { state = .failed("新版本 v\(latestVer) 尚未上传可信安装包 \(primaryAssetName)") }
                     return
                 }
 
@@ -187,7 +126,7 @@ final class UpdateManager: NSObject, ObservableObject {
                     version: latestVer,
                     tagName: decoded.tagName,
                     notes: (decoded.body ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
-                    edition: desiredEdition,
+                    edition: .unified,
                     isEditionSwitch: false,
                     assetName: asset.name,
                     assetSize: asset.size,
@@ -202,7 +141,7 @@ final class UpdateManager: NSObject, ObservableObject {
                 state = .available(info)
             } catch {
                 guard requestID == self.checkRequestEpoch else { return }
-                if !silent || isSwitchingEdition {
+                if !silent {
                     state = .failed("无法连接 GitHub，请稍后重试")
                 }
             }
@@ -412,7 +351,7 @@ final class UpdateManager: NSObject, ObservableObject {
         // 1. 若当前运行在构建产物目录（如 dist/），同级存在同名版本构建出的兄弟包
         let bundleSiblingDir = Bundle.main.bundleURL.deletingLastPathComponent()
         let siblingZip = bundleSiblingDir.appendingPathComponent(assetName)
-        let siblingAppName = assetName == AppRoleEdition.developer.expectedAssetName ? "iClip-Dev.app" : "iClip-Flow.app"
+        let siblingAppName = "iClip.app"
         let siblingAppPlist = bundleSiblingDir.appendingPathComponent(siblingAppName).appendingPathComponent("Contents/Info.plist")
         if fm.fileExists(atPath: siblingZip.path),
            let plist = NSDictionary(contentsOf: siblingAppPlist),
