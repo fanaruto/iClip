@@ -209,10 +209,10 @@ final class InteractivePlaygroundController: ObservableObject {
     /// 接收来自本地监听器或非激活 CGEventTap 转发的修饰键状态，实时驱动键帽物理下沉动画
     func updateModifierFlags(_ flags: NSEvent.ModifierFlags) {
         guard isActive, phase == .tryDefaultHotKey else { return }
-        let opt = flags.contains(.option)
-        if isOptionModifierDown != opt {
+        let modPressed = ClipboardStore.shared.hotKeyShortcut.matchesTrialModifierPressed(in: flags)
+        if isOptionModifierDown != modPressed {
             withAnimation(.interpolatingSpring(mass: 0.55, stiffness: 420, damping: 24)) {
-                isOptionModifierDown = opt
+                isOptionModifierDown = modPressed
             }
         }
     }
@@ -225,8 +225,10 @@ final class InteractivePlaygroundController: ObservableObject {
                 self.updateModifierFlags(event.modifierFlags)
             } else if event.type == .keyDown,
                       self.phase == .tryDefaultHotKey,
-                      event.modifierFlags.contains(.option),
-                      event.keyCode == 9 { // 'V'
+                      ClipboardStore.shared.hotKeyShortcut.matchesLocalKeyDown(
+                          keyCode: event.keyCode,
+                          flags: event.modifierFlags
+                      ) {
                 _ = self.consumeHotKeyTrialIfNeeded()
                 return nil
             }
@@ -347,13 +349,29 @@ struct CoreHighlightsOverlay: View {
     // MARK: - Step 1：先试按一次预设 ⌥V
 
     private var step1TryHotKeyView: some View {
-        VStack(spacing: 16) {
+        let caps = store.hotKeyShortcut.onboardingKeycaps
+        let isDefaultHotKey = (store.hotKeyShortcut == .defaultShortcut)
+        let promptText: String = {
+            if caps.isDoubleTap {
+                return controller.isOptionModifierDown
+                    ? "轻按已感知，迅速松手再按第 2 下！"
+                    : "现在直接在键盘上连续轻按两次 \(caps.leftSymbol)"
+            }
+            if caps.leftSymbol.isEmpty {
+                return "现在直接在键盘上按一下 \(caps.rightSymbol) 键"
+            }
+            return controller.isOptionModifierDown
+                ? "已按住修饰键，再按一下 \(caps.rightSymbol)！"
+                : "现在直接在键盘上按一次 \(store.hotKeyShortcut.compactDisplayString)"
+        }()
+
+        return VStack(spacing: 16) {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("先试试呼出它的手感")
                         .font(.system(size: 19, weight: .bold))
                         .foregroundStyle(.primary)
-                    Text("按下预设的 \(store.hotKeyShortcut.compactDisplayString)，随时在光标旁零失焦唤出")
+                    Text("按下\(isDefaultHotKey ? "预设" : "当前")的 \(store.hotKeyShortcut.compactDisplayString)，随时在光标旁零失焦唤出")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                 }
@@ -361,25 +379,34 @@ struct CoreHighlightsOverlay: View {
                 BrandAppIconBadge(size: 32)
             }
 
-            // 物理行程双键帽舞台
+            // 物理行程动态键帽舞台（兼容组合键、双击单键与单功能键）
             HStack(spacing: 12) {
-                physicalKeycap(
-                    symbol: "⌥",
-                    label: "Option",
-                    isPressed: controller.isOptionModifierDown || controller.didHitTrialHotKey,
-                    isSuccess: controller.didHitTrialHotKey
-                )
+                if caps.leftSymbol.isEmpty {
+                    physicalKeycap(
+                        symbol: caps.rightSymbol,
+                        label: caps.rightLabel,
+                        isPressed: controller.didHitTrialHotKey,
+                        isSuccess: controller.didHitTrialHotKey
+                    )
+                } else {
+                    physicalKeycap(
+                        symbol: caps.leftSymbol,
+                        label: caps.leftLabel,
+                        isPressed: controller.isOptionModifierDown || controller.didHitTrialHotKey,
+                        isSuccess: controller.didHitTrialHotKey
+                    )
 
-                Text("+")
-                    .font(.system(size: 16, weight: .bold, design: .rounded))
-                    .foregroundStyle(.secondary.opacity(0.65))
+                    Text(caps.isDoubleTap ? "→" : "+")
+                        .font(.system(size: 16, weight: .bold, design: .rounded))
+                        .foregroundStyle(.secondary.opacity(0.65))
 
-                physicalKeycap(
-                    symbol: "V",
-                    label: "呼出面板",
-                    isPressed: controller.didHitTrialHotKey,
-                    isSuccess: controller.didHitTrialHotKey
-                )
+                    physicalKeycap(
+                        symbol: caps.rightSymbol,
+                        label: caps.rightLabel,
+                        isPressed: controller.didHitTrialHotKey,
+                        isSuccess: controller.didHitTrialHotKey
+                    )
+                }
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 16)
@@ -407,7 +434,7 @@ struct CoreHighlightsOverlay: View {
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(Color.green)
                 } else {
-                    Text(controller.isOptionModifierDown ? "已按住修饰键，再按一下主键！" : "现在直接在键盘上按一次 \(store.hotKeyShortcut.compactDisplayString)")
+                    Text(promptText)
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(controller.isOptionModifierDown ? brandCobalt : .secondary)
                 }
@@ -426,12 +453,16 @@ struct CoreHighlightsOverlay: View {
         VStack(spacing: 3) {
             Text(symbol)
                 .font(.system(size: 22, weight: .bold, design: .rounded))
+                .lineLimit(1)
+                .minimumScaleFactor(0.62)
                 .foregroundStyle(isSuccess ? Color.green : (isPressed ? brandCobalt : .primary))
             Text(label)
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(isSuccess ? Color.green.opacity(0.9) : .secondary)
         }
-        .frame(width: 82, height: 64)
+        .padding(.horizontal, 6)
+        .frame(minWidth: 82)
+        .frame(height: 64)
         .background(
             RoundedRectangle(cornerRadius: 13, style: .continuous)
                 .fill(
@@ -463,13 +494,22 @@ struct CoreHighlightsOverlay: View {
 
     private var step2ChooseHabitView: some View {
         VStack(alignment: .leading, spacing: 14) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("喜欢 \(store.hotKeyShortcut.compactDisplayString) 这个呼出手势吗？")
-                    .font(.system(size: 18.5, weight: .bold))
-                    .foregroundStyle(.primary)
-                Text("呼出时不会打断你正在输入的文本框，按 ↵ 即可顺手贴入。")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("喜欢 \(store.hotKeyShortcut.compactDisplayString) 这个呼出手势吗？")
+                        .font(.system(size: 18.5, weight: .bold))
+                        .foregroundStyle(.primary)
+                    Text("呼出时不会打断你正在输入的文本框，按 ↵ 即可顺手贴入。")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("上一步") {
+                    controller.restartInteractiveSetup()
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(.secondary)
             }
 
             VStack(spacing: 9) {

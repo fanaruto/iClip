@@ -263,6 +263,32 @@ impl WinHotKeyShortcut {
         }
         self.display_string().replace(" + ", "+")
     }
+
+    /// 新手引导键帽舞台所需（左键帽、右键帽、是否为双击模式）
+    pub fn onboarding_keycaps(&self) -> (String, String, bool) {
+        if let Some(kind) = self.double_tap {
+            return (kind.label().to_string(), "×2".to_string(), true);
+        }
+        let mut parts: Vec<&str> = Vec::new();
+        if (self.modifiers & MOD_CONTROL_BITS) != 0 {
+            parts.push("Ctrl");
+        }
+        if (self.modifiers & MOD_ALT_BITS) != 0 {
+            parts.push("Alt");
+        }
+        if (self.modifiers & MOD_SHIFT_BITS) != 0 {
+            parts.push("Shift");
+        }
+        if (self.modifiers & MOD_WIN_BITS) != 0 {
+            parts.push("Win");
+        }
+        let right = vk_label(self.vk);
+        if parts.is_empty() {
+            (String::new(), right, false)
+        } else {
+            (parts.join("+"), right, false)
+        }
+    }
 }
 
 pub fn vk_label(vk: u32) -> String {

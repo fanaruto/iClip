@@ -98,7 +98,7 @@ struct ClipCardView: View {
                         .lineLimit(2)
                         .multilineTextAlignment(.leading)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.trailing, 40)
+                        .padding(.trailing, index < 9 ? 40 : 4)
                         .hoverActionSafeTextMask(isHovered: isHovered, reservedActionWidth: hoverActionBarEstimateWidth)
 
                     HStack(spacing: 6) {

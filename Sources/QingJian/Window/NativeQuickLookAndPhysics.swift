@@ -793,6 +793,7 @@ struct AppleTVPhysicalCardModifier: ViewModifier {
     var onHoverEnterSelect: (() -> Bool)? = nil
     var onHoverEnded: (() -> Void)? = nil
     var onResetHoverFromHide: (() -> Void)? = nil
+    var onDeepPressActiveChanged: ((Bool) -> Void)? = nil
     var onDeepPressPreview: (() -> Void)? = nil
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -806,7 +807,7 @@ struct AppleTVPhysicalCardModifier: ViewModifier {
     @State private var scrollDamped: Bool = false
 
     private var activeNorm: CGPoint {
-        (isHovered && !scrollDamped) ? (pointerNorm ?? internalPointerNorm) : .zero
+        (isHovered && !scrollDamped && pressStage != 2) ? (pointerNorm ?? internalPointerNorm) : .zero
     }
 
     private var effectiveScale: CGFloat {
@@ -986,11 +987,19 @@ struct AppleTVPhysicalCardModifier: ViewModifier {
                     leadingExclusionWidth: leadingExclusionWidth,
                     bottomExclusionHeight: bottomChipHeight,
                     onPressStateChange: { stage, progress in
+                        let prevStage = pressStage
                         if pressStage != stage {
                             pressStage = stage
                         }
-                        if stage == 2 && internalPointerNorm != .zero {
-                            internalPointerNorm = .zero
+                        if stage == 2 {
+                            if internalPointerNorm != .zero {
+                                internalPointerNorm = .zero
+                            }
+                            if prevStage != 2 {
+                                onDeepPressActiveChanged?(true)
+                            }
+                        } else if prevStage == 2 {
+                            onDeepPressActiveChanged?(false)
                         }
                         if abs(pressureProgress - progress) >= 0.02 || progress == 0 || progress == 1 {
                             pressureProgress = progress
@@ -1014,6 +1023,7 @@ struct AppleTVPhysicalCardModifier: ViewModifier {
                         pressureProgress = 0
                         scrollDamped = false
                         internalPointerNorm = .zero
+                        onDeepPressActiveChanged?(false)
                         onHoverEnded?()
                         onResetHoverFromHide?()
                     }
@@ -1039,6 +1049,7 @@ struct AppleTVPhysicalCardModifier: ViewModifier {
                     pressureProgress = 0
                     scrollDamped = false
                     internalPointerNorm = .zero
+                    onDeepPressActiveChanged?(false)
                 }
             }
 

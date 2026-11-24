@@ -2863,4 +2863,30 @@ mod tests {
         assert!(extract_single_image_src_from_html(r#"<img src="file://localhost/\evil.example.com/share/a.png" />"#).is_none());
         assert!(extract_single_image_src_from_html("<img src=\"file:///etc/passwd\" />").is_none());
     }
+
+    #[test]
+    fn test_win_hotkey_onboarding_keycaps() {
+        use crate::hotkey::{WinHotKeyShortcut, WinSingleModifier, MOD_CONTROL_BITS, MOD_SHIFT_BITS};
+
+        let def_caps = WinHotKeyShortcut::default_toggle().onboarding_keycaps();
+        assert_eq!(def_caps, ("Alt".to_string(), "V".to_string(), false));
+
+        let custom = WinHotKeyShortcut::combo(0x56, MOD_CONTROL_BITS | MOD_SHIFT_BITS);
+        assert_eq!(
+            custom.onboarding_keycaps(),
+            ("Ctrl+Shift".to_string(), "V".to_string(), false)
+        );
+
+        let dt_ctrl = WinHotKeyShortcut::double_tap(WinSingleModifier::Control);
+        assert_eq!(
+            dt_ctrl.onboarding_keycaps(),
+            ("Ctrl".to_string(), "×2".to_string(), true)
+        );
+
+        let bare_f8 = WinHotKeyShortcut::combo(0x77, 0);
+        assert_eq!(
+            bare_f8.onboarding_keycaps(),
+            (String::new(), "F8".to_string(), false)
+        );
+    }
 }

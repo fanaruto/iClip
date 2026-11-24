@@ -281,6 +281,46 @@ struct HotKeyShortcut: Codable, Equatable {
         ]
         return functionKeyCodes.contains(Int(keyCode))
     }
+
+    /// 新手引导键帽舞台所需的动态符号与标签
+    var onboardingKeycaps: (leftSymbol: String, leftLabel: String, rightSymbol: String, rightLabel: String, isDoubleTap: Bool) {
+        if let kind = doubleTapModifier {
+            return (kind.symbol, "轻按第 1 下", "×2", "连按呼出", true)
+        }
+        let modMask = UInt32(cmdKey | optionKey | controlKey | shiftKey)
+        let mods = carbonModifiers & modMask
+        let keyTitle = Self.keyLabel(for: keyCode)
+        if mods == 0 {
+            return ("", "", keyTitle, "呼出面板", false)
+        }
+        var activeMods: [(symbol: String, label: String)] = []
+        if (mods & UInt32(controlKey)) != 0 { activeMods.append(("⌃", "Control")) }
+        if (mods & UInt32(optionKey)) != 0 { activeMods.append(("⌥", "Option")) }
+        if (mods & UInt32(shiftKey)) != 0 { activeMods.append(("⇧", "Shift")) }
+        if (mods & UInt32(cmdKey)) != 0 { activeMods.append(("⌘", "Command")) }
+        let leftSymbol = activeMods.map(\.symbol).joined()
+        let leftLabel = activeMods.count == 1 ? activeMods[0].label : "修饰键"
+        return (leftSymbol, leftLabel, keyTitle, "呼出面板", false)
+    }
+
+    /// 判断当前按下的修饰键是否命中试按阶段的键帽下沉反馈（与双击状态机一致，排除多修饰键误触发）
+    func matchesTrialModifierPressed(in flags: NSEvent.ModifierFlags) -> Bool {
+        if let kind = doubleTapModifier {
+            return kind.isExclusivelyPressed(in: flags)
+        }
+        let modMask = UInt32(cmdKey | optionKey | controlKey | shiftKey)
+        let required = carbonModifiers & modMask
+        guard required != 0 else { return false }
+        return Self.carbonModifiers(from: flags) == required
+    }
+
+    /// 本地键盘事件是否精准匹配当前用户配置的呼出组合键（双击单键交由 flagsChanged 状态机处理）
+    func matchesLocalKeyDown(keyCode: UInt16, flags: NSEvent.ModifierFlags) -> Bool {
+        guard doubleTapModifier == nil else { return false }
+        let modMask = UInt32(cmdKey | optionKey | controlKey | shiftKey)
+        return UInt32(keyCode) == self.keyCode
+            && Self.carbonModifiers(from: flags) == (carbonModifiers & modMask)
+    }
 }
 
 /// 全局热键槽位类型

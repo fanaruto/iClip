@@ -321,6 +321,7 @@ struct WinAppState {
     pressed_visible_pos: Option<usize>,
     onboarding_step: u8,
     onboarding_hit_trial: bool,
+    onboarding_import_feedback: Option<String>,
     ql_stage_visible: bool,
     ql_stage_rgba: Option<(u32, u32, Vec<u8>, String)>,
     ql_stage_cached_key: Option<(String, u32, u32)>,
@@ -562,6 +563,7 @@ pub fn run_windows_app() -> i32 {
                 pressed_visible_pos: None,
                 onboarding_step: init_onboard_step,
                 onboarding_hit_trial: false,
+                onboarding_import_feedback: None,
                 ql_stage_visible: false,
                 ql_stage_rgba: None,
                 ql_stage_cached_key: None,
@@ -745,6 +747,7 @@ pub fn run_windows_self_test() -> Result<(), String> {
             pressed_visible_pos: None,
             onboarding_step: 0,
             onboarding_hit_trial: false,
+            onboarding_import_feedback: None,
             ql_stage_visible: false,
             ql_stage_rgba: None,
             ql_stage_cached_key: None,
@@ -1587,6 +1590,20 @@ unsafe fn handle_double_tap_message(hwnd: HWND, mod_code: usize, is_completed_do
     });
 
     if match_toggle {
+        let consumed_trial = APP_STATE.with(|c| {
+            let mut b = c.borrow_mut();
+            let Some(st) = b.as_mut() else { return false };
+            if st.visible && st.show_highlights_overlay && st.onboarding_step == 0 {
+                st.onboarding_hit_trial = true;
+                st.onboarding_step = 1;
+                return true;
+            }
+            false
+        });
+        if consumed_trial {
+            let _ = InvalidateRect(hwnd, null(), FALSE);
+            return;
+        }
         let is_vis = APP_STATE.with(|c| c.borrow().as_ref().map(|s| s.visible).unwrap_or(false));
         if is_vis {
             hide_panel(hwnd, true);
@@ -10275,6 +10292,7 @@ fn layout_and_draw_highlights_overlay(
     canvas.stroke_round_rect(mx, my, mw, mh, sf(20.0), sf(0.85), palette.group_stroke);
 
     let hk_label = st.store.config.hotkey_toggle.display_string();
+    let hk_compact = st.store.config.hotkey_toggle.compact_string();
 
     if st.onboarding_step == 0 {
         // Step 0：先试按预设快捷键感受手感
@@ -10290,8 +10308,14 @@ fn layout_and_draw_highlights_overlay(
             font_kind: FontKind::Display,
             flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE,
         });
+        let is_default_hk =
+            st.store.config.hotkey_toggle == WinHotKeyShortcut::default_toggle();
+        let (cap_l, cap_r, is_dt) = st.store.config.hotkey_toggle.onboarding_keycaps();
         texts.push(TextDrawCmd {
-            text: format!("按下预设的 {hk_label}，随时在光标旁零失焦唤出"),
+            text: format!(
+                "按下{prefix}的 {hk_compact}，随时在光标旁零失焦唤出",
+                prefix = if is_default_hk { "预设" } else { "当前" }
+            ),
             rect: RECT {
                 left: mx + s(22),
                 top: my + s(48),
@@ -10322,47 +10346,112 @@ fn layout_and_draw_highlights_overlay(
             },
         );
 
-        let kw = s(92);
         let kh = s(64);
         let ky = stage_y + (stage_h - kh) / 2;
-        let k1x = stage_x + stage_w / 2 - kw - s(14);
-        let k2x = stage_x + stage_w / 2 + s(14);
         let key_bg = if st.is_dark_mode {
             Color4::rgb(46, 51, 64)
         } else {
             Color4::rgb(255, 255, 255)
         };
-        for (kx, sym) in [(k1x, "Alt"), (k2x, "V")] {
+        if cap_l.is_empty() {
+            let kw = s(116);
+            let kx = stage_x + (stage_w - kw) / 2;
             canvas.fill_round_rect(kx, ky, kw, kh, sf(13.0), key_bg);
-            canvas.stroke_round_rect(kx, ky, kw, kh, sf(13.0), sf(1.1), palette.cobalt.with_alpha(150));
+            canvas.stroke_round_rect(
+                kx,
+                ky,
+                kw,
+                kh,
+                sf(13.0),
+                sf(1.1),
+                palette.cobalt.with_alpha(150),
+            );
             texts.push(TextDrawCmd {
-                text: sym.to_string(),
+                text: cap_r.clone(),
                 rect: RECT {
-                    left: kx,
+                    left: kx + s(6),
                     top: ky,
-                    right: kx + kw,
+                    right: kx + kw - s(6),
                     bottom: ky + kh,
                 },
                 color: palette.cobalt,
                 font_kind: FontKind::Display,
+                flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+            });
+        } else {
+            let l_chars = cap_l.chars().count();
+            let r_chars = cap_r.chars().count();
+            let k1w = if l_chars >= 8 {
+                s(138)
+            } else if l_chars >= 5 {
+                s(112)
+            } else {
+                s(92)
+            };
+            let k2w = if r_chars >= 4 { s(104) } else { s(86) };
+            let gap = s(24);
+            let k1x = stage_x + (stage_w - (k1w + gap + k2w)) / 2;
+            let k2x = k1x + k1w + gap;
+            let k1_font = if l_chars >= 5 {
+                FontKind::CardTitle
+            } else {
+                FontKind::Display
+            };
+            let k2_font = if r_chars >= 5 {
+                FontKind::CardTitle
+            } else {
+                FontKind::Display
+            };
+            for (kx, kw_cur, sym, fkind) in [
+                (k1x, k1w, cap_l.as_str(), k1_font),
+                (k2x, k2w, cap_r.as_str(), k2_font),
+            ] {
+                canvas.fill_round_rect(kx, ky, kw_cur, kh, sf(13.0), key_bg);
+                canvas.stroke_round_rect(
+                    kx,
+                    ky,
+                    kw_cur,
+                    kh,
+                    sf(13.0),
+                    sf(1.1),
+                    palette.cobalt.with_alpha(150),
+                );
+                texts.push(TextDrawCmd {
+                    text: sym.to_string(),
+                    rect: RECT {
+                        left: kx + s(6),
+                        top: ky,
+                        right: kx + kw_cur - s(6),
+                        bottom: ky + kh,
+                    },
+                    color: palette.cobalt,
+                    font_kind: fkind,
+                    flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                });
+            }
+            texts.push(TextDrawCmd {
+                text: (if is_dt { "→" } else { "+" }).to_string(),
+                rect: RECT {
+                    left: k1x + k1w,
+                    top: ky,
+                    right: k2x,
+                    bottom: ky + kh,
+                },
+                color: palette.text_muted,
+                font_kind: FontKind::Display,
                 flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
             });
         }
-        texts.push(TextDrawCmd {
-            text: "+".to_string(),
-            rect: RECT {
-                left: k1x + kw,
-                top: ky,
-                right: k2x,
-                bottom: ky + kh,
-            },
-            color: palette.text_muted,
-            font_kind: FontKind::Display,
-            flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-        });
 
+        let prompt_str = if is_dt {
+            format!("现在直接在键盘上连续轻按两次 {cap_l} 体验手感")
+        } else if cap_l.is_empty() {
+            format!("现在直接在键盘上按一下 {cap_r} 键体验手感")
+        } else {
+            format!("现在直接在键盘上按一次 {hk_compact} 体验手感")
+        };
         texts.push(TextDrawCmd {
-            text: format!("现在直接在键盘上按一次 {hk_label} 体验手感"),
+            text: prompt_str,
             rect: RECT {
                 left: mx + s(22),
                 top: stage_y + stage_h + s(18),
@@ -10371,7 +10460,7 @@ fn layout_and_draw_highlights_overlay(
             },
             color: palette.text_secondary,
             font_kind: FontKind::Body,
-            flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
         });
 
         let btn_x = mx + s(22);
@@ -10406,13 +10495,39 @@ fn layout_and_draw_highlights_overlay(
             text: format!("喜欢 {hk_label} 这个呼出手势吗？"),
             rect: RECT {
                 left: mx + s(22),
-                top: my + s(24),
-                right: mx + mw - s(22),
-                bottom: my + s(50),
+                top: my + s(22),
+                right: mx + mw - s(84),
+                bottom: my + s(48),
             },
             color: palette.text_primary,
             font_kind: FontKind::Display,
             flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        });
+        let back1_rc = RECT {
+            left: mx + mw - s(76),
+            top: my + s(20),
+            right: mx + mw - s(22),
+            bottom: my + s(44),
+        };
+        canvas.fill_round_rect(
+            back1_rc.left,
+            back1_rc.top,
+            back1_rc.right - back1_rc.left,
+            back1_rc.bottom - back1_rc.top,
+            sf(12.0),
+            palette.chip_bg,
+        );
+        texts.push(TextDrawCmd {
+            text: "上一步".to_string(),
+            rect: back1_rc,
+            color: palette.text_secondary,
+            font_kind: FontKind::Meta,
+            flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+        });
+        st.hit_regions.push(HitRegion {
+            rect: back1_rc,
+            interactive_cursor: true,
+            action: HitAction::OnboardingSetStep(0),
         });
         texts.push(TextDrawCmd {
             text: "呼出时不打断你正在输入的窗口，按 Enter 即可顺手贴入。".to_string(),
@@ -10517,12 +10632,38 @@ fn layout_and_draw_highlights_overlay(
             rect: RECT {
                 left: mx + s(22),
                 top: my + s(20),
-                right: mx + mw - s(22),
+                right: mx + mw - s(84),
                 bottom: my + s(46),
             },
             color: palette.text_primary,
             font_kind: FontKind::Display,
-            flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+            flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        });
+        let back2_rc = RECT {
+            left: mx + mw - s(76),
+            top: my + s(18),
+            right: mx + mw - s(22),
+            bottom: my + s(42),
+        };
+        canvas.fill_round_rect(
+            back2_rc.left,
+            back2_rc.top,
+            back2_rc.right - back2_rc.left,
+            back2_rc.bottom - back2_rc.top,
+            sf(12.0),
+            palette.chip_bg,
+        );
+        texts.push(TextDrawCmd {
+            text: "上一步".to_string(),
+            rect: back2_rc,
+            color: palette.text_secondary,
+            font_kind: FontKind::Meta,
+            flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+        });
+        st.hit_regions.push(HitRegion {
+            rect: back2_rc,
+            interactive_cursor: true,
+            action: HitAction::OnboardingSetStep(1),
         });
         texts.push(TextDrawCmd {
             text: "录下你肌肉记忆的手势，并从常用剪贴板无缝导入".to_string(),
@@ -10534,7 +10675,7 @@ fn layout_and_draw_highlights_overlay(
             },
             color: palette.text_secondary,
             font_kind: FontKind::Meta,
-            flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+            flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
         });
 
         let bx = mx + s(22);
@@ -10601,7 +10742,7 @@ fn layout_and_draw_highlights_overlay(
         });
 
         let imp_y = rec_y + rec_h + s(14);
-        let imp_h = s(128);
+        let imp_h = s(146);
         canvas.fill_round_rect(bx, imp_y, bw, imp_h, sf(14.0), palette.group_fill);
         canvas.stroke_round_rect(bx, imp_y, bw, imp_h, sf(14.0), sf(0.85), palette.group_stroke);
         texts.push(TextDrawCmd {
@@ -10614,7 +10755,7 @@ fn layout_and_draw_highlights_overlay(
             },
             color: palette.text_primary,
             font_kind: FontKind::CardTitle,
-            flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+            flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
         });
         texts.push(TextDrawCmd {
             text: "兼容 Ditto、CopyQ、Paste、Raycast、Clipy、Alfred 及 CSV/JSON/MD，自动归入链接、待办、文件与收藏分组。".to_string(),
@@ -10649,6 +10790,20 @@ fn layout_and_draw_highlights_overlay(
             interactive_cursor: true,
             action: HitAction::ImportArchive,
         });
+        if let Some(ref fb) = st.onboarding_import_feedback {
+            texts.push(TextDrawCmd {
+                text: fb.clone(),
+                rect: RECT {
+                    left: bx + s(14),
+                    top: imp_y + s(120),
+                    right: bx + bw - s(14),
+                    bottom: imp_y + s(142),
+                },
+                color: palette.emerald,
+                font_kind: FontKind::Meta,
+                flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+            });
+        }
 
         let done_h = s(36);
         let done_y = my + mh - done_h - s(16);
@@ -10681,12 +10836,38 @@ fn layout_and_draw_highlights_overlay(
             rect: RECT {
                 left: mx + s(22),
                 top: my + s(20),
-                right: mx + mw - s(22),
+                right: mx + mw - s(84),
                 bottom: my + s(46),
             },
             color: palette.text_primary,
             font_kind: FontKind::Display,
-            flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+            flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        });
+        let back3_rc = RECT {
+            left: mx + mw - s(76),
+            top: my + s(18),
+            right: mx + mw - s(22),
+            bottom: my + s(42),
+        };
+        canvas.fill_round_rect(
+            back3_rc.left,
+            back3_rc.top,
+            back3_rc.right - back3_rc.left,
+            back3_rc.bottom - back3_rc.top,
+            sf(12.0),
+            palette.chip_bg,
+        );
+        texts.push(TextDrawCmd {
+            text: "上一步".to_string(),
+            rect: back3_rc,
+            color: palette.text_secondary,
+            font_kind: FontKind::Meta,
+            flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+        });
+        st.hit_regions.push(HitRegion {
+            rect: back3_rc,
+            interactive_cursor: true,
+            action: HitAction::OnboardingSetStep(1),
         });
         texts.push(TextDrawCmd {
             text: "已配套好零冲突副手势，后续随时可在设置中切换".to_string(),
@@ -10698,7 +10879,7 @@ fn layout_and_draw_highlights_overlay(
             },
             color: palette.text_secondary,
             font_kind: FontKind::Meta,
-            flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+            flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
         });
 
         let bx = mx + s(22);
@@ -11819,6 +12000,7 @@ unsafe fn handle_left_click(hwnd: HWND, x: i32, y: i32, is_double: bool) {
                 if let Some(st) = c.borrow_mut().as_mut() {
                     st.show_highlights_overlay = false;
                     st.recording_slot = None;
+                    st.onboarding_import_feedback = None;
                     if !st.store.config.has_seen_highlights_v27 {
                         st.store.config.has_seen_highlights_v27 = true;
                         st.store.save_config();
@@ -11837,6 +12019,7 @@ unsafe fn handle_left_click(hwnd: HWND, x: i32, y: i32, is_double: bool) {
                     st.onboarding_step = step;
                     if step == 0 {
                         st.onboarding_hit_trial = false;
+                        st.onboarding_import_feedback = None;
                     }
                     if start_rec {
                         st.recording_slot = Some(WinHotKeySlot::MainToggle);
@@ -13678,13 +13861,24 @@ unsafe fn export_archive_via_dialog(hwnd: HWND) {
 }
 
 unsafe fn import_archive_via_dialog(hwnd: HWND) {
-    APP_STATE.with(|c| {
+    let cancelled_recording = APP_STATE.with(|c| {
         if let Some(st) = c.borrow_mut().as_mut() {
             st.suppress_deactivate_hide = true;
+            if st.recording_slot.is_some() {
+                st.recording_slot = None;
+                st.hotkey_conflict_error = None;
+                st.hotkey_recording_hint = None;
+                st.double_tap_machine.reset();
+                return true;
+            }
         }
+        false
     });
+    if cancelled_recording {
+        reload_global_hotkeys_and_hooks(hwnd);
+    }
 
-    let mut file_buf = vec![0u16; 260];
+    let mut file_buf = vec![0u16; 1024];
     let filter: Vec<u16> =
         "支持导入的剪贴板备份 (*.iclip;*.json;*.xml;*.dto;*.clipy;*.alfredsnippets;*.md;*.csv;*.tsv)\0*.iclip;*.json;*.xml;*.dto;*.clipy;*.alfredsnippets;*.md;*.markdown;*.csv;*.tsv\0所有文件 (*.*)\0*.*\0\0"
             .encode_utf16()
@@ -13728,20 +13922,49 @@ unsafe fn import_archive_via_dialog(hwnd: HWND) {
         });
         show_panel_near_cursor(hwnd);
         match res {
-            Ok(s) => set_toast(
-                hwnd,
-                format!(
-                    "已从{}迁入 {} 条，合并更新 {} 条",
-                    s.source_format_label, s.imported_new_count, s.updated_existing_count
-                ),
-            ),
+            Ok(s) => {
+                APP_STATE.with(|c| {
+                    if let Some(st) = c.borrow_mut().as_mut() {
+                        if st.show_highlights_overlay && st.onboarding_step == 2 {
+                            st.onboarding_import_feedback = Some(format!(
+                                "✓ 已从{}迁入 {} 条（更新 {} 条）",
+                                s.source_format_label, s.imported_new_count, s.updated_existing_count
+                            ));
+                        } else {
+                            st.onboarding_import_feedback = None;
+                        }
+                    }
+                });
+                let _ = InvalidateRect(hwnd, null(), FALSE);
+                set_toast(
+                    hwnd,
+                    format!(
+                        "已从{}迁入 {} 条，合并更新 {} 条",
+                        s.source_format_label, s.imported_new_count, s.updated_existing_count
+                    ),
+                );
+            }
             Err(iclip_core::archive::ArchiveBackupError::PassphraseRequiredOrIncorrect) => {
+                APP_STATE.with(|c| {
+                    if let Some(st) = c.borrow_mut().as_mut() {
+                        st.onboarding_import_feedback = None;
+                    }
+                });
+                let _ = InvalidateRect(hwnd, null(), FALSE);
                 set_toast(
                     hwnd,
                     "加密归档：请先复制口令或在搜索框输入口令后再点导入".to_string(),
                 )
             }
-            Err(e) => set_toast(hwnd, e.message()),
+            Err(e) => {
+                APP_STATE.with(|c| {
+                    if let Some(st) = c.borrow_mut().as_mut() {
+                        st.onboarding_import_feedback = None;
+                    }
+                });
+                let _ = InvalidateRect(hwnd, null(), FALSE);
+                set_toast(hwnd, e.message())
+            }
         }
     }
 }

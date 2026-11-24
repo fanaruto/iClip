@@ -26,10 +26,11 @@ struct ClipImageGridTile: View {
     @State private var asyncThumbnail: NSImage? = nil
     @State private var lastTapUptime: TimeInterval = 0
     @State private var showCopiedInlineFlash: Bool = false
+    @State private var isDeepPressFlat: Bool = false
 
     var body: some View {
-        let pnx = (isHovered && !reduceMotion) ? hoverNorm.x : 0
-        let pny = (isHovered && !reduceMotion) ? hoverNorm.y : 0
+        let pnx = (isHovered && !isDeepPressFlat && !reduceMotion) ? hoverNorm.x : 0
+        let pny = (isHovered && !isDeepPressFlat && !reduceMotion) ? hoverNorm.y : 0
         ZStack(alignment: .bottom) {
             // 缩略图主体（Apple TV 底层视差微放大 + 光标反向纵深位移，零 I/O 缓存读取）
             Color.clear
@@ -253,6 +254,17 @@ struct ClipImageGridTile: View {
                         isHovered = false
                         hoverNorm = .zero
                     }
+                    if isDeepPressFlat {
+                        isDeepPressFlat = false
+                    }
+                },
+                onDeepPressActiveChanged: { active in
+                    if isDeepPressFlat != active {
+                        isDeepPressFlat = active
+                    }
+                    if active && hoverNorm != .zero {
+                        hoverNorm = .zero
+                    }
                 },
                 onDeepPressPreview: {
                     onSelect()
@@ -288,17 +300,22 @@ struct ClipImageGridTile: View {
                     if !isHovered {
                         isHovered = true
                     }
-                    let w = max(1, tileSize.width)
-                    let h = max(1, tileSize.height)
-                    let nx = max(-1, min(1, ((loc.x / w) - 0.5) * 2.0))
-                    let ny = max(-1, min(1, ((loc.y / h) - 0.5) * 2.0))
-                    if abs(nx - hoverNorm.x) >= 0.03 || abs(ny - hoverNorm.y) >= 0.03 {
-                        hoverNorm = CGPoint(x: nx, y: ny)
+                    if !isDeepPressFlat {
+                        let w = max(1, tileSize.width)
+                        let h = max(1, tileSize.height)
+                        let nx = max(-1, min(1, ((loc.x / w) - 0.5) * 2.0))
+                        let ny = max(-1, min(1, ((loc.y / h) - 0.5) * 2.0))
+                        if abs(nx - hoverNorm.x) >= 0.03 || abs(ny - hoverNorm.y) >= 0.03 {
+                            hoverNorm = CGPoint(x: nx, y: ny)
+                        }
                     }
                 }
             case .ended:
                 if isHovered {
                     isHovered = false
+                }
+                if isDeepPressFlat {
+                    isDeepPressFlat = false
                 }
                 if hoverNorm != .zero {
                     hoverNorm = .zero

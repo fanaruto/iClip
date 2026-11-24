@@ -4165,4 +4165,51 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertEqual(portrait2x.width, 0, accuracy: 0.01)
         XCTAssertEqual(portrait2x.height, 200, accuracy: 0.01)
     }
+
+    func testHotKeyOnboardingDynamicKeycapsAndTrialMatching() {
+        // 1. 默认 Option+V：键帽与修饰键/本地键入匹配
+        let defCaps = HotKeyShortcut.defaultShortcut.onboardingKeycaps
+        XCTAssertEqual(defCaps.leftSymbol, "⌥")
+        XCTAssertEqual(defCaps.leftLabel, "Option")
+        XCTAssertEqual(defCaps.rightSymbol, "V")
+        XCTAssertFalse(defCaps.isDoubleTap)
+        XCTAssertTrue(HotKeyShortcut.defaultShortcut.matchesTrialModifierPressed(in: .option))
+        XCTAssertFalse(HotKeyShortcut.defaultShortcut.matchesTrialModifierPressed(in: [.option, .command]))
+        XCTAssertTrue(HotKeyShortcut.defaultShortcut.matchesLocalKeyDown(keyCode: UInt16(kVK_ANSI_V), flags: .option))
+        XCTAssertFalse(HotKeyShortcut.defaultShortcut.matchesLocalKeyDown(keyCode: UInt16(kVK_ANSI_V), flags: [.option, .shift]))
+        XCTAssertFalse(HotKeyShortcut.defaultShortcut.matchesLocalKeyDown(keyCode: UInt16(kVK_ANSI_C), flags: .option))
+
+        // 2. 自定义 Shift+Command+V：多修饰键组合符号顺序与精确拦截
+        let shiftCmdV = HotKeyShortcut(keyCode: UInt32(kVK_ANSI_V), carbonModifiers: UInt32(cmdKey | shiftKey))
+        let multiCaps = shiftCmdV.onboardingKeycaps
+        XCTAssertEqual(multiCaps.leftSymbol, "⇧⌘")
+        XCTAssertEqual(multiCaps.leftLabel, "修饰键")
+        XCTAssertEqual(multiCaps.rightSymbol, "V")
+        XCTAssertFalse(multiCaps.isDoubleTap)
+        XCTAssertFalse(shiftCmdV.matchesTrialModifierPressed(in: .command))
+        XCTAssertTrue(shiftCmdV.matchesTrialModifierPressed(in: [.shift, .command]))
+        XCTAssertTrue(shiftCmdV.matchesLocalKeyDown(keyCode: UInt16(kVK_ANSI_V), flags: [.shift, .command]))
+        XCTAssertFalse(shiftCmdV.matchesLocalKeyDown(keyCode: UInt16(kVK_ANSI_V), flags: .command))
+
+        // 3. 单功能键 F9（带 NSEvent .function 系统标志位仍精确匹配）
+        let bareF9 = HotKeyShortcut(keyCode: UInt32(kVK_F9), carbonModifiers: 0)
+        let f9Caps = bareF9.onboardingKeycaps
+        XCTAssertEqual(f9Caps.leftSymbol, "")
+        XCTAssertEqual(f9Caps.rightSymbol, "F9")
+        XCTAssertFalse(f9Caps.isDoubleTap)
+        XCTAssertFalse(bareF9.matchesTrialModifierPressed(in: .function))
+        XCTAssertTrue(bareF9.matchesLocalKeyDown(keyCode: UInt16(kVK_F9), flags: .function))
+        XCTAssertFalse(bareF9.matchesLocalKeyDown(keyCode: UInt16(kVK_F9), flags: [.function, .command]))
+
+        // 4. 双击 Command：键帽呈示双击标记，不误走普通 keyDown
+        let doubleCmd = HotKeyShortcut.doubleTap(.command)
+        let dtCaps = doubleCmd.onboardingKeycaps
+        XCTAssertEqual(dtCaps.leftSymbol, "⌘")
+        XCTAssertEqual(dtCaps.rightSymbol, "×2")
+        XCTAssertTrue(dtCaps.isDoubleTap)
+        XCTAssertTrue(doubleCmd.matchesTrialModifierPressed(in: .command))
+        XCTAssertFalse(doubleCmd.matchesTrialModifierPressed(in: [.command, .shift]))
+        XCTAssertFalse(doubleCmd.matchesTrialModifierPressed(in: .option))
+        XCTAssertFalse(doubleCmd.matchesLocalKeyDown(keyCode: UInt16(kVK_ANSI_V), flags: .command))
+    }
 }

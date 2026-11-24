@@ -172,6 +172,7 @@ final class BigBangStageController: ObservableObject {
     @Published private(set) var activeModeIsImage: Bool = false
     @Published var isImageBigBangActive: Bool = false
     @Published var imageZoomScale: CGFloat = 1.0
+    private(set) var zoomExternalEpoch: Int = 0
     @Published private(set) var isAnalyzingOCR: Bool = false
     @Published var granularity: BigBangGranularity = .word {
         didSet {
@@ -645,25 +646,37 @@ final class BigBangStageController: ObservableObject {
 
     func zoomInImage() {
         guard activeModeIsImage, !isImageBigBangActive else { return }
+        zoomExternalEpoch &+= 1
         imageZoomScale = min(3.0, ((imageZoomScale + 0.5) * 2).rounded() / 2)
         TactileFeedbackEngine.shared.performNavigationStepHaptic()
     }
 
     func zoomOutImage() {
         guard activeModeIsImage, !isImageBigBangActive else { return }
+        zoomExternalEpoch &+= 1
         imageZoomScale = max(1.0, ((imageZoomScale - 0.5) * 2).rounded() / 2)
         TactileFeedbackEngine.shared.performNavigationStepHaptic()
     }
 
     func resetImageZoom() {
         guard imageZoomScale != 1.0 else { return }
+        zoomExternalEpoch &+= 1
         imageZoomScale = 1.0
     }
 
     func toggleImageZoom() {
         guard activeModeIsImage, !isImageBigBangActive else { return }
+        zoomExternalEpoch &+= 1
         imageZoomScale = (imageZoomScale > 1.05) ? 1.0 : 2.0
         TactileFeedbackEngine.shared.performNavigationStepHaptic()
+    }
+
+    func setImageZoomScale(_ scale: CGFloat) {
+        guard activeModeIsImage, !isImageBigBangActive else { return }
+        let clamped = min(3.0, max(1.0, scale))
+        if abs(imageZoomScale - clamped) >= 0.005 || clamped == 1.0 || clamped == 3.0 {
+            imageZoomScale = clamped
+        }
     }
 
     func toggleImageBigBangMode() {
@@ -1058,6 +1071,9 @@ struct BigBangStageRootView: View {
     @State private var tokenFrameStore = TokenFrameRegistry()
     @State private var imagePanOffset: CGSize = .zero
     @State private var lastImagePanTranslation: CGSize? = nil
+    @State private var pinchStartZoom: CGFloat? = nil
+    @State private var pinchStartEpoch: Int = -1
+    @GestureState private var isPinchingImage: Bool = false
 
     private var brandCobalt: Color { Color(red: 0.118, green: 0.369, blue: 1.0) }
 
@@ -1097,6 +1113,8 @@ struct BigBangStageRootView: View {
             lastBoxSweepPoint = nil
             imagePanOffset = .zero
             lastImagePanTranslation = nil
+            pinchStartZoom = nil
+            pinchStartEpoch = -1
             tokenDragTargetSelect = nil
             tokenSweepVisited = []
             lastTextSweepPoint = nil
@@ -1105,7 +1123,19 @@ struct BigBangStageRootView: View {
             if active {
                 imagePanOffset = .zero
                 lastImagePanTranslation = nil
+                pinchStartZoom = nil
+                pinchStartEpoch = -1
             }
+        }
+        .onChange(of: isPinchingImage) { _, pinching in
+            if !pinching {
+                pinchStartZoom = nil
+                pinchStartEpoch = -1
+            }
+        }
+        .onDisappear {
+            pinchStartZoom = nil
+            pinchStartEpoch = -1
         }
         .onChange(of: controller.imageZoomScale) { _, newScale in
             if newScale <= 1.01 {
@@ -1216,7 +1246,7 @@ struct BigBangStageRootView: View {
                 return "\(dim) · 单击或按住横扫原位词块精准取词"
             }
             let zoomSuffix = controller.imageZoomScale > 1.01 ? " · \(Int(round(controller.imageZoomScale * 100)))%（双击还原）" : ""
-            return "\(dim) · Space 关闭 · 双击/⌘+/- 缩放 · O 大爆炸选字\(zoomSuffix)"
+            return "\(dim) · Space 关闭 · 双击/双指/⌘+/- 缩放 · O 大爆炸选字\(zoomSuffix)"
         }
 
         let txt = controller.isEditingText ? controller.draftText : controller.activeSourceTextForTextBigBang()
@@ -1303,7 +1333,7 @@ struct BigBangStageRootView: View {
                         }
                         .scaleEffect(controller.isImageBigBangActive ? 1.0 : controller.imageZoomScale)
                         .offset(clampedPan)
-                        .animation(.interactiveSpring(response: 0.24, dampingFraction: 0.86), value: controller.imageZoomScale)
+                        .animation(isPinchingImage ? nil : .interactiveSpring(response: 0.24, dampingFraction: 0.86), value: controller.imageZoomScale)
                         .position(x: absImageRect.midX, y: absImageRect.midY)
                 } else {
                     ProgressView()
@@ -1454,6 +1484,30 @@ struct BigBangStageRootView: View {
                             lastBoxSweepPoint = nil
                         } else {
                             lastImagePanTranslation = nil
+                        }
+                    }
+            )
+            .simultaneousGesture(
+                MagnifyGesture()
+                    .updating($isPinchingImage) { _, state, _ in
+                        state = true
+                    }
+                    .onChanged { value in
+                        guard controller.activeModeIsImage, !controller.isImageBigBangActive else { return }
+                        if pinchStartZoom == nil || pinchStartEpoch != controller.zoomExternalEpoch {
+                            pinchStartZoom = controller.imageZoomScale / max(0.05, value.magnification)
+                            pinchStartEpoch = controller.zoomExternalEpoch
+                        }
+                        controller.setImageZoomScale((pinchStartZoom ?? 1.0) * value.magnification)
+                    }
+                    .onEnded { _ in
+                        guard pinchStartZoom != nil else { return }
+                        pinchStartZoom = nil
+                        pinchStartEpoch = -1
+                        if controller.imageZoomScale < 1.06 {
+                            withAnimation(.spring(response: 0.22, dampingFraction: 0.86)) {
+                                controller.resetImageZoom()
+                            }
                         }
                     }
             )
