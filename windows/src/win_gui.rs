@@ -2,10 +2,10 @@
 
 use iclip_core::canvas_ui::{
     build_display_rows_ext, clamp_image_pan_offset, clamp_quick_look_scroll,
-    compute_wrapped_text_scroll_bounds, decode_cf_dib_bytes_to_rgba, estimate_mono_text_px,
-    estimate_text_px, fit_image_in_viewport, grid_move_selection, image_grid_row_height,
-    pack_big_bang_chip_rows, standard_card_height, Color4, DisplayRow, GlassPalette, GridMoveDir,
-    PixelCanvas,
+    compute_cursor_anchored_zoom_pan, compute_wrapped_text_scroll_bounds,
+    decode_cf_dib_bytes_to_rgba, estimate_mono_text_px, estimate_text_px, fit_image_in_viewport,
+    grid_move_selection, image_grid_row_height, pack_big_bang_chip_rows, standard_card_height,
+    Color4, DisplayRow, GlassPalette, GridMoveDir, PixelCanvas,
 };
 use iclip_core::engines::{
     analyze_file_actions, analyze_text_actions, clean_tracking_url, compress_png_to_white_bg_jpeg,
@@ -48,12 +48,12 @@ use windows_sys::Win32::Graphics::Dwm::{DwmExtendFrameIntoClientArea, DwmSetWind
 use windows_sys::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject,
     DrawTextW, EndPaint, EnumFontFamiliesExW, GdiFlush, GetDC, GetMonitorInfoW,
-    GetTextExtentPoint32W, InvalidateRect, MonitorFromPoint, ReleaseDC, SelectObject, SetBkMode,
-    SetTextColor, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CLEARTYPE_NATURAL_QUALITY,
-    CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DIB_RGB_COLORS, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT,
-    DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, FW_BOLD, FW_MEDIUM, FW_NORMAL,
-    FW_SEMIBOLD, HDC, LOGFONTW, MONITORINFO, MONITOR_DEFAULTTONEAREST, OUT_DEFAULT_PRECIS,
-    PAINTSTRUCT, SRCCOPY, TEXTMETRICW, TRANSPARENT,
+    GetTextExtentPoint32W, InvalidateRect, MonitorFromPoint, ReleaseDC, ScreenToClient,
+    SelectObject, SetBkMode, SetTextColor, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+    CLEARTYPE_NATURAL_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DIB_RGB_COLORS, DT_CENTER,
+    DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK,
+    FW_BOLD, FW_MEDIUM, FW_NORMAL, FW_SEMIBOLD, HDC, LOGFONTW, MONITORINFO,
+    MONITOR_DEFAULTTONEAREST, OUT_DEFAULT_PRECIS, PAINTSTRUCT, SRCCOPY, TEXTMETRICW, TRANSPARENT,
 };
 use windows_sys::Win32::System::DataExchange::{
     AddClipboardFormatListener, CloseClipboard, EmptyClipboard, GetClipboardData,
@@ -295,6 +295,15 @@ enum HitAction {
     QuitApp,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HoveredCardButton {
+    Delete,
+    Pin,
+    Todo,
+    OpenLinkPill,
+    QuickAction(usize, usize),
+}
+
 struct DecodedThumb {
     file_name: String,
     width: u32,
@@ -352,6 +361,7 @@ struct WinAppState {
     ql_stage_pan_drag: Option<(i32, i32, f32, f32)>,
     tracking_mouse_leave: bool,
     hovered_link_badge_store_idx: Option<usize>,
+    hovered_card_btn: Option<HoveredCardButton>,
     copied_flash_item_id: Option<String>,
     recording_slot: Option<WinHotKeySlot>,
     hotkey_conflict_error: Option<String>,
@@ -607,6 +617,7 @@ pub fn run_windows_app() -> i32 {
                 ql_stage_pan_drag: None,
                 tracking_mouse_leave: false,
                 hovered_link_badge_store_idx: None,
+                hovered_card_btn: None,
                 copied_flash_item_id: None,
                 recording_slot: None,
                 hotkey_conflict_error: None,
@@ -804,6 +815,7 @@ pub fn run_windows_self_test() -> Result<(), String> {
             ql_stage_pan_drag: None,
             tracking_mouse_leave: false,
             hovered_link_badge_store_idx: None,
+            hovered_card_btn: None,
             copied_flash_item_id: None,
             recording_slot: None,
             hotkey_conflict_error: None,
@@ -1832,6 +1844,7 @@ unsafe fn hide_panel(hwnd: HWND, restore_focus: bool) {
             st.hover_card_ny = 0.0;
             st.pressed_visible_pos = None;
             st.hovered_link_badge_store_idx = None;
+            st.hovered_card_btn = None;
             st.dragging_slider_track = None;
             st.show_quick_look = false;
             st.quick_look_scroll = 0;
@@ -2391,6 +2404,9 @@ unsafe extern "system" fn wnd_proc(
                     if st.hovered_link_badge_store_idx.take().is_some() {
                         need_redraw = true;
                     }
+                    if st.hovered_card_btn.take().is_some() {
+                        need_redraw = true;
+                    }
                     let old_pressed = st.pressed_visible_pos.take();
                     if let Some(pr) = old_pressed {
                         need_redraw = true;
@@ -2452,6 +2468,9 @@ unsafe extern "system" fn wnd_proc(
                             st.hover_card_nx = 0.0;
                             st.hover_card_ny = 0.0;
                             if st.hovered_link_badge_store_idx.take().is_some() {
+                                need_redraw = true;
+                            }
+                            if st.hovered_card_btn.take().is_some() {
                                 need_redraw = true;
                             }
                         }
@@ -2526,10 +2545,20 @@ unsafe extern "system" fn wnd_proc(
                             &st.store.items,
                             st.selected_tab != ClipFilterTab::Todo,
                         );
+                        let mut scrolled = false;
                         if delta < 0 && st.scroll_row_offset + 3 < rows.len() {
                             st.scroll_row_offset += 1;
+                            scrolled = true;
                         } else if delta > 0 && st.scroll_row_offset > 0 {
                             st.scroll_row_offset -= 1;
+                            scrolled = true;
+                        }
+                        if scrolled {
+                            st.hovered_visible_pos = None;
+                            st.hover_card_nx = 0.0;
+                            st.hover_card_ny = 0.0;
+                            st.hovered_link_badge_store_idx = None;
+                            st.hovered_card_btn = None;
                         }
                     }
                 }
@@ -5266,24 +5295,32 @@ fn draw_image_grid_tile(
         let del_x = tx + tw - b_sz - s(5);
         let pin_x = del_x - b_sz - s(4);
         let by = tile_y + s(5);
+        let pin_hov = st.hovered_card_btn == Some(HoveredCardButton::Pin);
+        let del_hov = st.hovered_card_btn == Some(HoveredCardButton::Delete);
 
         canvas.fill_circle(
             (pin_x + b_sz / 2) as f32,
             (by + b_sz / 2) as f32,
             sf(11.0),
-            Color4::rgba(18, 22, 28, 178),
+            if pin_hov {
+                palette.amber
+            } else {
+                Color4::rgba(18, 22, 28, 178)
+            },
         );
         canvas.draw_icon_star(
             (pin_x + b_sz / 2) as f32,
             (by + b_sz / 2) as f32,
             sf(11.5),
             sf(1.4),
-            if item.is_pinned {
+            if pin_hov {
+                Color4::rgb(255, 255, 255)
+            } else if item.is_pinned {
                 palette.amber
             } else {
                 Color4::rgb(255, 255, 255)
             },
-            item.is_pinned,
+            item.is_pinned || pin_hov,
         );
         st.hit_regions.push(HitRegion {
             rect: RECT {
@@ -5300,14 +5337,22 @@ fn draw_image_grid_tile(
             (del_x + b_sz / 2) as f32,
             (by + b_sz / 2) as f32,
             sf(11.0),
-            Color4::rgba(18, 22, 28, 178),
+            if del_hov {
+                palette.danger
+            } else {
+                Color4::rgba(18, 22, 28, 178)
+            },
         );
         canvas.draw_icon_trash(
             (del_x + b_sz / 2) as f32,
             (by + b_sz / 2) as f32,
             sf(11.0),
             sf(1.4),
-            Color4::rgb(255, 112, 104),
+            if del_hov {
+                Color4::rgb(255, 255, 255)
+            } else {
+                Color4::rgb(255, 112, 104)
+            },
         );
         st.hit_regions.push(HitRegion {
             rect: RECT {
@@ -5407,6 +5452,874 @@ fn draw_image_grid_tile(
             top: tile_y,
             right: tx + tw,
             bottom: tile_y + row_h,
+        },
+        interactive_cursor: false,
+        action: HitAction::SelectCard(vis_pos),
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_standard_card(
+    canvas: &mut PixelCanvas,
+    texts: &mut Vec<TextDrawCmd>,
+    w: i32,
+    pad: i32,
+    track_w: i32,
+    scale: f32,
+    palette: &GlassPalette,
+    st: &mut WinAppState,
+    cur_y: i32,
+    vis_pos: usize,
+    store_idx: usize,
+    minimal: bool,
+) {
+    let s = |v: i32| ((v as f32) * scale).round() as i32;
+    let sf = |v: f32| v * scale;
+    let item = st.store.items[store_idx].clone();
+    let is_selected = vis_pos == st.selected_visible_pos;
+    let is_hovered = st.hovered_visible_pos == Some(vis_pos);
+
+    let quick_actions = item_quick_actions_for_ui(st, &item);
+    let has_chips = !quick_actions.is_empty();
+    let card_h = standard_card_height(has_chips, scale);
+
+    // 现代液态玻璃卡片材质：悬停动态视差投影 + 左键物理下沉充电环 + 选中态冰蓝玻璃层
+    let is_pressed = st.pressed_visible_pos == Some(vis_pos);
+    let cd = if is_pressed { s(1) } else { 0 };
+    let (cx, cy, cw, ch) = (
+        pad + cd,
+        cur_y + cd,
+        (track_w - 2 * cd).max(1),
+        (card_h - 2 * cd).max(1),
+    );
+    if is_hovered || is_pressed {
+        canvas.draw_soft_shadow_round_rect_xy(
+            cx,
+            cy,
+            cw,
+            ch,
+            sf(14.0),
+            if is_pressed {
+                0.0
+            } else {
+                (sf(-6.0) * st.hover_card_nx).round()
+            },
+            if is_pressed {
+                sf(2.0)
+            } else {
+                sf(5.0) - (sf(3.5) * st.hover_card_ny).round()
+            },
+            if is_pressed { sf(5.0) } else { sf(10.0) },
+            Color4::rgba(
+                0,
+                0,
+                0,
+                if is_pressed {
+                    44
+                } else if st.is_dark_mode {
+                    76
+                } else {
+                    36
+                },
+            ),
+        );
+    }
+    if is_selected {
+        canvas.fill_round_rect(cx, cy, cw, ch, sf(14.0), palette.card_bg);
+        canvas.fill_diag_grad_round_rect(
+            cx,
+            cy,
+            cw,
+            ch,
+            sf(14.0),
+            palette.select_top,
+            palette.select_bottom,
+        );
+        canvas.stroke_glass_bevel_round_rect(
+            cx,
+            cy,
+            cw,
+            ch,
+            sf(14.0),
+            sf(0.95),
+            palette.glass_top_highlight,
+            palette.select_border,
+        );
+        let ind_h = ((ch as f32) * 0.58).round() as i32;
+        canvas.fill_round_rect(
+            cx + s(1),
+            cy + (ch - ind_h) / 2,
+            s(3),
+            ind_h.max(s(22)),
+            sf(1.5),
+            palette.select_indicator,
+        );
+    } else if item.is_pinned {
+        let (pt, pb) = if is_hovered {
+            (
+                palette.card_pinned_hover_top,
+                palette.card_pinned_hover_bottom,
+            )
+        } else {
+            (palette.card_pinned_top, palette.card_pinned_bottom)
+        };
+        canvas.fill_diag_grad_round_rect(cx, cy, cw, ch, sf(14.0), pt, pb);
+        canvas.stroke_glass_bevel_round_rect(
+            cx,
+            cy,
+            cw,
+            ch,
+            sf(14.0),
+            sf(if is_pressed { 1.25 } else { 0.85 }),
+            palette.glass_top_highlight,
+            if is_pressed {
+                palette.cobalt.with_alpha(150)
+            } else {
+                palette.card_pinned_border
+            },
+        );
+    } else {
+        let bg = if is_hovered {
+            palette.card_hover_bg
+        } else {
+            palette.card_bg
+        };
+        let bd = if is_pressed {
+            palette.cobalt.with_alpha(150)
+        } else if is_hovered {
+            palette.card_hover_border
+        } else {
+            palette.card_border
+        };
+        canvas.fill_round_rect(cx, cy, cw, ch, sf(14.0), bg);
+        canvas.stroke_glass_bevel_round_rect(
+            cx,
+            cy,
+            cw,
+            ch,
+            sf(14.0),
+            sf(if is_pressed { 1.25 } else { 0.80 }),
+            palette.glass_top_highlight,
+            bd,
+        );
+    }
+    if is_hovered {
+        canvas.draw_apple_tv_glare_round_rect(
+            cx,
+            cy,
+            cw,
+            ch,
+            sf(14.0),
+            st.hover_card_nx,
+            st.hover_card_ny,
+            if is_pressed {
+                18
+            } else if st.is_dark_mode {
+                42
+            } else {
+                68
+            },
+        );
+    }
+
+    let mut left_cursor = pad + s(13);
+    let content_center_y = if has_chips {
+        cur_y + s(30)
+    } else {
+        cur_y + card_h / 2
+    };
+
+    let shows_todo = !minimal && item.is_todo();
+    let todo_done = item.is_todo_completed();
+    if shows_todo {
+        let cb_sz = s(20);
+        let cbx = left_cursor;
+        let cby = content_center_y - cb_sz / 2;
+        let ring_c = if todo_done {
+            palette.emerald
+        } else if is_selected {
+            palette.cobalt_text
+        } else {
+            palette.cobalt.with_alpha(185)
+        };
+        let chk_c = Color4::rgb(255, 255, 255);
+        canvas.draw_icon_check_circle(
+            (cbx + cb_sz / 2) as f32,
+            (cby + cb_sz / 2) as f32,
+            sf(17.5),
+            sf(1.55),
+            ring_c,
+            todo_done,
+            chk_c,
+        );
+        st.hit_regions.push(HitRegion {
+            rect: RECT {
+                left: cbx - s(3),
+                top: cby - s(3),
+                right: cbx + cb_sz + s(3),
+                bottom: cby + cb_sz + s(3),
+            },
+            interactive_cursor: true,
+            action: HitAction::ToggleTodo(item.id.clone()),
+        });
+        left_cursor += s(28);
+    }
+
+    let can_jump = item_supports_external_jump(&item);
+    if can_jump {
+        let b_sz = s(42);
+        let bx = left_cursor;
+        let by = content_center_y - b_sz / 2;
+        let badge_hov = st.hovered_link_badge_store_idx == Some(store_idx);
+
+        if badge_hov {
+            canvas.draw_soft_shadow_round_rect(
+                bx,
+                by,
+                b_sz,
+                b_sz,
+                sf(11.0),
+                sf(2.0),
+                sf(5.0),
+                palette.cobalt.with_alpha(86),
+            );
+            canvas.fill_diag_grad_round_rect(
+                bx,
+                by,
+                b_sz,
+                b_sz,
+                sf(11.0),
+                palette.cobalt,
+                Color4::rgb(31, 163, 250),
+            );
+        } else {
+            let bg = if is_selected {
+                palette
+                    .cobalt
+                    .with_alpha(if st.is_dark_mode { 54 } else { 32 })
+            } else {
+                palette
+                    .cobalt
+                    .with_alpha(if st.is_dark_mode { 36 } else { 24 })
+            };
+            canvas.fill_round_rect(bx, by, b_sz, b_sz, sf(11.0), bg);
+        }
+
+        let ic_c = if badge_hov {
+            Color4::rgb(255, 255, 255)
+        } else {
+            palette.cobalt_text
+        };
+        let ic_cx = (bx + b_sz / 2) as f32;
+        let ic_cy = (by + b_sz / 2) as f32;
+        if item.kind == ClipContentType::File {
+            canvas.draw_icon_file(ic_cx, ic_cy, sf(18.0), sf(1.55), ic_c);
+        } else if badge_hov {
+            canvas.draw_icon_external_link(ic_cx, ic_cy, sf(16.0), sf(1.75), ic_c);
+        } else {
+            canvas.draw_icon_link_chain(ic_cx, ic_cy, sf(19.0), sf(1.6), ic_c);
+        }
+
+        st.hit_regions.push(HitRegion {
+            rect: RECT {
+                left: bx,
+                top: by,
+                right: bx + b_sz,
+                bottom: by + b_sz,
+            },
+            interactive_cursor: true,
+            action: HitAction::OpenExternalTarget(store_idx),
+        });
+        left_cursor += b_sz + s(11);
+    }
+
+    let b_sz = s(22);
+    let mut btn_cnt = 2;
+    if !minimal {
+        btn_cnt += 1;
+    }
+    if can_jump {
+        btn_cnt += 1;
+    }
+    let pill_w = btn_cnt * b_sz + (btn_cnt - 1) * s(4) + s(8);
+    let has_right_badge = st.store.queue_rank(&item.id).is_some() || vis_pos < 9;
+    let right_reserved = if is_hovered {
+        pill_w + s(13)
+    } else if is_selected && has_right_badge {
+        s(72)
+    } else if has_right_badge {
+        s(46)
+    } else {
+        s(14)
+    };
+
+    if is_hovered {
+        let by = cur_y + s(7);
+        let mut rx = w - pad - s(9) - b_sz;
+        let circle_bg = palette.chip_hover_bg;
+        let pill_x = w - pad - s(5) - pill_w;
+        let pill_y = by - s(2);
+        let pill_h = b_sz + s(4);
+        let pill_bg = if st.is_dark_mode {
+            Color4::rgba(28, 32, 42, 236)
+        } else {
+            Color4::rgba(255, 255, 255, 242)
+        };
+        canvas.draw_soft_shadow_round_rect(
+            pill_x,
+            pill_y,
+            pill_w,
+            pill_h,
+            sf(13.0),
+            sf(1.5),
+            sf(4.5),
+            Color4::rgba(0, 0, 0, if st.is_dark_mode { 72 } else { 28 }),
+        );
+        canvas.fill_round_rect(pill_x, pill_y, pill_w, pill_h, sf(13.0), pill_bg);
+        canvas.stroke_glass_bevel_round_rect(
+            pill_x,
+            pill_y,
+            pill_w,
+            pill_h,
+            sf(13.0),
+            sf(0.65),
+            palette.glass_top_highlight,
+            palette.card_border,
+        );
+
+        // 删除圆钮
+        let del_hov = st.hovered_card_btn == Some(HoveredCardButton::Delete);
+        canvas.fill_circle(
+            (rx + b_sz / 2) as f32,
+            (by + b_sz / 2) as f32,
+            (b_sz as f32) * 0.5,
+            if del_hov { palette.danger } else { circle_bg },
+        );
+        canvas.draw_icon_trash(
+            (rx + b_sz / 2) as f32,
+            (by + b_sz / 2) as f32,
+            sf(11.0),
+            sf(1.4),
+            if del_hov {
+                Color4::rgb(255, 255, 255)
+            } else {
+                palette.danger
+            },
+        );
+        st.hit_regions.push(HitRegion {
+            rect: RECT {
+                left: rx,
+                top: by,
+                right: rx + b_sz,
+                bottom: by + b_sz,
+            },
+            interactive_cursor: true,
+            action: HitAction::DeleteItem(item.id.clone()),
+        });
+        rx -= b_sz + s(4);
+
+        // 星标收藏圆钮
+        let pin_hov = st.hovered_card_btn == Some(HoveredCardButton::Pin);
+        canvas.fill_circle(
+            (rx + b_sz / 2) as f32,
+            (by + b_sz / 2) as f32,
+            (b_sz as f32) * 0.5,
+            if pin_hov {
+                palette.amber
+            } else if item.is_pinned {
+                palette.amber.with_alpha(38)
+            } else {
+                circle_bg
+            },
+        );
+        canvas.draw_icon_star(
+            (rx + b_sz / 2) as f32,
+            (by + b_sz / 2) as f32,
+            sf(11.5),
+            sf(1.4),
+            if pin_hov {
+                Color4::rgb(255, 255, 255)
+            } else if item.is_pinned {
+                palette.amber
+            } else {
+                palette.text_secondary
+            },
+            item.is_pinned || pin_hov,
+        );
+        st.hit_regions.push(HitRegion {
+            rect: RECT {
+                left: rx,
+                top: by,
+                right: rx + b_sz,
+                bottom: by + b_sz,
+            },
+            interactive_cursor: true,
+            action: HitAction::TogglePin(item.id.clone()),
+        });
+
+        if !minimal {
+            rx -= b_sz + s(4);
+            let todo_hov = st.hovered_card_btn == Some(HoveredCardButton::Todo);
+            canvas.fill_circle(
+                (rx + b_sz / 2) as f32,
+                (by + b_sz / 2) as f32,
+                (b_sz as f32) * 0.5,
+                if todo_hov {
+                    palette.emerald
+                } else {
+                    circle_bg
+                },
+            );
+            canvas.draw_icon_check_circle(
+                (rx + b_sz / 2) as f32,
+                (by + b_sz / 2) as f32,
+                sf(11.5),
+                sf(1.35),
+                if todo_hov {
+                    Color4::rgb(255, 255, 255)
+                } else if item.is_todo() {
+                    palette.emerald
+                } else {
+                    palette.text_secondary
+                },
+                item.is_todo(),
+                if todo_hov {
+                    palette.emerald
+                } else {
+                    Color4::rgb(255, 255, 255)
+                },
+            );
+            st.hit_regions.push(HitRegion {
+                rect: RECT {
+                    left: rx,
+                    top: by,
+                    right: rx + b_sz,
+                    bottom: by + b_sz,
+                },
+                interactive_cursor: true,
+                action: HitAction::ToggleTodo(item.id.clone()),
+            });
+        }
+
+        if can_jump {
+            rx -= b_sz + s(4);
+            let link_hov = st.hovered_card_btn == Some(HoveredCardButton::OpenLinkPill);
+            canvas.fill_circle(
+                (rx + b_sz / 2) as f32,
+                (by + b_sz / 2) as f32,
+                (b_sz as f32) * 0.5,
+                if link_hov {
+                    palette.cobalt
+                } else {
+                    circle_bg
+                },
+            );
+            canvas.draw_icon_external_link(
+                (rx + b_sz / 2) as f32,
+                (by + b_sz / 2) as f32,
+                sf(10.5),
+                sf(1.5),
+                if link_hov {
+                    Color4::rgb(255, 255, 255)
+                } else {
+                    palette.cobalt_text
+                },
+            );
+            st.hit_regions.push(HitRegion {
+                rect: RECT {
+                    left: rx,
+                    top: by,
+                    right: rx + b_sz,
+                    bottom: by + b_sz,
+                },
+                interactive_cursor: true,
+                action: HitAction::OpenExternalTarget(store_idx),
+            });
+        }
+    } else if let Some(q_rank) = st.store.queue_rank(&item.id) {
+        let bw = s(34);
+        let bh = s(18);
+        let bx = w - pad - bw - s(10);
+        let by = cur_y + s(9);
+        canvas.fill_round_rect(bx, by, bw, bh, sf(9.0), palette.cobalt);
+        texts.push(TextDrawCmd {
+            text: format!("#{q_rank}"),
+            rect: RECT {
+                left: bx,
+                top: by,
+                right: bx + bw,
+                bottom: by + bh,
+            },
+            color: Color4::rgb(255, 255, 255),
+            font_kind: FontKind::KeyCap,
+            flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+        });
+    } else if vis_pos < 9 {
+        let bw = s(28);
+        let bh = s(18);
+        let mut bx = w - pad - bw - s(10);
+        let by = cur_y + s(9);
+        if is_selected {
+            let r_sz = s(20);
+            let rx = bx + bw - r_sz;
+            canvas.fill_circle(
+                (rx + r_sz / 2) as f32,
+                (by + bh / 2) as f32,
+                (r_sz as f32) * 0.5,
+                palette.cobalt,
+            );
+            canvas.draw_icon_return_arrow(
+                (rx + r_sz / 2) as f32,
+                (by + bh / 2) as f32,
+                sf(10.5),
+                sf(1.45),
+                Color4::rgb(255, 255, 255),
+            );
+            bx = rx - bw - s(6);
+        }
+        canvas.fill_round_rect(
+            bx,
+            by,
+            bw,
+            bh,
+            sf(6.0),
+            if is_selected {
+                palette
+                    .cobalt
+                    .with_alpha(if st.is_dark_mode { 42 } else { 20 })
+            } else {
+                palette.chip_bg
+            },
+        );
+        texts.push(TextDrawCmd {
+            text: format!("^{}", vis_pos + 1),
+            rect: RECT {
+                left: bx,
+                top: by,
+                right: bx + bw,
+                bottom: by + bh,
+            },
+            color: if is_selected {
+                palette.cobalt_text
+            } else {
+                palette.text_muted
+            },
+            font_kind: FontKind::KeyCap,
+            flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+        });
+    }
+
+    let veil_on = st.store.config.mask_sensitive_previews && !is_selected && !is_hovered;
+    let title_str = item.display_title(minimal, veil_on);
+    texts.push(TextDrawCmd {
+        text: title_str,
+        rect: RECT {
+            left: left_cursor,
+            top: cur_y + s(8),
+            right: w - pad - right_reserved,
+            bottom: cur_y + s(31),
+        },
+        color: if todo_done {
+            palette.text_muted
+        } else {
+            palette.text_primary
+        },
+        font_kind: FontKind::CardTitle,
+        flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+    });
+
+    let mut meta_x = left_cursor;
+    let meta_cy = (cur_y + s(41)) as f32;
+    if item.is_pinned {
+        let star_c = if !minimal {
+            item.pin_category
+                .map(GlassPalette::pin_category_color)
+                .unwrap_or(palette.amber)
+        } else {
+            palette.amber
+        };
+        canvas.draw_icon_star(
+            meta_x as f32 + sf(5.0),
+            meta_cy,
+            sf(10.5),
+            sf(1.3),
+            star_c,
+            true,
+        );
+        meta_x += s(14);
+    } else if !minimal {
+        if let Some(cat) = item.pin_category {
+            let dot_c = GlassPalette::pin_category_color(cat);
+            canvas.fill_circle(meta_x as f32 + sf(3.0), meta_cy, sf(2.6), dot_c);
+            meta_x += s(8);
+        }
+    }
+
+    if !minimal {
+        if let Some(cat) = item.pin_category {
+            let cat_lbl = cat.title();
+            let cat_c = GlassPalette::pin_category_color(cat);
+            let cw = estimate_text_px(cat_lbl, sf(10.5)) + s(10);
+            let ch = s(15);
+            let cy_b = cur_y + s(34);
+            canvas.fill_round_rect(
+                meta_x,
+                cy_b,
+                cw,
+                ch,
+                sf(7.5),
+                cat_c.with_alpha(if st.is_dark_mode { 44 } else { 26 }),
+            );
+            texts.push(TextDrawCmd {
+                text: cat_lbl.to_string(),
+                rect: RECT {
+                    left: meta_x,
+                    top: cy_b,
+                    right: meta_x + cw,
+                    bottom: cy_b + ch,
+                },
+                color: if st.is_dark_mode {
+                    cat_c.lerp(Color4::rgb(255, 255, 255), 0.28)
+                } else {
+                    cat_c.lerp(Color4::rgb(15, 23, 42), 0.22)
+                },
+                font_kind: FontKind::BadgeBold,
+                flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            });
+            meta_x += cw + s(6);
+        }
+    }
+
+    let mut sub_parts: Vec<String> = Vec::new();
+    let is_copied_flash = st.copied_flash_item_id.as_deref() == Some(item.id.as_str());
+    if is_copied_flash {
+        sub_parts.push("✓ 已复制".to_string());
+    }
+    if item.is_burn_after_paste() {
+        sub_parts.push("粘贴即焚".to_string());
+    } else if matches!(
+        item.detected_poison_threat(),
+        Some(iclip_core::security::PoisonThreatKind::PastejackingOrBidi(_))
+    ) {
+        sub_parts.push("含隐藏控制符".to_string());
+    } else if let Some(link_risk) = item.detected_link_risk() {
+        sub_parts.push(link_risk.badge_title().to_string());
+    } else if let Some(sec_kind) = item.detected_sensitive_kind() {
+        if !item.is_pinned
+            && !item.is_pending_todo()
+            && st.store.config.auto_expire_unpinned_secrets
+        {
+            sub_parts.push(format!("{} · 24h自毁", sec_kind.badge_title()));
+        } else {
+            sub_parts.push(sec_kind.badge_title().to_string());
+        }
+    }
+    sub_parts.push(item.subtitle_info_veiled(veil_on));
+    if let Some(app) = &item.source_app_name {
+        if !app.is_empty() {
+            sub_parts.push(app.clone());
+        }
+    }
+    if !is_copied_flash && !minimal {
+        if let Some(badge) = st
+            .store
+            .preferred_target_badge(&item.content_hash, st.active_target_app_name.as_deref())
+        {
+            sub_parts.push(badge);
+        } else if !item.is_pinned {
+            let reuse = st.store.reuse_count(&item.content_hash);
+            if reuse >= 3 {
+                sub_parts.push(format!("高频 ×{reuse}"));
+            }
+        }
+    }
+
+    let time_w = s(58);
+    texts.push(TextDrawCmd {
+        text: sub_parts.join(" · "),
+        rect: RECT {
+            left: meta_x,
+            top: cur_y + s(32),
+            right: w - pad - time_w - s(12),
+            bottom: cur_y + s(52),
+        },
+        color: if is_copied_flash {
+            palette.emerald
+        } else {
+            palette.text_secondary
+        },
+        font_kind: FontKind::Meta,
+        flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+    });
+    texts.push(TextDrawCmd {
+        text: format_relative_time(item.created_unix_secs),
+        rect: RECT {
+            left: w - pad - time_w - s(10),
+            top: cur_y + s(32),
+            right: w - pad - s(12),
+            bottom: cur_y + s(52),
+        },
+        color: palette.text_muted,
+        font_kind: FontKind::Meta,
+        flags: DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
+    });
+
+    if has_chips {
+        let mut chip_x = left_cursor;
+        let chip_top = cur_y + s(55);
+        let chip_h = s(22);
+        for (a_idx, act) in quick_actions.iter().enumerate() {
+            let label = act.title.clone();
+            let is_primary_chip = a_idx == 0;
+            let txt_w = estimate_text_px(&label, sf(10.4));
+            let extra_key_w = if is_primary_chip { s(22) } else { 0 };
+            let cw = (s(21) + txt_w + extra_key_w + s(7)).min(w - pad - chip_x - s(10));
+            if cw < s(52) {
+                break;
+            }
+            let is_q_hov = is_hovered
+                && st.hovered_card_btn == Some(HoveredCardButton::QuickAction(store_idx, a_idx));
+            let (chip_bg, chip_bd, chip_fg, bolt_c) = if is_primary_chip {
+                if act.is_security {
+                    (
+                        palette.amber.with_alpha(if st.is_dark_mode {
+                            if is_q_hov { 76 } else { 42 }
+                        } else {
+                            if is_q_hov { 42 } else { 22 }
+                        }),
+                        palette.amber.with_alpha(if st.is_dark_mode {
+                            if is_q_hov { 148 } else { 96 }
+                        } else {
+                            if is_q_hov { 110 } else { 64 }
+                        }),
+                        if st.is_dark_mode {
+                            Color4::rgb(253, 224, 138)
+                        } else {
+                            Color4::rgb(180, 83, 9)
+                        },
+                        palette.amber,
+                    )
+                } else {
+                    (
+                        palette.cobalt.with_alpha(if st.is_dark_mode {
+                            if is_q_hov { 78 } else { 44 }
+                        } else {
+                            if is_q_hov { 40 } else { 20 }
+                        }),
+                        palette.cobalt.with_alpha(if st.is_dark_mode {
+                            if is_q_hov { 160 } else { 108 }
+                        } else {
+                            if is_q_hov { 112 } else { 62 }
+                        }),
+                        palette.cobalt_text,
+                        palette.cobalt_text,
+                    )
+                }
+            } else {
+                (
+                    if is_q_hov {
+                        palette.cobalt.with_alpha(if st.is_dark_mode { 52 } else { 22 })
+                    } else if is_hovered {
+                        palette.chip_hover_bg
+                    } else {
+                        palette.chip_bg
+                    },
+                    if is_q_hov {
+                        palette.cobalt.with_alpha(120)
+                    } else {
+                        palette.card_border
+                    },
+                    if is_q_hov {
+                        palette.text_primary
+                    } else {
+                        palette.text_secondary
+                    },
+                    if act.is_security {
+                        palette.amber
+                    } else {
+                        palette.cobalt_text
+                    },
+                )
+            };
+            canvas.fill_round_rect(chip_x, chip_top, cw, chip_h, sf(11.0), chip_bg);
+            canvas.stroke_round_rect(
+                chip_x,
+                chip_top,
+                cw,
+                chip_h,
+                sf(11.0),
+                sf(if is_q_hov { 0.9 } else { 0.65 }),
+                chip_bd,
+            );
+            canvas.draw_icon_bolt(
+                (chip_x + s(11)) as f32,
+                (chip_top + chip_h / 2) as f32,
+                sf(9.5),
+                sf(1.35),
+                bolt_c,
+            );
+            let text_right = if is_primary_chip {
+                chip_x + cw - s(26)
+            } else {
+                chip_x + cw - s(8)
+            };
+            texts.push(TextDrawCmd {
+                text: label,
+                rect: RECT {
+                    left: chip_x + s(19),
+                    top: chip_top,
+                    right: text_right,
+                    bottom: chip_top + chip_h,
+                },
+                color: chip_fg,
+                font_kind: if is_primary_chip {
+                    FontKind::BadgeBold
+                } else {
+                    FontKind::Meta
+                },
+                flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+            });
+            if is_primary_chip && cw >= s(72) {
+                let icy = (chip_top + chip_h / 2) as f32;
+                let key_c = chip_fg.with_alpha(210);
+                canvas.draw_icon_shift_arrow(
+                    (chip_x + cw - s(19)) as f32,
+                    icy,
+                    sf(8.2),
+                    sf(1.18),
+                    key_c,
+                );
+                canvas.draw_icon_return_arrow(
+                    (chip_x + cw - s(10)) as f32,
+                    icy,
+                    sf(8.4),
+                    sf(1.22),
+                    key_c,
+                );
+            }
+            st.hit_regions.push(HitRegion {
+                rect: RECT {
+                    left: chip_x,
+                    top: chip_top,
+                    right: chip_x + cw,
+                    bottom: chip_top + chip_h,
+                },
+                interactive_cursor: true,
+                action: HitAction::TriggerQuickAction {
+                    item_idx: store_idx,
+                    action: act.clone(),
+                },
+            });
+            chip_x += cw + s(6);
+        }
+    }
+
+    st.hit_regions.push(HitRegion {
+        rect: RECT {
+            left: pad,
+            top: cur_y,
+            right: w - pad,
+            bottom: cur_y + card_h,
         },
         interactive_cursor: false,
         action: HitAction::SelectCard(vis_pos),
@@ -7112,6 +8025,7 @@ fn layout_and_draw_main_view(
     } else {
         let images_dir = st.store.images_dir.clone();
         let mut deferred_hovered_tile: Option<(i32, i32, i32, i32, usize, usize)> = None;
+        let mut deferred_hovered_card: Option<(i32, usize, usize)> = None;
         for row in rows.iter().skip(st.scroll_row_offset) {
             match row {
                 DisplayRow::ImageGridRow { cells } => {
@@ -7204,844 +8118,29 @@ fn layout_and_draw_main_view(
                 DisplayRow::StandardCard { vis_pos, store_idx } => {
                     let vis_pos = *vis_pos;
                     let store_idx = *store_idx;
-                    let item = st.store.items[store_idx].clone();
-                    let is_selected = vis_pos == st.selected_visible_pos;
-                    let is_hovered = st.hovered_visible_pos == Some(vis_pos);
-
-                    let quick_actions = item_quick_actions_for_ui(st, &item);
-                    let has_chips = !quick_actions.is_empty();
+                    let has_chips = !item_quick_actions_for_ui(st, &st.store.items[store_idx]).is_empty();
                     let card_h = standard_card_height(has_chips, scale);
                     if cur_y + card_h > max_list_bottom {
                         break;
                     }
-
-                    // 现代液态玻璃卡片材质：悬停动态视差投影 + 左键物理下沉充电环 + 选中态冰蓝玻璃层
-                    let is_pressed = st.pressed_visible_pos == Some(vis_pos);
-                    let cd = if is_pressed { s(1) } else { 0 };
-                    let (cx, cy, cw, ch) = (
-                        pad + cd,
-                        cur_y + cd,
-                        (track_w - 2 * cd).max(1),
-                        (card_h - 2 * cd).max(1),
-                    );
-                    if is_hovered || is_pressed {
-                        canvas.draw_soft_shadow_round_rect_xy(
-                            cx,
-                            cy,
-                            cw,
-                            ch,
-                            sf(14.0),
-                            if is_pressed {
-                                0.0
-                            } else {
-                                (sf(-6.0) * st.hover_card_nx).round()
-                            },
-                            if is_pressed {
-                                sf(2.0)
-                            } else {
-                                sf(5.0) - (sf(3.5) * st.hover_card_ny).round()
-                            },
-                            if is_pressed { sf(5.0) } else { sf(10.0) },
-                            Color4::rgba(
-                                0,
-                                0,
-                                0,
-                                if is_pressed {
-                                    44
-                                } else if st.is_dark_mode {
-                                    76
-                                } else {
-                                    36
-                                },
-                            ),
-                        );
-                    }
-                    if is_selected {
-                        canvas.fill_round_rect(
-                            cx,
-                            cy,
-                            cw,
-                            ch,
-                            sf(14.0),
-                            palette.card_bg,
-                        );
-                        canvas.fill_diag_grad_round_rect(
-                            cx,
-                            cy,
-                            cw,
-                            ch,
-                            sf(14.0),
-                            palette.select_top,
-                            palette.select_bottom,
-                        );
-                        canvas.stroke_glass_bevel_round_rect(
-                            cx,
-                            cy,
-                            cw,
-                            ch,
-                            sf(14.0),
-                            sf(0.95),
-                            palette.glass_top_highlight,
-                            palette.select_border,
-                        );
-                        // 左侧 3px 圆头品牌电光钴蓝精选指示条（上下收紧至卡片高度 58%，远离卡片外圆角拐点）
-                        let ind_h = ((ch as f32) * 0.58).round() as i32;
-                        canvas.fill_round_rect(
-                            cx + s(1),
-                            cy + (ch - ind_h) / 2,
-                            s(3),
-                            ind_h.max(s(22)),
-                            sf(1.5),
-                            palette.select_indicator,
-                        );
-                    } else if item.is_pinned {
-                        let (pt, pb) = if is_hovered {
-                            (
-                                palette.card_pinned_hover_top,
-                                palette.card_pinned_hover_bottom,
-                            )
-                        } else {
-                            (palette.card_pinned_top, palette.card_pinned_bottom)
-                        };
-                        canvas.fill_diag_grad_round_rect(
-                            cx,
-                            cy,
-                            cw,
-                            ch,
-                            sf(14.0),
-                            pt,
-                            pb,
-                        );
-                        canvas.stroke_glass_bevel_round_rect(
-                            cx,
-                            cy,
-                            cw,
-                            ch,
-                            sf(14.0),
-                            sf(if is_pressed { 1.25 } else { 0.85 }),
-                            palette.glass_top_highlight,
-                            if is_pressed {
-                                palette.cobalt.with_alpha(150)
-                            } else {
-                                palette.card_pinned_border
-                            },
-                        );
+                    if st.hovered_visible_pos == Some(vis_pos) {
+                        deferred_hovered_card = Some((cur_y, vis_pos, store_idx));
                     } else {
-                        let bg = if is_hovered {
-                            palette.card_hover_bg
-                        } else {
-                            palette.card_bg
-                        };
-                        let bd = if is_pressed {
-                            palette.cobalt.with_alpha(150)
-                        } else if is_hovered {
-                            palette.card_hover_border
-                        } else {
-                            palette.card_border
-                        };
-                        canvas.fill_round_rect(cx, cy, cw, ch, sf(14.0), bg);
-                        canvas.stroke_glass_bevel_round_rect(
-                            cx,
-                            cy,
-                            cw,
-                            ch,
-                            sf(14.0),
-                            sf(if is_pressed { 1.25 } else { 0.80 }),
-                            palette.glass_top_highlight,
-                            bd,
+                        draw_standard_card(
+                            canvas,
+                            texts,
+                            w,
+                            pad,
+                            track_w,
+                            scale,
+                            palette,
+                            st,
+                            cur_y,
+                            vis_pos,
+                            store_idx,
+                            minimal,
                         );
                     }
-                    if is_hovered {
-                        canvas.draw_apple_tv_glare_round_rect(
-                            cx,
-                            cy,
-                            cw,
-                            ch,
-                            sf(14.0),
-                            st.hover_card_nx,
-                            st.hover_card_ny,
-                            if is_pressed {
-                                18
-                            } else if st.is_dark_mode {
-                                42
-                            } else {
-                                68
-                            },
-                        );
-                    }
-
-                    let mut left_cursor = pad + s(13);
-                    let content_center_y = if has_chips {
-                        cur_y + s(30)
-                    } else {
-                        cur_y + card_h / 2
-                    };
-
-                    // Things 3 风格待办圆环勾选框（复刻 TodoLeadingCheckboxButton）
-                    let shows_todo = !minimal && item.is_todo();
-                    let todo_done = item.is_todo_completed();
-                    if shows_todo {
-                        let cb_sz = s(20);
-                        let cbx = left_cursor;
-                        let cby = content_center_y - cb_sz / 2;
-                        let ring_c = if todo_done {
-                            palette.emerald
-                        } else if is_selected {
-                            palette.cobalt_text
-                        } else {
-                            palette.cobalt.with_alpha(185)
-                        };
-                        let chk_c = Color4::rgb(255, 255, 255);
-                        canvas.draw_icon_check_circle(
-                            (cbx + cb_sz / 2) as f32,
-                            (cby + cb_sz / 2) as f32,
-                            sf(17.5),
-                            sf(1.55),
-                            ring_c,
-                            todo_done,
-                            chk_c,
-                        );
-                        st.hit_regions.push(HitRegion {
-                            rect: RECT {
-                                left: cbx - s(3),
-                                top: cby - s(3),
-                                right: cbx + cb_sz + s(3),
-                                bottom: cby + cb_sz + s(3),
-                            },
-                            interactive_cursor: true,
-                            action: HitAction::ToggleTodo(item.id.clone()),
-                        });
-                        left_cursor += s(28);
-                    }
-
-                    // 左侧 42x42 圆角 11px 视觉徽标（复刻 LinkLaunchLogoButton：常态链环，悬停变蓝青渐变 + ↗ 发射箭头！）
-                    let can_jump = item_supports_external_jump(&item);
-                    if can_jump {
-                        let b_sz = s(42);
-                        let bx = left_cursor;
-                        let by = content_center_y - b_sz / 2;
-                        let badge_hov = st.hovered_link_badge_store_idx == Some(store_idx);
-
-                        if badge_hov {
-                            canvas.draw_soft_shadow_round_rect(
-                                bx,
-                                by,
-                                b_sz,
-                                b_sz,
-                                sf(11.0),
-                                sf(2.0),
-                                sf(5.0),
-                                palette.cobalt.with_alpha(86),
-                            );
-                            canvas.fill_diag_grad_round_rect(
-                                bx,
-                                by,
-                                b_sz,
-                                b_sz,
-                                sf(11.0),
-                                palette.cobalt,
-                                Color4::rgb(31, 163, 250),
-                            );
-                        } else {
-                            let bg = if is_selected {
-                                palette
-                                    .cobalt
-                                    .with_alpha(if st.is_dark_mode { 54 } else { 32 })
-                            } else {
-                                palette
-                                    .cobalt
-                                    .with_alpha(if st.is_dark_mode { 36 } else { 24 })
-                            };
-                            canvas.fill_round_rect(bx, by, b_sz, b_sz, sf(11.0), bg);
-                        }
-
-                        let ic_c = if badge_hov {
-                            Color4::rgb(255, 255, 255)
-                        } else {
-                            palette.cobalt_text
-                        };
-                        let ic_cx = (bx + b_sz / 2) as f32;
-                        let ic_cy = (by + b_sz / 2) as f32;
-                        if item.kind == ClipContentType::File {
-                            canvas.draw_icon_file(ic_cx, ic_cy, sf(18.0), sf(1.55), ic_c);
-                        } else if badge_hov {
-                            canvas.draw_icon_external_link(ic_cx, ic_cy, sf(16.0), sf(1.75), ic_c);
-                        } else {
-                            canvas.draw_icon_link_chain(ic_cx, ic_cy, sf(19.0), sf(1.6), ic_c);
-                        }
-
-                        st.hit_regions.push(HitRegion {
-                            rect: RECT {
-                                left: bx,
-                                top: by,
-                                right: bx + b_sz,
-                                bottom: by + b_sz,
-                            },
-                            interactive_cursor: true,
-                            action: HitAction::OpenExternalTarget(store_idx),
-                        });
-                        left_cursor += b_sz + s(11);
-                    }
-
-                    // 恒定标题预留基准宽度防止非悬停/选中态切换跳动；悬停浮现胶囊时精确退让胶囊宽度 + 8px 呼吸间距
-                    let mut hover_pill_total_w = 0;
-                    if is_hovered {
-                        let b_sz = s(23);
-                        let mut btn_cnt = 2;
-                        if !minimal {
-                            btn_cnt += 1;
-                        }
-                        if can_jump {
-                            btn_cnt += 1;
-                        }
-                        hover_pill_total_w = btn_cnt * b_sz + (btn_cnt - 1) * s(4) + s(8);
-                    }
-                    let has_right_badge =
-                        st.store.queue_rank(&item.id).is_some() || vis_pos < 9;
-                    let right_reserved = if is_hovered {
-                        hover_pill_total_w + s(13)
-                    } else if is_selected && has_right_badge {
-                        s(72)
-                    } else if has_right_badge {
-                        s(46)
-                    } else {
-                        s(14)
-                    };
-
-                    if is_hovered {
-                        let b_sz = s(23);
-                        let by = cur_y + s(8);
-                        let mut rx = w - pad - s(9) - b_sz;
-                        let circle_bg = palette.chip_hover_bg;
-                        let mut btn_cnt = 2;
-                        if !minimal {
-                            btn_cnt += 1;
-                        }
-                        if can_jump {
-                            btn_cnt += 1;
-                        }
-                        let pill_w = btn_cnt * b_sz + (btn_cnt - 1) * s(4) + s(8);
-                        let pill_x = w - pad - s(5) - pill_w;
-                        let pill_bg = if st.is_dark_mode {
-                            Color4::rgba(28, 32, 42, 232)
-                        } else {
-                            Color4::rgba(255, 255, 255, 238)
-                        };
-                        canvas.fill_round_rect(
-                            pill_x,
-                            by - s(2),
-                            pill_w,
-                            b_sz + s(4),
-                            sf(13.5),
-                            pill_bg,
-                        );
-
-                        // 删除圆钮
-                        canvas.fill_circle(
-                            (rx + b_sz / 2) as f32,
-                            (by + b_sz / 2) as f32,
-                            (b_sz as f32) * 0.5,
-                            circle_bg,
-                        );
-                        canvas.draw_icon_trash(
-                            (rx + b_sz / 2) as f32,
-                            (by + b_sz / 2) as f32,
-                            sf(11.5),
-                            sf(1.4),
-                            palette.danger,
-                        );
-                        st.hit_regions.push(HitRegion {
-                            rect: RECT {
-                                left: rx,
-                                top: by,
-                                right: rx + b_sz,
-                                bottom: by + b_sz,
-                            },
-                            interactive_cursor: true,
-                            action: HitAction::DeleteItem(item.id.clone()),
-                        });
-                        rx -= b_sz + s(4);
-
-                        // 星标收藏圆钮
-                        canvas.fill_circle(
-                            (rx + b_sz / 2) as f32,
-                            (by + b_sz / 2) as f32,
-                            (b_sz as f32) * 0.5,
-                            if item.is_pinned {
-                                palette.amber.with_alpha(38)
-                            } else {
-                                circle_bg
-                            },
-                        );
-                        canvas.draw_icon_star(
-                            (rx + b_sz / 2) as f32,
-                            (by + b_sz / 2) as f32,
-                            sf(12.0),
-                            sf(1.4),
-                            if item.is_pinned {
-                                palette.amber
-                            } else {
-                                palette.text_secondary
-                            },
-                            item.is_pinned,
-                        );
-                        st.hit_regions.push(HitRegion {
-                            rect: RECT {
-                                left: rx,
-                                top: by,
-                                right: rx + b_sz,
-                                bottom: by + b_sz,
-                            },
-                            interactive_cursor: true,
-                            action: HitAction::TogglePin(item.id.clone()),
-                        });
-
-                        if !minimal {
-                            rx -= b_sz + s(4);
-                            canvas.fill_circle(
-                                (rx + b_sz / 2) as f32,
-                                (by + b_sz / 2) as f32,
-                                (b_sz as f32) * 0.5,
-                                circle_bg,
-                            );
-                            canvas.draw_icon_check_circle(
-                                (rx + b_sz / 2) as f32,
-                                (by + b_sz / 2) as f32,
-                                sf(12.0),
-                                sf(1.35),
-                                if item.is_todo() {
-                                    palette.emerald
-                                } else {
-                                    palette.text_secondary
-                                },
-                                item.is_todo(),
-                                Color4::rgb(255, 255, 255),
-                            );
-                            st.hit_regions.push(HitRegion {
-                                rect: RECT {
-                                    left: rx,
-                                    top: by,
-                                    right: rx + b_sz,
-                                    bottom: by + b_sz,
-                                },
-                                interactive_cursor: true,
-                                action: HitAction::ToggleTodo(item.id.clone()),
-                            });
-                        }
-
-                        if can_jump {
-                            rx -= b_sz + s(4);
-                            canvas.fill_circle(
-                                (rx + b_sz / 2) as f32,
-                                (by + b_sz / 2) as f32,
-                                (b_sz as f32) * 0.5,
-                                circle_bg,
-                            );
-                            canvas.draw_icon_external_link(
-                                (rx + b_sz / 2) as f32,
-                                (by + b_sz / 2) as f32,
-                                sf(11.0),
-                                sf(1.5),
-                                palette.cobalt_text,
-                            );
-                            st.hit_regions.push(HitRegion {
-                                rect: RECT {
-                                    left: rx,
-                                    top: by,
-                                    right: rx + b_sz,
-                                    bottom: by + b_sz,
-                                },
-                                interactive_cursor: true,
-                                action: HitAction::OpenExternalTarget(store_idx),
-                            });
-                        }
-                    } else if let Some(q_rank) = st.store.queue_rank(&item.id) {
-                        let bw = s(34);
-                        let bh = s(18);
-                        let bx = w - pad - bw - s(10);
-                        let by = cur_y + s(9);
-                        canvas.fill_round_rect(bx, by, bw, bh, sf(9.0), palette.cobalt);
-                        texts.push(TextDrawCmd {
-                            text: format!("#{q_rank}"),
-                            rect: RECT {
-                                left: bx,
-                                top: by,
-                                right: bx + bw,
-                                bottom: by + bh,
-                            },
-                            color: Color4::rgb(255, 255, 255),
-                            font_kind: FontKind::KeyCap,
-                            flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-                        });
-                    } else if vis_pos < 9 {
-                        let bw = s(28);
-                        let bh = s(18);
-                        let mut bx = w - pad - bw - s(10);
-                        let by = cur_y + s(9);
-                        if is_selected {
-                            let r_sz = s(20);
-                            let rx = bx + bw - r_sz;
-                            // 选中卡片右侧确认键入圆钮承担唯一品牌电光钴蓝焦点
-                            canvas.fill_circle(
-                                (rx + r_sz / 2) as f32,
-                                (by + bh / 2) as f32,
-                                (r_sz as f32) * 0.5,
-                                palette.cobalt,
-                            );
-                            canvas.draw_icon_return_arrow(
-                                (rx + r_sz / 2) as f32,
-                                (by + bh / 2) as f32,
-                                sf(10.5),
-                                sf(1.45),
-                                Color4::rgb(255, 255, 255),
-                            );
-                            bx = rx - bw - s(6);
-                        }
-                        canvas.fill_round_rect(
-                            bx,
-                            by,
-                            bw,
-                            bh,
-                            sf(6.0),
-                            if is_selected {
-                                palette
-                                    .cobalt
-                                    .with_alpha(if st.is_dark_mode { 42 } else { 20 })
-                            } else {
-                                palette.chip_bg
-                            },
-                        );
-                        texts.push(TextDrawCmd {
-                            text: format!("^{}", vis_pos + 1),
-                            rect: RECT {
-                                left: bx,
-                                top: by,
-                                right: bx + bw,
-                                bottom: by + bh,
-                            },
-                            color: if is_selected {
-                                palette.cobalt_text
-                            } else {
-                                palette.text_muted
-                            },
-                            font_kind: FontKind::KeyCap,
-                            flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-                        });
-                    }
-
-                    // 卡片主标题（通透选中层下始终保持深海军蓝/纯白最高可读对比度）
-                    let veil_on =
-                        st.store.config.mask_sensitive_previews && !is_selected && !is_hovered;
-                    let title_str = item.display_title(minimal, veil_on);
-                    texts.push(TextDrawCmd {
-                        text: title_str,
-                        rect: RECT {
-                            left: left_cursor,
-                            top: cur_y + s(8),
-                            right: w - pad - right_reserved,
-                            bottom: cur_y + s(31),
-                        },
-                        color: if todo_done {
-                            palette.text_muted
-                        } else {
-                            palette.text_primary
-                        },
-                        font_kind: FontKind::CardTitle,
-                        flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
-                    });
-
-                    // 副标题行（收藏星标 + 独立分类徽章胶囊 + 降噪元信息 + 右侧等宽相对时间）
-                    let mut meta_x = left_cursor;
-                    let meta_cy = (cur_y + s(41)) as f32;
-                    if item.is_pinned {
-                        let star_c = if !minimal {
-                            item.pin_category
-                                .map(GlassPalette::pin_category_color)
-                                .unwrap_or(palette.amber)
-                        } else {
-                            palette.amber
-                        };
-                        canvas.draw_icon_star(
-                            meta_x as f32 + sf(5.0),
-                            meta_cy,
-                            sf(10.5),
-                            sf(1.3),
-                            star_c,
-                            true,
-                        );
-                        meta_x += s(14);
-                    } else if !minimal {
-                        if let Some(cat) = item.pin_category {
-                            let dot_c = GlassPalette::pin_category_color(cat);
-                            canvas.fill_circle(meta_x as f32 + sf(3.0), meta_cy, sf(2.6), dot_c);
-                            meta_x += s(8);
-                        }
-                    }
-
-                    // 收藏分类拆分为独立语义微胶囊（告别与正文摘要混排成一团！）
-                    if !minimal {
-                        if let Some(cat) = item.pin_category {
-                            let cat_lbl = cat.title();
-                            let cat_c = GlassPalette::pin_category_color(cat);
-                            let cw = estimate_text_px(cat_lbl, sf(10.5)) + s(10);
-                            let ch = s(15);
-                            let cy_b = cur_y + s(34);
-                            canvas.fill_round_rect(
-                                meta_x,
-                                cy_b,
-                                cw,
-                                ch,
-                                sf(7.5),
-                                cat_c.with_alpha(if st.is_dark_mode { 44 } else { 26 }),
-                            );
-                            texts.push(TextDrawCmd {
-                                text: cat_lbl.to_string(),
-                                rect: RECT {
-                                    left: meta_x,
-                                    top: cy_b,
-                                    right: meta_x + cw,
-                                    bottom: cy_b + ch,
-                                },
-                                color: if st.is_dark_mode {
-                                    cat_c.lerp(Color4::rgb(255, 255, 255), 0.28)
-                                } else {
-                                    cat_c.lerp(Color4::rgb(15, 23, 42), 0.22)
-                                },
-                                font_kind: FontKind::BadgeBold,
-                                flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-                            });
-                            meta_x += cw + s(6);
-                        }
-                    }
-
-                    let mut sub_parts: Vec<String> = Vec::new();
-                    let is_copied_flash =
-                        st.copied_flash_item_id.as_deref() == Some(item.id.as_str());
-                    if is_copied_flash {
-                        sub_parts.push("✓ 已复制".to_string());
-                    }
-                    if item.is_burn_after_paste() {
-                        sub_parts.push("粘贴即焚".to_string());
-                    } else if matches!(
-                        item.detected_poison_threat(),
-                        Some(iclip_core::security::PoisonThreatKind::PastejackingOrBidi(
-                            _
-                        ))
-                    ) {
-                        sub_parts.push("含隐藏控制符".to_string());
-                    } else if let Some(link_risk) = item.detected_link_risk() {
-                        sub_parts.push(link_risk.badge_title().to_string());
-                    } else if let Some(sec_kind) = item.detected_sensitive_kind() {
-                        if !item.is_pinned
-                            && !item.is_pending_todo()
-                            && st.store.config.auto_expire_unpinned_secrets
-                        {
-                            sub_parts.push(format!("{} · 24h自毁", sec_kind.badge_title()));
-                        } else {
-                            sub_parts.push(sec_kind.badge_title().to_string());
-                        }
-                    }
-                    sub_parts.push(item.subtitle_info_veiled(veil_on));
-                    if let Some(app) = &item.source_app_name {
-                        if !app.is_empty() {
-                            sub_parts.push(app.clone());
-                        }
-                    }
-                    if !is_copied_flash && !minimal {
-                        if let Some(badge) = st.store.preferred_target_badge(
-                            &item.content_hash,
-                            st.active_target_app_name.as_deref(),
-                        ) {
-                            sub_parts.push(badge);
-                        } else if !item.is_pinned {
-                            let reuse = st.store.reuse_count(&item.content_hash);
-                            if reuse >= 3 {
-                                sub_parts.push(format!("高频 ×{reuse}"));
-                            }
-                        }
-                    }
-
-                    let time_w = s(58);
-                    texts.push(TextDrawCmd {
-                        text: sub_parts.join(" · "),
-                        rect: RECT {
-                            left: meta_x,
-                            top: cur_y + s(32),
-                            right: w - pad - time_w - s(12),
-                            bottom: cur_y + s(52),
-                        },
-                        color: if st.copied_flash_item_id.as_deref() == Some(item.id.as_str()) {
-                            palette.emerald
-                        } else {
-                            palette.text_secondary
-                        },
-                        font_kind: FontKind::Meta,
-                        flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
-                    });
-                    texts.push(TextDrawCmd {
-                        text: format_relative_time(item.created_unix_secs),
-                        rect: RECT {
-                            left: w - pad - time_w - s(10),
-                            top: cur_y + s(32),
-                            right: w - pad - s(12),
-                            bottom: cur_y + s(52),
-                        },
-                        color: palette.text_muted,
-                        font_kind: FontKind::Meta,
-                        flags: DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
-                    });
-
-                    // 现代精致快捷转化胶囊（零低质 Unicode 符号、高辨识冷蓝/琥珀语义底、清晰 22px 舒展高度）
-                    if has_chips {
-                        let mut chip_x = left_cursor;
-                        let chip_top = cur_y + s(55);
-                        let chip_h = s(22);
-                        for (a_idx, act) in quick_actions.iter().enumerate() {
-                            let label = act.title.clone();
-                            let is_primary_chip = a_idx == 0;
-                            let txt_w = estimate_text_px(&label, sf(10.4));
-                            let extra_key_w = if is_primary_chip { s(22) } else { 0 };
-                            let cw =
-                                (s(21) + txt_w + extra_key_w + s(7)).min(w - pad - chip_x - s(10));
-                            if cw < s(52) {
-                                break;
-                            }
-                            let (chip_bg, chip_bd, chip_fg, bolt_c) = if is_primary_chip {
-                                if act.is_security {
-                                    (
-                                        palette.amber.with_alpha(if st.is_dark_mode {
-                                            42
-                                        } else {
-                                            22
-                                        }),
-                                        palette.amber.with_alpha(if st.is_dark_mode {
-                                            96
-                                        } else {
-                                            64
-                                        }),
-                                        if st.is_dark_mode {
-                                            Color4::rgb(253, 224, 138)
-                                        } else {
-                                            Color4::rgb(180, 83, 9)
-                                        },
-                                        palette.amber,
-                                    )
-                                } else {
-                                    (
-                                        palette.cobalt.with_alpha(if st.is_dark_mode {
-                                            44
-                                        } else {
-                                            20
-                                        }),
-                                        palette.cobalt.with_alpha(if st.is_dark_mode {
-                                            108
-                                        } else {
-                                            62
-                                        }),
-                                        palette.cobalt_text,
-                                        palette.cobalt_text,
-                                    )
-                                }
-                            } else {
-                                (
-                                    if is_hovered {
-                                        palette.chip_hover_bg
-                                    } else {
-                                        palette.chip_bg
-                                    },
-                                    palette.card_border,
-                                    palette.text_secondary,
-                                    if act.is_security {
-                                        palette.amber
-                                    } else {
-                                        palette.cobalt_text
-                                    },
-                                )
-                            };
-                            canvas.fill_round_rect(chip_x, chip_top, cw, chip_h, sf(11.0), chip_bg);
-                            canvas.stroke_round_rect(
-                                chip_x,
-                                chip_top,
-                                cw,
-                                chip_h,
-                                sf(11.0),
-                                sf(0.65),
-                                chip_bd,
-                            );
-                            canvas.draw_icon_bolt(
-                                (chip_x + s(11)) as f32,
-                                (chip_top + chip_h / 2) as f32,
-                                sf(9.5),
-                                sf(1.35),
-                                bolt_c,
-                            );
-                            let text_right = if is_primary_chip {
-                                chip_x + cw - s(26)
-                            } else {
-                                chip_x + cw - s(8)
-                            };
-                            texts.push(TextDrawCmd {
-                                text: label,
-                                rect: RECT {
-                                    left: chip_x + s(19),
-                                    top: chip_top,
-                                    right: text_right,
-                                    bottom: chip_top + chip_h,
-                                },
-                                color: chip_fg,
-                                font_kind: if is_primary_chip {
-                                    FontKind::BadgeBold
-                                } else {
-                                    FontKind::Meta
-                                },
-                                flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
-                            });
-                            // 首枚胶囊右侧绘制像素对齐矢量 Shift + Enter 双图标，与底栏 [⇧ ↵] 转换 100% 语义统一
-                            if is_primary_chip && cw >= s(72) {
-                                let icy = (chip_top + chip_h / 2) as f32;
-                                let key_c = chip_fg.with_alpha(210);
-                                canvas.draw_icon_shift_arrow(
-                                    (chip_x + cw - s(19)) as f32,
-                                    icy,
-                                    sf(8.2),
-                                    sf(1.18),
-                                    key_c,
-                                );
-                                canvas.draw_icon_return_arrow(
-                                    (chip_x + cw - s(10)) as f32,
-                                    icy,
-                                    sf(8.4),
-                                    sf(1.22),
-                                    key_c,
-                                );
-                            }
-                            st.hit_regions.push(HitRegion {
-                                rect: RECT {
-                                    left: chip_x,
-                                    top: chip_top,
-                                    right: chip_x + cw,
-                                    bottom: chip_top + chip_h,
-                                },
-                                interactive_cursor: true,
-                                action: HitAction::TriggerQuickAction {
-                                    item_idx: store_idx,
-                                    action: act.clone(),
-                                },
-                            });
-                            chip_x += cw + s(6);
-                        }
-                    }
-
-                    st.hit_regions.push(HitRegion {
-                        rect: RECT {
-                            left: pad,
-                            top: cur_y,
-                            right: w - pad,
-                            bottom: cur_y + card_h,
-                        },
-                        interactive_cursor: false,
-                        action: HitAction::SelectCard(vis_pos),
-                    });
                     cur_y += card_h + s(9);
                 }
             }
@@ -8062,6 +8161,22 @@ fn layout_and_draw_main_view(
                 row_h,
                 vis_pos,
                 store_idx,
+            );
+        }
+        if let Some((card_y, vis_pos, store_idx)) = deferred_hovered_card {
+            draw_standard_card(
+                canvas,
+                texts,
+                w,
+                pad,
+                track_w,
+                scale,
+                palette,
+                st,
+                card_y,
+                vis_pos,
+                store_idx,
+                minimal,
             );
         }
     }
@@ -11596,6 +11711,9 @@ unsafe fn handle_mouse_move(hwnd: HWND, x: i32, y: i32, left_held: bool) {
     let mut use_hand = false;
     let dpi_scale = get_dpi_scale(hwnd);
     let shadow_margin = (34.0 * dpi_scale).ceil() as i32;
+    let mut client_rc: RECT = zeroed();
+    GetClientRect(hwnd, &mut client_rc);
+    let client_w = (client_rc.right - client_rc.left).max(1);
 
     APP_STATE.with(|cell| {
         if let Some(st) = cell.borrow_mut().as_mut() {
@@ -11631,17 +11749,48 @@ unsafe fn handle_mouse_move(hwnd: HWND, x: i32, y: i32, left_held: bool) {
                 return;
             }
             let mut found_badge_idx = None;
-            for reg in &st.hit_regions {
+            let mut found_card_btn = None;
+            let pill_btn_max_w = (32.0 * dpi_scale).round() as i32;
+            for (reg_idx, reg) in st.hit_regions.iter().enumerate() {
                 if point_in_rect(x, y, &reg.rect) {
                     use_hand = reg.interactive_cursor;
-                    if let HitAction::OpenExternalTarget(si) = reg.action {
-                        found_badge_idx = Some(si);
+                    match &reg.action {
+                        HitAction::OpenExternalTarget(si) => {
+                            if reg.rect.right - reg.rect.left <= pill_btn_max_w {
+                                found_card_btn = Some(HoveredCardButton::OpenLinkPill);
+                            } else {
+                                found_badge_idx = Some(*si);
+                            }
+                        }
+                        HitAction::DeleteItem(_) => {
+                            found_card_btn = Some(HoveredCardButton::Delete);
+                        }
+                        HitAction::TogglePin(_) => {
+                            found_card_btn = Some(HoveredCardButton::Pin);
+                        }
+                        HitAction::ToggleTodo(_) if reg.rect.left > client_w / 2 => {
+                            found_card_btn = Some(HoveredCardButton::Todo);
+                        }
+                        HitAction::TriggerQuickAction { item_idx, .. } => {
+                            let q_idx = st.hit_regions[..reg_idx]
+                                .iter()
+                                .filter(|prev| matches!(&prev.action, HitAction::TriggerQuickAction { item_idx: pi, .. } if pi == item_idx))
+                                .count();
+                            found_card_btn = Some(HoveredCardButton::QuickAction(*item_idx, q_idx));
+                        }
+                        _ => {}
                     }
                     break;
                 }
             }
+            let btn_or_badge_changed = st.hovered_link_badge_store_idx != found_badge_idx
+                || st.hovered_card_btn != found_card_btn;
             if st.hovered_link_badge_store_idx != found_badge_idx {
                 st.hovered_link_badge_store_idx = found_badge_idx;
+                changed = true;
+            }
+            if st.hovered_card_btn != found_card_btn {
+                st.hovered_card_btn = found_card_btn;
                 changed = true;
             }
 
@@ -11705,6 +11854,14 @@ unsafe fn handle_mouse_move(hwnd: HWND, x: i32, y: i32, left_held: bool) {
                 changed = true;
                 let m = shadow_margin;
                 dirty_union = new_card_rect.map(|b| RECT {
+                    left: b.left - m,
+                    top: b.top - m,
+                    right: b.right + m,
+                    bottom: b.bottom + m,
+                });
+            } else if btn_or_badge_changed {
+                let m = shadow_margin;
+                dirty_union = new_card_rect.or(prev_card_rect).map(|b| RECT {
                     left: b.left - m,
                     top: b.top - m,
                     right: b.right + m,
@@ -13206,7 +13363,7 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
                 0xBD | 0x6D => st.ql_stage_zoom - 0.5,
                 _ => 1.0,
             };
-            step_ql_stage_zoom(st, next_zoom, avail_w, avail_h);
+            step_ql_stage_zoom(st, next_zoom, avail_w, avail_h, None);
             true
         });
         if zoomed {
@@ -14903,7 +15060,14 @@ fn active_ql_stage_rgba_parts<'a>(
     Some((*dw, *dh, disp_rgba.as_slice(), title.as_str()))
 }
 
-fn step_ql_stage_zoom(st: &mut WinAppState, next_zoom: f32, avail_w: i32, avail_h: i32) {
+fn step_ql_stage_zoom(
+    st: &mut WinAppState,
+    next_zoom: f32,
+    avail_w: i32,
+    avail_h: i32,
+    anchor_rel: Option<(f32, f32)>,
+) {
+    let old_zoom = st.ql_stage_zoom.clamp(1.0, 3.0);
     let clamped = next_zoom.clamp(1.0, 3.0);
     if clamped <= 1.01 {
         reset_ql_stage_zoom_and_pan(st);
@@ -14913,12 +15077,25 @@ fn step_ql_stage_zoom(st: &mut WinAppState, next_zoom: f32, avail_w: i32, avail_
     ensure_ql_stage_hi_rgba_if_needed(st);
     if let Some((iw, ih)) = active_ql_stage_dims(st) {
         let (base_w, base_h) = fit_image_in_viewport(iw, ih, avail_w, avail_h);
-        let (px, py) = clamp_image_pan_offset(
+        let (pre_px, pre_py) = clamp_image_pan_offset(
             st.ql_stage_pan_x,
             st.ql_stage_pan_y,
             base_w,
             base_h,
+            old_zoom,
+            avail_w as f32,
+            avail_h as f32,
+        );
+        let (ax, ay) = anchor_rel.unwrap_or((0.0, 0.0));
+        let (px, py) = compute_cursor_anchored_zoom_pan(
+            pre_px,
+            pre_py,
+            old_zoom,
             clamped,
+            ax,
+            ay,
+            base_w,
+            base_h,
             avail_w as f32,
             avail_h as f32,
         );
@@ -15325,6 +15502,8 @@ unsafe fn handle_ql_stage_wnd_proc(
             let ch = (rc.bottom - rc.top).max(1);
             let avail_w = (cw - sv(36)).max(1);
             let avail_h = (ch - sv(82)).max(1);
+            let vp_cx = sv(18) as f32 + avail_w as f32 * 0.5;
+            let vp_cy = sv(42) as f32 + avail_h as f32 * 0.5;
             let toggled = APP_STATE.with(|c| {
                 let mut b = c.borrow_mut();
                 let Some(st) = b.as_mut() else { return false };
@@ -15337,7 +15516,8 @@ unsafe fn handle_ql_stage_wnd_proc(
                     && point_in_ql_stage_image(x, y, cw, ch, sc, st)
                 {
                     let target = if st.ql_stage_zoom > 1.05 { 1.0 } else { 2.0 };
-                    step_ql_stage_zoom(st, target, avail_w, avail_h);
+                    let anchor = Some((x as f32 - vp_cx, y as f32 - vp_cy));
+                    step_ql_stage_zoom(st, target, avail_w, avail_h, anchor);
                     return true;
                 }
                 false
@@ -15356,8 +15536,17 @@ unsafe fn handle_ql_stage_wnd_proc(
             GetClientRect(hwnd, &mut rc);
             let sc = get_dpi_scale(hwnd);
             let sv = |v: i32| ((v as f32) * sc).round() as i32;
-            let avail_w = ((rc.right - rc.left) - sv(36)).max(1);
-            let avail_h = ((rc.bottom - rc.top) - sv(82)).max(1);
+            let cw = (rc.right - rc.left).max(1);
+            let ch = (rc.bottom - rc.top).max(1);
+            let avail_w = (cw - sv(36)).max(1);
+            let avail_h = (ch - sv(82)).max(1);
+            let mut cursor_pt = POINT {
+                x: (lparam & 0xFFFF) as i16 as i32,
+                y: ((lparam >> 16) & 0xFFFF) as i16 as i32,
+            };
+            let pt_ok = ScreenToClient(hwnd, &mut cursor_pt) != FALSE;
+            let vp_cx = sv(18) as f32 + avail_w as f32 * 0.5;
+            let vp_cy = sv(42) as f32 + avail_h as f32 * 0.5;
             let updated = APP_STATE.with(|c| {
                 let mut b = c.borrow_mut();
                 let Some(st) = b.as_mut() else { return false };
@@ -15368,7 +15557,12 @@ unsafe fn handle_ql_stage_wnd_proc(
                     } else {
                         st.ql_stage_zoom + step
                     };
-                    step_ql_stage_zoom(st, next, avail_w, avail_h);
+                    let anchor = if pt_ok && point_in_ql_stage_image(cursor_pt.x, cursor_pt.y, cw, ch, sc, st) {
+                        Some((cursor_pt.x as f32 - vp_cx, cursor_pt.y as f32 - vp_cy))
+                    } else {
+                        None
+                    };
+                    step_ql_stage_zoom(st, next, avail_w, avail_h, anchor);
                     return true;
                 }
                 false

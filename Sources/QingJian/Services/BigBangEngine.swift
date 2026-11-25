@@ -489,6 +489,27 @@ enum BigBangTokenizer {
         )
     }
 
+    /// 以指定视口相对中心点为锚计算缩放后的平移偏移，确保双击/缩放时焦点像素紧跟锚点且绝不露出黑边
+    static func cursorAnchoredZoomPanOffset(
+        currentPan: CGSize,
+        oldZoom: CGFloat,
+        newZoom: CGFloat,
+        cursorRelativeToCenter: CGPoint,
+        imageSize: CGSize,
+        viewportSize: CGSize
+    ) -> CGSize {
+        guard newZoom > 1.001, oldZoom > 0.01 else { return .zero }
+        let ratio = newZoom / oldZoom
+        let rawX = cursorRelativeToCenter.x - (cursorRelativeToCenter.x - currentPan.width) * ratio
+        let rawY = cursorRelativeToCenter.y - (cursorRelativeToCenter.y - currentPan.height) * ratio
+        return clampedImagePanOffset(
+            offset: CGSize(width: rawX, height: rawY),
+            imageSize: imageSize,
+            zoomScale: newZoom,
+            viewportSize: viewportSize
+        )
+    }
+
     /// 按字素簇（Character）边界安全截取不超过 `maxUTF16` 码元的前缀，杜绝 emoji/CRLF 截断归零
     static func utf16Prefix(_ text: String, maxUTF16: Int) -> String {
         guard maxUTF16 > 0 else { return "" }

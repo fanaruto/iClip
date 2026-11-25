@@ -4403,4 +4403,57 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertFalse(coord.markFadeStarted(for: pendingEpoch))
         XCTAssertFalse(coord.isFadingOut)
     }
+
+    func testCursorAnchoredZoomPanOffsetMathAndClamping() {
+        let img = CGSize(width: 600, height: 400)
+        let vp = CGSize(width: 600, height: 400)
+
+        // 1. 以右下象限像素 (+100, +60) 为光标锚点从 1x 双击放大至 2x：
+        // 目标平移使点位原地钉住，且贴边防黑边钳制不超过 maxPan=(300, 200)
+        let pan1 = BigBangTokenizer.cursorAnchoredZoomPanOffset(
+            currentPan: .zero,
+            oldZoom: 1.0,
+            newZoom: 2.0,
+            cursorRelativeToCenter: CGPoint(x: 100, y: 60),
+            imageSize: img,
+            viewportSize: vp
+        )
+        XCTAssertEqual(pan1.width, -100, accuracy: 0.1)
+        XCTAssertEqual(pan1.height, -60, accuracy: 0.1)
+
+        // 2. 在 2x 基础上面对中心锚 (.zero) 继续放大至 3x：焦距中心点保持等比 1.5 倍跟随，零偏移突变
+        let pan2 = BigBangTokenizer.cursorAnchoredZoomPanOffset(
+            currentPan: pan1,
+            oldZoom: 2.0,
+            newZoom: 3.0,
+            cursorRelativeToCenter: .zero,
+            imageSize: img,
+            viewportSize: vp
+        )
+        XCTAssertEqual(pan2.width, -150, accuracy: 0.1)
+        XCTAssertEqual(pan2.height, -90, accuracy: 0.1)
+
+        // 3. 极端边角放大时严密夹紧至可允许偏移上限，杜绝任何黑边露底
+        let edgePan = BigBangTokenizer.cursorAnchoredZoomPanOffset(
+            currentPan: .zero,
+            oldZoom: 1.0,
+            newZoom: 2.0,
+            cursorRelativeToCenter: CGPoint(x: 450, y: 380),
+            imageSize: img,
+            viewportSize: vp
+        )
+        XCTAssertEqual(edgePan.width, -300, accuracy: 0.1)
+        XCTAssertEqual(edgePan.height, -200, accuracy: 0.1)
+
+        // 4. 缩放归 1.0x 时自动清零回归
+        let reset = BigBangTokenizer.cursorAnchoredZoomPanOffset(
+            currentPan: pan2,
+            oldZoom: 3.0,
+            newZoom: 1.0,
+            cursorRelativeToCenter: CGPoint(x: 50, y: 50),
+            imageSize: img,
+            viewportSize: vp
+        )
+        XCTAssertEqual(reset, .zero)
+    }
 }

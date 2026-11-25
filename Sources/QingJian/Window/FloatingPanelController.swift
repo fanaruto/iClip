@@ -206,6 +206,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     private var recordingTapMachine = ModifierDoubleTapStateMachine(maxHoldDuration: 0.35, maxTapGap: 0.48)
     private var previousApp: NSRunningApplication?
     private var hideWorkItem: DispatchWorkItem?
+    private var fadeCoordinator = ActionSparkFadeCoordinator()
     private var cancellables = Set<AnyCancellable>()
 
     private let panelSize = NSSize(width: 420, height: 560)
@@ -217,7 +218,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     }
 
     var isVisible: Bool {
-        (panel?.isVisible ?? false) && nav.isPresented
+        (panel?.isVisible ?? false) && nav.isPresented && !fadeCoordinator.isFadingOut
     }
 
     override init() {
@@ -469,6 +470,9 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     }
 
     private func lockDownPanelForSystemSleepOrLock() {
+        fadeCoordinator.invalidatePendingFade()
+        hideWorkItem?.cancel()
+        hideWorkItem = nil
         removeKeyMonitor()
         DragFileExportHelper.wipeAllExports()
         ActionSparkController.shared.dismiss()
@@ -580,6 +584,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         CursorDropPodController.shared.dismissImmediately()
         hideWorkItem?.cancel()
         hideWorkItem = nil
+        let showEpoch = fadeCoordinator.beginPresentation()
 
         if let front = NSWorkspace.shared.frontmostApplication,
            front.bundleIdentifier != Bundle.main.bundleIdentifier {
@@ -619,15 +624,24 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         }
 
         DispatchQueue.main.async { [weak self] in
-            self?.nav.isPresented = true
+            guard let self, self.fadeCoordinator.shouldCompleteFadeOut(scheduledEpoch: showEpoch) else {
+                return
+            }
+            self.nav.isPresented = true
         }
     }
 
     /// 隐藏面板（粘贴时 0ms 同步移出窗口栈并保护宿主原输入框焦点；普通收起时柔和淡出）
     func hide(restoreFocus: Bool) {
         guard panel.isVisible else { return }
+        if restoreFocus {
+            fadeCoordinator.invalidatePendingFade()
+        } else {
+            guard !fadeCoordinator.isFadingOut else { return }
+        }
         removeKeyMonitor()
         hideWorkItem?.cancel()
+        hideWorkItem = nil
 
         nav.isPresented = false
         BigBangStageController.shared.dismissImmediatelyAndPurge()
@@ -646,6 +660,9 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             return
         }
 
+        let scheduledEpoch = fadeCoordinator.beginFadeSchedule()
+        _ = fadeCoordinator.markFadeStarted(for: scheduledEpoch)
+
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.12
             ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
@@ -654,7 +671,12 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
 
         let work = DispatchWorkItem { [weak self] in
             Task { @MainActor [weak self] in
-                guard let self = self, !self.nav.isPresented else { return }
+                guard let self,
+                      self.fadeCoordinator.shouldCompleteFadeOut(scheduledEpoch: scheduledEpoch) else {
+                    return
+                }
+                self.hideWorkItem = nil
+                self.fadeCoordinator.invalidatePendingFade()
                 self.panel.orderOut(nil)
                 self.panel.alphaValue = 1
             }

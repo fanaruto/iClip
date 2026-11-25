@@ -242,6 +242,7 @@ final class BigBangStageController: ObservableObject {
     private var ocrTask: Task<Void, Never>?
     private var prewarmTask: Task<Void, Never>?
     private var hideWorkItem: DispatchWorkItem?
+    private var fadeCoordinator = ActionSparkFadeCoordinator()
     private var stickyDiffSelected: Bool = false
 
     private init() {
@@ -271,7 +272,7 @@ final class BigBangStageController: ObservableObject {
     }
 
     var isVisible: Bool {
-        panel?.isVisible ?? false
+        (panel?.isVisible ?? false) && !fadeCoordinator.isFadingOut && hideWorkItem == nil
     }
 
     var visiblePanelScreenFrame: NSRect? {
@@ -350,6 +351,8 @@ final class BigBangStageController: ObservableObject {
         guard item.type == .image || item.type == .text || item.type == .link else {
             return false
         }
+        let wasActivelyVisible = isVisible
+        fadeCoordinator.beginPresentation()
         hideWorkItem?.cancel()
         hideWorkItem = nil
         if let hostWindow {
@@ -376,8 +379,6 @@ final class BigBangStageController: ObservableObject {
             stagePanel.sharingType = (store.screenSharePrivacyEnabled && !ProcessInfo.processInfo.arguments.contains("--demo")) ? .none : .readOnly
         }
 
-        let wasVisible = stagePanel.isVisible
-
         if item.type == .image {
             activeModeIsImage = true
             isImageBigBangActive = (initialMode == .imageBigBangOCR)
@@ -390,7 +391,7 @@ final class BigBangStageController: ObservableObject {
 
         let targetCardFrame = computeTargetScreenFrame(for: item, image: fullPreviewImage)
         let targetWindowFrame = windowFrame(forCardRect: targetCardFrame)
-        if !wasVisible {
+        if !wasActivelyVisible {
             let sourceRect = SystemQuickLookController.shared.liveVisibleScreenRect(for: item.id)
             let startCardFrame = Self.transitionCardRect(
                 anchorRect: sourceRect,
@@ -410,6 +411,8 @@ final class BigBangStageController: ObservableObject {
                 stagePanel.animator().alphaValue = 1.0
             }
         } else {
+            stagePanel.enforceUnifiedActiveAppearance()
+            surfaceHost.refreshInPlace()
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = 0.18
                 ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
@@ -423,9 +426,18 @@ final class BigBangStageController: ObservableObject {
     func dismiss() {
         cancelAsyncTasks()
         guard let stagePanel = panel, stagePanel.isVisible else {
+            fadeCoordinator.invalidatePendingFade()
+            hideWorkItem?.cancel()
+            hideWorkItem = nil
             clearTransientState()
             return
         }
+        guard !fadeCoordinator.isFadingOut else { return }
+        hideWorkItem?.cancel()
+        hideWorkItem = nil
+        let scheduledEpoch = fadeCoordinator.beginFadeSchedule()
+        _ = fadeCoordinator.markFadeStarted(for: scheduledEpoch)
+
         isEditingText = false
         let sourceRect = currentItem.flatMap { SystemQuickLookController.shared.liveVisibleScreenRect(for: $0.id) }
         let currentCardRect = stagePanel.frame.insetBy(dx: stageShadowBleed, dy: stageShadowBleed)
@@ -443,7 +455,12 @@ final class BigBangStageController: ObservableObject {
         }
         let work = DispatchWorkItem { [weak self] in
             Task { @MainActor [weak self] in
-                guard let self else { return }
+                guard let self,
+                      self.fadeCoordinator.shouldCompleteFadeOut(scheduledEpoch: scheduledEpoch) else {
+                    return
+                }
+                self.hideWorkItem = nil
+                self.fadeCoordinator.invalidatePendingFade()
                 self.panel?.orderOut(nil)
                 self.panel?.alphaValue = 1.0
                 self.clearTransientState()
@@ -454,6 +471,7 @@ final class BigBangStageController: ObservableObject {
     }
 
     func dismissImmediatelyAndPurge() {
+        fadeCoordinator.invalidatePendingFade()
         hideWorkItem?.cancel()
         hideWorkItem = nil
         cancelAsyncTasks()
@@ -1109,6 +1127,7 @@ struct BigBangStageRootView: View {
     @State private var lastImagePanTranslation: CGSize? = nil
     @State private var pinchStartZoom: CGFloat? = nil
     @State private var pinchStartEpoch: Int = -1
+    @State private var suppressNextProportionalPan: Bool = false
     @GestureState private var isPinchingImage: Bool = false
 
     private var brandCobalt: Color { Color(red: 0.118, green: 0.369, blue: 1.0) }
@@ -1149,6 +1168,7 @@ struct BigBangStageRootView: View {
             lastBoxSweepPoint = nil
             imagePanOffset = .zero
             lastImagePanTranslation = nil
+            suppressNextProportionalPan = false
             pinchStartZoom = nil
             pinchStartEpoch = -1
             tokenDragTargetSelect = nil
@@ -1364,8 +1384,9 @@ struct BigBangStageRootView: View {
                             }
                         }
                         .scaleEffect(controller.isImageBigBangActive ? 1.0 : controller.imageZoomScale)
-                        .offset(clampedPan)
                         .animation(isPinchingImage ? nil : .interactiveSpring(response: 0.24, dampingFraction: 0.86), value: controller.imageZoomScale)
+                        .offset(clampedPan)
+                        .animation((isPinchingImage || lastImagePanTranslation != nil) ? nil : .interactiveSpring(response: 0.24, dampingFraction: 0.86), value: clampedPan)
                         .position(x: absImageRect.midX, y: absImageRect.midY)
                 } else {
                     ProgressView()
@@ -1447,15 +1468,32 @@ struct BigBangStageRootView: View {
             }
             .contentShape(Rectangle())
             .clipped()
-            .onChange(of: controller.imageZoomScale) { _, newScale in
+            .onChange(of: controller.imageZoomScale) { oldScale, newScale in
                 if newScale <= 1.01 {
+                    suppressNextProportionalPan = false
                     imagePanOffset = .zero
                     lastImagePanTranslation = nil
-                } else {
+                } else if suppressNextProportionalPan {
+                    suppressNextProportionalPan = false
                     imagePanOffset = BigBangTokenizer.clampedImagePanOffset(
                         offset: imagePanOffset,
                         imageSize: absImageRect.size,
                         zoomScale: newScale,
+                        viewportSize: containerSize
+                    )
+                } else {
+                    let preZoomClampedPan = BigBangTokenizer.clampedImagePanOffset(
+                        offset: imagePanOffset,
+                        imageSize: absImageRect.size,
+                        zoomScale: oldScale,
+                        viewportSize: containerSize
+                    )
+                    imagePanOffset = BigBangTokenizer.cursorAnchoredZoomPanOffset(
+                        currentPan: preZoomClampedPan,
+                        oldZoom: oldScale,
+                        newZoom: newScale,
+                        cursorRelativeToCenter: .zero,
+                        imageSize: absImageRect.size,
                         viewportSize: containerSize
                     )
                 }
@@ -1481,11 +1519,32 @@ struct BigBangStageRootView: View {
                 }
             }
             .simultaneousGesture(
-                TapGesture(count: 2)
-                    .onEnded {
+                SpatialTapGesture(count: 2)
+                    .onEnded { value in
                         guard controller.activeModeIsImage, !controller.isImageBigBangActive else { return }
                         withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
-                            controller.toggleImageZoom()
+                            if controller.imageZoomScale > 1.05 {
+                                suppressNextProportionalPan = false
+                                imagePanOffset = .zero
+                                controller.resetImageZoom()
+                                TactileFeedbackEngine.shared.performNavigationStepHaptic()
+                            } else {
+                                let cursorRel = CGPoint(
+                                    x: value.location.x - absImageRect.midX,
+                                    y: value.location.y - absImageRect.midY
+                                )
+                                let targetPan = BigBangTokenizer.cursorAnchoredZoomPanOffset(
+                                    currentPan: imagePanOffset,
+                                    oldZoom: controller.imageZoomScale,
+                                    newZoom: 2.0,
+                                    cursorRelativeToCenter: cursorRel,
+                                    imageSize: absImageRect.size,
+                                    viewportSize: containerSize
+                                )
+                                suppressNextProportionalPan = true
+                                imagePanOffset = targetPan
+                                controller.toggleImageZoom()
+                            }
                         }
                     }
             )

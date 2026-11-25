@@ -2324,6 +2324,36 @@ pub fn clamp_image_pan_offset(
     (offset_x.clamp(-max_x, max_x), offset_y.clamp(-max_y, max_y))
 }
 
+/// 以指定视口相对中心点为锚计算缩放后二维平移，确保光标下方焦点像素不漂移且边缘零黑边
+pub fn compute_cursor_anchored_zoom_pan(
+    cur_pan_x: f32,
+    cur_pan_y: f32,
+    old_zoom: f32,
+    new_zoom: f32,
+    cursor_rel_x: f32,
+    cursor_rel_y: f32,
+    image_w: f32,
+    image_h: f32,
+    viewport_w: f32,
+    viewport_h: f32,
+) -> (f32, f32) {
+    if new_zoom <= 1.001 || old_zoom <= 0.01 {
+        return (0.0, 0.0);
+    }
+    let ratio = new_zoom / old_zoom;
+    let raw_x = cursor_rel_x - (cursor_rel_x - cur_pan_x) * ratio;
+    let raw_y = cursor_rel_y - (cursor_rel_y - cur_pan_y) * ratio;
+    clamp_image_pan_offset(
+        raw_x,
+        raw_y,
+        image_w,
+        image_h,
+        new_zoom,
+        viewport_w,
+        viewport_h,
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BigBangChipRowItem {
     pub token_idx: usize,

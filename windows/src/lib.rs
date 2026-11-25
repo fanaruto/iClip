@@ -3194,4 +3194,44 @@ mod tests {
         assert_eq!(&rgba4[0..4], &[11, 22, 33, 44]);
         assert_eq!(&rgba4[4..8], &[55, 66, 77, 88]);
     }
+
+    #[test]
+    fn test_cursor_anchored_zoom_pan_preserves_focal_point_and_clamps() {
+        use crate::canvas_ui::compute_cursor_anchored_zoom_pan;
+
+        // 1. 1x -> 2x 光标位于 (+100, +60) 时焦点原地锚定
+        let (px1, py1) = compute_cursor_anchored_zoom_pan(
+            0.0, 0.0, 1.0, 2.0, 100.0, 60.0, 600.0, 400.0, 600.0, 400.0,
+        );
+        assert!((px1 + 100.0).abs() < 0.1);
+        assert!((py1 + 60.0).abs() < 0.1);
+
+        // 2. 视口中心续放到 3x 保持比例放大
+        let (px2, py2) = compute_cursor_anchored_zoom_pan(
+            px1, py1, 2.0, 3.0, 0.0, 0.0, 600.0, 400.0, 600.0, 400.0,
+        );
+        assert!((px2 + 150.0).abs() < 0.1);
+        assert!((py2 + 90.0).abs() < 0.1);
+
+        // 3. 极端角落夹紧绝不露出黑边
+        let (ex, ey) = compute_cursor_anchored_zoom_pan(
+            0.0, 0.0, 1.0, 2.0, 450.0, 380.0, 600.0, 400.0, 600.0, 400.0,
+        );
+        assert!((ex + 300.0).abs() < 0.1);
+        assert!((ey + 200.0).abs() < 0.1);
+
+        // 4. 复位 1x 与异常 old_zoom <= 0 保护归零
+        assert_eq!(
+            compute_cursor_anchored_zoom_pan(
+                px2, py2, 3.0, 1.0, 20.0, 20.0, 600.0, 400.0, 600.0, 400.0
+            ),
+            (0.0, 0.0)
+        );
+        assert_eq!(
+            compute_cursor_anchored_zoom_pan(
+                px2, py2, 0.0, 2.0, 20.0, 20.0, 600.0, 400.0, 600.0, 400.0
+            ),
+            (0.0, 0.0)
+        );
+    }
 }
