@@ -500,6 +500,15 @@ pub enum NonActiveKeyRoute {
     ActivateAndTypeChar(char),
 }
 
+pub fn should_intercept_non_active_panel_key(
+    visible: bool,
+    implicit_capture_armed: bool,
+    show_quick_look: bool,
+    is_recording: bool,
+) -> bool {
+    visible && (is_recording || show_quick_look || implicit_capture_armed)
+}
+
 pub fn classify_non_active_panel_key(
     vk: u32,
     mods: u32,

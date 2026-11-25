@@ -3444,4 +3444,19 @@ mod tests {
         assert_eq!(compute_paint_blt_rect(450, 10, 500, 50, 420, 560), (0, 0, 420, 560));
         assert_eq!(compute_paint_blt_rect(10, 580, 100, 620, 420, 560), (0, 0, 420, 560));
     }
+
+    #[test]
+    fn test_non_active_panel_key_capture_disarms_when_external_input_focused() {
+        use crate::hotkey::should_intercept_non_active_panel_key;
+
+        // 面板刚唤起：允许免激活盲搜/上下键导航
+        assert!(should_intercept_non_active_panel_key(true, true, false, false));
+        // 用户点击外部应用输入框（置顶模式面板仍可见，但 implicit_capture_armed 置 false）：必须 100% 放行给外部输入框
+        assert!(!should_intercept_non_active_panel_key(true, false, false, false));
+        // 预览舞台打开或正在录制快捷键时：保留预览/录制按键响应
+        assert!(should_intercept_non_active_panel_key(true, false, true, false));
+        assert!(should_intercept_non_active_panel_key(true, false, false, true));
+        // 面板隐藏时始终放行
+        assert!(!should_intercept_non_active_panel_key(false, true, true, true));
+    }
 }

@@ -2927,6 +2927,21 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertFalse(PanelFocusPreservationPolicy.shouldActivatePreviousApp(isPreviousAppActive: true))
         XCTAssertTrue(PanelFocusPreservationPolicy.shouldActivatePreviousApp(isPreviousAppActive: false))
 
+        // 验证隐式键盘捕获状态机：面板打开时可盲搜，但一旦用户点击外部输入框/切走应用/粘贴完成即刻释放，不再劫持外部打字
+        var capture = PanelFocusPreservationPolicy.KeyboardCaptureState()
+        XCTAssertFalse(capture.isArmed)
+        XCTAssertFalse(capture.shouldInterceptNonKeyEvent(isPanelKeyWindow: false, isRecordingHotKey: false, isPreviewStageVisible: false))
+        capture.armOnShowOrPanelClick()
+        XCTAssertTrue(capture.isArmed)
+        XCTAssertTrue(capture.shouldInterceptNonKeyEvent(isPanelKeyWindow: false, isRecordingHotKey: false, isPreviewStageVisible: false))
+        XCTAssertFalse(capture.shouldInterceptNonKeyEvent(isPanelKeyWindow: true, isRecordingHotKey: false, isPreviewStageVisible: false))
+        capture.disarmOnExternalFocus()
+        XCTAssertFalse(capture.isArmed)
+        XCTAssertFalse(capture.shouldInterceptNonKeyEvent(isPanelKeyWindow: false, isRecordingHotKey: false, isPreviewStageVisible: false))
+        XCTAssertTrue(capture.shouldInterceptNonKeyEvent(isPanelKeyWindow: false, isRecordingHotKey: false, isPreviewStageVisible: true))
+        capture.armOnShowOrPanelClick()
+        XCTAssertTrue(capture.shouldInterceptNonKeyEvent(isPanelKeyWindow: false, isRecordingHotKey: false, isPreviewStageVisible: false))
+
         // 2. 验证超大文本 UTF-8 多字节汉字/Emoji 标量边界安全截断
         let multiByte = "微信搜索🚀测试文本"
         let clamped = ClipboardStore.clampOversizedTextForStorage(multiByte, maxUTF8Bytes: 15)

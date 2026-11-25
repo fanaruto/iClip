@@ -15,10 +15,11 @@ use iclip_core::engines::{
 };
 use iclip_core::hotkey::{
     classify_non_active_panel_key_ext, resolve_onboarding_step3_back_target,
-    resolve_preview_step_transition, should_restore_foreground_window,
-    static_hotkey_conflict_reason, DoubleTapOutcome, NonActiveKeyRoute, PreviewStepTarget,
-    WinHotKeyShortcut, WinHotKeySlot, WinModifierDoubleTapMachine, WinSingleModifier, MOD_ALT_BITS,
-    MOD_CONTROL_BITS, MOD_SHIFT_BITS, MOD_WIN_BITS,
+    resolve_preview_step_transition, should_intercept_non_active_panel_key,
+    should_restore_foreground_window, static_hotkey_conflict_reason, DoubleTapOutcome,
+    NonActiveKeyRoute, PreviewStepTarget, WinHotKeyShortcut, WinHotKeySlot,
+    WinModifierDoubleTapMachine, WinSingleModifier, MOD_ALT_BITS, MOD_CONTROL_BITS, MOD_SHIFT_BITS,
+    MOD_WIN_BITS,
 };
 use iclip_core::intelligence::{
     assemble_big_bang_selection, compute_clipboard_diff, evaluate_instant_math,
@@ -477,6 +478,7 @@ struct WinAppState {
     cf_can_include_history: u32,
     cf_can_upload_cloud: u32,
     suppress_deactivate_hide: bool,
+    implicit_key_capture_armed: bool,
     autostart_cached: bool,
     kbd_hook: HHOOK,
     mouse_hook: HHOOK,
@@ -830,6 +832,7 @@ pub fn run_windows_app() -> i32 {
                 cf_can_include_history: cf_can_hist,
                 cf_can_upload_cloud: cf_can_cloud,
                 suppress_deactivate_hide: false,
+                implicit_key_capture_armed: false,
                 autostart_cached: autostart,
                 kbd_hook: null_mut(),
                 mouse_hook: null_mut(),
@@ -1040,6 +1043,7 @@ pub fn run_windows_self_test() -> Result<(), String> {
             cf_can_include_history: 0,
             cf_can_upload_cloud: 0,
             suppress_deactivate_hide: true,
+            implicit_key_capture_armed: false,
             autostart_cached: true,
             kbd_hook: null_mut(),
             mouse_hook: null_mut(),
@@ -1706,7 +1710,12 @@ unsafe extern "system" fn ll_kbd_proc(code: i32, wparam: WPARAM, lparam: LPARAM)
                             let Some(st) = b.as_ref() else {
                                 return NonActiveKeyRoute::PassThrough;
                             };
-                            if !st.visible {
+                            if !should_intercept_non_active_panel_key(
+                                st.visible,
+                                st.implicit_key_capture_armed,
+                                st.show_quick_look || st.ql_stage_visible,
+                                st.recording_slot.is_some(),
+                            ) {
                                 return NonActiveKeyRoute::PassThrough;
                             }
                             let cur_combo = WinHotKeyShortcut::combo(vk, mod_bits);
@@ -1763,18 +1772,13 @@ unsafe extern "system" fn ll_mouse_proc(code: i32, wparam: WPARAM, lparam: LPARA
         if matches!(m, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN) && lparam != 0 {
             let hwnd = MAIN_HWND_RAW.load(Ordering::SeqCst) as HWND;
             if !hwnd.is_null() {
-                let should_check = APP_STATE.with(|c| {
+                let is_open = APP_STATE.with(|c| {
                     c.borrow()
                         .as_ref()
-                        .map(|s| {
-                            s.visible
-                                && !s.store.config.always_on_top
-                                && !s.suppress_deactivate_hide
-                                && s.recording_slot.is_none()
-                        })
+                        .map(|s| s.visible && s.recording_slot.is_none())
                         .unwrap_or(false)
                 });
-                if should_check {
+                if is_open {
                     let ms = &*(lparam as *const MSLLHOOKSTRUCT);
                     let ql_h = QL_STAGE_HWND_RAW.load(Ordering::SeqCst) as HWND;
                     let mut in_ql = false;
@@ -1790,14 +1794,25 @@ unsafe extern "system" fn ll_mouse_proc(code: i32, wparam: WPARAM, lparam: LPARA
                         }
                     }
                     let mut rc: RECT = zeroed();
-                    if !in_ql
-                        && GetWindowRect(hwnd, &mut rc) != FALSE
-                        && (ms.pt.x < rc.left
+                    if GetWindowRect(hwnd, &mut rc) != FALSE {
+                        let outside_main = ms.pt.x < rc.left
                             || ms.pt.x >= rc.right
                             || ms.pt.y < rc.top
-                            || ms.pt.y >= rc.bottom)
-                    {
-                        let _ = PostMessageW(hwnd, WM_APP_OUTSIDE_CLICK, 0, 0);
+                            || ms.pt.y >= rc.bottom;
+                        if !in_ql && outside_main {
+                            APP_STATE.with(|c| {
+                                if let Some(st) = c.borrow_mut().as_mut() {
+                                    st.implicit_key_capture_armed = false;
+                                }
+                            });
+                            let _ = PostMessageW(hwnd, WM_APP_OUTSIDE_CLICK, 0, 0);
+                        } else if !outside_main {
+                            APP_STATE.with(|c| {
+                                if let Some(st) = c.borrow_mut().as_mut() {
+                                    st.implicit_key_capture_armed = true;
+                                }
+                            });
+                        }
                     }
                 }
             }
@@ -1988,6 +2003,7 @@ unsafe fn show_panel_near_cursor(hwnd: HWND) {
                 }
             }
             st.visible = true;
+            st.implicit_key_capture_armed = true;
             st.view_mode = ActiveViewMode::MainList;
             st.search_query.clear();
             st.selected_visible_pos = 0;
@@ -2048,6 +2064,7 @@ unsafe fn hide_panel(hwnd: HWND, restore_focus: bool) {
     APP_STATE.with(|cell| {
         if let Some(st) = cell.borrow_mut().as_mut() {
             st.visible = false;
+            st.implicit_key_capture_armed = false;
             st.seg_pill_last_tick = None;
             st.skin_blend = st.store.config.card_skin.blend_target();
             st.skin_blend_target = st.skin_blend;
@@ -2266,18 +2283,19 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_APP_OUTSIDE_CLICK => {
             let should_hide = APP_STATE.with(|c| {
-                c.borrow()
-                    .as_ref()
-                    .map(|s| {
-                        s.visible
-                            && !s.store.config.always_on_top
-                            && !s.suppress_deactivate_hide
-                            && s.recording_slot.is_none()
-                    })
-                    .unwrap_or(false)
+                let mut b = c.borrow_mut();
+                let Some(st) = b.as_mut() else { return false };
+                st.implicit_key_capture_armed = false;
+                st.editing_alias_item_id = None;
+                st.visible
+                    && !st.store.config.always_on_top
+                    && !st.suppress_deactivate_hide
+                    && st.recording_slot.is_none()
             });
             if should_hide {
                 hide_panel(hwnd, false);
+            } else {
+                let _ = InvalidateRect(hwnd, null(), FALSE);
             }
             0
         }
@@ -2528,16 +2546,23 @@ unsafe extern "system" fn wnd_proc(
                     hide_panel(hwnd, false);
                 } else {
                     let fg = GetForegroundWindow();
-                    if !fg.is_null() && fg != hwnd {
-                        let app = query_process_name_from_hwnd(fg);
-                        APP_STATE.with(|c| {
-                            if let Some(st) = c.borrow_mut().as_mut() {
+                    APP_STATE.with(|c| {
+                        if let Some(st) = c.borrow_mut().as_mut() {
+                            st.implicit_key_capture_armed = false;
+                            st.editing_alias_item_id = None;
+                            if !fg.is_null() && fg != hwnd {
                                 st.previous_foreground = fg;
-                                if app.is_some() {
-                                    st.active_target_app_name = app;
-                                }
                             }
-                        });
+                        }
+                    });
+                    if !fg.is_null() && fg != hwnd {
+                        if let Some(app) = query_process_name_from_hwnd(fg) {
+                            APP_STATE.with(|c| {
+                                if let Some(st) = c.borrow_mut().as_mut() {
+                                    st.active_target_app_name = Some(app);
+                                }
+                            });
+                        }
                     }
                 }
             }
@@ -2813,6 +2838,7 @@ unsafe extern "system" fn wnd_proc(
             let y = ((lparam >> 16) & 0xFFFF) as i16 as i32;
             APP_STATE.with(|c| {
                 if let Some(st) = c.borrow_mut().as_mut() {
+                    st.implicit_key_capture_armed = true;
                     if !st.show_highlights_overlay
                         && !st.show_quick_look
                         && st.view_mode == ActiveViewMode::MainList
@@ -2831,6 +2857,11 @@ unsafe extern "system" fn wnd_proc(
         WM_LBUTTONDBLCLK => {
             let x = (lparam & 0xFFFF) as i16 as i32;
             let y = ((lparam >> 16) & 0xFFFF) as i16 as i32;
+            APP_STATE.with(|c| {
+                if let Some(st) = c.borrow_mut().as_mut() {
+                    st.implicit_key_capture_armed = true;
+                }
+            });
             handle_left_click(hwnd, x, y, true);
             0
         }
@@ -4272,6 +4303,11 @@ unsafe fn commit_paste_item_by_index(hwnd: HWND, item_idx: usize, force_plain: b
     }
 
     if always_top {
+        APP_STATE.with(|c| {
+            if let Some(st) = c.borrow_mut().as_mut() {
+                st.implicit_key_capture_armed = false;
+            }
+        });
         restore_target_foreground_if_needed(target_fg);
         set_toast(hwnd, "✓ 已键入目标窗口".to_string());
     } else {
@@ -4318,6 +4354,11 @@ unsafe fn commit_ephemeral_secret_paste_with_delay(
     SetTimer(hwnd, TIMER_ID_CONCEALED_SCRUB, scrub_ms, None);
 
     if always_top {
+        APP_STATE.with(|c| {
+            if let Some(st) = c.borrow_mut().as_mut() {
+                st.implicit_key_capture_armed = false;
+            }
+        });
         restore_target_foreground_if_needed(target_fg);
         set_toast(hwnd, toast);
     } else {

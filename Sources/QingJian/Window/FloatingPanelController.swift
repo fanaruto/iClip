@@ -41,6 +41,36 @@ final class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
 
 /// 唤醒零失焦与顺手粘贴焦点保持策略
 enum PanelFocusPreservationPolicy {
+    /// 面板非激活悬浮期间的隐式键盘捕获权状态机：
+    /// - 仅在刚呼出面板（`⌥V` / 状态栏点击）或用户主动点击面板内部时置为 `isArmed = true`；
+    /// - 一旦用户点击面板外的任意输入框/窗口、通过 `⌘Tab` 切换外部应用、或在「始终在前」模式下完成粘贴，
+    ///   立即置为 `isArmed = false` 并交还 Key 焦点，杜绝外部输入框打字被劫持到 iClip 搜索框。
+    struct KeyboardCaptureState: Equatable {
+        private(set) var isArmed: Bool = false
+
+        mutating func armOnShowOrPanelClick() {
+            isArmed = true
+        }
+
+        mutating func disarmOnExternalFocus() {
+            isArmed = false
+        }
+
+        func shouldInterceptNonKeyEvent(
+            isPanelKeyWindow: Bool,
+            isRecordingHotKey: Bool,
+            isPreviewStageVisible: Bool
+        ) -> Bool {
+            if isPanelKeyWindow {
+                return false
+            }
+            if isRecordingHotKey || isPreviewStageVisible {
+                return true
+            }
+            return isArmed
+        }
+    }
+
     /// 判断在非 Key 悬浮态下敲击的按键是否应自动激活顶部搜索框开始盲打搜索
     static func shouldBeginSearchTyping(
         keyCode: UInt16,
@@ -106,62 +136,86 @@ private func nonActivatingPanelEventTapCallback(
     if cgEvent.getIntegerValueField(.eventSourceUserData) == iClipSyntheticEventMagic {
         return Unmanaged.passUnretained(cgEvent)
     }
+    if type == .leftMouseDown || type == .rightMouseDown || type == .otherMouseDown {
+        MainActor.assumeIsolated {
+            tapController.dispatchObservedPointerDown(NSEvent.mouseLocation)
+        }
+        return Unmanaged.passUnretained(cgEvent)
+    }
     let consumed = MainActor.assumeIsolated {
         tapController.dispatchInterceptedCGEvent(type: type, cgEvent: cgEvent)
     }
     return consumed ? nil : Unmanaged.passUnretained(cgEvent)
 }
 
-/// 仅在面板可见期间按需挂载的会话级键盘拦截与外部点击收起控制器（面板隐藏即彻底卸载，后台待机 0 开销）
+/// 仅在面板可见期间按需挂载的会话级键盘拦截与内外部点击焦点仲裁控制器（面板隐藏即彻底卸载，后台待机 0 开销）
 @MainActor
 final class PanelNonActivatingTapController {
     private var tapPort: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var outsideMouseMonitor: Any?
+    private var localMouseMonitor: Any?
     private var onInterceptEvent: ((NSEvent) -> Bool)?
+    private var onPointerDownAtScreenPoint: ((NSPoint) -> Void)?
 
     func start(
         onInterceptEvent: @escaping (NSEvent) -> Bool,
-        onOutsideMouseDown: @escaping (NSPoint) -> Void
+        onPointerDownAtScreenPoint: @escaping (NSPoint) -> Void
     ) -> Bool {
         stop()
         self.onInterceptEvent = onInterceptEvent
-
-        outsideMouseMonitor = NSEvent.addGlobalMonitorForEvents(
-            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
-        ) { _ in
-            let mouseLoc = NSEvent.mouseLocation
-            Task { @MainActor in
-                onOutsideMouseDown(mouseLoc)
-            }
-        }
+        self.onPointerDownAtScreenPoint = onPointerDownAtScreenPoint
 
         let mask: CGEventMask =
             (1 << CGEventType.keyDown.rawValue) |
-            (1 << CGEventType.flagsChanged.rawValue)
+            (1 << CGEventType.flagsChanged.rawValue) |
+            (1 << CGEventType.leftMouseDown.rawValue) |
+            (1 << CGEventType.rightMouseDown.rawValue) |
+            (1 << CGEventType.otherMouseDown.rawValue)
         let refcon = Unmanaged.passUnretained(self).toOpaque()
-        guard let port = CGEvent.tapCreate(
+        if let port = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
             options: .defaultTap,
             eventsOfInterest: mask,
             callback: nonActivatingPanelEventTapCallback,
             userInfo: refcon
-        ), let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, port, 0) else {
-            return false
+        ), let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, port, 0) {
+            self.tapPort = port
+            self.runLoopSource = source
+            CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+            CGEvent.tapEnable(tap: port, enable: true)
+            return true
         }
-        self.tapPort = port
-        self.runLoopSource = source
-        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
-        CGEvent.tapEnable(tap: port, enable: true)
-        return true
+
+        // 未授予辅助功能权限时的零权限降级监听：依然准确识别面板内/外部点击以释放或重获焦点
+        outsideMouseMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        ) { _ in
+            let mouseLoc = NSEvent.mouseLocation
+            Task { @MainActor in
+                onPointerDownAtScreenPoint(mouseLoc)
+            }
+        }
+        localMouseMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        ) { event in
+            onPointerDownAtScreenPoint(NSEvent.mouseLocation)
+            return event
+        }
+        return false
     }
 
     func stop() {
         onInterceptEvent = nil
+        onPointerDownAtScreenPoint = nil
         if let monitor = outsideMouseMonitor {
             NSEvent.removeMonitor(monitor)
             outsideMouseMonitor = nil
+        }
+        if let monitor = localMouseMonitor {
+            NSEvent.removeMonitor(monitor)
+            localMouseMonitor = nil
         }
         if let source = runLoopSource {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
@@ -177,6 +231,10 @@ final class PanelNonActivatingTapController {
         if let port = tapPort {
             CGEvent.tapEnable(tap: port, enable: true)
         }
+    }
+
+    fileprivate func dispatchObservedPointerDown(_ screenPoint: NSPoint) {
+        onPointerDownAtScreenPoint?(screenPoint)
     }
 
     fileprivate func dispatchInterceptedCGEvent(type: CGEventType, cgEvent: CGEvent) -> Bool {
@@ -202,6 +260,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     private var demoRunner: DemoShowcaseRunner?
     private var keyMonitor: Any?
     private let nonActivatingTap = PanelNonActivatingTapController()
+    private var keyboardCaptureState = PanelFocusPreservationPolicy.KeyboardCaptureState()
     var statusItemScreenRectProvider: (() -> NSRect?)?
     private var recordingTapMachine = ModifierDoubleTapStateMachine(maxHoldDuration: 0.35, maxTapGap: 0.48)
     private var previousApp: NSRunningApplication?
@@ -219,6 +278,35 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
 
     var isVisible: Bool {
         (panel?.isVisible ?? false) && nav.isPresented && !fadeCoordinator.isFadingOut
+    }
+
+    private var shouldKeepPanelVisibleOnOutsideInteraction: Bool {
+        (InteractivePlaygroundController.shared.isActive && InteractivePlaygroundController.shared.phase == .permissionsSetup)
+            || store.alwaysOnTop
+            || nav.suppressAutoHide
+            || nav.isRecordingHotKey
+    }
+
+    /// 当用户点击外部输入框、切换外部应用或在置顶模式下粘贴后，彻底释放面板隐式拦截与 WindowServer Key 焦点
+    private func relinquishPanelKeyboardFocus(surrenderWindowServerKey: Bool) {
+        keyboardCaptureState.disarmOnExternalFocus()
+        if nav.isEditingAlias {
+            rootView.cancelAliasEdit()
+        }
+        nav.blurSearchTrigger = UUID()
+        panel?.makeFirstResponder(nil)
+        if let panel, panel.isKeyWindow {
+            panel.resignKey()
+            if surrenderWindowServerKey && panel.isVisible {
+                panel.orderOut(nil)
+                panel.orderFrontRegardless()
+                panel.enforceUnifiedActiveAppearance()
+                surfaceHost.refreshInPlace()
+            }
+        }
+        if NSApp.isActive {
+            NSApp.deactivate()
+        }
     }
 
     override init() {
@@ -251,16 +339,19 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
                 if self.store.activeTargetAppName != app.localizedName {
                     self.store.activeTargetAppName = app.localizedName
                 }
+                guard self.isVisible, !self.nav.isRecordingHotKey else { return }
+                let previewStageOpen = BigBangStageController.shared.isVisible || SystemQuickLookController.shared.isVisible
+                self.relinquishPanelKeyboardFocus(surrenderWindowServerKey: true)
+                if !self.shouldKeepPanelVisibleOnOutsideInteraction && !previewStageOpen {
+                    self.hide(restoreFocus: false)
+                }
             }
         }
     }
 
     private func handleDismissForPaste() {
         if store.alwaysOnTop {
-            panel.makeFirstResponder(nil)
-            if panel.isKeyWindow {
-                panel.resignKey()
-            }
+            relinquishPanelKeyboardFocus(surrenderWindowServerKey: true)
             if let app = previousApp,
                PanelFocusPreservationPolicy.shouldActivatePreviousApp(isPreviousAppActive: app.isActive) {
                 app.activate()
@@ -473,6 +564,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         fadeCoordinator.invalidatePendingFade()
         hideWorkItem?.cancel()
         hideWorkItem = nil
+        keyboardCaptureState.disarmOnExternalFocus()
         removeKeyMonitor()
         DragFileExportHelper.wipeAllExports()
         ActionSparkController.shared.dismiss()
@@ -605,6 +697,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         panel.setFrameOrigin(startOrigin)
         panel.alphaValue = 0
 
+        keyboardCaptureState.armOnShowOrPanelClick()
         let tapReady = installKeyMonitor()
         if tapReady && !IsSecureEventInputEnabled() {
             panel.orderFrontRegardless()
@@ -639,6 +732,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         } else {
             guard !fadeCoordinator.isFadingOut else { return }
         }
+        keyboardCaptureState.disarmOnExternalFocus()
         removeKeyMonitor()
         hideWorkItem?.cancel()
         hideWorkItem = nil
@@ -744,13 +838,13 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     }
 
     func windowDidResignKey(_ notification: Notification) {
-        let keepVisible = BigBangStageController.shared.isVisible
-            || SystemQuickLookController.shared.isVisible
-            || (InteractivePlaygroundController.shared.isActive && InteractivePlaygroundController.shared.phase == .permissionsSetup)
-            || store.alwaysOnTop
-            || nav.suppressAutoHide
-            || nav.isRecordingHotKey
+        let previewStageOpen = BigBangStageController.shared.isVisible || SystemQuickLookController.shared.isVisible
+        let keepVisible = previewStageOpen || shouldKeepPanelVisibleOnOutsideInteraction
         if keepVisible {
+            if !previewStageOpen && !nav.isRecordingHotKey {
+                keyboardCaptureState.disarmOnExternalFocus()
+                nav.blurSearchTrigger = UUID()
+            }
             panel.makeFirstResponder(nil)
             panel.enforceUnifiedActiveAppearance()
             surfaceHost.refreshInPlace()
@@ -769,6 +863,10 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             if self.nav.isRecordingHotKey {
                 return self.handleHotKeyRecording(event)
             }
+            let previewStageOpen = BigBangStageController.shared.isVisible || SystemQuickLookController.shared.isVisible
+            guard self.panel.isKeyWindow || self.keyboardCaptureState.isArmed || previewStageOpen else {
+                return event
+            }
             guard event.type == .keyDown else { return event }
             return self.handleKeyDown(event)
         }
@@ -777,36 +875,48 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
                 guard let self, self.isVisible else { return false }
                 return self.handleNonKeyPanelInterceptedEvent(event)
             },
-            onOutsideMouseDown: { [weak self] mouseLoc in
-                guard let self, self.isVisible else { return }
-                if InteractivePlaygroundController.shared.isActive && InteractivePlaygroundController.shared.phase == .permissionsSetup {
-                    return
-                }
-                if self.store.alwaysOnTop || self.nav.suppressAutoHide || self.nav.isRecordingHotKey {
-                    return
-                }
-                if let bbFrame = BigBangStageController.shared.visiblePanelScreenFrame,
-                   bbFrame.insetBy(dx: -10, dy: -10).contains(mouseLoc) {
-                    return
-                }
-                if let qlFrame = SystemQuickLookController.shared.visiblePanelScreenFrame,
-                   qlFrame.insetBy(dx: -10, dy: -10).contains(mouseLoc) {
-                    return
-                }
-                if let statusRect = self.statusItemScreenRectProvider?(),
-                   statusRect.insetBy(dx: -4, dy: -4).contains(mouseLoc) {
-                    return
-                }
-                let cardFrame = self.panel.frame.insetBy(dx: self.shadowBleed - 2, dy: self.shadowBleed - 2)
-                if !cardFrame.contains(mouseLoc) {
-                    self.hide(restoreFocus: false)
-                }
+            onPointerDownAtScreenPoint: { [weak self] mouseLoc in
+                self?.handlePointerDownAtScreenPoint(mouseLoc)
             }
         )
     }
 
+    private func handlePointerDownAtScreenPoint(_ mouseLoc: NSPoint) {
+        guard isVisible else { return }
+        if let bbFrame = BigBangStageController.shared.visiblePanelScreenFrame,
+           bbFrame.insetBy(dx: -10, dy: -10).contains(mouseLoc) {
+            return
+        }
+        if let qlFrame = SystemQuickLookController.shared.visiblePanelScreenFrame,
+           qlFrame.insetBy(dx: -10, dy: -10).contains(mouseLoc) {
+            return
+        }
+        if let statusRect = statusItemScreenRectProvider?(),
+           statusRect.insetBy(dx: -4, dy: -4).contains(mouseLoc) {
+            return
+        }
+        let cardFrame = panel.frame.insetBy(dx: shadowBleed - 2, dy: shadowBleed - 2)
+        if cardFrame.contains(mouseLoc) {
+            keyboardCaptureState.armOnShowOrPanelClick()
+            return
+        }
+        if nav.isRecordingHotKey {
+            return
+        }
+        // 用户点击面板外的任意输入框或窗口：同步释放面板键盘拦截与 Key 焦点，确保外部输入框正常打字
+        relinquishPanelKeyboardFocus(surrenderWindowServerKey: true)
+        if !shouldKeepPanelVisibleOnOutsideInteraction {
+            hide(restoreFocus: false)
+        }
+    }
+
     private func handleNonKeyPanelInterceptedEvent(_ event: NSEvent) -> Bool {
-        if panel.isKeyWindow {
+        let previewStageOpen = BigBangStageController.shared.isVisible || SystemQuickLookController.shared.isVisible
+        guard keyboardCaptureState.shouldInterceptNonKeyEvent(
+            isPanelKeyWindow: panel.isKeyWindow,
+            isRecordingHotKey: nav.isRecordingHotKey,
+            isPreviewStageVisible: previewStageOpen
+        ) else {
             return false
         }
         if InteractivePlaygroundController.shared.isActive && InteractivePlaygroundController.shared.phase == .permissionsSetup {
@@ -839,7 +949,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             flags: event.modifierFlags,
             charactersIgnoringModifiers: event.charactersIgnoringModifiers,
             showSettings: nav.showSettings,
-            showQuickLook: nav.showQuickLook || BigBangStageController.shared.isVisible || SystemQuickLookController.shared.isVisible
+            showQuickLook: nav.showQuickLook || previewStageOpen
         ) {
             beginSearchTypingFromNonKeyPanel(event)
             return true
