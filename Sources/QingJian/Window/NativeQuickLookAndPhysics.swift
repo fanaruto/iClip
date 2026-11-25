@@ -648,10 +648,178 @@ struct CardSpatialSpecularLayer: View {
     }
 }
 
+/// 全局共享指针与压感探针协调器：全应用最多挂载 1 个 Core 本地事件监视器与按需 `.mouseMoved` 监视器，
+/// 彻底消除鼠标高速上下扫卡时逐卡反复向 AppKit 装拆监听器的主线程卡顿。
+@MainActor
+final class PanelForceTouchCoordinator {
+    static let shared = PanelForceTouchCoordinator()
+
+    private weak var activeProbe: ForceTouchWindowProbe.ProbeNSView?
+    private weak var pendingUnlockProbe: ForceTouchWindowProbe.ProbeNSView?
+    private var pendingUnlockRetry: (() -> Void)?
+    private let trackedHoverProbes = NSHashTable<ForceTouchWindowProbe.ProbeNSView>.weakObjects()
+    private var coreMonitor: Any?
+    private var moveMonitor: Any?
+    private var hideObserver: NSObjectProtocol?
+
+    var hasActiveCoreMonitor: Bool { coreMonitor != nil }
+    var hasActiveMoveMonitor: Bool { moveMonitor != nil }
+
+    private init() {
+        hideObserver = NotificationCenter.default.addObserver(
+            forName: .iClipPanelDidHide,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.handlePanelDidHide()
+            }
+        }
+    }
+
+    func setActiveProbe(_ probe: ForceTouchWindowProbe.ProbeNSView) {
+        if pendingUnlockProbe === probe {
+            pendingUnlockProbe = nil
+            pendingUnlockRetry = nil
+        }
+        trackedHoverProbes.add(probe)
+        if activeProbe !== probe {
+            activeProbe?.resetPressState()
+            activeProbe = probe
+        }
+        ensureCoreMonitorIfNeeded()
+        syncMoveMonitor()
+        if probe.coordinator?.cardSkin == .spatialGlass,
+           let win = probe.window {
+            probe.dispatchSpatialPointer(windowPoint: win.mouseLocationOutsideOfEventStream)
+        }
+    }
+
+    func setPendingUnlockProbe(_ probe: ForceTouchWindowProbe.ProbeNSView, onRetryEnter: @escaping () -> Void) {
+        pendingUnlockProbe = probe
+        pendingUnlockRetry = onRetryEnter
+        trackedHoverProbes.add(probe)
+        syncMoveMonitor()
+    }
+
+    func clearProbe(_ probe: ForceTouchWindowProbe.ProbeNSView) {
+        trackedHoverProbes.remove(probe)
+        if pendingUnlockProbe === probe {
+            pendingUnlockProbe = nil
+            pendingUnlockRetry = nil
+        }
+        if activeProbe === probe {
+            probe.resetPressState()
+            activeProbe = nil
+        }
+        syncMoveMonitor()
+    }
+
+    func refreshSkinState(for probe: ForceTouchWindowProbe.ProbeNSView) {
+        if activeProbe === probe {
+            syncMoveMonitor()
+        }
+    }
+
+    private func handlePanelDidHide() {
+        pendingUnlockProbe = nil
+        pendingUnlockRetry = nil
+        let snapshot = trackedHoverProbes.allObjects
+        trackedHoverProbes.removeAllObjects()
+        for probe in snapshot {
+            probe.resetHoverActiveFlag()
+            probe.resetPressState()
+            probe.coordinator?.onPanelDidHideReset()
+        }
+        activeProbe?.resetPressState()
+        activeProbe = nil
+        teardownMoveMonitor()
+        teardownCoreMonitor()
+    }
+
+    private func ensureCoreMonitorIfNeeded() {
+        guard coreMonitor == nil else { return }
+        let mask: NSEvent.EventTypeMask = [.leftMouseDown, .leftMouseDragged, .leftMouseUp, .pressure, .scrollWheel]
+        coreMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
+            MainActor.assumeIsolated {
+                self?.handleCoreEvent(event)
+            }
+            return event
+        }
+    }
+
+    func syncMoveMonitorIfIdle() {
+        syncMoveMonitor()
+    }
+
+    private func syncMoveMonitor() {
+        let needsMove = (pendingUnlockProbe != nil) || (activeProbe?.coordinator?.cardSkin == .spatialGlass)
+        if needsMove {
+            guard moveMonitor == nil else { return }
+            moveMonitor = NSEvent.addLocalMonitorForEvents(matching: .mouseMoved) { [weak self] event in
+                MainActor.assumeIsolated {
+                    self?.handleMouseMoved(event)
+                }
+                return event
+            }
+        } else {
+            teardownMoveMonitor()
+        }
+    }
+
+    private func teardownCoreMonitor() {
+        if let monitor = coreMonitor {
+            NSEvent.removeMonitor(monitor)
+            coreMonitor = nil
+        }
+    }
+
+    private func teardownMoveMonitor() {
+        if let monitor = moveMonitor {
+            NSEvent.removeMonitor(monitor)
+            moveMonitor = nil
+        }
+    }
+
+    private func handleMouseMoved(_ event: NSEvent) {
+        if let pending = pendingUnlockProbe,
+           let retry = pendingUnlockRetry,
+           let win = pending.window,
+           event.window === win {
+            retry()
+        }
+        if let active = activeProbe,
+           let win = active.window,
+           event.window === win,
+           active.coordinator?.cardSkin == .spatialGlass {
+            active.dispatchSpatialPointer(windowPoint: event.locationInWindow)
+        }
+    }
+
+    private func handleCoreEvent(_ event: NSEvent) {
+        if event.type == .scrollWheel {
+            activeProbe?.handleEvent(event)
+            return
+        }
+        if event.type == .leftMouseDragged,
+           let active = activeProbe,
+           let win = active.window,
+           event.window === win,
+           active.coordinator?.cardSkin == .spatialGlass {
+            active.dispatchSpatialPointer(windowPoint: event.locationInWindow)
+        }
+        activeProbe?.handleEvent(event)
+    }
+}
+
+final class ForceTouchProbeBridge {
+    weak var probe: ForceTouchWindowProbe.ProbeNSView?
+}
+
 /// 完全穿透命中测试（`hitTest -> nil`，绝不拦截 SwiftUI 点击、右键菜单、`.onDrag` 拖拽或列表滚动）的原生探针：
 /// - 向 `SystemQuickLookController` 注册弱引用视图供滚动后精确屏幕坐标换算；
-/// - 配置 `NSPressureConfiguration(.primaryDeepClick)` 解锁触控板一段轻按与二段 Force Touch 深按弹出！
-private struct ForceTouchWindowProbe: NSViewRepresentable {
+/// - 共享 `PanelForceTouchCoordinator` 处理触控板一段轻按与二段 Force Touch 深按弹出（零逐卡监听器装拆）。
+struct ForceTouchWindowProbe: NSViewRepresentable {
     let itemID: UUID
     let surfaceKind: PhysicalCardSurfaceKind
     let cardSkin: CardSkinStyle
@@ -659,6 +827,8 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
     let trailingActionWidth: CGFloat
     let leadingExclusionWidth: CGFloat
     let bottomExclusionHeight: CGFloat
+    let probeBridge: ForceTouchProbeBridge
+    let onSpatialPointerNormChange: (CGPoint) -> Void
     let onPressStateChange: (Int, CGFloat) -> Void
     let onScrollReset: () -> Void
     let onDeepPressTrigger: () -> Void
@@ -667,21 +837,25 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
     func makeNSView(context: Context) -> ProbeNSView {
         let v = ProbeNSView()
         v.coordinator = context.coordinator
+        probeBridge.probe = v
         return v
     }
 
     func updateNSView(_ nsView: ProbeNSView, context: Context) {
         let oldID = context.coordinator.itemID
+        let skinChanged = context.coordinator.cardSkin != cardSkin
         context.coordinator.itemID = itemID
         context.coordinator.surfaceKind = surfaceKind
         context.coordinator.cardSkin = cardSkin
         context.coordinator.trailingExclusionWidth = trailingActionWidth
         context.coordinator.leadingExclusionWidth = leadingExclusionWidth
         context.coordinator.bottomExclusionHeight = bottomExclusionHeight
+        context.coordinator.onSpatialPointerNormChange = onSpatialPointerNormChange
         context.coordinator.onPressStateChange = onPressStateChange
         context.coordinator.onScrollReset = onScrollReset
         context.coordinator.onDeepPressTrigger = onDeepPressTrigger
         context.coordinator.onPanelDidHideReset = onPanelDidHideReset
+        probeBridge.probe = nsView
         if oldID != itemID {
             SystemQuickLookController.shared.unregisterProbeView(nsView, for: oldID)
             if nsView.window != nil {
@@ -689,6 +863,9 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
             }
         }
         nsView.setHoverMonitoring(active: isHovered)
+        if skinChanged {
+            PanelForceTouchCoordinator.shared.refreshSkinState(for: nsView)
+        }
     }
 
     func makeCoordinator() -> Coordinator {
@@ -699,6 +876,7 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
             trailingExclusionWidth: trailingActionWidth,
             leadingExclusionWidth: leadingExclusionWidth,
             bottomExclusionHeight: bottomExclusionHeight,
+            onSpatialPointerNormChange: onSpatialPointerNormChange,
             onPressStateChange: onPressStateChange,
             onScrollReset: onScrollReset,
             onDeepPressTrigger: onDeepPressTrigger,
@@ -713,6 +891,7 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
         var trailingExclusionWidth: CGFloat
         var leadingExclusionWidth: CGFloat
         var bottomExclusionHeight: CGFloat
+        var onSpatialPointerNormChange: (CGPoint) -> Void
         var onPressStateChange: (Int, CGFloat) -> Void
         var onScrollReset: () -> Void
         var onDeepPressTrigger: () -> Void
@@ -725,6 +904,7 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
             trailingExclusionWidth: CGFloat,
             leadingExclusionWidth: CGFloat,
             bottomExclusionHeight: CGFloat,
+            onSpatialPointerNormChange: @escaping (CGPoint) -> Void,
             onPressStateChange: @escaping (Int, CGFloat) -> Void,
             onScrollReset: @escaping () -> Void,
             onDeepPressTrigger: @escaping () -> Void,
@@ -736,6 +916,7 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
             self.trailingExclusionWidth = trailingExclusionWidth
             self.leadingExclusionWidth = leadingExclusionWidth
             self.bottomExclusionHeight = bottomExclusionHeight
+            self.onSpatialPointerNormChange = onSpatialPointerNormChange
             self.onPressStateChange = onPressStateChange
             self.onScrollReset = onScrollReset
             self.onDeepPressTrigger = onDeepPressTrigger
@@ -745,14 +926,14 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
 
     final class ProbeNSView: NSView {
         weak var coordinator: Coordinator?
-        private var localMonitor: Any?
-        private var hideObserver: NSObjectProtocol?
         private var isMouseDownInside = false
         private var didFireDeepPress = false
+        private var isHoverActive = false
         private var downPointInWindow: NSPoint = .zero
         private var lastReportedProgress: CGFloat = 0
         private var maxStageTransition: CGFloat = 0
         private var deepPopResetEpoch: UInt64 = 0
+        private var lastDispatchedSpatialNorm: CGPoint = .zero
 
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
@@ -760,67 +941,35 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
             super.viewDidMoveToWindow()
             if let win = window, let id = coordinator?.itemID {
                 SystemQuickLookController.shared.registerProbeView(self, for: id, window: win)
-                installHideObserverIfNeeded()
             } else {
+                isHoverActive = false
                 if let id = coordinator?.itemID {
                     SystemQuickLookController.shared.unregisterProbeView(self, for: id)
                 }
-                teardownMonitor()
-                removeHideObserver()
+                PanelForceTouchCoordinator.shared.clearProbe(self)
             }
         }
 
-        private func installHideObserverIfNeeded() {
-            guard hideObserver == nil else { return }
-            hideObserver = NotificationCenter.default.addObserver(
-                forName: .iClipPanelDidHide,
-                object: nil,
-                queue: .main
-            ) { [weak self] _ in
-                guard let self else { return }
-                self.resetPressState()
-                self.teardownMonitor()
-                self.coordinator?.onPanelDidHideReset()
-            }
-        }
-
-        private func removeHideObserver() {
-            if let obs = hideObserver {
-                NotificationCenter.default.removeObserver(obs)
-                hideObserver = nil
-            }
+        func resetHoverActiveFlag() {
+            isHoverActive = false
         }
 
         func setHoverMonitoring(active: Bool) {
+            guard active != isHoverActive else { return }
+            isHoverActive = active
             if active {
                 if let win = window, let id = coordinator?.itemID {
                     SystemQuickLookController.shared.registerProbeView(self, for: id, window: win)
                 }
-                installMonitorIfNeeded()
+                PanelForceTouchCoordinator.shared.setActiveProbe(self)
             } else {
-                resetPressState()
-                teardownMonitor()
+                PanelForceTouchCoordinator.shared.clearProbe(self)
             }
         }
 
-        private func installMonitorIfNeeded() {
-            guard localMonitor == nil else { return }
-            let mask: NSEvent.EventTypeMask = [.leftMouseDown, .leftMouseDragged, .leftMouseUp, .pressure, .scrollWheel]
-            localMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
-                self?.handleEvent(event)
-                return event
-            }
-        }
-
-        private func teardownMonitor() {
-            if let monitor = localMonitor {
-                NSEvent.removeMonitor(monitor)
-                localMonitor = nil
-            }
-        }
-
-        private func resetPressState() {
+        func resetPressState() {
             deepPopResetEpoch &+= 1
+            lastDispatchedSpatialNorm = .zero
             if isMouseDownInside || lastReportedProgress != 0 || maxStageTransition != 0 {
                 isMouseDownInside = false
                 didFireDeepPress = false
@@ -830,7 +979,20 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
             }
         }
 
-        private func handleEvent(_ event: NSEvent) {
+        func dispatchSpatialPointer(windowPoint: NSPoint) {
+            guard bounds.width > 8, bounds.height > 8 else { return }
+            let localPt = convert(windowPoint, from: nil)
+            let rawY = isFlipped ? localPt.y : (bounds.height - localPt.y)
+            let nx = max(-1, min(1, ((localPt.x / bounds.width) - 0.5) * 2.0))
+            let ny = max(-1, min(1, ((rawY / bounds.height) - 0.5) * 2.0))
+            if abs(nx - lastDispatchedSpatialNorm.x) >= 0.08 || abs(ny - lastDispatchedSpatialNorm.y) >= 0.08 {
+                let next = CGPoint(x: nx, y: ny)
+                lastDispatchedSpatialNorm = next
+                coordinator?.onSpatialPointerNormChange(next)
+            }
+        }
+
+        func handleEvent(_ event: NSEvent) {
             guard let win = window, event.window === win, bounds.width > 8, bounds.height > 8 else { return }
 
             if event.type == .scrollWheel {
@@ -844,7 +1006,6 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
 
             switch event.type {
             case .leftMouseDown:
-                // 排除 Control+左键唤起上下文菜单场景
                 guard inside, !event.modifierFlags.contains(.control) else { return }
                 let visualY = isFlipped ? localPt.y : (bounds.height - localPt.y)
                 let trailW = coordinator?.trailingExclusionWidth ?? 0
@@ -895,7 +1056,6 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
                 }
 
             case .leftMouseUp:
-                // 若用户在卡片内一段加压深入（stageTransition ≥ 0.48）后松手取消，仍同步拦截当次松手单击防误贴；拖离卡片外则不再误伤后续点击
                 if isMouseDownInside && inside && !didFireDeepPress && maxStageTransition >= 0.48,
                    let currentID = coordinator?.itemID {
                     MainActor.assumeIsolated {
@@ -931,8 +1091,9 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
         }
 
         deinit {
-            teardownMonitor()
-            removeHideObserver()
+            Task { @MainActor in
+                PanelForceTouchCoordinator.shared.syncMoveMonitorIfIdle()
+            }
         }
     }
 }
@@ -961,10 +1122,10 @@ struct AppleTVPhysicalCardModifier: ViewModifier {
     /// 滚动防抖递增代数，避免连续滚动中旧延迟任务误复位 scrollDamped
     @State private var scrollDebounceEpoch: Int = 0
     @State private var internalPointerNorm: CGPoint = .zero
-    @State private var surfaceSize: CGSize = CGSize(width: 392, height: 68)
     @State private var pressStage: Int = 0
     @State private var pressureProgress: CGFloat = 0
     @State private var scrollDamped: Bool = false
+    @State private var probeBridge = ForceTouchProbeBridge()
 
     private var activeNorm: CGPoint {
         (cardSkin == .spatialGlass && isHovered && !scrollDamped && pressStage != 2)
@@ -1009,7 +1170,7 @@ struct AppleTVPhysicalCardModifier: ViewModifier {
             colorScheme: colorScheme
         )
 
-        let transformed = content
+        content
             .background(
                 ForceTouchWindowProbe(
                     itemID: itemID,
@@ -1019,6 +1180,14 @@ struct AppleTVPhysicalCardModifier: ViewModifier {
                     trailingActionWidth: trailingActionWidth,
                     leadingExclusionWidth: leadingExclusionWidth,
                     bottomExclusionHeight: bottomExclusionHeight,
+                    probeBridge: probeBridge,
+                    onSpatialPointerNormChange: { next in
+                        if pointerNorm != nil {
+                            onPointerNormChange?(next)
+                        } else if internalPointerNorm != next {
+                            internalPointerNorm = next
+                        }
+                    },
                     onPressStateChange: { stage, progress in
                         let prevStage = pressStage
                         if pressStage != stage {
@@ -1027,8 +1196,8 @@ struct AppleTVPhysicalCardModifier: ViewModifier {
                         if stage == 2 {
                             if internalPointerNorm != .zero {
                                 internalPointerNorm = .zero
-                                onPointerNormChange?(.zero)
                             }
+                            onPointerNormChange?(.zero)
                             if prevStage != 2 {
                                 onDeepPressActiveChanged?(true)
                             }
@@ -1082,10 +1251,11 @@ struct AppleTVPhysicalCardModifier: ViewModifier {
                 axis: (x: tilt.axisX, y: tilt.axisY, z: 0),
                 perspective: 0.78
             )
-            .animation(.interpolatingSpring(mass: 0.58, stiffness: 360, damping: 24), value: effectiveScale)
-            .animation(.interpolatingSpring(mass: 0.58, stiffness: 360, damping: 24), value: pressStage)
-            .animation(.interactiveSpring(response: 0.18, dampingFraction: 0.84), value: activeNorm)
-            .animation(.spring(response: 0.36, dampingFraction: 0.86), value: cardSkin)
+            .animation(.easeOut(duration: 0.13), value: effectiveScale)
+            .animation(.easeOut(duration: 0.14), value: tilt.angle)
+            .animation(.interpolatingSpring(mass: 0.52, stiffness: 420, damping: 26), value: pressStage)
+            .animation(.interactiveSpring(response: 0.16, dampingFraction: 0.86), value: activeNorm)
+            .animation(.spring(response: 0.34, dampingFraction: 0.86), value: cardSkin)
             .onChange(of: isHovered) { _, hovering in
                 if !hovering {
                     pressStage = 0
@@ -1105,90 +1275,65 @@ struct AppleTVPhysicalCardModifier: ViewModifier {
                     onPointerNormChange?(.zero)
                 }
             }
-
-        attachInternalHoverIfNeeded(transformed)
-    }
-
-    @ViewBuilder
-    private func attachInternalHoverIfNeeded<V: View>(_ view: V) -> some View {
-        if pointerNorm == nil {
-            view
-                .background {
-                    GeometryReader { geo in
-                        Color.clear
-                            .onAppear { surfaceSize = geo.size }
-                            .onChange(of: geo.size) { _, newSize in surfaceSize = newSize }
+            .onHover { hovering in
+                if hovering {
+                    let allowed = onHoverEnterSelect?() ?? true
+                    if allowed {
+                        if let p = probeBridge.probe {
+                            PanelForceTouchCoordinator.shared.setActiveProbe(p)
+                        }
+                    } else if let p = probeBridge.probe {
+                        PanelForceTouchCoordinator.shared.setPendingUnlockProbe(p) {
+                            let unlocked = onHoverEnterSelect?() ?? true
+                            if unlocked, let probe = probeBridge.probe {
+                                PanelForceTouchCoordinator.shared.setActiveProbe(probe)
+                            }
+                        }
                     }
-                }
-                .onContinuousHover(coordinateSpace: .local) { phase in
-                    switch phase {
-                    case .active(let loc):
-                        let allowed: Bool
-                        if !isHovered || !isSelected {
-                            allowed = onHoverEnterSelect?() ?? true
-                        } else {
-                            allowed = true
-                        }
-                        guard allowed, cardSkin == .spatialGlass else { return }
-                        let w = max(1, surfaceSize.width)
-                        let h = max(1, surfaceSize.height)
-                        let nx = max(-1, min(1, ((loc.x / w) - 0.5) * 2.0))
-                        let ny = max(-1, min(1, ((loc.y / h) - 0.5) * 2.0))
-                        if abs(nx - internalPointerNorm.x) >= 0.08 || abs(ny - internalPointerNorm.y) >= 0.08 {
-                            let next = CGPoint(x: nx, y: ny)
-                            internalPointerNorm = next
-                            onPointerNormChange?(next)
-                        }
-                    case .ended:
-                        if internalPointerNorm != .zero {
-                            internalPointerNorm = .zero
-                            onPointerNormChange?(.zero)
-                        }
-                        onHoverEnded?()
+                } else {
+                    if let p = probeBridge.probe {
+                        PanelForceTouchCoordinator.shared.clearProbe(p)
                     }
+                    if internalPointerNorm != .zero {
+                        internalPointerNorm = .zero
+                    }
+                    onPointerNormChange?(.zero)
+                    onHoverEnded?()
                 }
-        } else {
-            view
-        }
+            }
     }
 }
 
-// MARK: - 3. 长文本与右上角胶囊按钮 100% 零重叠 + 零身份重建重影 + 零切半字形的渐隐遮罩
+// MARK: - 3. 长文本与右上角胶囊按钮 100% 零重叠 + 零身份重建重影 + 无 GeometryReader 零二阶段布局开销渐隐遮罩
 
 extension View {
-    /// 始终挂载恒定遮罩结构（避免 `if/else` 切换引发 Text 视图重建闪烁）：
-    /// 悬停时仅对首行右侧按钮托盘覆盖区（高度精确收束于首行 `19pt`，落在两行文字行距空白处）做丝滑渐隐，第 2 行完整保留不切字。
+    /// 始终挂载恒定无 GeometryReader 遮罩结构（零二阶段布局重排 + 零视图重建闪烁）：
+    /// 仅在悬停展示操作浮岛时对首行右侧 `reservedActionWidth` 区域做 24pt 线性羽化渐隐，第 2 行完整保留不切字。
     func hoverActionSafeTextMask(isHovered: Bool, reservedActionWidth: CGFloat) -> some View {
-        self.mask(
-            GeometryReader { geo in
-                let totalW = max(1, geo.size.width)
-                let stops = ClipCardLayoutMetrics.hoverActionMaskStops(
-                    totalWidth: totalW,
-                    reservedActionWidth: reservedActionWidth
-                )
-                let maskedRightOpacity: Double = (isHovered && reservedActionWidth > 0) ? 0.0 : 1.0
-                let firstLineBandHeight = min(geo.size.height, 19.5)
-
-                VStack(spacing: 0) {
+        let maskedRightOpacity: Double = (isHovered && reservedActionWidth > 0) ? 0.0 : 1.0
+        let solidRightW = max(0, reservedActionWidth)
+        let fadeSpanW: CGFloat = 24
+        return self.mask(alignment: .topLeading) {
+            VStack(spacing: 0) {
+                HStack(spacing: 0) {
+                    Color.black
                     LinearGradient(
-                        stops: [
-                            .init(color: .black, location: 0.0),
-                            .init(color: .black, location: stops.fadeStart),
-                            .init(color: .black.opacity(maskedRightOpacity), location: stops.fadeEnd),
-                            .init(color: .black.opacity(maskedRightOpacity), location: 1.0)
-                        ],
+                        colors: [.black, Color.black.opacity(maskedRightOpacity)],
                         startPoint: .leading,
                         endPoint: .trailing
                     )
-                    .frame(height: firstLineBandHeight)
-
-                    if geo.size.height > firstLineBandHeight {
-                        Rectangle()
-                            .fill(Color.black)
+                    .frame(width: fadeSpanW)
+                    if solidRightW > 0 {
+                        Color.black.opacity(maskedRightOpacity)
+                            .frame(width: solidRightW)
                     }
                 }
+                .frame(height: 19.5)
+
+                Color.black
+                    .frame(minHeight: 0, maxHeight: .infinity)
             }
-        )
+        }
     }
 
     /// 为卡片右上角操作圆钮组包裹温润液态毛玻璃浮岛胶囊托盘，彻底隔绝底层文字笔画干扰

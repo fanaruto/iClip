@@ -4823,4 +4823,134 @@ final class CoreFeatureTests: XCTestCase {
             0.15
         )
     }
+
+    @MainActor
+    func testPanelSelectionStoreO1IsolationCardRenderMetaCacheAndHoverDwellGate() {
+        let store = PanelSelectionStore()
+        XCTAssertEqual(store.selectedIndex, 0)
+
+        var hits: [Int: Int] = [0: 0, 1: 0, 2: 0, 3: 0]
+        var states: [Int: Bool] = [0: true, 1: false, 2: false, 3: false]
+        var tokens: [(Int, UUID)] = []
+        for idx in 0..<4 {
+            let tok = store.registerIndexListener(for: idx) { selected in
+                hits[idx, default: 0] += 1
+                states[idx] = selected
+            }
+            tokens.append((idx, tok))
+        }
+
+        // 同一 index 挂载第 2 个监听器，及在回调执行中安全自注销（重入不越界）
+        var peer0Hits = 0
+        var peer0State = true
+        let peer0Tok = store.registerIndexListener(for: 0) { selected in
+            peer0Hits += 1
+            peer0State = selected
+        }
+        var oneShotTok: UUID? = nil
+        oneShotTok = store.registerIndexListener(for: 0) { _ in
+            if let t = oneShotTok {
+                store.unregisterIndexListener(token: t, for: 0)
+                oneShotTok = nil
+            }
+        }
+
+        var range01Hits = 0
+        var range01State = true
+        let rTok1 = store.registerRangeListener(for: 0...1) { active in
+            range01Hits += 1
+            range01State = active
+        }
+        var range23Hits = 0
+        var range23State = false
+        let rTok2 = store.registerRangeListener(for: 2...3) { active in
+            range23Hits += 1
+            range23State = active
+        }
+        XCTAssertEqual(store.activeIndexListenerCount, 6)
+        XCTAssertEqual(store.activeRangeListenerCount, 2)
+
+        store.setSelectedIndex(2)
+        XCTAssertEqual(store.selectedIndex, 2)
+        XCTAssertEqual(hits[0], 1)
+        XCTAssertEqual(peer0Hits, 1)
+        XCTAssertFalse(peer0State)
+        XCTAssertNil(oneShotTok)
+        XCTAssertEqual(hits[1], 0)
+        XCTAssertEqual(hits[2], 1)
+        XCTAssertEqual(hits[3], 0)
+        XCTAssertEqual(states[0], false)
+        XCTAssertEqual(states[2], true)
+        XCTAssertEqual(range01Hits, 1)
+        XCTAssertFalse(range01State)
+        XCTAssertEqual(range23Hits, 1)
+        XCTAssertTrue(range23State)
+
+        // 同一行范围内切换（2 -> 3 同在 2...3）不应触发范围回调
+        store.setSelectedIndex(3)
+        XCTAssertEqual(range23Hits, 1)
+        XCTAssertTrue(range23State)
+
+        // 重复写入相同索引不应触发多余回调
+        store.setSelectedIndex(3)
+        XCTAssertEqual(hits[3], 1)
+
+        for (idx, tok) in tokens {
+            store.unregisterIndexListener(token: tok, for: idx)
+        }
+        store.unregisterIndexListener(token: peer0Tok, for: 0)
+        store.unregisterRangeListener(token: rTok1)
+        store.unregisterRangeListener(token: rTok2)
+        XCTAssertEqual(store.activeIndexListenerCount, 0)
+        XCTAssertEqual(store.activeRangeListenerCount, 0)
+
+        var gate = HoverActionsDwellGate()
+        let t1 = gate.beginHover()
+        XCTAssertTrue(gate.shouldReveal(for: t1))
+        let t2 = gate.beginHover()
+        XCTAssertFalse(gate.shouldReveal(for: t1))
+        XCTAssertTrue(gate.shouldReveal(for: t2))
+        gate.endHover()
+        XCTAssertFalse(gate.shouldReveal(for: t2))
+
+        let cbStore = ClipboardStore.shared
+        let secretURLItem = ClipItem(
+            type: .text,
+            text: "OPENAI_API_KEY=sk-proj-1234567890abcdefghijklmnop https://example.com/?utm_source=x\u{202E}",
+            contentHash: "test-render-meta-hash-\(UUID().uuidString)"
+        )
+        XCTAssertFalse(cbStore.hasCachedCardRenderMeta(for: secretURLItem))
+        let baseComputes = cbStore.cardRenderMetaCacheComputeCountForTesting
+        let meta1 = cbStore.cardRenderMeta(for: secretURLItem)
+        XCTAssertEqual(cbStore.cardRenderMetaCacheComputeCountForTesting, baseComputes + 1)
+        XCTAssertTrue(cbStore.hasCachedCardRenderMeta(for: secretURLItem))
+        let meta2 = cbStore.cardRenderMeta(for: secretURLItem)
+        XCTAssertEqual(cbStore.cardRenderMetaCacheComputeCountForTesting, baseComputes + 1)
+        XCTAssertNotNil(meta1.detectedSensitiveKind)
+        XCTAssertTrue(meta1.hasEmbeddedWebLink)
+        XCTAssertNotNil(meta1.detectedPoisonThreat)
+        XCTAssertNotEqual(meta1.plainDisplayTitle, meta1.veiledDisplayTitle)
+        XCTAssertEqual(meta1.plainDisplayTitle, meta2.plainDisplayTitle)
+
+        // 修改可变字段（customAlias）应覆盖原 id 键而非残留旧键，锁屏清理可一并清空
+        var updatedAliasItem = secretURLItem
+        updatedAliasItem.customAlias = "已重命名生产密钥"
+        let metaAlias = cbStore.cardRenderMeta(for: updatedAliasItem)
+        XCTAssertEqual(cbStore.cardRenderMetaCacheComputeCountForTesting, baseComputes + 2)
+        XCTAssertEqual(metaAlias.plainDisplayTitle, "已重命名生产密钥")
+        cbStore.lockDownEphemeralBuffers()
+        XCTAssertFalse(cbStore.hasCachedCardRenderMeta(for: updatedAliasItem))
+
+        // 粘贴即焚条目严禁进入 cardRenderMetaCache
+        let burnItem = ClipItem(
+            type: .text,
+            text: "OPENAI_API_KEY=sk-proj-burnonly1234567890abcdef",
+            contentHash: "test-burn-meta-hash-\(UUID().uuidString)",
+            burnAfterPaste: true
+        )
+        let burnMeta = cbStore.cardRenderMeta(for: burnItem)
+        XCTAssertFalse(cbStore.hasCachedCardRenderMeta(for: burnItem))
+        XCTAssertNotNil(burnMeta.detectedSensitiveKind)
+        XCTAssertNotEqual(burnMeta.plainDisplayTitle, burnMeta.veiledDisplayTitle)
+    }
 }

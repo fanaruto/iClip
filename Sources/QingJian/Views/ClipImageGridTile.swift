@@ -23,8 +23,10 @@ struct ClipImageGridTile: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
     @State private var isHovered: Bool = false
+    @State private var showHoverActions: Bool = false
+    @State private var hoverDwellGate = HoverActionsDwellGate()
+    @State private var hoverDwellTask: Task<Void, Never>? = nil
     @State private var hoverNorm: CGPoint = .zero
-    @State private var tileSize: CGSize = CGSize(width: 124, height: 98)
     @State private var asyncThumbnail: NSImage? = nil
     @State private var lastTapUptime: TimeInterval = 0
     @State private var showCopiedInlineFlash: Bool = false
@@ -33,6 +35,7 @@ struct ClipImageGridTile: View {
     @State private var isDeepPressFlat: Bool = false
 
     var body: some View {
+        let renderMeta = ClipboardStore.shared.cardRenderMeta(for: item)
         let applySpatialParallax = (cardSkin == .spatialGlass && isHovered && !isDeepPressFlat && !reduceMotion)
         let pnx = applySpatialParallax ? hoverNorm.x : 0
         let pny = applySpatialParallax ? hoverNorm.y : 0
@@ -41,7 +44,7 @@ struct ClipImageGridTile: View {
             Color.clear
                 .overlay {
                     if let nsImage = ClipboardStore.shared.cachedThumbnail(for: item) ?? asyncThumbnail {
-                        let veilImg = ClipboardStore.shared.maskSensitivePreviews && !isSelected && !isHovered && item.detectedSensitiveKind != nil
+                        let veilImg = ClipboardStore.shared.maskSensitivePreviews && !isSelected && !isHovered && renderMeta.detectedSensitiveKind != nil
                         Image(nsImage: nsImage)
                             .resizable()
                             .interpolation(.high)
@@ -149,7 +152,7 @@ struct ClipImageGridTile: View {
         }
         .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
         .overlay(alignment: .topLeading) {
-            if !isHovered && index < 9 {
+            if !showHoverActions && index < 9 {
                 Text("⌘\(index + 1)")
                     .font(.system(size: 9.5, weight: .bold, design: .rounded))
                     .foregroundStyle(.white)
@@ -165,7 +168,7 @@ struct ClipImageGridTile: View {
             }
         }
         .overlay(alignment: .topTrailing) {
-            if isHovered {
+            if showHoverActions {
                 HStack(spacing: 4) {
                     if !ClipboardStore.shared.minimalModeEnabled, (onExtractOCR != nil || onOpenOCRBigBang != nil) {
                         let hasQR = !(item.qrCodePayload?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
@@ -263,6 +266,8 @@ struct ClipImageGridTile: View {
                 }
                 .opacity(isSelected ? 1 : 0)
             }
+            .animation(.easeOut(duration: 0.12), value: isHovered)
+            .animation(.easeOut(duration: 0.10), value: isSelected)
         }
         .modifier(
             AppleTVPhysicalCardModifier(
@@ -277,13 +282,34 @@ struct ClipImageGridTile: View {
                     hasTodoButton: !ClipboardStore.shared.minimalModeEnabled && onToggleTodo != nil
                 ),
                 bottomExclusionHeight: 0,
-                onResetHoverFromHide: {
-                    if isHovered {
-                        isHovered = false
-                        hoverNorm = .zero
+                onHoverEnterSelect: {
+                    let allowed = onHoverSelect?() ?? {
+                        onSelect()
+                        return true
+                    }()
+                    if allowed {
+                        beginTileHover()
                     }
+                    return allowed
+                },
+                onHoverEnded: {
+                    endTileHover()
+                },
+                onResetHoverFromHide: {
+                    endTileHover()
                     if isDeepPressFlat {
                         isDeepPressFlat = false
+                    }
+                },
+                onPointerNormChange: { newNorm in
+                    guard cardSkin == .spatialGlass && !isDeepPressFlat else {
+                        if hoverNorm != .zero {
+                            hoverNorm = .zero
+                        }
+                        return
+                    }
+                    if hoverNorm != newNorm {
+                        hoverNorm = newNorm
                     }
                 },
                 onDeepPressActiveChanged: { active in
@@ -300,64 +326,10 @@ struct ClipImageGridTile: View {
                 }
             )
         )
-        .animation(.spring(response: 0.22, dampingFraction: 0.9), value: isHovered)
-        .animation(.spring(response: 0.2, dampingFraction: 0.88), value: isSelected)
-        .animation(.spring(response: 0.36, dampingFraction: 0.86), value: cardSkin)
         .contentShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
-        .background {
-            GeometryReader { geo in
-                Color.clear
-                    .onAppear {
-                        tileSize = geo.size
-                    }
-                    .onChange(of: geo.size) { _, newSize in
-                        tileSize = newSize
-                    }
-            }
-        }
         .onChange(of: cardSkin) { _, newSkin in
             if newSkin == .nativeApple && hoverNorm != .zero {
                 hoverNorm = .zero
-            }
-        }
-        .onContinuousHover(coordinateSpace: .local) { phase in
-            switch phase {
-            case .active(let loc):
-                let allowed: Bool
-                if !isHovered || !isSelected {
-                    if let onHoverSelect {
-                        allowed = onHoverSelect()
-                    } else {
-                        onSelect()
-                        allowed = true
-                    }
-                } else {
-                    allowed = true
-                }
-                if allowed {
-                    if !isHovered {
-                        isHovered = true
-                    }
-                    if cardSkin == .spatialGlass && !isDeepPressFlat {
-                        let w = max(1, tileSize.width)
-                        let h = max(1, tileSize.height)
-                        let nx = max(-1, min(1, ((loc.x / w) - 0.5) * 2.0))
-                        let ny = max(-1, min(1, ((loc.y / h) - 0.5) * 2.0))
-                        if abs(nx - hoverNorm.x) >= 0.08 || abs(ny - hoverNorm.y) >= 0.08 {
-                            hoverNorm = CGPoint(x: nx, y: ny)
-                        }
-                    }
-                }
-            case .ended:
-                if isHovered {
-                    isHovered = false
-                }
-                if isDeepPressFlat {
-                    isDeepPressFlat = false
-                }
-                if hoverNorm != .zero {
-                    hoverNorm = .zero
-                }
             }
         }
         .onDrag {
@@ -495,10 +467,49 @@ struct ClipImageGridTile: View {
         }
         .zIndex(isHovered ? 30 : (isSelected ? 5 : 0))
         .onDisappear {
+            hoverDwellTask?.cancel()
+            hoverDwellTask = nil
+            hoverDwellGate.endHover()
+            showHoverActions = false
+            isHovered = false
             copiedFlashTask?.cancel()
             copiedFlashTask = nil
             copiedFlashGate.cancel()
             showCopiedInlineFlash = false
+        }
+    }
+
+    private func beginTileHover() {
+        if !isHovered {
+            isHovered = true
+        }
+        guard !showHoverActions else { return }
+        hoverDwellTask?.cancel()
+        let gen = hoverDwellGate.beginHover()
+        hoverDwellTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 42_000_000)
+            guard !Task.isCancelled, hoverDwellGate.shouldReveal(for: gen) else { return }
+            hoverDwellTask = nil
+            withAnimation(.spring(response: 0.18, dampingFraction: 0.88)) {
+                showHoverActions = true
+            }
+        }
+    }
+
+    private func endTileHover() {
+        hoverDwellTask?.cancel()
+        hoverDwellTask = nil
+        hoverDwellGate.endHover()
+        if showHoverActions {
+            withAnimation(.easeOut(duration: 0.12)) {
+                showHoverActions = false
+            }
+        }
+        if isHovered {
+            isHovered = false
+        }
+        if hoverNorm != .zero {
+            hoverNorm = .zero
         }
     }
 }

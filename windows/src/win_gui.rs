@@ -2,7 +2,7 @@
 
 use iclip_core::canvas_ui::{
     build_display_rows_ext, clamp_image_pan_offset, clamp_quick_look_scroll,
-    compute_card_skin_visual_metrics, compute_cursor_anchored_zoom_pan,
+    compute_card_skin_visual_metrics, compute_cursor_anchored_zoom_pan, compute_paint_blt_rect,
     compute_selected_tile_ring_geometry, compute_settings_group1_skin_layout,
     compute_spring_lerp_step, compute_wrapped_text_scroll_bounds, decode_cf_dib_bytes_to_rgba,
     estimate_mono_text_px, estimate_text_px, fit_image_in_viewport, grid_move_selection,
@@ -54,7 +54,7 @@ use windows_sys::Win32::Graphics::Gdi::{
     SelectObject, SetBkMode, SetTextColor, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
     CLEARTYPE_NATURAL_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DIB_RGB_COLORS, DT_CENTER,
     DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK,
-    FW_BOLD, FW_MEDIUM, FW_NORMAL, FW_SEMIBOLD, HDC, LOGFONTW, MONITORINFO,
+    FW_BOLD, FW_MEDIUM, FW_NORMAL, FW_SEMIBOLD, HBITMAP, HDC, HGDIOBJ, LOGFONTW, MONITORINFO,
     MONITOR_DEFAULTTONEAREST, OUT_DEFAULT_PRECIS, PAINTSTRUCT, SRCCOPY, TEXTMETRICW, TRANSPARENT,
 };
 use windows_sys::Win32::System::DataExchange::{
@@ -447,6 +447,8 @@ struct WinAppState {
     tracking_mouse_leave: bool,
     hovered_link_badge_store_idx: Option<usize>,
     hovered_card_btn: Option<HoveredCardButton>,
+    hovered_filter_tab: Option<ClipFilterTab>,
+    hovered_pin_cat: Option<Option<PinCategory>>,
     copied_flash_item_id: Option<String>,
     recording_slot: Option<WinHotKeySlot>,
     hotkey_conflict_error: Option<String>,
@@ -486,8 +488,93 @@ struct WinAppState {
     ota_cancel: Arc<AtomicBool>,
 }
 
+struct MainBackBuffer {
+    mem_dc: HDC,
+    hbmp: HBITMAP,
+    old_bmp: HGDIOBJ,
+    bits_ptr: *mut core::ffi::c_void,
+    w: i32,
+    h: i32,
+}
+
+impl MainBackBuffer {
+    const fn new() -> Self {
+        Self {
+            mem_dc: null_mut(),
+            hbmp: null_mut(),
+            old_bmp: null_mut(),
+            bits_ptr: null_mut(),
+            w: 0,
+            h: 0,
+        }
+    }
+
+    unsafe fn release(&mut self) {
+        if !self.mem_dc.is_null() {
+            if !self.old_bmp.is_null() {
+                SelectObject(self.mem_dc, self.old_bmp);
+                self.old_bmp = null_mut();
+            }
+            if !self.hbmp.is_null() {
+                DeleteObject(self.hbmp);
+                self.hbmp = null_mut();
+            }
+            DeleteDC(self.mem_dc);
+            self.mem_dc = null_mut();
+        } else if !self.hbmp.is_null() {
+            DeleteObject(self.hbmp);
+            self.hbmp = null_mut();
+        }
+        self.bits_ptr = null_mut();
+        self.w = 0;
+        self.h = 0;
+    }
+
+    unsafe fn ensure(&mut self, hdc: HDC, w: i32, h: i32) -> Option<(HDC, *mut u32, usize)> {
+        if self.w != w
+            || self.h != h
+            || self.mem_dc.is_null()
+            || self.hbmp.is_null()
+            || self.bits_ptr.is_null()
+        {
+            self.release();
+            let mem_dc = CreateCompatibleDC(hdc);
+            if mem_dc.is_null() {
+                return None;
+            }
+            let mut bmi: BITMAPINFO = zeroed();
+            bmi.bmiHeader.biSize = size_of::<BITMAPINFOHEADER>() as u32;
+            bmi.bmiHeader.biWidth = w;
+            bmi.bmiHeader.biHeight = -h;
+            bmi.bmiHeader.biPlanes = 1;
+            bmi.bmiHeader.biBitCount = 32;
+            bmi.bmiHeader.biCompression = BI_RGB;
+            let mut bits_ptr: *mut core::ffi::c_void = null_mut();
+            let hbmp =
+                CreateDIBSection(mem_dc, &bmi, DIB_RGB_COLORS, &mut bits_ptr, null_mut(), 0);
+            if hbmp.is_null() || bits_ptr.is_null() {
+                if !hbmp.is_null() {
+                    DeleteObject(hbmp);
+                }
+                DeleteDC(mem_dc);
+                return None;
+            }
+            let old_bmp = SelectObject(mem_dc, hbmp);
+            self.mem_dc = mem_dc;
+            self.hbmp = hbmp;
+            self.old_bmp = old_bmp;
+            self.bits_ptr = bits_ptr;
+            self.w = w;
+            self.h = h;
+        }
+        let len = (w as usize).checked_mul(h as usize)?;
+        Some((self.mem_dc, self.bits_ptr as *mut u32, len))
+    }
+}
+
 thread_local! {
     static APP_STATE: RefCell<Option<WinAppState>> = const { RefCell::new(None) };
+    static MAIN_BACK_BUFFER: RefCell<MainBackBuffer> = const { RefCell::new(MainBackBuffer::new()) };
 }
 
 fn to_wide(s: &str) -> Vec<u16> {
@@ -713,6 +800,8 @@ pub fn run_windows_app() -> i32 {
                 tracking_mouse_leave: false,
                 hovered_link_badge_store_idx: None,
                 hovered_card_btn: None,
+                hovered_filter_tab: None,
+                hovered_pin_cat: None,
                 copied_flash_item_id: None,
                 recording_slot: None,
                 hotkey_conflict_error: None,
@@ -921,6 +1010,8 @@ pub fn run_windows_self_test() -> Result<(), String> {
             tracking_mouse_leave: false,
             hovered_link_badge_store_idx: None,
             hovered_card_btn: None,
+            hovered_filter_tab: None,
+            hovered_pin_cat: None,
             copied_flash_item_id: None,
             recording_slot: None,
             hotkey_conflict_error: None,
@@ -1917,6 +2008,8 @@ unsafe fn show_panel_near_cursor(hwnd: HWND) {
             st.skin_blend_target = st.skin_blend;
             st.skin_anim_last_tick = None;
             st.quick_look_hovered_target = None;
+            st.hovered_filter_tab = None;
+            st.hovered_pin_cat = None;
             st.big_bang_sweep_last_pt = None;
         }
     });
@@ -1966,6 +2059,8 @@ unsafe fn hide_panel(hwnd: HWND, restore_focus: bool) {
             st.pressed_visible_pos = None;
             st.hovered_link_badge_store_idx = None;
             st.hovered_card_btn = None;
+            st.hovered_filter_tab = None;
+            st.hovered_pin_cat = None;
             st.dragging_slider_track = None;
             st.show_quick_look = false;
             st.quick_look_hovered_target = None;
@@ -2008,6 +2103,7 @@ unsafe fn hide_panel(hwnd: HWND, restore_focus: bool) {
         let _ = ReleaseCapture();
     }
     ShowWindow(hwnd, SW_HIDE);
+    MAIN_BACK_BUFFER.with(|buf| buf.borrow_mut().release());
     if restore_focus {
         restore_target_foreground_if_needed(target_fg);
     }
@@ -2477,21 +2573,9 @@ unsafe extern "system" fn wnd_proc(
             let h = (rc.bottom - rc.top).max(1);
             let scale = get_dpi_scale(hwnd);
 
-            let mem_dc = CreateCompatibleDC(hdc);
-            let mut bmi: BITMAPINFO = zeroed();
-            bmi.bmiHeader.biSize = size_of::<BITMAPINFOHEADER>() as u32;
-            bmi.bmiHeader.biWidth = w;
-            bmi.bmiHeader.biHeight = -h;
-            bmi.bmiHeader.biPlanes = 1;
-            bmi.bmiHeader.biBitCount = 32;
-            bmi.bmiHeader.biCompression = BI_RGB;
-
-            let mut bits_ptr: *mut core::ffi::c_void = null_mut();
-            let hbmp = CreateDIBSection(mem_dc, &bmi, DIB_RGB_COLORS, &mut bits_ptr, null_mut(), 0);
-            if !hbmp.is_null() && !bits_ptr.is_null() {
-                let old_bmp = SelectObject(mem_dc, hbmp);
-                let dib_slice =
-                    std::slice::from_raw_parts_mut(bits_ptr as *mut u32, (w * h) as usize);
+            let surface = MAIN_BACK_BUFFER.with(|buf| buf.borrow_mut().ensure(hdc, w, h));
+            if let Some((mem_dc, ptr, len)) = surface {
+                let dib_slice = std::slice::from_raw_parts_mut(ptr, len);
 
                 APP_STATE.with(|cell| {
                     if let Some(st) = cell.borrow_mut().as_mut() {
@@ -2499,11 +2583,16 @@ unsafe extern "system" fn wnd_proc(
                     }
                 });
 
-                let _ = BitBlt(hdc, 0, 0, w, h, mem_dc, 0, 0, SRCCOPY);
-                SelectObject(mem_dc, old_bmp);
-                DeleteObject(hbmp);
+                let (bx, by, bw, bh) = compute_paint_blt_rect(
+                    ps.rcPaint.left,
+                    ps.rcPaint.top,
+                    ps.rcPaint.right,
+                    ps.rcPaint.bottom,
+                    w,
+                    h,
+                );
+                let _ = BitBlt(hdc, bx, by, bw, bh, mem_dc, bx, by, SRCCOPY);
             }
-            DeleteDC(mem_dc);
             EndPaint(hwnd, &ps);
             0
         }
@@ -2581,6 +2670,56 @@ unsafe extern "system" fn wnd_proc(
                     if st.hovered_card_btn.take().is_some() {
                         need_redraw = true;
                     }
+                    let old_tab = st.hovered_filter_tab.take();
+                    if let Some(t) = old_tab {
+                        need_redraw = true;
+                        let pad_ctrl = (6.0 * dpi_scale).ceil() as i32;
+                        if let Some(r) = st.hit_regions.iter().find_map(|hr| match hr.action {
+                            HitAction::SelectTab(ht) if ht == t => Some(hr.rect),
+                            _ => None,
+                        }) {
+                            let padded = RECT {
+                                left: r.left - pad_ctrl,
+                                top: r.top - pad_ctrl,
+                                right: r.right + pad_ctrl,
+                                bottom: r.bottom + pad_ctrl,
+                            };
+                            dirty_rect = Some(match dirty_rect {
+                                Some(prev) => RECT {
+                                    left: prev.left.min(padded.left),
+                                    top: prev.top.min(padded.top),
+                                    right: prev.right.max(padded.right),
+                                    bottom: prev.bottom.max(padded.bottom),
+                                },
+                                None => padded,
+                            });
+                        }
+                    }
+                    let old_pin_cat = st.hovered_pin_cat.take();
+                    if let Some(pc) = old_pin_cat {
+                        need_redraw = true;
+                        let pad_ctrl = (6.0 * dpi_scale).ceil() as i32;
+                        if let Some(r) = st.hit_regions.iter().find_map(|hr| match hr.action {
+                            HitAction::SelectPinCategory(hpc) if hpc == pc => Some(hr.rect),
+                            _ => None,
+                        }) {
+                            let padded = RECT {
+                                left: r.left - pad_ctrl,
+                                top: r.top - pad_ctrl,
+                                right: r.right + pad_ctrl,
+                                bottom: r.bottom + pad_ctrl,
+                            };
+                            dirty_rect = Some(match dirty_rect {
+                                Some(prev) => RECT {
+                                    left: prev.left.min(padded.left),
+                                    top: prev.top.min(padded.top),
+                                    right: prev.right.max(padded.right),
+                                    bottom: prev.bottom.max(padded.bottom),
+                                },
+                                None => padded,
+                            });
+                        }
+                    }
                     let old_pressed = st.pressed_visible_pos.take();
                     if let Some(pr) = old_pressed {
                         need_redraw = true;
@@ -2652,6 +2791,12 @@ unsafe extern "system" fn wnd_proc(
                                 need_redraw = true;
                             }
                             if st.hovered_card_btn.take().is_some() {
+                                need_redraw = true;
+                            }
+                            if st.hovered_filter_tab.take().is_some() {
+                                need_redraw = true;
+                            }
+                            if st.hovered_pin_cat.take().is_some() {
                                 need_redraw = true;
                             }
                         }
@@ -2777,6 +2922,7 @@ unsafe extern "system" fn wnd_proc(
             0
         }
         WM_DESTROY => {
+            MAIN_BACK_BUFFER.with(|buf| buf.borrow_mut().release());
             iclip_core::security::wipe_all_temp_previews();
             iclip_core::security::wipe_privacy_twins();
             PostQuitMessage(0);
@@ -6843,11 +6989,31 @@ fn layout_and_draw_main_view(
             pill_w
         };
         let active = st.selected_tab == *tab;
+        let hovered = st.hovered_filter_tab == Some(*tab) && !active;
         let rc = RECT {
             left: sx,
             top: pill_y,
             right: sx + sw,
             bottom: pill_y + pill_h,
+        };
+        if hovered {
+            let hx = sx + s(2);
+            let hy = pill_y + s(2);
+            let hw = (sw - s(4)).max(1);
+            let hh = (pill_h - s(4)).max(2);
+            let hover_fill = if st.is_dark_mode {
+                Color4::rgba(255, 255, 255, 24)
+            } else {
+                Color4::rgba(15, 23, 42, 14)
+            };
+            canvas.fill_round_rect(hx, hy, hw, hh, (hh as f32) * 0.5, hover_fill);
+        }
+        let tab_text_color = if active {
+            palette.text_primary
+        } else if hovered {
+            palette.text_primary.with_alpha(224)
+        } else {
+            palette.text_secondary
         };
         if *tab == ClipFilterTab::Todo && pending_todos > 0 {
             // 独立微圆计数徽章：文字与计数清晰分离，不再等大等重挤成一团
@@ -6865,11 +7031,7 @@ fn layout_and_draw_main_view(
                     right: gx + txt_w,
                     bottom: pill_y + pill_h,
                 },
-                color: if active {
-                    palette.text_primary
-                } else {
-                    palette.text_secondary
-                },
+                color: tab_text_color,
                 font_kind: if active {
                     FontKind::BadgeBold
                 } else {
@@ -6913,11 +7075,7 @@ fn layout_and_draw_main_view(
             texts.push(TextDrawCmd {
                 text: tab.title().to_string(),
                 rect: rc,
-                color: if active {
-                    palette.text_primary
-                } else {
-                    palette.text_secondary
-                },
+                color: tab_text_color,
                 font_kind: if active {
                     FontKind::BadgeBold
                 } else {
@@ -7879,17 +8037,46 @@ fn layout_and_draw_main_view(
             let cx = pad + (i as i32) * (cell_w + sub_gap);
             let cw = if i == 4 { w - pad - cx } else { cell_w };
             let active = st.selected_pin_category == *opt_cat;
+            let hovered = st.hovered_pin_cat == Some(*opt_cat) && !active;
             let accent = opt_cat
                 .map(GlassPalette::pin_category_color)
                 .unwrap_or(palette.cobalt);
+            let chip_fill = if active {
+                accent
+            } else if hovered {
+                if opt_cat.is_some() {
+                    accent.with_alpha(if st.is_dark_mode { 48 } else { 32 })
+                } else if st.is_dark_mode {
+                    Color4::rgba(255, 255, 255, 36)
+                } else {
+                    Color4::rgba(15, 23, 42, 22)
+                }
+            } else {
+                palette.chip_bg
+            };
             canvas.fill_round_rect(
                 cx,
                 cur_y,
                 cw,
                 sub_h,
                 sf(12.0),
-                if active { accent } else { palette.chip_bg },
+                chip_fill,
             );
+            if hovered {
+                canvas.stroke_round_rect(
+                    cx,
+                    cur_y,
+                    cw,
+                    sub_h,
+                    sf(12.0),
+                    sf(0.65),
+                    if opt_cat.is_some() {
+                        accent.with_alpha(96)
+                    } else {
+                        palette.track_border
+                    },
+                );
+            }
             if let Some(_cat) = opt_cat {
                 let dot_c = if active {
                     Color4::rgb(255, 255, 255)
@@ -7914,6 +8101,8 @@ fn layout_and_draw_main_view(
                 rect: rc,
                 color: if active {
                     Color4::rgb(255, 255, 255)
+                } else if hovered {
+                    palette.text_primary
                 } else {
                     palette.text_secondary
                 },
@@ -12516,9 +12705,11 @@ unsafe fn handle_mouse_move(hwnd: HWND, x: i32, y: i32, left_held: bool) {
                 let c1 = st.hovered_visible_pos.take().is_some();
                 let c2 = st.hovered_link_badge_store_idx.take().is_some();
                 let c3 = st.hovered_card_btn.take().is_some();
+                let c4 = st.hovered_filter_tab.take().is_some();
+                let c5 = st.hovered_pin_cat.take().is_some();
                 st.hover_card_nx = 0.0;
                 st.hover_card_ny = 0.0;
-                if c1 || c2 || c3 {
+                if c1 || c2 || c3 || c4 || c5 {
                     changed = true;
                 }
                 let mut found_ob_hover = None;
@@ -12535,8 +12726,41 @@ unsafe fn handle_mouse_move(hwnd: HWND, x: i32, y: i32, left_held: bool) {
                 }
                 return;
             }
+            let mut merge_dirty = |r: RECT, pad_px: i32| {
+                let padded = RECT {
+                    left: r.left - pad_px,
+                    top: r.top - pad_px,
+                    right: r.right + pad_px,
+                    bottom: r.bottom + pad_px,
+                };
+                dirty_union = Some(match dirty_union {
+                    Some(prev) => RECT {
+                        left: prev.left.min(padded.left),
+                        top: prev.top.min(padded.top),
+                        right: prev.right.max(padded.right),
+                        bottom: prev.bottom.max(padded.bottom),
+                    },
+                    None => padded,
+                });
+            };
+            let prev_tab_rect = st.hovered_filter_tab.and_then(|old_tab| {
+                st.hit_regions.iter().find_map(|r| match r.action {
+                    HitAction::SelectTab(t) if t == old_tab => Some(r.rect),
+                    _ => None,
+                })
+            });
+            let prev_pin_rect = st.hovered_pin_cat.and_then(|old_cat| {
+                st.hit_regions.iter().find_map(|r| match r.action {
+                    HitAction::SelectPinCategory(c) if c == old_cat => Some(r.rect),
+                    _ => None,
+                })
+            });
             let mut found_badge_idx = None;
             let mut found_card_btn = None;
+            let mut found_tab = None;
+            let mut found_tab_rect: Option<RECT> = None;
+            let mut found_pin_cat = None;
+            let mut found_pin_rect: Option<RECT> = None;
             let pill_btn_max_w = (32.0 * dpi_scale).round() as i32;
             for (reg_idx, reg) in st.hit_regions.iter().enumerate() {
                 if point_in_rect(x, y, &reg.rect) {
@@ -12565,9 +12789,38 @@ unsafe fn handle_mouse_move(hwnd: HWND, x: i32, y: i32, left_held: bool) {
                                 .count();
                             found_card_btn = Some(HoveredCardButton::QuickAction(*item_idx, q_idx));
                         }
+                        HitAction::SelectTab(tab) => {
+                            found_tab = Some(*tab);
+                            found_tab_rect = Some(reg.rect);
+                        }
+                        HitAction::SelectPinCategory(cat) => {
+                            found_pin_cat = Some(*cat);
+                            found_pin_rect = Some(reg.rect);
+                        }
                         _ => {}
                     }
                     break;
+                }
+            }
+            let ctrl_margin = (6.0 * dpi_scale).ceil() as i32;
+            if st.hovered_filter_tab != found_tab {
+                st.hovered_filter_tab = found_tab;
+                changed = true;
+                if let Some(r) = prev_tab_rect {
+                    merge_dirty(r, ctrl_margin);
+                }
+                if let Some(r) = found_tab_rect {
+                    merge_dirty(r, ctrl_margin);
+                }
+            }
+            if st.hovered_pin_cat != found_pin_cat {
+                st.hovered_pin_cat = found_pin_cat;
+                changed = true;
+                if let Some(r) = prev_pin_rect {
+                    merge_dirty(r, ctrl_margin);
+                }
+                if let Some(r) = found_pin_rect {
+                    merge_dirty(r, ctrl_margin);
                 }
             }
             let btn_or_badge_changed = st.hovered_link_badge_store_idx != found_badge_idx
@@ -12612,28 +12865,12 @@ unsafe fn handle_mouse_move(hwnd: HWND, x: i32, y: i32, left_held: bool) {
                 st.hover_card_nx = if skin_active { norm_nx } else { 0.0 };
                 st.hover_card_ny = if skin_active { norm_ny } else { 0.0 };
                 changed = true;
-                let m = shadow_margin;
-                dirty_union = match (prev_card_rect, new_card_rect) {
-                    (Some(a), Some(b)) => Some(RECT {
-                        left: a.left.min(b.left) - m,
-                        top: a.top.min(b.top) - m,
-                        right: a.right.max(b.right) + m,
-                        bottom: a.bottom.max(b.bottom) + m,
-                    }),
-                    (Some(a), None) => Some(RECT {
-                        left: a.left - m,
-                        top: a.top - m,
-                        right: a.right + m,
-                        bottom: a.bottom + m,
-                    }),
-                    (None, Some(b)) => Some(RECT {
-                        left: b.left - m,
-                        top: b.top - m,
-                        right: b.right + m,
-                        bottom: b.bottom + m,
-                    }),
-                    _ => None,
-                };
+                if let Some(a) = prev_card_rect {
+                    merge_dirty(a, shadow_margin);
+                }
+                if let Some(b) = new_card_rect {
+                    merge_dirty(b, shadow_margin);
+                }
             } else if skin_active
                 && found_card.is_some()
                 && ((st.hover_card_nx - norm_nx).abs() > 0.12
@@ -12642,21 +12879,13 @@ unsafe fn handle_mouse_move(hwnd: HWND, x: i32, y: i32, left_held: bool) {
                 st.hover_card_nx = norm_nx;
                 st.hover_card_ny = norm_ny;
                 changed = true;
-                let m = shadow_margin;
-                dirty_union = new_card_rect.map(|b| RECT {
-                    left: b.left - m,
-                    top: b.top - m,
-                    right: b.right + m,
-                    bottom: b.bottom + m,
-                });
+                if let Some(b) = new_card_rect {
+                    merge_dirty(b, shadow_margin);
+                }
             } else if btn_or_badge_changed {
-                let m = shadow_margin;
-                dirty_union = new_card_rect.or(prev_card_rect).map(|b| RECT {
-                    left: b.left - m,
-                    top: b.top - m,
-                    right: b.right + m,
-                    bottom: b.bottom + m,
-                });
+                if let Some(b) = new_card_rect.or(prev_card_rect) {
+                    merge_dirty(b, shadow_margin);
+                }
             }
         }
     });

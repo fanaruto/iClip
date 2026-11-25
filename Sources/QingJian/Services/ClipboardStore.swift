@@ -95,6 +95,27 @@ private final class SemanticSnapshotBox {
     }
 }
 
+/// 单条卡片轻量不可变渲染元信息（O(1) 命中缓存，彻底消灭悬停/选区重绘期间重复正则与文本摘要计算）
+struct ClipCardRenderMeta {
+    let detectedSensitiveKind: SensitiveSecretKind?
+    let detectedPoisonThreat: ClipboardPoisonGuard.ThreatKind?
+    let detectedLinkRisk: FileAndLinkSecurityGuard.LinkRiskKind?
+    let hasEmbeddedWebLink: Bool
+    let plainDisplayTitle: String
+    let veiledDisplayTitle: String
+    let plainSubtitle: String
+    let veiledSubtitle: String
+}
+
+private final class ClipCardRenderMetaBox {
+    let signature: String
+    let meta: ClipCardRenderMeta
+    init(signature: String, meta: ClipCardRenderMeta) {
+        self.signature = signature
+        self.meta = meta
+    }
+}
+
 
 
 /// 跨处选段「续接复制（Copy-Append）」纯函数文本衔接器
@@ -475,6 +496,8 @@ final class ClipboardStore: ObservableObject {
     private let previewCache = NSCache<NSString, NSImage>()
     private let fileIconCache = NSCache<NSString, NSImage>()
     private let semanticCache = NSCache<NSString, SemanticSnapshotBox>()
+    private let cardRenderMetaCache = NSCache<NSString, ClipCardRenderMetaBox>()
+    private(set) var cardRenderMetaCacheComputeCountForTesting: UInt64 = 0
     private var inFlightThumbnails = Set<String>()
     private var inFlightPreviews = Set<String>()
 
@@ -560,6 +583,7 @@ final class ClipboardStore: ObservableObject {
         self.autoCleanTrackingURL = UserDefaults.standard.object(forKey: "autoCleanTrackingURL") as? Bool ?? false
         self.autoRedactOnPaste = UserDefaults.standard.object(forKey: "autoRedactOnPaste") as? Bool ?? false
         self.semanticCache.countLimit = 256
+        self.cardRenderMetaCache.countLimit = 384
 
 
         let savedMax = UserDefaults.standard.integer(forKey: "maxHistoryCount")
@@ -1075,6 +1099,7 @@ final class ClipboardStore: ObservableObject {
         clearTransientDragImageBuffers()
         ReversiblePrivacyTwin.wipeAll()
         semanticCache.removeAllObjects()
+        cardRenderMetaCache.removeAllObjects()
         VisionOCRService.clearWordBoxCache()
     }
 
@@ -3478,6 +3503,66 @@ final class ClipboardStore: ObservableObject {
 
     // MARK: - 极客开发版专属能力（微秒级语义总线 + 密钥脱敏 + 动态模板）
 
+    private func cardRenderMetaSignature(for item: ClipItem, minimal: Bool) -> String {
+        let ocrSig = item.ocrText.map { "\($0.count):\($0.hashValue)" } ?? "-"
+        return "\(item.contentHash)|\(item.type.rawValue)|\(item.customAlias ?? "")|\(item.imageWidth ?? 0)x\(item.imageHeight ?? 0)|\(item.filePaths?.joined(separator: "|") ?? "")|\(item.qrCodePayload ?? "")|\(ocrSig)|\(minimal ? "m" : "f")"
+    }
+
+    func hasCachedCardRenderMeta(for item: ClipItem) -> Bool {
+        cardRenderMetaCache.object(forKey: item.id.uuidString as NSString) != nil
+    }
+
+    func cardRenderMeta(for item: ClipItem) -> ClipCardRenderMeta {
+        let minimal = minimalModeEnabled
+        let cacheKey = item.id.uuidString as NSString
+        if item.isBurnAfterPaste {
+            cardRenderMetaCache.removeObject(forKey: cacheKey)
+        }
+        let signature = cardRenderMetaSignature(for: item, minimal: minimal)
+        if !item.isBurnAfterPaste,
+           let cached = cardRenderMetaCache.object(forKey: cacheKey),
+           cached.signature == signature {
+            return cached.meta
+        }
+
+        cardRenderMetaCacheComputeCountForTesting &+= 1
+        let sensitiveKind = item.detectedSensitiveKind
+        let poisonThreat = item.detectedPoisonThreat
+        let linkRisk = item.detectedLinkRisk
+        let hasEmbeddedURL: Bool = {
+            guard item.type == .text, let raw = item.text else { return false }
+            let head = raw.prefix(2048).lowercased()
+            guard head.contains("http://") || head.contains("https://") else { return false }
+            return URLTrackingCleaner.extractFirstCleanedWebURL(from: raw) != nil
+        }()
+        let plainTitle = item.displayTitle(minimalMode: minimal, veilActive: false)
+        let veiledTitle = sensitiveKind != nil
+            ? item.displayTitle(minimalMode: minimal, veilActive: true)
+            : plainTitle
+        let plainSub = item.subtitleInfo(veilActive: false)
+        let veiledSub = sensitiveKind != nil
+            ? item.subtitleInfo(veilActive: true)
+            : plainSub
+
+        let meta = ClipCardRenderMeta(
+            detectedSensitiveKind: sensitiveKind,
+            detectedPoisonThreat: poisonThreat,
+            detectedLinkRisk: linkRisk,
+            hasEmbeddedWebLink: hasEmbeddedURL,
+            plainDisplayTitle: plainTitle,
+            veiledDisplayTitle: veiledTitle,
+            plainSubtitle: plainSub,
+            veiledSubtitle: veiledSub
+        )
+        if !item.isBurnAfterPaste {
+            cardRenderMetaCache.setObject(
+                ClipCardRenderMetaBox(signature: signature, meta: meta),
+                forKey: cacheKey
+            )
+        }
+        return meta
+    }
+
     func semanticSnapshot(for item: ClipItem) -> SemanticSnapshot {
         guard !minimalModeEnabled, (item.type == .text || item.type == .link) else { return .empty }
         let isExternalAI = SensitiveCredentialVeil.isExternalAIOrChatApp(activeTargetAppName)
@@ -4027,6 +4112,7 @@ final class ClipboardStore: ObservableObject {
         items = sortItems(items)
         trimHistoryIfNeeded()
         semanticCache.removeAllObjects()
+        cardRenderMetaCache.removeAllObjects()
         saveHistory()
         TactileFeedbackEngine.shared.perform(.magicTransform)
         showToast("✓ 已拆解为 \(createdCount) 条待办（按 ⌥2 查看）")
@@ -4260,6 +4346,7 @@ final class ClipboardStore: ObservableObject {
         }
         copyAppendTargetID = older.id
         copyAppendSegmentCount = 1
+        evictItemMemoryCaches(for: newest)
         items.removeAll { $0.id == newest.id }
         commitAppendedSegment(incomingText: tNew, explicitBase: tOld, sourceApp: newest.sourceAppName, showGlobalNotice: true)
     }
@@ -4914,6 +5001,7 @@ final class ClipboardStore: ObservableObject {
         let extKey = "\(item.contentHash)|\(appPart)|ext" as NSString
         semanticCache.removeObject(forKey: stdKey)
         semanticCache.removeObject(forKey: extKey)
+        cardRenderMetaCache.removeObject(forKey: item.id.uuidString as NSString)
         if let imgURL = imageURL(for: item) {
             VisionOCRService.evictWordBoxCache(for: imgURL)
         }

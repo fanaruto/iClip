@@ -2821,3 +2821,27 @@ pub fn decode_cf_dib_bytes_to_rgba(raw: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
 
     Some((rgba, w, h))
 }
+
+/// 将 WM_PAINT 返回的脏区裁剪到窗口客户区矩形；空矩形安全回退为全窗口，避免局部重绘漏刷。
+pub fn compute_paint_blt_rect(
+    paint_l: i32,
+    paint_t: i32,
+    paint_r: i32,
+    paint_b: i32,
+    win_w: i32,
+    win_h: i32,
+) -> (i32, i32, i32, i32) {
+    let safe_w = win_w.max(1);
+    let safe_h = win_h.max(1);
+    if paint_r <= paint_l || paint_b <= paint_t {
+        return (0, 0, safe_w, safe_h);
+    }
+    let l = paint_l.clamp(0, safe_w);
+    let t = paint_t.clamp(0, safe_h);
+    let r = paint_r.clamp(l, safe_w);
+    let b = paint_b.clamp(t, safe_h);
+    if r <= l || b <= t {
+        return (0, 0, safe_w, safe_h);
+    }
+    (l, t, r - l, b - t)
+}

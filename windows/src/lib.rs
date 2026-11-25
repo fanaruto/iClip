@@ -3430,4 +3430,18 @@ mod tests {
             assert!(g1.sub_bottom_in < g1.pill_h);
         }
     }
+
+    #[test]
+    fn test_paint_blt_rect_clamping_for_partial_hover_dirty_region() {
+        use crate::canvas_ui::compute_paint_blt_rect;
+
+        assert_eq!(compute_paint_blt_rect(12, 118, 408, 224, 420, 560), (12, 118, 396, 106));
+        assert_eq!(compute_paint_blt_rect(-20, -10, 500, 620, 420, 560), (0, 0, 420, 560));
+        assert_eq!(compute_paint_blt_rect(0, 0, 0, 0, 420, 560), (0, 0, 420, 560));
+        assert_eq!(compute_paint_blt_rect(50, 50, 50, 90, 420, 560), (0, 0, 420, 560));
+        // 脏区整体落在窗口外时安全回退整窗，避免空 Blit
+        assert_eq!(compute_paint_blt_rect(-100, 10, -10, 50, 420, 560), (0, 0, 420, 560));
+        assert_eq!(compute_paint_blt_rect(450, 10, 500, 50, 420, 560), (0, 0, 420, 560));
+        assert_eq!(compute_paint_blt_rect(10, 580, 100, 620, 420, 560), (0, 0, 420, 560));
+    }
 }

@@ -48,6 +48,9 @@ struct ClipCardView: View {
 
     @Environment(\.colorScheme) private var colorScheme
     @State private var isHovered: Bool = false
+    @State private var showHoverActions: Bool = false
+    @State private var hoverActionsDwellGate = HoverActionsDwellGate()
+    @State private var hoverActionsDwellTask: Task<Void, Never>? = nil
     @State private var asyncThumbnail: NSImage? = nil
     @State private var lastTapUptime: TimeInterval = 0
     @State private var showCopiedInlineFlash: Bool = false
@@ -58,26 +61,27 @@ struct ClipCardView: View {
         LiquidGlassPalette(colorScheme: colorScheme, surfaceStyle: surfaceStyle, appearance: liquidGlassAppearance)
     }
 
+    private var renderMeta: ClipCardRenderMeta {
+        ClipboardStore.shared.cardRenderMeta(for: item)
+    }
+
     private var semantic: SemanticSnapshot {
         ClipboardStore.shared.semanticSnapshot(for: item)
     }
 
     private var hasEmbeddedWebLink: Bool {
-        guard item.type == .text, let raw = item.text else { return false }
-        let head = raw.prefix(2048).lowercased()
-        guard head.contains("http://") || head.contains("https://") else { return false }
-        return URLTrackingCleaner.extractFirstCleanedWebURL(from: raw) != nil
+        renderMeta.hasEmbeddedWebLink
     }
 
     private var hasLeadingVisual: Bool {
         if item.type == .text {
-            return semantic.parsedColorRGBA != nil || hasEmbeddedWebLink
+            return semantic.parsedColorRGBA != nil || renderMeta.hasEmbeddedWebLink
         }
         return true
     }
 
     private var hasInteractiveLeadingLink: Bool {
-        item.type == .link || (item.type == .text && semantic.parsedColorRGBA == nil && hasEmbeddedWebLink)
+        item.type == .link || (item.type == .text && semantic.parsedColorRGBA == nil && renderMeta.hasEmbeddedWebLink)
     }
 
     private var showsTodoCheckbox: Bool {
@@ -86,7 +90,7 @@ struct ClipCardView: View {
 
     private var hoverActionBarEstimateWidth: CGFloat {
         var count = 2
-        if item.type == .link || hasEmbeddedWebLink { count += 1 }
+        if item.type == .link || renderMeta.hasEmbeddedWebLink { count += 1 }
         if !ClipboardStore.shared.minimalModeEnabled {
             if item.isTodo && onEditAlias != nil { count += 1 }
             if onToggleTodo != nil { count += 1 }
@@ -95,9 +99,32 @@ struct ClipCardView: View {
     }
 
     var body: some View {
+        let store = ClipboardStore.shared
+        let minimalMode = store.minimalModeEnabled
+        let meta = store.cardRenderMeta(for: item)
+        let snap = store.semanticSnapshot(for: item)
+        let todoCheckboxVisible = !minimalMode && item.isTodo
+        let embeddedWebLink = meta.hasEmbeddedWebLink
+        let leadingVisualVisible: Bool = {
+            if item.type == .text {
+                return snap.parsedColorRGBA != nil || embeddedWebLink
+            }
+            return true
+        }()
+        let interactiveLeadingLink = item.type == .link || (item.type == .text && snap.parsedColorRGBA == nil && embeddedWebLink)
+        let actionBarWidth: CGFloat = {
+            var count = 2
+            if item.type == .link || embeddedWebLink { count += 1 }
+            if !minimalMode {
+                if item.isTodo && onEditAlias != nil { count += 1 }
+                if onToggleTodo != nil { count += 1 }
+            }
+            return ClipCardLayoutMetrics.hoverActionBarWidth(buttonCount: count)
+        }()
+
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .center, spacing: 11) {
-                if showsTodoCheckbox {
+                if todoCheckboxVisible {
                     TodoLeadingCheckboxButton(
                         isCompleted: item.isTodoCompleted,
                         isSelected: isSelected,
@@ -108,23 +135,23 @@ struct ClipCardView: View {
                     )
                 }
 
-                if hasLeadingVisual {
-                    leadingThumbnail
+                if leadingVisualVisible {
+                    leadingThumbnail(semantic: snap, hasEmbeddedURL: embeddedWebLink)
                 }
 
                 VStack(alignment: .leading, spacing: 5.5) {
-                    let veilOn = ClipboardStore.shared.maskSensitivePreviews && !isSelected && !isHovered
-                    Text(item.displayTitle(minimalMode: ClipboardStore.shared.minimalModeEnabled, veilActive: veilOn))
+                    let veilOn = store.maskSensitivePreviews && !isSelected && !isHovered
+                    Text(veilOn ? meta.veiledDisplayTitle : meta.plainDisplayTitle)
                         .font(.system(size: 13.5, weight: .medium))
                         .lineSpacing(2.5)
                         .foregroundStyle(isSelected ? Color.white : Color.primary)
-                        .strikethrough(showsTodoCheckbox && item.isTodoCompleted, color: isSelected ? Color.white.opacity(0.75) : Color.secondary)
-                        .opacity((showsTodoCheckbox && item.isTodoCompleted) ? 0.54 : 1.0)
+                        .strikethrough(todoCheckboxVisible && item.isTodoCompleted, color: isSelected ? Color.white.opacity(0.75) : Color.secondary)
+                        .opacity((todoCheckboxVisible && item.isTodoCompleted) ? 0.54 : 1.0)
                         .lineLimit(2)
                         .multilineTextAlignment(.leading)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.trailing, index < 9 ? 40 : 4)
-                        .hoverActionSafeTextMask(isHovered: isHovered, reservedActionWidth: hoverActionBarEstimateWidth)
+                        .hoverActionSafeTextMask(isHovered: isHovered && showHoverActions, reservedActionWidth: actionBarWidth)
 
                     HStack(spacing: 6) {
                         if item.isPinned {
@@ -133,7 +160,7 @@ struct ClipCardView: View {
                                 .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.orange)
                         }
 
-                        if !ClipboardStore.shared.minimalModeEnabled, let cat = item.pinCategory {
+                        if !minimalMode, let cat = item.pinCategory {
                             HStack(spacing: 3.5) {
                                 Circle()
                                     .fill(isSelected ? Color.white : cat.dotColor)
@@ -154,14 +181,14 @@ struct ClipCardView: View {
                                 .lineLimit(1)
                                 .layoutPriority(1)
                             Text("·")
-                        } else if case .pastejackingOrBidi = item.detectedPoisonThreat {
+                        } else if case .pastejackingOrBidi = meta.detectedPoisonThreat {
                             Text("含隐藏控制符")
                                 .font(.system(size: 10, weight: .semibold))
                                 .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.red)
                                 .lineLimit(1)
                                 .layoutPriority(1)
                             Text("·")
-                        } else if let linkRisk = item.detectedLinkRisk {
+                        } else if let linkRisk = meta.detectedLinkRisk {
                             Text(linkRisk.badgeTitle)
                                 .font(.system(size: 10, weight: .semibold))
                                 .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.red)
@@ -170,7 +197,7 @@ struct ClipCardView: View {
                             Text("·")
                         }
 
-                        if showsTodoCheckbox {
+                        if todoCheckboxVisible {
                             Text(item.isTodoCompleted ? "已完成" : "待办")
                                 .font(.system(size: 10, weight: .semibold))
                                 .foregroundStyle(
@@ -183,7 +210,7 @@ struct ClipCardView: View {
                             Text("·")
                         }
 
-                        if let kind = semantic.primaryKind {
+                        if let kind = snap.primaryKind {
                             Text(kind.badgeTitle)
                                 .font(.system(size: 10, weight: .semibold))
                                 .foregroundStyle(
@@ -194,8 +221,8 @@ struct ClipCardView: View {
                                 .lineLimit(1)
                                 .layoutPriority(1)
                             Text("·")
-                        } else if !item.isBurnAfterPaste, let secKind = item.detectedSensitiveKind {
-                            let ttlHint = (!item.isPinned && !item.isPendingTodo && ClipboardStore.shared.autoExpireUnpinnedSecrets) ? " · 24h自毁" : ""
+                        } else if !item.isBurnAfterPaste, let secKind = meta.detectedSensitiveKind {
+                            let ttlHint = (!item.isPinned && !item.isPendingTodo && store.autoExpireUnpinnedSecrets) ? " · 24h自毁" : ""
                             Text(secKind.shieldBadgeTitle + ttlHint)
                                 .font(.system(size: 10, weight: .semibold))
                                 .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.orange)
@@ -204,7 +231,7 @@ struct ClipCardView: View {
                             Text("·")
                         }
 
-                        Text(item.subtitleInfo(veilActive: veilOn))
+                        Text(veilOn ? meta.veiledSubtitle : meta.plainSubtitle)
                             .lineLimit(1)
                             .truncationMode(.middle)
 
@@ -257,12 +284,13 @@ struct ClipCardView: View {
                     .font(.system(size: 11, weight: .regular))
                     .foregroundStyle(isSelected ? Color.white.opacity(0.82) : Color.secondary)
                 }
+                .animation(.easeOut(duration: 0.10), value: isSelected)
                 .overlay(alignment: .topTrailing) {
-                    if isHovered {
+                    if isHovered && showHoverActions {
                         hoverActions
                             .floatingActionIslandBackdrop(isSelected: isSelected, colorScheme: colorScheme)
                             .offset(y: -6.5)
-                            .transition(.opacity.combined(with: .scale(scale: 0.92, anchor: .trailing)))
+                            .transition(.opacity.combined(with: .scale(scale: 0.94, anchor: .trailing)))
                     } else if index < 9 {
                         shortcutBadge
                     }
@@ -270,14 +298,15 @@ struct ClipCardView: View {
             }
 
             // 常驻布局占位 + 悬停/选中亮度提振：彻底根除鼠标滑过卡片时的纵向伸缩抖动与横向撑宽
-            if !semantic.actions.isEmpty {
-                transformActionStrip(actions: semantic.actions)
+            if !snap.actions.isEmpty {
+                transformActionStrip(actions: snap.actions)
                     .opacity((isSelected || isHovered) ? 1.0 : 0.78)
-                    .padding(.leading, (showsTodoCheckbox ? 29 : 0) + (hasLeadingVisual ? (item.type == .text ? 48 : 54) : 0))
+                    .animation(.easeOut(duration: 0.10), value: isSelected)
+                    .padding(.leading, (todoCheckboxVisible ? 29 : 0) + (leadingVisualVisible ? (item.type == .text ? 48 : 54) : 0))
             }
         }
-        .padding(.horizontal, hasLeadingVisual ? 12 : 14)
-        .padding(.vertical, hasLeadingVisual ? 10 : 11)
+        .padding(.horizontal, leadingVisualVisible ? 12 : 14)
+        .padding(.vertical, leadingVisualVisible ? 10 : 11)
         .background(
             ZStack {
                 cardBackground
@@ -290,8 +319,17 @@ struct ClipCardView: View {
                 )
             }
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .animation(.easeOut(duration: 0.12), value: isHovered)
+            .animation(.easeOut(duration: 0.10), value: isSelected)
+            .animation(.spring(response: 0.30, dampingFraction: 0.86), value: cardSkin)
         )
-        .overlay(cardBorder.allowsHitTesting(false))
+        .overlay(
+            cardBorder
+                .allowsHitTesting(false)
+                .animation(.easeOut(duration: 0.12), value: isHovered)
+                .animation(.easeOut(duration: 0.10), value: isSelected)
+                .animation(.spring(response: 0.30, dampingFraction: 0.86), value: cardSkin)
+        )
         .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .modifier(
             AppleTVPhysicalCardModifier(
@@ -300,23 +338,42 @@ struct ClipCardView: View {
                 cardSkin: cardSkin,
                 isHovered: isHovered,
                 isSelected: isSelected,
-                trailingActionWidth: hoverActionBarEstimateWidth,
+                trailingActionWidth: actionBarWidth,
                 leadingExclusionWidth: ClipCardLayoutMetrics.leadingForceTouchExclusionWidth(
-                    hasTodoCheckbox: showsTodoCheckbox,
-                    hasInteractiveLeadingLink: hasInteractiveLeadingLink
+                    hasTodoCheckbox: todoCheckboxVisible,
+                    hasInteractiveLeadingLink: interactiveLeadingLink
                 ),
-                bottomExclusionHeight: !semantic.actions.isEmpty ? 28 : 0,
+                bottomExclusionHeight: !snap.actions.isEmpty ? 28 : 0,
                 onHoverEnterSelect: {
                     let allowed = onHoverSelect?() ?? {
                         onSelect()
                         return true
                     }()
-                    if allowed && !isHovered {
-                        isHovered = true
+                    if allowed {
+                        if !isHovered {
+                            isHovered = true
+                        }
+                        hoverActionsDwellTask?.cancel()
+                        let token = hoverActionsDwellGate.beginHover()
+                        hoverActionsDwellTask = Task { @MainActor in
+                            try? await Task.sleep(nanoseconds: 42_000_000)
+                            guard !Task.isCancelled, hoverActionsDwellGate.shouldReveal(for: token) else { return }
+                            if !showHoverActions {
+                                withAnimation(.easeOut(duration: 0.12)) {
+                                    showHoverActions = true
+                                }
+                            }
+                        }
                     }
                     return allowed
                 },
                 onHoverEnded: {
+                    hoverActionsDwellTask?.cancel()
+                    hoverActionsDwellTask = nil
+                    hoverActionsDwellGate.endHover()
+                    if showHoverActions {
+                        showHoverActions = false
+                    }
                     if isHovered {
                         isHovered = false
                     }
@@ -327,9 +384,6 @@ struct ClipCardView: View {
                 }
             )
         )
-        .animation(.spring(response: 0.22, dampingFraction: 0.86), value: isHovered)
-        .animation(.spring(response: 0.2, dampingFraction: 0.86), value: isSelected)
-        .animation(.spring(response: 0.36, dampingFraction: 0.86), value: cardSkin)
         .zIndex(isHovered ? 30 : (isSelected ? 5 : 0))
         .onDrag {
             ClipboardStore.shared.makeDragItemProvider(for: item)
@@ -344,6 +398,11 @@ struct ClipCardView: View {
             copiedFlashTask?.cancel()
             copiedFlashTask = nil
             copiedFlashGate.cancel()
+            hoverActionsDwellTask?.cancel()
+            hoverActionsDwellTask = nil
+            hoverActionsDwellGate.endHover()
+            showHoverActions = false
+            isHovered = false
             showCopiedInlineFlash = false
         }
     }
@@ -467,7 +526,7 @@ struct ClipCardView: View {
     // MARK: - 左侧视觉预览
 
     @ViewBuilder
-    private var leadingThumbnail: some View {
+    private func leadingThumbnail(semantic snap: SemanticSnapshot, hasEmbeddedURL: Bool) -> some View {
         switch item.type {
         case .image:
             if let nsImage = ClipboardStore.shared.cachedThumbnail(for: item) ?? asyncThumbnail {
@@ -509,7 +568,7 @@ struct ClipCardView: View {
             .frame(width: 46, height: 46)
 
         case .link:
-            let isDirty = (semantic.primaryKind == .dirtyURL)
+            let isDirty = (snap.primaryKind == .dirtyURL)
             LinkLaunchLogoButton(
                 defaultSymbol: isDirty ? "sparkles" : "link",
                 tint: isDirty ? .teal : .blue,
@@ -519,7 +578,7 @@ struct ClipCardView: View {
             }
 
         case .text:
-            if let rgba = semantic.parsedColorRGBA {
+            if let rgba = snap.parsedColorRGBA {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .fill(Color(red: rgba.r, green: rgba.g, blue: rgba.b, opacity: rgba.a))
                     .frame(width: 36, height: 36)
@@ -528,7 +587,7 @@ struct ClipCardView: View {
                             .strokeBorder(Color.white.opacity(0.45), lineWidth: 1)
                     )
                     .shadow(color: Color.black.opacity(0.12), radius: 3, y: 1)
-            } else if hasEmbeddedWebLink {
+            } else if hasEmbeddedURL {
                 LinkLaunchLogoButton(
                     defaultSymbol: "link",
                     tint: .blue,
@@ -967,22 +1026,15 @@ struct TodoLeadingCheckboxButton: View {
     }
 }
 
-private struct IconMotionKeyframes {
-    var rotation: Double = 0
-    var scaleX: CGFloat = 1.0
-    var scaleY: CGFloat = 1.0
-    var offsetY: CGFloat = 0
-}
-
 private struct HoverActionSpringButtonStyle: ButtonStyle {
     let isHovered: Bool
     let reduceMotion: Bool
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .scaleEffect(configuration.isPressed ? 0.88 : (isHovered && !reduceMotion ? 1.12 : 1.0))
-            .animation(.spring(response: 0.22, dampingFraction: 0.66), value: isHovered)
-            .animation(.spring(response: 0.14, dampingFraction: 0.72), value: configuration.isPressed)
+            .scaleEffect(configuration.isPressed ? 0.90 : (isHovered && !reduceMotion ? 1.08 : 1.0))
+            .animation(.easeOut(duration: 0.13), value: isHovered)
+            .animation(.easeOut(duration: 0.09), value: configuration.isPressed)
     }
 }
 
@@ -998,7 +1050,6 @@ struct HoverActionCircleButton: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isHovered: Bool = false
-    @State private var hoverTrigger: Int = 0
     @State private var ringBurstScale: CGFloat = 0.6
     @State private var ringBurstOpacity: Double = 0.0
 
@@ -1136,11 +1187,10 @@ struct HoverActionCircleButton: View {
         }
         .buttonStyle(HoverActionSpringButtonStyle(isHovered: isHovered, reduceMotion: reduceMotion))
         .help(helpText)
-        .animation(.spring(response: 0.24, dampingFraction: 0.72), value: isHovered)
-        .animation(.spring(response: 0.26, dampingFraction: 0.66), value: steadyRotation)
+        .animation(.easeOut(duration: 0.14), value: isHovered)
+        .animation(.easeOut(duration: 0.16), value: steadyRotation)
         .onHover { hovering in
             if hovering && !isHovered {
-                hoverTrigger &+= 1
                 TactileFeedbackEngine.shared.perform(.hoverTick)
             }
             isHovered = hovering
@@ -1148,88 +1198,10 @@ struct HoverActionCircleButton: View {
     }
 
     private var animatedIcon: some View {
-        let isReduced = reduceMotion
-        let currentKind = kind
-        let baseIcon = Image(systemName: effectiveSymbol)
+        Image(systemName: effectiveSymbol)
             .font(.system(size: iconSize, weight: .medium))
             .foregroundStyle(foregroundColor)
             .rotationEffect(.degrees(steadyRotation))
-            .symbolEffect(.bounce, value: symbolName)
-
-        return baseIcon.keyframeAnimator(
-            initialValue: IconMotionKeyframes(),
-            trigger: hoverTrigger,
-            content: { content, val in
-                content
-                    .scaleEffect(x: isReduced ? 1.0 : val.scaleX, y: isReduced ? 1.0 : val.scaleY)
-                    .rotationEffect(.degrees(isReduced ? 0.0 : val.rotation))
-                    .offset(y: isReduced ? 0.0 : val.offsetY)
-            },
-            keyframes: { _ in
-                KeyframeTrack(\.rotation) {
-                    if currentKind == .delete {
-                        CubicKeyframe(-13.0, duration: 0.07)
-                        CubicKeyframe(10.0, duration: 0.08)
-                        CubicKeyframe(-6.0, duration: 0.08)
-                        SpringKeyframe(0.0, duration: 0.14, spring: .smooth)
-                    } else if case .star = currentKind {
-                        CubicKeyframe(20.0, duration: 0.12)
-                        SpringKeyframe(0.0, duration: 0.24, spring: .bouncy)
-                    } else {
-                        LinearKeyframe(0.0, duration: 0.01)
-                    }
-                }
-                KeyframeTrack(\.offsetY) {
-                    if case .star = currentKind {
-                        CubicKeyframe(-2.2, duration: 0.12)
-                        SpringKeyframe(0.0, duration: 0.22, spring: .bouncy)
-                    } else if currentKind == .delete {
-                        CubicKeyframe(-1.0, duration: 0.08)
-                        SpringKeyframe(0.0, duration: 0.16, spring: .smooth)
-                    } else {
-                        LinearKeyframe(0.0, duration: 0.01)
-                    }
-                }
-                KeyframeTrack(\.scaleX) {
-                    if case .merge = currentKind {
-                        SpringKeyframe(1.12, duration: 0.10, spring: .snappy)
-                        SpringKeyframe(0.95, duration: 0.13, spring: .bouncy)
-                        SpringKeyframe(1.00, duration: 0.13, spring: .smooth)
-                    } else if currentKind == .ocr {
-                        CubicKeyframe(1.22, duration: 0.09)
-                        CubicKeyframe(0.93, duration: 0.09)
-                        SpringKeyframe(1.00, duration: 0.15, spring: .snappy)
-                    } else if case .star = currentKind {
-                        CubicKeyframe(1.18, duration: 0.12)
-                        SpringKeyframe(1.00, duration: 0.22, spring: .bouncy)
-                    } else if case .queue(let isActive) = currentKind {
-                        SpringKeyframe(isActive ? 1.15 : 1.08, duration: 0.12, spring: .bouncy)
-                        SpringKeyframe(1.00, duration: 0.15, spring: .smooth)
-                    } else {
-                        LinearKeyframe(1.00, duration: 0.01)
-                    }
-                }
-                KeyframeTrack(\.scaleY) {
-                    if case .merge = currentKind {
-                        SpringKeyframe(0.80, duration: 0.10, spring: .snappy)
-                        SpringKeyframe(1.12, duration: 0.13, spring: .bouncy)
-                        SpringKeyframe(1.00, duration: 0.13, spring: .smooth)
-                    } else if currentKind == .ocr {
-                        CubicKeyframe(1.22, duration: 0.09)
-                        CubicKeyframe(0.93, duration: 0.09)
-                        SpringKeyframe(1.00, duration: 0.15, spring: .snappy)
-                    } else if case .star = currentKind {
-                        CubicKeyframe(1.18, duration: 0.12)
-                        SpringKeyframe(1.00, duration: 0.22, spring: .bouncy)
-                    } else if case .queue(let isActive) = currentKind {
-                        SpringKeyframe(isActive ? 1.15 : 1.08, duration: 0.12, spring: .bouncy)
-                        SpringKeyframe(1.00, duration: 0.15, spring: .smooth)
-                    } else {
-                        LinearKeyframe(1.00, duration: 0.01)
-                    }
-                }
-            }
-        )
     }
 
     private func triggerClickHaloIfNeeded() {

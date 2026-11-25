@@ -43,6 +43,99 @@ struct PointerSelectionGuard {
     }
 }
 
+/// 高速扫卡操作浮岛防频闪驻留门控（代际单调递增，快速经过不挂载重型操作钮，停驻 >= 42ms 后丝滑揭示）
+struct HoverActionsDwellGate: Equatable {
+    private(set) var generation: UInt64 = 0
+    private(set) var isHovering: Bool = false
+
+    mutating func beginHover() -> UInt64 {
+        generation &+= 1
+        isHovering = true
+        return generation
+    }
+
+    func shouldReveal(for token: UInt64) -> Bool {
+        isHovering && generation == token
+    }
+
+    mutating func endHover() {
+        generation &+= 1
+        isHovering = false
+    }
+}
+
+/// O(1) 选区隔离总线：跨卡切换严格只回调失选行（false）与新选行（true），彻底消除整窗重算雪崩
+@MainActor
+final class PanelSelectionStore {
+    private(set) var selectedIndex: Int = 0
+    private var indexListeners: [Int: [UUID: (Bool) -> Void]] = [:]
+    private var rangeListeners: [UUID: (range: ClosedRange<Int>, handler: (Bool) -> Void)] = [:]
+    var onSelectionDidChange: ((_ oldIndex: Int, _ newIndex: Int) -> Void)?
+
+    var activeIndexListenerCount: Int {
+        indexListeners.values.reduce(0) { $0 + $1.count }
+    }
+
+    var activeRangeListenerCount: Int {
+        rangeListeners.count
+    }
+
+    func setSelectedIndex(_ newIndex: Int) {
+        guard newIndex != selectedIndex else { return }
+        let oldIndex = selectedIndex
+        selectedIndex = newIndex
+
+        if let oldHandlers = indexListeners[oldIndex]?.values {
+            for handler in Array(oldHandlers) {
+                handler(false)
+            }
+        }
+        if let newHandlers = indexListeners[newIndex]?.values {
+            for handler in Array(newHandlers) {
+                handler(true)
+            }
+        }
+        if !rangeListeners.isEmpty {
+            for entry in Array(rangeListeners.values) {
+                let hadOld = entry.range.contains(oldIndex)
+                let hasNew = entry.range.contains(newIndex)
+                if hadOld != hasNew {
+                    entry.handler(hasNew)
+                }
+            }
+        }
+        onSelectionDidChange?(oldIndex, newIndex)
+    }
+
+    @discardableResult
+    func registerIndexListener(for index: Int, handler: @escaping (Bool) -> Void) -> UUID {
+        let token = UUID()
+        indexListeners[index, default: [:]][token] = handler
+        return token
+    }
+
+    func unregisterIndexListener(token: UUID, for index: Int) {
+        guard var bucket = indexListeners[index] else { return }
+        bucket.removeValue(forKey: token)
+        if bucket.isEmpty {
+            indexListeners.removeValue(forKey: index)
+        } else {
+            indexListeners[index] = bucket
+        }
+    }
+
+    @discardableResult
+    func registerRangeListener(for range: ClosedRange<Int>, handler: @escaping (Bool) -> Void) -> UUID {
+        let token = UUID()
+        rangeListeners[token] = (range: range, handler: handler)
+        return token
+    }
+
+    func unregisterRangeListener(token: UUID) {
+        rangeListeners.removeValue(forKey: token)
+    }
+}
+
 /// 剪贴板混合列表（普通单行卡片 + 3 列图片网格）的二维方向键导航方向
 enum PanelNavigationDirection {
     case up

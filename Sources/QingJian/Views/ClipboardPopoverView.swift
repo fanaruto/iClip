@@ -27,7 +27,12 @@ final class PanelNavigationModel: ObservableObject {
     @Published var searchText: String = ""
     @Published var selectedTab: ClipFilterTab = .all
     @Published var selectedPinCategory: PinCategory? = nil
-    @Published var selectedIndex: Int = 0
+    @Published private(set) var listRevision: UInt64 = 0
+    let selection = PanelSelectionStore()
+    var selectedIndex: Int {
+        get { selection.selectedIndex }
+        set { selection.setSelectedIndex(newValue) }
+    }
     @Published var focusTrigger: UUID = UUID()
     @Published var blurSearchTrigger: UUID = UUID()
     @Published var showSettings: Bool = false
@@ -103,6 +108,13 @@ final class PanelNavigationModel: ObservableObject {
             self.rebuildCache(items: s.items, tab: self.selectedTab, pinCat: self.selectedPinCategory, query: self.searchText)
         }
         .store(in: &cancellables)
+
+        selection.onSelectionDidChange = { [weak self] _, _ in
+            guard let self else { return }
+            if self.showQuickLook || SecretCapsuleMessenger.isCapsuleCommandPrefix(self.searchText) {
+                self.objectWillChange.send()
+            }
+        }
     }
 
     func registerTodoCompletionSettle(for itemID: UUID, isNowCompleted: Bool) {
@@ -246,6 +258,7 @@ final class PanelNavigationModel: ObservableObject {
         self.cachedVisualRows = GridNavigationHelper.buildVisualRows(count: filtered.count, imageColumns: 3) {
             tab != .todo && filtered[$0].type == .image
         }
+        self.listRevision &+= 1
     }
 
     func resetOnOpen() {
@@ -873,69 +886,22 @@ struct ClipboardPopoverView: View {
     // MARK: - iOS 滑动胶囊分类条（独立隔离渲染 + 常驻 GPU 硬件偏移滑块，120Hz 满帧零列表重绘干扰）
 
     private var filterBar: some View {
-        let tabs = ClipFilterTab.visibleTabs(minimalMode: store.minimalModeEnabled)
-        let selectedIdx = tabs.firstIndex(of: nav.selectedTab) ?? 0
-        let pendingTodos = store.pendingTodoCount
-
-        return GeometryReader { geo in
-            let inset: CGFloat = 3
-            let innerWidth = max(0, geo.size.width - inset * 2)
-            let pillWidth = innerWidth / CGFloat(max(1, tabs.count))
-
-            ZStack(alignment: .leading) {
-                // 常驻单一选中胶囊滑块：仅做 GPU 水平位移，永不销毁重建、永不被列表 diff 打断
-                Capsule()
-                    .fill(glassPalette.activeSegmentFill)
-                    .overlay(
-                        Capsule()
-                            .strokeBorder(glassPalette.controlCapsuleStroke, lineWidth: 0.6)
-                    )
-                    .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.24 : 0.08), radius: 2.5, y: 1)
-                    .frame(width: pillWidth, height: 28)
-                    .offset(x: inset + CGFloat(selectedIdx) * pillWidth)
-                    .animation(.spring(response: 0.22, dampingFraction: 0.84), value: nav.selectedTab)
-
-                HStack(spacing: 0) {
-                    ForEach(tabs) { tab in
-                        let isSelected = nav.selectedTab == tab
-                        Button {
-                            guard nav.selectedTab != tab else { return }
-                            nav.selectedTab = tab
-                        } label: {
-                            HStack(spacing: 2.5) {
-                                Text(tab.title)
-                                    .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
-                                    .foregroundStyle(isSelected ? Color.primary : Color.secondary)
-                                if tab == .todo && pendingTodos > 0 {
-                                    Text("\(min(pendingTodos, 99))")
-                                        .font(.system(size: 10, weight: .bold))
-                                        .monospacedDigit()
-                                        .foregroundStyle(isSelected ? Color.accentColor : Color.accentColor.opacity(0.9))
-                                }
-                            }
-                            .frame(width: pillWidth, height: 28)
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .help("\(tab.title)（\(tab.optionShortcutLabel(minimalMode: store.minimalModeEnabled))）")
-                    }
-                }
-                .padding(.horizontal, inset)
+        FilterTabBarView(
+            tabs: ClipFilterTab.visibleTabs(minimalMode: store.minimalModeEnabled),
+            selectedTab: nav.selectedTab,
+            minimalMode: store.minimalModeEnabled,
+            pendingTodos: store.pendingTodoCount,
+            glassPalette: glassPalette,
+            colorScheme: colorScheme,
+            onSelectTab: { tab in
+                guard nav.selectedTab != tab else { return }
+                nav.selectedTab = tab
             }
-            .frame(width: geo.size.width, height: 34)
-            .background(
-                Capsule()
-                    .fill(glassPalette.controlCapsuleFill)
-            )
-            .overlay(
-                Capsule()
-                    .strokeBorder(glassPalette.controlCapsuleStroke.opacity(0.75), lineWidth: 0.6)
-            )
-        }
-        .frame(height: 34)
+        )
     }
 
     private var currentSecretCapsuleState: SecretCapsuleMessenger.CommandState? {
+        guard SecretCapsuleMessenger.isCapsuleCommandPrefix(nav.searchText) else { return nil }
         let selectedItem = (nav.selectedIndex >= 0 && nav.selectedIndex < filteredItems.count) ? filteredItems[nav.selectedIndex] : nil
         return SecretCapsuleMessenger.evaluateCommand(
             query: nav.searchText,
@@ -1196,46 +1162,14 @@ struct ClipboardPopoverView: View {
     }
 
     private var pinCategoryBar: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 5) {
-                let allActive = (nav.selectedPinCategory == nil)
-                Button {
-                    withAnimation(.easeOut(duration: 0.16)) {
-                        nav.selectedPinCategory = nil
-                    }
-                } label: {
-                    Text("全部收藏")
-                        .font(.system(size: 11, weight: allActive ? .semibold : .medium))
-                        .foregroundStyle(allActive ? Color.white : Color.secondary)
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 4)
-                        .background(Capsule().fill(allActive ? Color.accentColor : Color.primary.opacity(0.06)))
-                }
-                .buttonStyle(.plain)
-
-                ForEach(PinCategory.allCases) { cat in
-                    let active = (nav.selectedPinCategory == cat)
-                    Button {
-                        withAnimation(.easeOut(duration: 0.16)) {
-                            nav.selectedPinCategory = active ? nil : cat
-                        }
-                    } label: {
-                        HStack(spacing: 4) {
-                            Circle()
-                                .fill(active ? Color.white : cat.dotColor)
-                                .frame(width: 6, height: 6)
-                            Text(cat.title)
-                                .font(.system(size: 11, weight: active ? .semibold : .medium))
-                        }
-                        .foregroundStyle(active ? Color.white : Color.primary.opacity(0.82))
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 4)
-                        .background(Capsule().fill(active ? cat.dotColor : Color.primary.opacity(0.06)))
-                    }
-                    .buttonStyle(.plain)
+        PinCategoryBarView(
+            selectedCategory: nav.selectedPinCategory,
+            onSelectCategory: { category in
+                withAnimation(.easeOut(duration: 0.16)) {
+                    nav.selectedPinCategory = category
                 }
             }
-        }
+        )
     }
 
     private var pinnedTemplateToolbar: some View {
@@ -1384,10 +1318,11 @@ struct ClipboardPopoverView: View {
                             ForEach(Array(displayRows.enumerated()), id: \.element.id) { rowIndex, row in
                                 switch row {
                                 case .standard(let index, let item):
-                                    ClipCardView(
+                                    SelectableClipCardRow(
+                                        selection: nav.selection,
+                                        listRevision: nav.listRevision,
                                         item: item,
                                         index: index,
-                                        isSelected: index == nav.selectedIndex,
                                         surfaceStyle: store.surfaceStyle,
                                         liquidGlassAppearance: store.liquidGlassAppearance,
                                         borderlessPanel: store.borderlessPanel,
@@ -1477,85 +1412,77 @@ struct ClipboardPopoverView: View {
                                     .id(item.id)
 
                                 case .imageGrid(let entries):
-                                    LazyVGrid(columns: imageGridColumns, spacing: 9) {
-                                        ForEach(Array(entries.enumerated()), id: \.element.item.id) { colIndex, entry in
-                                            ClipImageGridTile(
-                                                item: entry.item,
-                                                index: entry.index,
-                                                isSelected: entry.index == nav.selectedIndex,
-                                                cardSkin: store.cardSkin,
-                                                onSelect: {
-                                                    nav.selectExplicitly(entry.index)
-                                                },
-                                                onHoverSelect: {
-                                                    nav.selectByHover(entry.index)
-                                                },
-                                                onPaste: {
-                                                    store.copyAndOptionallyPaste(
-                                                        entry.item,
-                                                        plainTextOnly: false,
-                                                        shouldAutoPaste: true,
-                                                        onBeforePaste: onDismiss
-                                                    )
-                                                },
-                                                onCopyOnly: {
-                                                    store.copyAndOptionallyPaste(
-                                                        entry.item,
-                                                        plainTextOnly: false,
-                                                        shouldAutoPaste: false,
-                                                        onBeforePaste: nil
-                                                    )
-                                                },
-                                                onExtractOCR: { autoPaste in
-                                                    store.pasteExtractedOCRText(
-                                                        for: entry.item,
-                                                        shouldAutoPaste: autoPaste,
-                                                        onBeforePaste: autoPaste ? onDismiss : nil
-                                                    )
-                                                },
-                                                onTogglePin: {
-                                                    withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
-                                                        store.togglePin(entry.item)
-                                                    }
-                                                },
-                                                onToggleTodo: {
-                                                    withAnimation(.spring(response: 0.26, dampingFraction: 0.84)) {
-                                                        store.toggleTodo(entry.item)
-                                                    }
-                                                },
-                                                onRemoveTodo: {
-                                                    withAnimation(.spring(response: 0.24, dampingFraction: 0.85)) {
-                                                        store.removeFromTodo(entry.item)
-                                                        clampSelection()
-                                                    }
-                                                },
-                                                onEditAlias: {
-                                                    beginAliasEdit(for: entry.item)
-                                                },
-                                                onOpenQuickLook: {
-                                                    nav.selectedIndex = entry.index
-                                                    triggerSmartQuickLook(for: entry.item)
-                                                },
-                                                onOpenOCRBigBang: {
-                                                    nav.selectedIndex = entry.index
-                                                    triggerSmartQuickLook(for: entry.item, initialMode: .imageBigBangOCR)
-                                                },
-                                                onDelete: {
-                                                    withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
-                                                        store.delete(entry.item)
-                                                        clampSelection()
-                                                    }
-                                                }
+                                    SelectableImageGridRow(
+                                        selection: nav.selection,
+                                        listRevision: nav.listRevision,
+                                        columns: imageGridColumns,
+                                        entries: entries,
+                                        rowIndex: rowIndex,
+                                        isPresented: nav.isPresented,
+                                        cardSkin: store.cardSkin,
+                                        onSelect: { idx in
+                                            nav.selectExplicitly(idx)
+                                        },
+                                        onHoverSelect: { idx in
+                                            nav.selectByHover(idx)
+                                        },
+                                        onPaste: { target in
+                                            store.copyAndOptionallyPaste(
+                                                target,
+                                                plainTextOnly: false,
+                                                shouldAutoPaste: true,
+                                                onBeforePaste: onDismiss
                                             )
-                                            .cascadeAppear(
-                                                isPresented: nav.isPresented,
-                                                delay: Double(min(rowIndex, 7)) * 0.028 + Double(min(colIndex, 8)) * 0.02
+                                        },
+                                        onCopyOnly: { target in
+                                            store.copyAndOptionallyPaste(
+                                                target,
+                                                plainTextOnly: false,
+                                                shouldAutoPaste: false,
+                                                onBeforePaste: nil
                                             )
-                                            .id(entry.item.id)
+                                        },
+                                        onExtractOCR: { target, autoPaste in
+                                            store.pasteExtractedOCRText(
+                                                for: target,
+                                                shouldAutoPaste: autoPaste,
+                                                onBeforePaste: autoPaste ? onDismiss : nil
+                                            )
+                                        },
+                                        onTogglePin: { target in
+                                            withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
+                                                store.togglePin(target)
+                                            }
+                                        },
+                                        onToggleTodo: { target in
+                                            withAnimation(.spring(response: 0.26, dampingFraction: 0.84)) {
+                                                store.toggleTodo(target)
+                                            }
+                                        },
+                                        onRemoveTodo: { target in
+                                            withAnimation(.spring(response: 0.24, dampingFraction: 0.85)) {
+                                                store.removeFromTodo(target)
+                                                clampSelection()
+                                            }
+                                        },
+                                        onEditAlias: { target in
+                                            beginAliasEdit(for: target)
+                                        },
+                                        onOpenQuickLook: { idx, target in
+                                            nav.selectedIndex = idx
+                                            triggerSmartQuickLook(for: target)
+                                        },
+                                        onOpenOCRBigBang: { idx, target in
+                                            nav.selectedIndex = idx
+                                            triggerSmartQuickLook(for: target, initialMode: .imageBigBangOCR)
+                                        },
+                                        onDelete: { target in
+                                            withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
+                                                store.delete(target)
+                                                clampSelection()
+                                            }
                                         }
-                                    }
-                                    .padding(.vertical, 2)
-                                    .zIndex(entries.contains { $0.index == nav.selectedIndex } ? 30 : 0)
+                                    )
 
                                 case .todoCompletedHeader(let count):
                                     todoCompletedSectionHeader(count: count)
@@ -1665,7 +1592,7 @@ struct ClipboardPopoverView: View {
                 keyHint("ESC", "关闭")
             }
 
-            if !store.items.filter({ !$0.isPinned }).isEmpty {
+            if store.items.contains(where: { !$0.isPinned }) {
                 Button {
                     withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
                         store.clearUnpinned()
@@ -3002,6 +2929,620 @@ private struct CascadeAppearModifier: ViewModifier {
 private extension View {
     func cascadeAppear(isPresented: Bool, delay: Double) -> some View {
         modifier(CascadeAppearModifier(isPresented: isPresented, delay: delay))
+    }
+}
+
+/// 隔离式选中行包装：仅在自身 index 成为/退出选中项时重绘，根除快速扫过列表时的全屏重算
+private struct SelectableClipCardRow: View {
+    let selection: PanelSelectionStore
+    let listRevision: UInt64
+    let item: ClipItem
+    let index: Int
+    let surfaceStyle: PanelSurfaceStyle
+    let liquidGlassAppearance: LiquidGlassAppearance
+    let borderlessPanel: Bool
+    let cardSkin: CardSkinStyle
+    let onSelect: () -> Void
+    let onHoverSelect: () -> Bool
+    let onPaste: (Bool) -> Void
+    let onCopyOnly: (Bool) -> Void
+    let onApplyTransform: (TransformAction, Bool) -> Void
+    let onTogglePin: () -> Void
+    let onSelectPinCategory: (PinCategory?) -> Void
+    let onEditAlias: () -> Void
+    let onToggleTodo: () -> Void
+    let onToggleTodoCompletion: () -> Void
+    let onRemoveTodo: () -> Void
+    let onOpenQuickLook: () -> Void
+    let onDelete: () -> Void
+
+    @State private var isSelected: Bool
+    @State private var listenerToken: UUID? = nil
+    @State private var registeredIndex: Int? = nil
+
+    init(
+        selection: PanelSelectionStore,
+        listRevision: UInt64,
+        item: ClipItem,
+        index: Int,
+        surfaceStyle: PanelSurfaceStyle,
+        liquidGlassAppearance: LiquidGlassAppearance,
+        borderlessPanel: Bool,
+        cardSkin: CardSkinStyle,
+        onSelect: @escaping () -> Void,
+        onHoverSelect: @escaping () -> Bool,
+        onPaste: @escaping (Bool) -> Void,
+        onCopyOnly: @escaping (Bool) -> Void,
+        onApplyTransform: @escaping (TransformAction, Bool) -> Void,
+        onTogglePin: @escaping () -> Void,
+        onSelectPinCategory: @escaping (PinCategory?) -> Void,
+        onEditAlias: @escaping () -> Void,
+        onToggleTodo: @escaping () -> Void,
+        onToggleTodoCompletion: @escaping () -> Void,
+        onRemoveTodo: @escaping () -> Void,
+        onOpenQuickLook: @escaping () -> Void,
+        onDelete: @escaping () -> Void
+    ) {
+        self.selection = selection
+        self.listRevision = listRevision
+        self.item = item
+        self.index = index
+        self.surfaceStyle = surfaceStyle
+        self.liquidGlassAppearance = liquidGlassAppearance
+        self.borderlessPanel = borderlessPanel
+        self.cardSkin = cardSkin
+        self.onSelect = onSelect
+        self.onHoverSelect = onHoverSelect
+        self.onPaste = onPaste
+        self.onCopyOnly = onCopyOnly
+        self.onApplyTransform = onApplyTransform
+        self.onTogglePin = onTogglePin
+        self.onSelectPinCategory = onSelectPinCategory
+        self.onEditAlias = onEditAlias
+        self.onToggleTodo = onToggleTodo
+        self.onToggleTodoCompletion = onToggleTodoCompletion
+        self.onRemoveTodo = onRemoveTodo
+        self.onOpenQuickLook = onOpenQuickLook
+        self.onDelete = onDelete
+        _isSelected = State(initialValue: selection.selectedIndex == index)
+    }
+
+    var body: some View {
+        ClipCardView(
+            item: item,
+            index: index,
+            isSelected: isSelected,
+            surfaceStyle: surfaceStyle,
+            liquidGlassAppearance: liquidGlassAppearance,
+            borderlessPanel: borderlessPanel,
+            cardSkin: cardSkin,
+            onSelect: onSelect,
+            onHoverSelect: onHoverSelect,
+            onPaste: onPaste,
+            onCopyOnly: onCopyOnly,
+            onApplyTransform: onApplyTransform,
+            onTogglePin: onTogglePin,
+            onSelectPinCategory: onSelectPinCategory,
+            onEditAlias: onEditAlias,
+            onToggleTodo: onToggleTodo,
+            onToggleTodoCompletion: onToggleTodoCompletion,
+            onRemoveTodo: onRemoveTodo,
+            onOpenQuickLook: onOpenQuickLook,
+            onDelete: onDelete
+        )
+        .onAppear {
+            syncSelectionListener()
+        }
+        .onChange(of: index) { _, _ in
+            syncSelectionListener()
+        }
+        .onChange(of: listRevision) { _, _ in
+            syncSelectionListener()
+        }
+        .onDisappear {
+            if let token = listenerToken, let idx = registeredIndex {
+                selection.unregisterIndexListener(token: token, for: idx)
+            }
+            listenerToken = nil
+            registeredIndex = nil
+        }
+    }
+
+    private func syncSelectionListener() {
+        let nowSelected = (selection.selectedIndex == index)
+        if isSelected != nowSelected {
+            isSelected = nowSelected
+        }
+        if registeredIndex != index || listenerToken == nil {
+            if let oldToken = listenerToken, let oldIdx = registeredIndex {
+                selection.unregisterIndexListener(token: oldToken, for: oldIdx)
+            }
+            registeredIndex = index
+            listenerToken = selection.registerIndexListener(for: index) { selected in
+                if isSelected != selected {
+                    isSelected = selected
+                }
+            }
+        }
+    }
+}
+
+private struct SelectableImageGridRow: View {
+    let selection: PanelSelectionStore
+    let listRevision: UInt64
+    let columns: [GridItem]
+    let entries: [(index: Int, item: ClipItem)]
+    let rowIndex: Int
+    let isPresented: Bool
+    let cardSkin: CardSkinStyle
+    let onSelect: (Int) -> Void
+    let onHoverSelect: (Int) -> Bool
+    let onPaste: (ClipItem) -> Void
+    let onCopyOnly: (ClipItem) -> Void
+    let onExtractOCR: (ClipItem, Bool) -> Void
+    let onTogglePin: (ClipItem) -> Void
+    let onToggleTodo: (ClipItem) -> Void
+    let onRemoveTodo: (ClipItem) -> Void
+    let onEditAlias: (ClipItem) -> Void
+    let onOpenQuickLook: (Int, ClipItem) -> Void
+    let onOpenOCRBigBang: (Int, ClipItem) -> Void
+    let onDelete: (ClipItem) -> Void
+
+    @State private var containsSelection: Bool
+    @State private var rangeToken: UUID? = nil
+    @State private var registeredRange: ClosedRange<Int>? = nil
+
+    private var indexRange: ClosedRange<Int>? {
+        guard let first = entries.first?.index, let last = entries.last?.index else { return nil }
+        return min(first, last)...max(first, last)
+    }
+
+    init(
+        selection: PanelSelectionStore,
+        listRevision: UInt64,
+        columns: [GridItem],
+        entries: [(index: Int, item: ClipItem)],
+        rowIndex: Int,
+        isPresented: Bool,
+        cardSkin: CardSkinStyle,
+        onSelect: @escaping (Int) -> Void,
+        onHoverSelect: @escaping (Int) -> Bool,
+        onPaste: @escaping (ClipItem) -> Void,
+        onCopyOnly: @escaping (ClipItem) -> Void,
+        onExtractOCR: @escaping (ClipItem, Bool) -> Void,
+        onTogglePin: @escaping (ClipItem) -> Void,
+        onToggleTodo: @escaping (ClipItem) -> Void,
+        onRemoveTodo: @escaping (ClipItem) -> Void,
+        onEditAlias: @escaping (ClipItem) -> Void,
+        onOpenQuickLook: @escaping (Int, ClipItem) -> Void,
+        onOpenOCRBigBang: @escaping (Int, ClipItem) -> Void,
+        onDelete: @escaping (ClipItem) -> Void
+    ) {
+        self.selection = selection
+        self.listRevision = listRevision
+        self.columns = columns
+        self.entries = entries
+        self.rowIndex = rowIndex
+        self.isPresented = isPresented
+        self.cardSkin = cardSkin
+        self.onSelect = onSelect
+        self.onHoverSelect = onHoverSelect
+        self.onPaste = onPaste
+        self.onCopyOnly = onCopyOnly
+        self.onExtractOCR = onExtractOCR
+        self.onTogglePin = onTogglePin
+        self.onToggleTodo = onToggleTodo
+        self.onRemoveTodo = onRemoveTodo
+        self.onEditAlias = onEditAlias
+        self.onOpenQuickLook = onOpenQuickLook
+        self.onOpenOCRBigBang = onOpenOCRBigBang
+        self.onDelete = onDelete
+        let initialRange: ClosedRange<Int>? = {
+            guard let first = entries.first?.index, let last = entries.last?.index else { return nil }
+            return min(first, last)...max(first, last)
+        }()
+        _containsSelection = State(initialValue: initialRange?.contains(selection.selectedIndex) ?? false)
+    }
+
+    var body: some View {
+        LazyVGrid(columns: columns, spacing: 9) {
+            ForEach(Array(entries.enumerated()), id: \.element.item.id) { colIndex, entry in
+                SelectableImageGridTileSlot(
+                    selection: selection,
+                    listRevision: listRevision,
+                    item: entry.item,
+                    index: entry.index,
+                    cardSkin: cardSkin,
+                    onSelect: { onSelect(entry.index) },
+                    onHoverSelect: { onHoverSelect(entry.index) },
+                    onPaste: { onPaste(entry.item) },
+                    onCopyOnly: { onCopyOnly(entry.item) },
+                    onExtractOCR: { autoPaste in onExtractOCR(entry.item, autoPaste) },
+                    onTogglePin: { onTogglePin(entry.item) },
+                    onToggleTodo: { onToggleTodo(entry.item) },
+                    onRemoveTodo: { onRemoveTodo(entry.item) },
+                    onEditAlias: { onEditAlias(entry.item) },
+                    onOpenQuickLook: { onOpenQuickLook(entry.index, entry.item) },
+                    onOpenOCRBigBang: { onOpenOCRBigBang(entry.index, entry.item) },
+                    onDelete: { onDelete(entry.item) }
+                )
+                .cascadeAppear(
+                    isPresented: isPresented,
+                    delay: Double(min(rowIndex, 7)) * 0.028 + Double(min(colIndex, 8)) * 0.02
+                )
+                .id(entry.item.id)
+            }
+        }
+        .padding(.vertical, 2)
+        .zIndex(containsSelection ? 30 : 0)
+        .onAppear {
+            syncRangeListener()
+        }
+        .onChange(of: listRevision) { _, _ in
+            syncRangeListener()
+        }
+        .onDisappear {
+            if let token = rangeToken {
+                selection.unregisterRangeListener(token: token)
+            }
+            rangeToken = nil
+            registeredRange = nil
+        }
+    }
+
+    private func syncRangeListener() {
+        guard let targetRange = indexRange else {
+            containsSelection = false
+            return
+        }
+        let nowContains = targetRange.contains(selection.selectedIndex)
+        if containsSelection != nowContains {
+            containsSelection = nowContains
+        }
+        if registeredRange != targetRange || rangeToken == nil {
+            if let oldToken = rangeToken {
+                selection.unregisterRangeListener(token: oldToken)
+            }
+            registeredRange = targetRange
+            rangeToken = selection.registerRangeListener(for: targetRange) { active in
+                if containsSelection != active {
+                    containsSelection = active
+                }
+            }
+        }
+    }
+}
+
+private struct SelectableImageGridTileSlot: View {
+    let selection: PanelSelectionStore
+    let listRevision: UInt64
+    let item: ClipItem
+    let index: Int
+    let cardSkin: CardSkinStyle
+    let onSelect: () -> Void
+    let onHoverSelect: () -> Bool
+    let onPaste: () -> Void
+    let onCopyOnly: () -> Void
+    let onExtractOCR: (Bool) -> Void
+    let onTogglePin: () -> Void
+    let onToggleTodo: () -> Void
+    let onRemoveTodo: () -> Void
+    let onEditAlias: () -> Void
+    let onOpenQuickLook: () -> Void
+    let onOpenOCRBigBang: () -> Void
+    let onDelete: () -> Void
+
+    @State private var isSelected: Bool
+    @State private var listenerToken: UUID? = nil
+    @State private var registeredIndex: Int? = nil
+
+    init(
+        selection: PanelSelectionStore,
+        listRevision: UInt64,
+        item: ClipItem,
+        index: Int,
+        cardSkin: CardSkinStyle,
+        onSelect: @escaping () -> Void,
+        onHoverSelect: @escaping () -> Bool,
+        onPaste: @escaping () -> Void,
+        onCopyOnly: @escaping () -> Void,
+        onExtractOCR: @escaping (Bool) -> Void,
+        onTogglePin: @escaping () -> Void,
+        onToggleTodo: @escaping () -> Void,
+        onRemoveTodo: @escaping () -> Void,
+        onEditAlias: @escaping () -> Void,
+        onOpenQuickLook: @escaping () -> Void,
+        onOpenOCRBigBang: @escaping () -> Void,
+        onDelete: @escaping () -> Void
+    ) {
+        self.selection = selection
+        self.listRevision = listRevision
+        self.item = item
+        self.index = index
+        self.cardSkin = cardSkin
+        self.onSelect = onSelect
+        self.onHoverSelect = onHoverSelect
+        self.onPaste = onPaste
+        self.onCopyOnly = onCopyOnly
+        self.onExtractOCR = onExtractOCR
+        self.onTogglePin = onTogglePin
+        self.onToggleTodo = onToggleTodo
+        self.onRemoveTodo = onRemoveTodo
+        self.onEditAlias = onEditAlias
+        self.onOpenQuickLook = onOpenQuickLook
+        self.onOpenOCRBigBang = onOpenOCRBigBang
+        self.onDelete = onDelete
+        _isSelected = State(initialValue: selection.selectedIndex == index)
+    }
+
+    var body: some View {
+        ClipImageGridTile(
+            item: item,
+            index: index,
+            isSelected: isSelected,
+            cardSkin: cardSkin,
+            onSelect: onSelect,
+            onHoverSelect: onHoverSelect,
+            onPaste: onPaste,
+            onCopyOnly: onCopyOnly,
+            onExtractOCR: onExtractOCR,
+            onTogglePin: onTogglePin,
+            onToggleTodo: onToggleTodo,
+            onRemoveTodo: onRemoveTodo,
+            onEditAlias: onEditAlias,
+            onOpenQuickLook: onOpenQuickLook,
+            onOpenOCRBigBang: onOpenOCRBigBang,
+            onDelete: onDelete
+        )
+        .onAppear {
+            syncSelectionListener()
+        }
+        .onChange(of: index) { _, _ in
+            syncSelectionListener()
+        }
+        .onChange(of: listRevision) { _, _ in
+            syncSelectionListener()
+        }
+        .onDisappear {
+            if let token = listenerToken, let idx = registeredIndex {
+                selection.unregisterIndexListener(token: token, for: idx)
+            }
+            listenerToken = nil
+            registeredIndex = nil
+        }
+    }
+
+    private func syncSelectionListener() {
+        let nowSelected = (selection.selectedIndex == index)
+        if isSelected != nowSelected {
+            isSelected = nowSelected
+        }
+        if registeredIndex != index || listenerToken == nil {
+            if let oldToken = listenerToken, let oldIdx = registeredIndex {
+                selection.unregisterIndexListener(token: oldToken, for: oldIdx)
+            }
+            registeredIndex = index
+            listenerToken = selection.registerIndexListener(for: index) { selected in
+                if isSelected != selected {
+                    isSelected = selected
+                }
+            }
+        }
+    }
+}
+
+/// 独立隔离分类标签条：仅自身感知 hover 微光胶囊与触感反馈，零触发主面板及卡片列表重绘
+private struct FilterTabBarView: View {
+    let tabs: [ClipFilterTab]
+    let selectedTab: ClipFilterTab
+    let minimalMode: Bool
+    let pendingTodos: Int
+    let glassPalette: LiquidGlassPalette
+    let colorScheme: ColorScheme
+    let onSelectTab: (ClipFilterTab) -> Void
+
+    @State private var hoveredTab: ClipFilterTab? = nil
+
+    var body: some View {
+        let selectedIdx = tabs.firstIndex(of: selectedTab) ?? 0
+
+        return GeometryReader { geo in
+            let inset: CGFloat = 3
+            let innerWidth = max(0, geo.size.width - inset * 2)
+            let pillWidth = innerWidth / CGFloat(max(1, tabs.count))
+
+            ZStack(alignment: .leading) {
+                HStack(spacing: 0) {
+                    ForEach(tabs) { tab in
+                        let isTabHovered = (hoveredTab == tab && selectedTab != tab)
+                        Capsule()
+                            .fill(
+                                isTabHovered
+                                    ? Color.primary.opacity(colorScheme == .dark ? 0.11 : 0.06)
+                                    : Color.clear
+                            )
+                            .padding(.horizontal, 2)
+                            .padding(.vertical, 2)
+                            .frame(width: pillWidth, height: 28)
+                    }
+                }
+                .padding(.horizontal, inset)
+                .animation(.easeOut(duration: 0.12), value: hoveredTab)
+
+                // 常驻单一选中胶囊滑块：仅做 GPU 水平位移，永不销毁重建、永不被列表 diff 打断
+                Capsule()
+                    .fill(glassPalette.activeSegmentFill)
+                    .overlay(
+                        Capsule()
+                            .strokeBorder(glassPalette.controlCapsuleStroke, lineWidth: 0.6)
+                    )
+                    .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.24 : 0.08), radius: 2.5, y: 1)
+                    .frame(width: pillWidth, height: 28)
+                    .offset(x: inset + CGFloat(selectedIdx) * pillWidth)
+                    .animation(.spring(response: 0.22, dampingFraction: 0.84), value: selectedTab)
+
+                HStack(spacing: 0) {
+                    ForEach(tabs) { tab in
+                        let isSelected = (selectedTab == tab)
+                        let isHovered = (hoveredTab == tab)
+                        Button {
+                            onSelectTab(tab)
+                        } label: {
+                            HStack(spacing: 2.5) {
+                                Text(tab.title)
+                                    .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
+                                    .foregroundStyle(
+                                        isSelected
+                                            ? Color.primary
+                                            : (isHovered ? Color.primary.opacity(0.88) : Color.secondary)
+                                    )
+                                if tab == .todo && pendingTodos > 0 {
+                                    Text("\(min(pendingTodos, 99))")
+                                        .font(.system(size: 10, weight: .bold))
+                                        .monospacedDigit()
+                                        .foregroundStyle(isSelected ? Color.accentColor : Color.accentColor.opacity(0.9))
+                                }
+                            }
+                            .frame(width: pillWidth, height: 28)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .onHover { hovering in
+                            if hovering {
+                                if hoveredTab != tab {
+                                    hoveredTab = tab
+                                    if !isSelected {
+                                        TactileFeedbackEngine.shared.perform(.hoverTick)
+                                    }
+                                }
+                            } else if hoveredTab == tab {
+                                hoveredTab = nil
+                            }
+                        }
+                        .help("\(tab.title)（\(tab.optionShortcutLabel(minimalMode: minimalMode))）")
+                    }
+                }
+                .padding(.horizontal, inset)
+            }
+            .frame(width: geo.size.width, height: 34)
+            .background(
+                Capsule()
+                    .fill(glassPalette.controlCapsuleFill)
+            )
+            .overlay(
+                Capsule()
+                    .strokeBorder(glassPalette.controlCapsuleStroke.opacity(0.75), lineWidth: 0.6)
+            )
+        }
+        .frame(height: 34)
+        .onDisappear {
+            hoveredTab = nil
+        }
+    }
+}
+
+/// 独立隔离收藏子类目筛选条：自带苹果微悬浮提亮，零触发主列表重建
+private struct PinCategoryBarView: View {
+    let selectedCategory: PinCategory?
+    let onSelectCategory: (PinCategory?) -> Void
+
+    @State private var hoveredCategory: PinCategory? = nil
+    @State private var isHoveringAll: Bool = false
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 5) {
+                let allActive = (selectedCategory == nil)
+                Button {
+                    onSelectCategory(nil)
+                } label: {
+                    Text("全部收藏")
+                        .font(.system(size: 11, weight: allActive ? .semibold : .medium))
+                        .foregroundStyle(
+                            allActive
+                                ? Color.white
+                                : (isHoveringAll ? Color.primary.opacity(0.9) : Color.secondary)
+                        )
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 4)
+                        .background(
+                            Capsule().fill(
+                                allActive
+                                    ? Color.accentColor
+                                    : Color.primary.opacity(isHoveringAll ? 0.11 : 0.06)
+                            )
+                        )
+                        .overlay(
+                            Capsule().strokeBorder(
+                                (!allActive && isHoveringAll) ? Color.primary.opacity(0.14) : Color.clear,
+                                lineWidth: 0.6
+                            )
+                        )
+                }
+                .buttonStyle(.plain)
+                .onHover { hovering in
+                    if hovering && !isHoveringAll && !allActive {
+                        TactileFeedbackEngine.shared.perform(.hoverTick)
+                    }
+                    isHoveringAll = hovering
+                }
+                .animation(.easeOut(duration: 0.12), value: isHoveringAll)
+
+                ForEach(PinCategory.allCases) { cat in
+                    let active = (selectedCategory == cat)
+                    let hovered = (hoveredCategory == cat)
+                    Button {
+                        onSelectCategory(active ? nil : cat)
+                    } label: {
+                        HStack(spacing: 4) {
+                            Circle()
+                                .fill(active ? Color.white : cat.dotColor)
+                                .frame(width: 6, height: 6)
+                            Text(cat.title)
+                                .font(.system(size: 11, weight: active ? .semibold : .medium))
+                        }
+                        .foregroundStyle(
+                            active
+                                ? Color.white
+                                : (hovered ? Color.primary : Color.primary.opacity(0.82))
+                        )
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 4)
+                        .background(
+                            Capsule().fill(
+                                active
+                                    ? cat.dotColor
+                                    : (hovered ? cat.dotColor.opacity(0.14) : Color.primary.opacity(0.06))
+                            )
+                        )
+                        .overlay(
+                            Capsule().strokeBorder(
+                                (!active && hovered) ? cat.dotColor.opacity(0.32) : Color.clear,
+                                lineWidth: 0.6
+                            )
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .onHover { hovering in
+                        if hovering {
+                            if hoveredCategory != cat {
+                                hoveredCategory = cat
+                                if !active {
+                                    TactileFeedbackEngine.shared.perform(.hoverTick)
+                                }
+                            }
+                        } else if hoveredCategory == cat {
+                            hoveredCategory = nil
+                        }
+                    }
+                    .animation(.easeOut(duration: 0.12), value: hoveredCategory)
+                }
+            }
+        }
+        .onDisappear {
+            isHoveringAll = false
+            hoveredCategory = nil
+        }
     }
 }
 
