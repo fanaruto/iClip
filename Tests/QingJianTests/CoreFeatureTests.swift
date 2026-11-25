@@ -5109,8 +5109,11 @@ final class CoreFeatureTests: XCTestCase {
         let bleed: CGFloat = 36
 
         let rightOrbCore = SpriteOrbPhysicsGeometry.orbCoreFrame(
-            fromPanelFrame: NSRect(origin: rightSnap.origin, size: orbPanelSize)
+            fromPanelFrame: NSRect(origin: rightSnap.origin, size: orbPanelSize),
+            dockedSide: rightSnap.dockedSide
         )
+        XCTAssertEqual(visible.maxX - rightOrbCore.maxX, SpriteOrbPhysicsGeometry.edgeVisualMargin, accuracy: 0.1)
+
         let panelWhenOrbRight = SpriteOrbPhysicsGeometry.panelAnchorOrigin(
             forOrbCoreFrame: rightOrbCore,
             panelSize: mainSize,
@@ -5122,8 +5125,11 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(cardLeftWhenOrbRight, visible.minX + 10)
 
         let leftOrbCore = SpriteOrbPhysicsGeometry.orbCoreFrame(
-            fromPanelFrame: NSRect(origin: leftSnap.origin, size: orbPanelSize)
+            fromPanelFrame: NSRect(origin: leftSnap.origin, size: orbPanelSize),
+            dockedSide: leftSnap.dockedSide
         )
+        XCTAssertEqual(leftOrbCore.minX - visible.minX, SpriteOrbPhysicsGeometry.edgeVisualMargin, accuracy: 0.1)
+
         let panelWhenOrbLeft = SpriteOrbPhysicsGeometry.panelAnchorOrigin(
             forOrbCoreFrame: leftOrbCore,
             panelSize: mainSize,
@@ -5134,8 +5140,8 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertGreaterThan(cardLeftWhenOrbLeft, leftOrbCore.maxX)
         XCTAssertLessThanOrEqual(cardLeftWhenOrbLeft + mainSize.width, visible.maxX - 10)
 
-        // 5. 智能提醒气泡紧贴精灵旁侧且不越出屏幕
-        let sparkSize = NSSize(width: 318, height: 40)
+        // 5. 智能提醒卡片紧贴精灵旁侧且不越出屏幕
+        let sparkSize = NSSize(width: 292, height: 82)
         let sparkRight = SpriteOrbPhysicsGeometry.sparkAnchorOrigin(
             forOrbCoreFrame: rightOrbCore,
             sparkSize: sparkSize,
@@ -5153,10 +5159,68 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertLessThanOrEqual(sparkLeft.x + sparkSize.width, visible.maxX - 10)
     }
 
+    func testSpriteOrbSpringPhysicsNearFieldPullImpulsesAndParticles() {
+        var state = SpriteOrbPhysicsState()
+
+        // 1. 光标进入 142pt 感应圈左侧 (-90, 0)：触发向左侧的弹性探身拉扯与表面张力
+        let nearInput = SpriteOrbPhysicsInput(
+            isHoveredOnCore: false,
+            isPressed: false,
+            isDragging: false,
+            isDragTargeted: false,
+            isClipboardPanelOpen: false,
+            smartSuggestionActive: false,
+            pointerOffsetFromAnchor: CGPoint(x: -90, y: 0),
+            dragStepVelocity: .zero
+        )
+        for _ in 0..<45 {
+            state.step(dt: 1.0 / 120.0, input: nearInput)
+        }
+        XCTAssertLessThan(state.offsetX, -0.5)
+        XCTAssertGreaterThan(state.tensionPull, 0.15)
+        XCTAssertLessThan(state.hoverBlend, 0.1)
+
+        // 2. 光标贴近核心 (-40, 0) < 60pt：hoverBlend 爬升且表冠最短弧指向左方（约 ±π）
+        var closeInput = nearInput
+        closeInput.pointerOffsetFromAnchor = CGPoint(x: -40, y: 0)
+        closeInput.isHoveredOnCore = true
+        for _ in 0..<60 {
+            state.step(dt: 1.0 / 120.0, input: closeInput)
+        }
+        XCTAssertGreaterThan(state.hoverBlend, 0.85)
+        XCTAssertGreaterThan(abs(state.crownAngle), 2.5)
+
+        // 3. 复制流光粒子注入：12 颗贝塞尔粒子在 0.22s 撞击球心激发波纹与冲击脉冲，1.5s 后消散殆尽
+        state.triggerCopyInflow(incomingAngle: .pi, accent: .amber)
+        XCTAssertEqual(state.inflowParticles.count, 12)
+        for _ in 0..<36 {
+            state.step(dt: 1.0 / 120.0, input: closeInput)
+        }
+        XCTAssertGreaterThan(state.ripples.count, 0)
+        XCTAssertGreaterThan(abs(state.scaleImpulse), 0.01)
+
+        for _ in 0..<180 {
+            state.step(dt: 1.0 / 120.0, input: closeInput)
+        }
+        XCTAssertTrue(state.inflowParticles.isEmpty)
+        XCTAssertTrue(state.ripples.isEmpty)
+
+        // 4. 采纳提醒庆贺：触发 12 颗落体火花与翡翠绿扩展波纹
+        state.triggerAcceptedCelebration()
+        XCTAssertEqual(state.sparks.count, 12)
+        XCTAssertGreaterThan(state.scaleImpulse, 0.2)
+        for _ in 0..<140 {
+            state.step(dt: 1.0 / 120.0, input: closeInput)
+        }
+        XCTAssertTrue(state.sparks.isEmpty)
+    }
+
     func testTodoIntentAndCompactPromptFormatting() {
         XCTAssertTrue(TodoChecklistExtractor.hasActionableSingleTodoIntent("周五下午3点前提交Q3复盘PPT"))
         XCTAssertTrue(TodoChecklistExtractor.hasActionableSingleTodoIntent("明天前发个邮件确认报价"))
         XCTAssertTrue(TodoChecklistExtractor.hasActionableSingleTodoIntent("记得下班前把报销单发给财务"))
+        XCTAssertTrue(TodoChecklistExtractor.hasActionableSingleTodoIntent("提醒我下午提交报销"))
+        XCTAssertFalse(TodoChecklistExtractor.hasActionableSingleTodoIntent("明天下午三点产品评审"))
         XCTAssertFalse(TodoChecklistExtractor.hasActionableSingleTodoIntent("https://app.webfooo.com/iClip"))
         XCTAssertFalse(TodoChecklistExtractor.hasActionableSingleTodoIntent("{\"deadline\": \"周五前\"}"))
 

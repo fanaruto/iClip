@@ -35,11 +35,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ActionSparkController.shared.spriteOrbAnchorFrameProvider = {
             FloatingSpriteOrbController.shared.visibleOrbCoreScreenFrame
         }
-        ActionSparkController.shared.onSuggestionVisibilityChanged = { active, categoryKey in
-            FloatingSpriteOrbController.shared.setSmartSuggestionState(active: active, categoryKey: categoryKey)
+        ActionSparkController.shared.onSuggestionVisibilityChanged = { active, categoryKey, actionID in
+            FloatingSpriteOrbController.shared.setSmartSuggestionState(active: active, categoryKey: categoryKey, actionID: actionID)
         }
         ActionSparkController.shared.onSuggestionAccepted = { _ in
             FloatingSpriteOrbController.shared.triggerSuggestionAcceptedPulse()
+        }
+        ActionSparkController.shared.onSuggestionDismissed = {
+            FloatingSpriteOrbController.shared.triggerSuggestionDismissedPulse()
         }
         orb.start(store: ClipboardStore.shared)
 
