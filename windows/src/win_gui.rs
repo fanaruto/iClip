@@ -2,10 +2,12 @@
 
 use iclip_core::canvas_ui::{
     build_display_rows_ext, clamp_image_pan_offset, clamp_quick_look_scroll,
-    compute_cursor_anchored_zoom_pan, compute_spring_lerp_step, compute_wrapped_text_scroll_bounds,
-    decode_cf_dib_bytes_to_rgba, estimate_mono_text_px, estimate_text_px, fit_image_in_viewport,
-    grid_move_selection, image_grid_row_height, pack_big_bang_chip_rows, sample_sweep_points,
-    standard_card_height, Color4, DisplayRow, GlassPalette, GridMoveDir, PixelCanvas,
+    compute_card_skin_visual_metrics, compute_cursor_anchored_zoom_pan,
+    compute_selected_tile_ring_geometry, compute_settings_group1_skin_layout,
+    compute_spring_lerp_step, compute_wrapped_text_scroll_bounds, decode_cf_dib_bytes_to_rgba,
+    estimate_mono_text_px, estimate_text_px, fit_image_in_viewport, grid_move_selection,
+    image_grid_row_height, pack_big_bang_chip_rows, sample_sweep_points, standard_card_height,
+    Color4, DisplayRow, GlassPalette, GridMoveDir, PixelCanvas,
 };
 use iclip_core::engines::{
     analyze_file_actions, analyze_text_actions, clean_tracking_url, compress_png_to_white_bg_jpeg,
@@ -27,7 +29,7 @@ use iclip_core::intelligence::{
 use iclip_core::model::{
     now_unix_secs, ClipContentType, ClipFilterTab, ClipItem, PinCategory, QuickAction,
 };
-use iclip_core::store::{ClipboardStore, GlassAppearance};
+use iclip_core::store::{CardSkin, ClipboardStore, GlassAppearance};
 use iclip_core::updater::{OtaReleaseInfo, OtaState};
 use image::{codecs::png::PngEncoder, imageops::FilterType, ColorType, ImageEncoder};
 use std::cell::RefCell;
@@ -261,6 +263,7 @@ enum HitAction {
     StartRecordHotkey(WinHotKeySlot),
     ResetHotkeyDefault(WinHotKeySlot),
     SetBlurPreset(u8),
+    SetCardSkin(CardSkin),
     AdjustBlurConcentration {
         track_left: i32,
         track_width: i32,
@@ -403,6 +406,9 @@ struct WinAppState {
     seg_pill_ratio: f32,
     seg_pill_target_ratio: f32,
     seg_pill_last_tick: Option<Instant>,
+    skin_blend: f32,
+    skin_blend_target: f32,
+    skin_anim_last_tick: Option<Instant>,
     selected_pin_category: Option<PinCategory>,
     search_query: String,
     selected_visible_pos: usize,
@@ -647,6 +653,7 @@ pub fn run_windows_app() -> i32 {
             RegisterClipboardFormatW(to_wide("CanIncludeInClipboardHistory").as_ptr());
         let cf_can_cloud = RegisterClipboardFormatW(to_wide("CanUploadToCloudClipboard").as_ptr());
         let autostart = is_autostart_enabled();
+        let init_skin_blend = store.config.card_skin.blend_target();
 
         APP_STATE.with(|cell| {
             *cell.borrow_mut() = Some(WinAppState {
@@ -665,6 +672,9 @@ pub fn run_windows_app() -> i32 {
                 seg_pill_ratio: 0.0,
                 seg_pill_target_ratio: 0.0,
                 seg_pill_last_tick: None,
+                skin_blend: init_skin_blend,
+                skin_blend_target: init_skin_blend,
+                skin_anim_last_tick: None,
                 selected_pin_category: None,
                 search_query: String::new(),
                 selected_visible_pos: 0,
@@ -853,6 +863,7 @@ pub fn run_windows_self_test() -> Result<(), String> {
         let cf_html = RegisterClipboardFormatW(to_wide("HTML Format").as_ptr());
         let cf_png = RegisterClipboardFormatW(to_wide("PNG").as_ptr());
         CF_PNG_FORMAT_ID.store(cf_png, Ordering::SeqCst);
+        let init_skin_blend = store.config.card_skin.blend_target();
         let mut state = WinAppState {
             store,
             visible: true,
@@ -869,6 +880,9 @@ pub fn run_windows_self_test() -> Result<(), String> {
             seg_pill_ratio: 0.0,
             seg_pill_target_ratio: 0.0,
             seg_pill_last_tick: None,
+            skin_blend: init_skin_blend,
+            skin_blend_target: init_skin_blend,
+            skin_anim_last_tick: None,
             selected_pin_category: None,
             search_query: String::new(),
             selected_visible_pos: 0,
@@ -1899,6 +1913,9 @@ unsafe fn show_panel_near_cursor(hwnd: HWND) {
             st.seg_pill_ratio = idx as f32;
             st.seg_pill_target_ratio = idx as f32;
             st.seg_pill_last_tick = None;
+            st.skin_blend = st.store.config.card_skin.blend_target();
+            st.skin_blend_target = st.skin_blend;
+            st.skin_anim_last_tick = None;
             st.quick_look_hovered_target = None;
             st.big_bang_sweep_last_pt = None;
         }
@@ -1939,6 +1956,9 @@ unsafe fn hide_panel(hwnd: HWND, restore_focus: bool) {
         if let Some(st) = cell.borrow_mut().as_mut() {
             st.visible = false;
             st.seg_pill_last_tick = None;
+            st.skin_blend = st.store.config.card_skin.blend_target();
+            st.skin_blend_target = st.skin_blend;
+            st.skin_anim_last_tick = None;
             st.tracking_mouse_leave = false;
             st.hovered_visible_pos = None;
             st.hover_card_nx = 0.0;
@@ -2291,23 +2311,39 @@ unsafe extern "system" fn wnd_proc(
                 let mut stop = true;
                 APP_STATE.with(|c| {
                     if let Some(st) = c.borrow_mut().as_mut() {
-                        let dt = st
-                            .seg_pill_last_tick
-                            .map(|prev| now.saturating_duration_since(prev).as_secs_f32())
-                            .unwrap_or(0.016);
-                        let (next, settled) = compute_spring_lerp_step(
-                            st.seg_pill_ratio,
-                            st.seg_pill_target_ratio,
-                            dt,
-                            28.0,
-                            0.008,
-                        );
-                        st.seg_pill_ratio = next;
-                        if settled {
-                            st.seg_pill_last_tick = None;
-                        } else {
-                            st.seg_pill_last_tick = Some(now);
-                            stop = false;
+                        if let Some(prev_pill) = st.seg_pill_last_tick {
+                            let dt = now.saturating_duration_since(prev_pill).as_secs_f32();
+                            let (next, settled) = compute_spring_lerp_step(
+                                st.seg_pill_ratio,
+                                st.seg_pill_target_ratio,
+                                dt,
+                                28.0,
+                                0.008,
+                            );
+                            st.seg_pill_ratio = next;
+                            if settled {
+                                st.seg_pill_last_tick = None;
+                            } else {
+                                st.seg_pill_last_tick = Some(now);
+                                stop = false;
+                            }
+                        }
+                        if let Some(prev_skin) = st.skin_anim_last_tick {
+                            let dt = now.saturating_duration_since(prev_skin).as_secs_f32();
+                            let (next_skin, settled) = compute_spring_lerp_step(
+                                st.skin_blend,
+                                st.skin_blend_target,
+                                dt,
+                                16.0,
+                                0.004,
+                            );
+                            st.skin_blend = next_skin;
+                            if settled {
+                                st.skin_anim_last_tick = None;
+                            } else {
+                                st.skin_anim_last_tick = Some(now);
+                                stop = false;
+                            }
                         }
                     }
                 });
@@ -5295,6 +5331,7 @@ fn draw_image_grid_tile(
     let is_sel = vis_pos == st.selected_visible_pos;
     let is_hov = st.hovered_visible_pos == Some(vis_pos);
     let is_tile_pressed = st.pressed_visible_pos == Some(vis_pos);
+    let skin_m = compute_card_skin_visual_metrics(st.skin_blend, st.is_dark_mode, true, is_tile_pressed);
 
     let d = if is_tile_pressed { s(1) } else { 0 };
     let dx = tx + d;
@@ -5309,33 +5346,10 @@ fn draw_image_grid_tile(
             dw,
             dh,
             sf(13.0),
-            if is_tile_pressed {
-                0.0
-            } else {
-                (sf(-7.0) * st.hover_card_nx).round()
-            },
-            if is_tile_pressed {
-                sf(2.0)
-            } else {
-                sf(5.5) - (sf(4.0) * st.hover_card_ny).round()
-            },
-            if is_tile_pressed {
-                sf(5.0)
-            } else {
-                sf(11.0)
-            },
-            Color4::rgba(
-                0,
-                0,
-                0,
-                if is_tile_pressed {
-                    48
-                } else if st.is_dark_mode {
-                    84
-                } else {
-                    42
-                },
-            ),
+            (sf(skin_m.shadow_dx_factor) * st.hover_card_nx).round(),
+            sf(skin_m.shadow_dy_base) - (sf(skin_m.shadow_dy_factor) * st.hover_card_ny).round(),
+            sf(skin_m.shadow_blur),
+            Color4::rgba(0, 0, 0, skin_m.shadow_alpha),
         );
     }
     canvas.fill_round_rect(dx, dy, dw, dh, sf(13.0), palette.card_bg);
@@ -5451,6 +5465,19 @@ fn draw_image_grid_tile(
         });
     }
 
+    if is_hov && skin_m.glare_peak_alpha > 0 {
+        canvas.draw_apple_tv_glare_round_rect(
+            dx,
+            dy,
+            dw,
+            dh,
+            sf(13.0),
+            st.hover_card_nx,
+            st.hover_card_ny,
+            skin_m.glare_peak_alpha,
+        );
+    }
+
     // 右上角悬停微圆钮或选中回车圆标
     if is_hov {
         let b_sz = s(22);
@@ -5546,43 +5573,28 @@ fn draw_image_grid_tile(
         );
     }
 
-    if is_hov {
-        canvas.draw_apple_tv_glare_round_rect(
-            dx,
-            dy,
-            dw,
-            dh,
-            sf(13.0),
-            st.hover_card_nx,
-            st.hover_card_ny,
-            if is_tile_pressed {
-                16
-            } else if st.is_dark_mode {
-                44
-            } else {
-                62
-            },
-        );
-    }
-
-    // 外白内蓝双环选中框（复刻 ClipImageGridTile.swift:204），左键蓄力按压态附加微缩下沉充电环
+    // 同心齐整双环选中框（全 DPI 缩放严格外蓝厚等于内缩像素、内环圆角严格同心，零缝隙零割裂）
     if is_sel {
+        let ring = compute_selected_tile_ring_geometry(scale);
+        let inset = ring.inner_inset_px;
+        if dw > inset * 2 + 4 && dh > inset * 2 + 4 {
+            canvas.stroke_round_rect(
+                dx + inset,
+                dy + inset,
+                dw - inset * 2,
+                dh - inset * 2,
+                ring.inner_radius,
+                ring.inner_thickness,
+                Color4::rgba(255, 255, 255, 210),
+            );
+        }
         canvas.stroke_round_rect(
             dx,
             dy,
             dw,
             dh,
-            sf(13.0),
-            sf(3.2),
-            Color4::rgba(255, 255, 255, 232),
-        );
-        canvas.stroke_round_rect(
-            dx,
-            dy,
-            dw,
-            dh,
-            sf(13.0),
-            sf(2.0),
+            ring.outer_radius,
+            ring.outer_thickness,
             palette.cobalt,
         );
     } else {
@@ -5654,6 +5666,7 @@ fn draw_standard_card(
         (track_w - 2 * cd).max(1),
         (card_h - 2 * cd).max(1),
     );
+    let skin_m = compute_card_skin_visual_metrics(st.skin_blend, st.is_dark_mode, false, is_pressed);
     if is_hovered || is_pressed {
         canvas.draw_soft_shadow_round_rect_xy(
             cx,
@@ -5661,31 +5674,13 @@ fn draw_standard_card(
             cw,
             ch,
             sf(14.0),
-            if is_pressed {
-                0.0
-            } else {
-                (sf(-6.0) * st.hover_card_nx).round()
-            },
-            if is_pressed {
-                sf(2.0)
-            } else {
-                sf(5.0) - (sf(3.5) * st.hover_card_ny).round()
-            },
-            if is_pressed { sf(5.0) } else { sf(10.0) },
-            Color4::rgba(
-                0,
-                0,
-                0,
-                if is_pressed {
-                    44
-                } else if st.is_dark_mode {
-                    76
-                } else {
-                    36
-                },
-            ),
+            (sf(skin_m.shadow_dx_factor) * st.hover_card_nx).round(),
+            sf(skin_m.shadow_dy_base) - (sf(skin_m.shadow_dy_factor) * st.hover_card_ny).round(),
+            sf(skin_m.shadow_blur),
+            Color4::rgba(0, 0, 0, skin_m.shadow_alpha),
         );
     }
+    // 绘制顺序严格分层：1) 卡片填充底色 -> 2) 立体光影顶光（仅激活皮肤且在边框内层）-> 3) 单一外框描边
     if is_selected {
         canvas.fill_round_rect(cx, cy, cw, ch, sf(14.0), palette.card_bg);
         canvas.fill_diag_grad_round_rect(
@@ -5696,16 +5691,6 @@ fn draw_standard_card(
             sf(14.0),
             palette.select_top,
             palette.select_bottom,
-        );
-        canvas.stroke_glass_bevel_round_rect(
-            cx,
-            cy,
-            cw,
-            ch,
-            sf(14.0),
-            sf(0.95),
-            palette.glass_top_highlight,
-            palette.select_border,
         );
         let ind_h = ((ch as f32) * 0.58).round() as i32;
         canvas.fill_round_rect(
@@ -5726,46 +5711,16 @@ fn draw_standard_card(
             (palette.card_pinned_top, palette.card_pinned_bottom)
         };
         canvas.fill_diag_grad_round_rect(cx, cy, cw, ch, sf(14.0), pt, pb);
-        canvas.stroke_glass_bevel_round_rect(
-            cx,
-            cy,
-            cw,
-            ch,
-            sf(14.0),
-            sf(if is_pressed { 1.25 } else { 0.85 }),
-            palette.glass_top_highlight,
-            if is_pressed {
-                palette.cobalt.with_alpha(150)
-            } else {
-                palette.card_pinned_border
-            },
-        );
     } else {
         let bg = if is_hovered {
             palette.card_hover_bg
         } else {
             palette.card_bg
         };
-        let bd = if is_pressed {
-            palette.cobalt.with_alpha(150)
-        } else if is_hovered {
-            palette.card_hover_border
-        } else {
-            palette.card_border
-        };
         canvas.fill_round_rect(cx, cy, cw, ch, sf(14.0), bg);
-        canvas.stroke_glass_bevel_round_rect(
-            cx,
-            cy,
-            cw,
-            ch,
-            sf(14.0),
-            sf(if is_pressed { 1.25 } else { 0.80 }),
-            palette.glass_top_highlight,
-            bd,
-        );
     }
-    if is_hovered {
+
+    if is_hovered && skin_m.glare_peak_alpha > 0 {
         canvas.draw_apple_tv_glare_round_rect(
             cx,
             cy,
@@ -5774,15 +5729,43 @@ fn draw_standard_card(
             sf(14.0),
             st.hover_card_nx,
             st.hover_card_ny,
-            if is_pressed {
-                18
-            } else if st.is_dark_mode {
-                42
-            } else {
-                68
-            },
+            skin_m.glare_peak_alpha,
         );
     }
+
+    let (stroke_thick, stroke_bottom) = if is_selected {
+        (sf(0.95), palette.select_border)
+    } else if item.is_pinned {
+        (
+            sf(if is_pressed { 1.25 } else { 0.85 }),
+            if is_pressed {
+                palette.cobalt.with_alpha(150)
+            } else {
+                palette.card_pinned_border
+            },
+        )
+    } else {
+        (
+            sf(if is_pressed { 1.25 } else { 0.80 }),
+            if is_pressed {
+                palette.cobalt.with_alpha(150)
+            } else if is_hovered {
+                palette.card_hover_border
+            } else {
+                palette.card_border
+            },
+        )
+    };
+    canvas.stroke_glass_bevel_round_rect(
+        cx,
+        cy,
+        cw,
+        ch,
+        sf(14.0),
+        stroke_thick,
+        palette.glass_top_highlight,
+        stroke_bottom,
+    );
 
     let mut left_cursor = pad + s(13);
     let content_center_y = if has_chips {
@@ -8868,13 +8851,14 @@ fn layout_and_draw_settings_view(
     }
     y += g0_h + s(16);
 
-    // ── 分组 1：液态玻璃（纯通透折射预览窗 + 三档语义微刻度滑杆）──
+    // ── 分组 1：液态玻璃与皮肤（折射预览窗 + 浓度滑杆 + 原生/立体皮肤丝滑切换器）──
     if visible_block(y, s(18)) {
-        draw_group_header(texts, pad, y, content_w, s(18), "液态玻璃", palette);
+        draw_group_header(texts, pad, y, content_w, s(18), "液态玻璃与皮肤", palette);
     }
     y += s(22);
 
-    let g1_h = s(178);
+    let g1_layout = compute_settings_group1_skin_layout(scale);
+    let g1_h = g1_layout.g1_h;
     if visible_block(y, g1_h) {
         canvas.fill_round_rect(pad, y, content_w, g1_h, sf(14.0), palette.group_fill);
         canvas.stroke_glass_bevel_round_rect(
@@ -8921,7 +8905,7 @@ fn layout_and_draw_settings_view(
             flags: DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
         });
 
-        // 92px 纯粹通透流光折射预览窗（彻底移除底部割裂灰条）
+        // 90px 纯粹通透流光折射预览窗
         let pv_x = pad + s(14);
         let pv_y = y + s(36);
         let pv_w = content_w - s(28);
@@ -8952,7 +8936,7 @@ fn layout_and_draw_settings_view(
             flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE,
         });
 
-        // 底部单轴滑块 + 对称三档语义标注（清透 · 均衡 · 浓雾）
+        // 浓度单轴滑块 + 对称三档语义标注（清透 · 均衡 · 浓雾）
         let sl_row_y = pv_y + pv_h + s(10);
         let gl_sz = s(18);
         let left_gx = pv_x;
@@ -9024,6 +9008,156 @@ fn layout_and_draw_settings_view(
                 color: palette.text_secondary,
                 font_kind: FontKind::Meta,
                 flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            });
+        }
+
+        // 分割线 + 卡片皮肤（原生雅致默认 / 立体光影皮肤，单层胶囊平滑过渡，文案与色块同步插值）
+        let sep_y = y + g1_layout.sep_off;
+        canvas.fill_round_rect(pv_x, sep_y, pv_w, 1, 0.0, palette.divider);
+
+        let row_lbl_y = y + g1_layout.row_lbl_off;
+        texts.push(TextDrawCmd {
+            text: "卡片皮肤".to_string(),
+            rect: RECT {
+                left: pv_x,
+                top: row_lbl_y,
+                right: pv_x + s(110),
+                bottom: row_lbl_y + g1_layout.row_lbl_h,
+            },
+            color: palette.text_primary,
+            font_kind: FontKind::CardTitle,
+            flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        });
+        texts.push(TextDrawCmd {
+            text: format!(
+                "{} · {}",
+                st.store.config.card_skin.title(),
+                st.store.config.card_skin.subtitle()
+            ),
+            rect: RECT {
+                left: pv_x + s(112),
+                top: row_lbl_y,
+                right: pv_x + pv_w,
+                bottom: row_lbl_y + g1_layout.row_lbl_h,
+            },
+            color: palette.text_secondary,
+            font_kind: FontKind::Meta,
+            flags: DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        });
+
+        let seg_x = pv_x;
+        let seg_y = y + g1_layout.seg_off;
+        let seg_w = pv_w;
+        let seg_h = g1_layout.seg_h;
+        canvas.fill_round_rect(seg_x, seg_y, seg_w, seg_h, sf(11.0), palette.track_bg);
+        canvas.stroke_round_rect(
+            seg_x,
+            seg_y,
+            seg_w,
+            seg_h,
+            sf(11.0),
+            sf(0.8),
+            palette.track_border,
+        );
+
+        let pad_in = g1_layout.pad_in;
+        let slot_w = (seg_w - pad_in * 2) / 2;
+        let blend_t = st.skin_blend.clamp(0.0, 1.0);
+        let pill_x = seg_x + pad_in + ((slot_w as f32) * blend_t).round() as i32;
+        let pill_y = seg_y + pad_in;
+        let pill_h = g1_layout.pill_h;
+        canvas.fill_round_rect(
+            pill_x,
+            pill_y,
+            slot_w,
+            pill_h,
+            sf(8.5),
+            palette.active_segment_fill,
+        );
+        if blend_t > 0.05 {
+            canvas.draw_apple_tv_glare_round_rect(
+                pill_x,
+                pill_y,
+                slot_w,
+                pill_h,
+                sf(8.5),
+                0.0,
+                -0.4,
+                (28.0 * blend_t).round() as u8,
+            );
+        }
+        canvas.stroke_round_rect(
+            pill_x,
+            pill_y,
+            slot_w,
+            pill_h,
+            sf(8.5),
+            sf(1.0),
+            palette.cobalt.with_alpha(205),
+        );
+
+        for (slot_idx, skin) in CardSkin::ALL.iter().enumerate() {
+            let sx = seg_x + pad_in + (slot_idx as i32) * slot_w;
+            let slot_focus = if slot_idx == 0 {
+                1.0 - blend_t
+            } else {
+                blend_t
+            };
+            let sw_x = sx + s(10);
+            let sw_y = pill_y + (pill_h - s(22)) / 2;
+            let sw_w = s(28);
+            let sw_h = s(22);
+            canvas.fill_round_rect(sw_x, sw_y, sw_w, sw_h, sf(5.5), palette.card_bg);
+            if *skin == CardSkin::SpatialGlass {
+                canvas.draw_apple_tv_glare_round_rect(sw_x, sw_y, sw_w, sw_h, sf(5.5), 0.0, -0.5, 42);
+            }
+            canvas.stroke_round_rect(
+                sw_x,
+                sw_y,
+                sw_w,
+                sw_h,
+                sf(5.5),
+                sf(0.85),
+                palette.card_border.lerp(palette.cobalt.with_alpha(185), slot_focus),
+            );
+            texts.push(TextDrawCmd {
+                text: skin.title().to_string(),
+                rect: RECT {
+                    left: sw_x + sw_w + s(8),
+                    top: pill_y + g1_layout.title_top_in,
+                    right: sx + slot_w - s(6),
+                    bottom: pill_y + g1_layout.title_bottom_in,
+                },
+                color: palette.text_secondary.lerp(palette.text_primary, slot_focus),
+                font_kind: FontKind::CardTitle,
+                flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+            });
+            texts.push(TextDrawCmd {
+                text: if *skin == CardSkin::NativeApple {
+                    "默认 · 零光影开销"
+                } else {
+                    "克制顶光与柔影"
+                }
+                .to_string(),
+                rect: RECT {
+                    left: sw_x + sw_w + s(8),
+                    top: pill_y + g1_layout.sub_top_in,
+                    right: sx + slot_w - s(6),
+                    bottom: pill_y + g1_layout.sub_bottom_in,
+                },
+                color: palette.text_muted,
+                font_kind: FontKind::Meta,
+                flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+            });
+            st.hit_regions.push(HitRegion {
+                rect: RECT {
+                    left: sx,
+                    top: seg_y,
+                    right: sx + slot_w,
+                    bottom: seg_y + seg_h,
+                },
+                interactive_cursor: true,
+                action: HitAction::SetCardSkin(*skin),
             });
         }
     }
@@ -12471,10 +12605,12 @@ unsafe fn handle_mouse_move(hwnd: HWND, x: i32, y: i32, left_held: bool) {
                     }
                 }
             }
+            let skin_active =
+                st.store.config.card_skin == CardSkin::SpatialGlass || st.skin_blend > 0.005;
             if st.hovered_visible_pos != found_card {
                 st.hovered_visible_pos = found_card;
-                st.hover_card_nx = norm_nx;
-                st.hover_card_ny = norm_ny;
+                st.hover_card_nx = if skin_active { norm_nx } else { 0.0 };
+                st.hover_card_ny = if skin_active { norm_ny } else { 0.0 };
                 changed = true;
                 let m = shadow_margin;
                 dirty_union = match (prev_card_rect, new_card_rect) {
@@ -12498,9 +12634,10 @@ unsafe fn handle_mouse_move(hwnd: HWND, x: i32, y: i32, left_held: bool) {
                     }),
                     _ => None,
                 };
-            } else if found_card.is_some()
-                && ((st.hover_card_nx - norm_nx).abs() > 0.08
-                    || (st.hover_card_ny - norm_ny).abs() > 0.08)
+            } else if skin_active
+                && found_card.is_some()
+                && ((st.hover_card_nx - norm_nx).abs() > 0.12
+                    || (st.hover_card_ny - norm_ny).abs() > 0.12)
             {
                 st.hover_card_nx = norm_nx;
                 st.hover_card_ny = norm_ny;
@@ -13079,6 +13216,29 @@ unsafe fn handle_left_click(hwnd: HWND, x: i32, y: i32, is_double: bool) {
                 }
             });
             apply_dwm_glass_style(hwnd, is_dark, pct);
+            let _ = InvalidateRect(hwnd, null(), FALSE);
+        }
+        HitAction::SetCardSkin(skin) => {
+            let mut need_timer = false;
+            APP_STATE.with(|c| {
+                if let Some(st) = c.borrow_mut().as_mut() {
+                    if st.store.config.card_skin != skin {
+                        st.store.config.card_skin = skin;
+                        st.store.save_config();
+                    }
+                    st.skin_blend_target = skin.blend_target();
+                    if (st.skin_blend_target - st.skin_blend).abs() > 0.004 {
+                        st.skin_anim_last_tick = Some(Instant::now());
+                        need_timer = true;
+                    } else {
+                        st.skin_blend = st.skin_blend_target;
+                        st.skin_anim_last_tick = None;
+                    }
+                }
+            });
+            if need_timer {
+                SetTimer(hwnd, TIMER_ID_SPRING_ANIM, 8, None);
+            }
             let _ = InvalidateRect(hwnd, null(), FALSE);
         }
         HitAction::AdjustBlurConcentration {

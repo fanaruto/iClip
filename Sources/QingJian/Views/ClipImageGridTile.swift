@@ -6,6 +6,7 @@ struct ClipImageGridTile: View {
     let item: ClipItem
     let index: Int
     let isSelected: Bool
+    var cardSkin: CardSkinStyle = .nativeApple
     let onSelect: () -> Void
     var onHoverSelect: (() -> Bool)? = nil
     let onPaste: () -> Void
@@ -20,6 +21,7 @@ struct ClipImageGridTile: View {
     let onDelete: () -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var colorScheme
     @State private var isHovered: Bool = false
     @State private var hoverNorm: CGPoint = .zero
     @State private var tileSize: CGSize = CGSize(width: 124, height: 98)
@@ -31,10 +33,11 @@ struct ClipImageGridTile: View {
     @State private var isDeepPressFlat: Bool = false
 
     var body: some View {
-        let pnx = (isHovered && !isDeepPressFlat && !reduceMotion) ? hoverNorm.x : 0
-        let pny = (isHovered && !isDeepPressFlat && !reduceMotion) ? hoverNorm.y : 0
+        let applySpatialParallax = (cardSkin == .spatialGlass && isHovered && !isDeepPressFlat && !reduceMotion)
+        let pnx = applySpatialParallax ? hoverNorm.x : 0
+        let pny = applySpatialParallax ? hoverNorm.y : 0
         ZStack(alignment: .bottom) {
-            // 缩略图主体（Apple TV 底层视差微放大 + 光标反向纵深位移，零 I/O 缓存读取）
+            // 缩略图主体（原生皮肤保持静止零开销；立体光影皮肤启用克制 1.045x 与 ±2pt 内视差）
             Color.clear
                 .overlay {
                     if let nsImage = ClipboardStore.shared.cachedThumbnail(for: item) ?? asyncThumbnail {
@@ -43,9 +46,10 @@ struct ClipImageGridTile: View {
                             .resizable()
                             .interpolation(.high)
                             .scaledToFill()
-                            .scaleEffect((isHovered && !isDeepPressFlat && !reduceMotion) ? 1.07 : 1.0)
-                            .offset(x: -pnx * 3.0, y: -pny * 2.8)
-                            .animation(.spring(response: 0.2, dampingFraction: 0.88), value: isDeepPressFlat)
+                            .scaleEffect(applySpatialParallax ? 1.045 : 1.0)
+                            .offset(x: -pnx * 2.0, y: -pny * 1.8)
+                            .animation(.spring(response: 0.22, dampingFraction: 0.88), value: isDeepPressFlat)
+                            .animation(.spring(response: 0.36, dampingFraction: 0.86), value: cardSkin)
                             .blur(radius: veilImg ? 11 : 0)
                             .overlay {
                                 if veilImg {
@@ -130,10 +134,20 @@ struct ClipImageGridTile: View {
             .foregroundStyle(Color.white.opacity(0.92))
             .padding(.horizontal, 7)
             .padding(.bottom, 5)
-            .offset(x: pnx * 2.2, y: pny * 2.2)
+            .offset(x: pnx * 1.4, y: pny * 1.4)
             .allowsHitTesting(false)
         }
         .frame(height: 98)
+        .overlay {
+            CardSpatialSpecularLayer(
+                cornerRadius: 13,
+                cardSkin: cardSkin,
+                isHovered: isHovered,
+                isSelected: isSelected,
+                pointerNorm: hoverNorm
+            )
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
         .overlay(alignment: .topLeading) {
             if !isHovered && index < 9 {
                 Text("⌘\(index + 1)")
@@ -221,29 +235,40 @@ struct ClipImageGridTile: View {
                     .transition(.opacity.combined(with: .scale(scale: 0.85)))
             }
         }
-        .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
         .overlay {
-            if isSelected {
-                RoundedRectangle(cornerRadius: 13, style: .continuous)
-                    .strokeBorder(Color.white.opacity(0.88), lineWidth: 3.6)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 13, style: .continuous)
-                            .strokeBorder(Color(nsColor: .controlAccentColor), lineWidth: 2.5)
-                    )
-            } else {
+            let idleStrokeColor: Color = {
+                if item.isPinned {
+                    return Color.orange.opacity(isHovered ? 0.92 : 0.72)
+                }
+                if cardSkin == .spatialGlass && isHovered {
+                    return Color.white.opacity(colorScheme == .dark ? 0.44 : 0.86)
+                }
+                return isHovered ? Color.white.opacity(0.75) : Color.primary.opacity(0.10)
+            }()
+            ZStack {
                 RoundedRectangle(cornerRadius: 13, style: .continuous)
                     .strokeBorder(
-                        item.isPinned
-                            ? Color.orange.opacity(isHovered ? 0.92 : 0.72)
-                            : (isHovered ? Color.white.opacity(0.75) : Color.primary.opacity(0.1)),
-                        lineWidth: item.isPinned ? 1.5 : (isHovered ? 1.2 : 0.75)
+                        idleStrokeColor,
+                        lineWidth: item.isPinned ? 1.5 : (isHovered ? 1.15 : 0.75)
                     )
+                    .opacity(isSelected ? 0 : 1)
+
+                ZStack {
+                    RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        .strokeBorder(Color.white.opacity(0.84), lineWidth: 1.0)
+                        .padding(2.0)
+
+                    RoundedRectangle(cornerRadius: 13, style: .continuous)
+                        .strokeBorder(Color(nsColor: .controlAccentColor), lineWidth: 2.2)
+                }
+                .opacity(isSelected ? 1 : 0)
             }
         }
         .modifier(
             AppleTVPhysicalCardModifier(
                 itemID: item.id,
                 surfaceKind: .imageTile,
+                cardSkin: cardSkin,
                 isHovered: isHovered,
                 isSelected: isSelected,
                 pointerNorm: hoverNorm,
@@ -251,7 +276,7 @@ struct ClipImageGridTile: View {
                     hasOCRButton: !ClipboardStore.shared.minimalModeEnabled && (onExtractOCR != nil || onOpenOCRBigBang != nil),
                     hasTodoButton: !ClipboardStore.shared.minimalModeEnabled && onToggleTodo != nil
                 ),
-                bottomChipHeight: 0,
+                bottomExclusionHeight: 0,
                 onResetHoverFromHide: {
                     if isHovered {
                         isHovered = false
@@ -277,6 +302,7 @@ struct ClipImageGridTile: View {
         )
         .animation(.spring(response: 0.22, dampingFraction: 0.9), value: isHovered)
         .animation(.spring(response: 0.2, dampingFraction: 0.88), value: isSelected)
+        .animation(.spring(response: 0.36, dampingFraction: 0.86), value: cardSkin)
         .contentShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
         .background {
             GeometryReader { geo in
@@ -289,26 +315,35 @@ struct ClipImageGridTile: View {
                     }
             }
         }
+        .onChange(of: cardSkin) { _, newSkin in
+            if newSkin == .nativeApple && hoverNorm != .zero {
+                hoverNorm = .zero
+            }
+        }
         .onContinuousHover(coordinateSpace: .local) { phase in
             switch phase {
             case .active(let loc):
                 let allowed: Bool
-                if let onHoverSelect {
-                    allowed = onHoverSelect()
+                if !isHovered || !isSelected {
+                    if let onHoverSelect {
+                        allowed = onHoverSelect()
+                    } else {
+                        onSelect()
+                        allowed = true
+                    }
                 } else {
-                    onSelect()
                     allowed = true
                 }
                 if allowed {
                     if !isHovered {
                         isHovered = true
                     }
-                    if !isDeepPressFlat {
+                    if cardSkin == .spatialGlass && !isDeepPressFlat {
                         let w = max(1, tileSize.width)
                         let h = max(1, tileSize.height)
                         let nx = max(-1, min(1, ((loc.x / w) - 0.5) * 2.0))
                         let ny = max(-1, min(1, ((loc.y / h) - 0.5) * 2.0))
-                        if abs(nx - hoverNorm.x) >= 0.03 || abs(ny - hoverNorm.y) >= 0.03 {
+                        if abs(nx - hoverNorm.x) >= 0.08 || abs(ny - hoverNorm.y) >= 0.08 {
                             hoverNorm = CGPoint(x: nx, y: ny)
                         }
                     }

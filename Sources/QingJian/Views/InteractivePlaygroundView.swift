@@ -59,8 +59,8 @@ final class InteractivePlaygroundController: ObservableObject {
             id: "drag-and-minimal",
             symbol: "hand.tap.fill",
             tint: Color(red: 0.16, green: 0.56, blue: 0.52),
-            title: "3D 物理卡片与极简开关",
-            detail: "轻扫视差流光、重按 3D Touch 弹出速览，按 ⌘E 随时切换极简纯净模式。"
+            title: "双皮肤质感与极简开关",
+            detail: "默认原生苹果轻盈卡片，支持设置页丝滑切换立体光影皮肤，按 ⌘E 秒切极简纯净模式。"
         )
     ]
 

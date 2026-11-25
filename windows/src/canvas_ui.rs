@@ -704,7 +704,7 @@ impl<'a> PixelCanvas<'a> {
         }
     }
 
-    /// Apple TV 级反向流动视差镜面高光 + 45° 斜向玻璃扫光带（根据鼠标在卡片内的归一化坐标 nx, ny ∈ [-1, 1] 绘制柔焦光泽）
+    /// 克制立体光影顶部径向镜面柔光（根据归一化坐标 nx, ny ∈ [-1, 1] 绘制顶部偏置高光，无斜向塑料条带）
     #[allow(clippy::too_many_arguments)]
     pub fn draw_apple_tv_glare_round_rect(
         &mut self,
@@ -734,20 +734,18 @@ impl<'a> PixelCanvas<'a> {
         let cy = (y as f32) + (h as f32) * 0.5;
         let hx = (w as f32) * 0.5 - r;
         let hy = (h as f32) * 0.5 - r;
-        let gx = (x as f32) + (w as f32) * (0.5 - nxc * 0.38);
-        let gy = (y as f32) + (h as f32) * (0.5 - nyc * 0.38);
         let wf = w as f32;
         let hf = h as f32;
-        let inv_diag = 1.0 / (wf + hf).max(1.0);
-        let band_center = 0.50 - nxc * 0.18;
-        let glare_rad = (wf.max(hf) * 0.85).max(1.0);
+        // 顶部受光偏置（去除 45° 斜向塑料反光带，仅保留柔和径向高光并严格限制在边框内侧）
+        let gx = (x as f32) + wf * (0.5 - nxc * 0.28);
+        let gy = (y as f32) + hf * (0.30 - nyc * 0.22);
+        let glare_rad = (wf.max(hf) * 0.72).max(1.0);
         let inv_rad_sq = 1.0 / (glare_rad * glare_rad);
 
         for py in y0..y1 {
             let pyf = py as f32 + 0.5;
             let dy = (pyf - cy).abs() - hy;
             let gdy_sq = (pyf - gy) * (pyf - gy);
-            let rel_y = pyf - (y as f32);
             for px in x0..x1 {
                 let pxf = px as f32 + 0.5;
                 let dx = (pxf - cx).abs() - hx;
@@ -756,21 +754,12 @@ impl<'a> PixelCanvas<'a> {
                 if cov > 0.0 {
                     let gdx = pxf - gx;
                     let norm_d2 = (gdx * gdx + gdy_sq) * inv_rad_sq;
-                    let radial = if norm_d2 < 1.0 {
+                    let a = if norm_d2 < 1.0 {
                         let falloff = (1.0 - norm_d2) * (1.0 - norm_d2);
-                        (peak_alpha as f32) * falloff
+                        ((peak_alpha as f32) * falloff).min(72.0).round() as u8
                     } else {
-                        0.0
+                        0
                     };
-                    let diag_t = ((pxf - (x as f32)) + rel_y) * inv_diag;
-                    let diag_dist = ((diag_t - band_center) / 0.22).abs();
-                    let sheen = if diag_dist < 1.0 {
-                        let s_f = 1.0 - diag_dist * diag_dist;
-                        (peak_alpha as f32) * 0.48 * s_f * s_f
-                    } else {
-                        0.0
-                    };
-                    let a = (radial + sheen).min(115.0).round() as u8;
                     if a > 0 {
                         self.blend_pixel(px, py, Color4::rgba(255, 255, 255, a), cov);
                     }
@@ -2417,6 +2406,149 @@ pub fn compute_spring_lerp_step(
         (target, true)
     } else {
         (next, false)
+    }
+}
+
+/// 卡片双皮肤光学与阴影参数（skin_blend: 0.0 = 原生雅致零扫光, 1.0 = 立体光影）
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CardSkinVisualMetrics {
+    pub glare_peak_alpha: u8,
+    pub shadow_alpha: u8,
+    pub shadow_blur: f32,
+    pub shadow_dx_factor: f32,
+    pub shadow_dy_base: f32,
+    pub shadow_dy_factor: f32,
+}
+
+pub fn compute_card_skin_visual_metrics(
+    skin_blend: f32,
+    is_dark: bool,
+    is_tile: bool,
+    is_pressed: bool,
+) -> CardSkinVisualMetrics {
+    let t = if skin_blend.is_finite() {
+        skin_blend.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    if is_pressed {
+        let base_alpha = if is_dark { 32.0 } else { 20.0 };
+        let spatial_alpha = if is_dark { 42.0 } else { 28.0 };
+        let glare = ((if is_tile { 14.0 } else { 16.0 }) * t).round() as u8;
+        return CardSkinVisualMetrics {
+            glare_peak_alpha: if t <= 0.005 { 0 } else { glare },
+            shadow_alpha: (base_alpha + (spatial_alpha - base_alpha) * t).round() as u8,
+            shadow_blur: 4.0 + t * 1.0,
+            shadow_dx_factor: 0.0,
+            shadow_dy_base: 1.5 + t * 0.5,
+            shadow_dy_factor: 0.0,
+        };
+    }
+
+    let base_alpha = if is_dark { 46.0 } else { 22.0 };
+    let spatial_alpha = if is_dark { 72.0 } else { 34.0 };
+    let spatial_blur = if is_tile { 10.0 } else { 9.0 };
+    let spatial_dy_base = if is_tile { 5.0 } else { 4.5 };
+    let max_glare = if is_dark {
+        if is_tile {
+            34.0
+        } else {
+            32.0
+        }
+    } else if is_tile {
+        48.0
+    } else {
+        52.0
+    };
+    CardSkinVisualMetrics {
+        glare_peak_alpha: if t <= 0.005 {
+            0
+        } else {
+            (max_glare * t).round() as u8
+        },
+        shadow_alpha: (base_alpha + (spatial_alpha - base_alpha) * t).round() as u8,
+        shadow_blur: 7.0 + (spatial_blur - 7.0) * t,
+        // 离散静态投影：对齐 macOS，避免悬停光标移动高频重算 CPU 软阴影模糊
+        shadow_dx_factor: 0.0,
+        shadow_dy_base: 3.0 + (spatial_dy_base - 3.0) * t,
+        shadow_dy_factor: 0.0,
+    }
+}
+
+/// 图片砖块选中态同心双环几何参数（保证 100%~200% 全 DPI 下外蓝环与内白环严格无缝贴合、圆角同心）
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SelectedTileRingGeometry {
+    pub outer_thickness: f32,
+    pub outer_radius: f32,
+    pub inner_inset_px: i32,
+    pub inner_thickness: f32,
+    pub inner_radius: f32,
+}
+
+pub fn compute_selected_tile_ring_geometry(scale: f32) -> SelectedTileRingGeometry {
+    let s_val = if scale.is_finite() {
+        scale.max(1.0)
+    } else {
+        1.0
+    };
+    let inset_px = (2.0 * s_val).round().max(2.0) as i32;
+    let inset_f = inset_px as f32;
+    let outer_radius = 13.0 * s_val;
+    SelectedTileRingGeometry {
+        outer_thickness: inset_f,
+        outer_radius,
+        inner_inset_px: inset_px,
+        inner_thickness: (1.0 * s_val).max(1.0),
+        inner_radius: (outer_radius - inset_f).max(1.0),
+    }
+}
+
+/// 设置分组 1（液态玻璃与皮肤）在各 DPI 缩放下的严格零重叠纵坐标布局
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SettingsGroup1SkinLayout {
+    pub g1_h: i32,
+    pub slider_lbl_bottom_off: i32,
+    pub sep_off: i32,
+    pub row_lbl_off: i32,
+    pub row_lbl_h: i32,
+    pub seg_off: i32,
+    pub seg_h: i32,
+    pub pad_in: i32,
+    pub pill_h: i32,
+    pub title_top_in: i32,
+    pub title_bottom_in: i32,
+    pub sub_top_in: i32,
+    pub sub_bottom_in: i32,
+}
+
+pub fn compute_settings_group1_skin_layout(scale: f32) -> SettingsGroup1SkinLayout {
+    let s_val = if scale.is_finite() {
+        scale.max(1.0)
+    } else {
+        1.0
+    };
+    let si = |v: f32| -> i32 { (v * s_val).round() as i32 };
+    let seg_h = si(44.0);
+    let pad_in = si(3.0);
+    let pill_h = (seg_h - pad_in * 2).max(4);
+    let title_top_in = si(3.0);
+    let title_bottom_in = (pill_h / 2).max(title_top_in + 1);
+    let sub_top_in = title_bottom_in + 1;
+    let sub_bottom_in = (pill_h - si(2.0)).max(sub_top_in + 1);
+    SettingsGroup1SkinLayout {
+        g1_h: si(266.0),
+        slider_lbl_bottom_off: si(172.0),
+        sep_off: si(178.0),
+        row_lbl_off: si(185.0),
+        row_lbl_h: si(20.0),
+        seg_off: si(210.0),
+        seg_h,
+        pad_in,
+        pill_h,
+        title_top_in,
+        title_bottom_in,
+        sub_top_in,
+        sub_bottom_in,
     }
 }
 

@@ -3360,4 +3360,74 @@ mod tests {
             Some(PinCategory::Invoice)
         );
     }
+
+    #[test]
+    fn test_card_skin_default_persistence_and_visual_metrics() {
+        use crate::canvas_ui::{
+            compute_card_skin_visual_metrics, compute_selected_tile_ring_geometry,
+            compute_settings_group1_skin_layout,
+        };
+        use crate::store::{CardSkin, StoreConfig};
+
+        let def_cfg = StoreConfig::default();
+        assert_eq!(def_cfg.card_skin, CardSkin::NativeApple);
+        assert!((CardSkin::NativeApple.blend_target() - 0.0).abs() < 0.0001);
+        assert!((CardSkin::SpatialGlass.blend_target() - 1.0).abs() < 0.0001);
+
+        // 旧版配置缺失 cardSkin 字段时必须无损兼容默认 NativeApple
+        let legacy: StoreConfig = serde_json::from_str("{}").expect("legacy config");
+        assert_eq!(legacy.card_skin, CardSkin::NativeApple);
+
+        let dir = std::env::temp_dir().join(format!(
+            "iclip-card-skin-test-{}",
+            crate::model::now_unix_secs()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::create_dir_all(&dir);
+        {
+            let mut store = ClipboardStore::new(dir.clone());
+            assert_eq!(store.config.card_skin, CardSkin::NativeApple);
+            store.config.card_skin = CardSkin::SpatialGlass;
+            store.save_config();
+        }
+        let reloaded = ClipboardStore::new(dir.clone());
+        assert_eq!(reloaded.config.card_skin, CardSkin::SpatialGlass);
+        let _ = fs::remove_dir_all(&dir);
+
+        // NativeApple 与 SpatialGlass 均采用零光标耦合投影（不随像素移动重绘阴影），仅 SpatialGlass 呈顶光与轻浮柔影
+        let native_m = compute_card_skin_visual_metrics(0.0, true, false, false);
+        assert_eq!(native_m.glare_peak_alpha, 0);
+        assert_eq!(native_m.shadow_dx_factor, 0.0);
+        assert_eq!(native_m.shadow_dy_factor, 0.0);
+
+        let spatial_light = compute_card_skin_visual_metrics(1.0, false, true, false);
+        assert!(spatial_light.glare_peak_alpha > 0 && spatial_light.glare_peak_alpha <= 52);
+        assert!(spatial_light.shadow_blur > native_m.shadow_blur);
+        assert_eq!(spatial_light.shadow_dx_factor, 0.0);
+        assert_eq!(spatial_light.shadow_dy_factor, 0.0);
+
+        let mid_blend = compute_card_skin_visual_metrics(0.5, false, true, false);
+        assert!(mid_blend.glare_peak_alpha > 0 && mid_blend.glare_peak_alpha < spatial_light.glare_peak_alpha);
+
+        let pressed = compute_card_skin_visual_metrics(1.0, true, false, true);
+        assert_eq!(pressed.shadow_dx_factor, 0.0);
+        assert_eq!(pressed.shadow_dy_factor, 0.0);
+
+        // 100%~200% 全 DPI 下图砖选中同心双环无缝对齐 + 设置分组 1 零矩形重叠
+        for scale in [1.0f32, 1.25, 1.5, 1.75, 2.0] {
+            let ring = compute_selected_tile_ring_geometry(scale);
+            assert!((ring.outer_thickness - (ring.inner_inset_px as f32)).abs() < 0.0001);
+            assert!(
+                (ring.inner_radius - (ring.outer_radius - (ring.inner_inset_px as f32))).abs() < 0.0001
+            );
+
+            let g1 = compute_settings_group1_skin_layout(scale);
+            assert!(g1.slider_lbl_bottom_off < g1.sep_off);
+            assert!(g1.sep_off < g1.row_lbl_off);
+            assert!(g1.row_lbl_off + g1.row_lbl_h <= g1.seg_off);
+            assert!(g1.seg_off + g1.seg_h < g1.g1_h);
+            assert!(g1.title_bottom_in < g1.sub_top_in);
+            assert!(g1.sub_bottom_in < g1.pill_h);
+        }
+    }
 }

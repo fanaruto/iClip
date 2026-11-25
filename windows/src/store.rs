@@ -49,6 +49,42 @@ impl GlassAppearance {
     }
 }
 
+/// 卡片皮肤质感档位（对齐 macOS CardSkinStyle）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CardSkin {
+    /// 默认原生雅致：零动态扫光、单层齐整边框、零多余逐像素采样开销
+    #[default]
+    NativeApple,
+    /// 可选立体光影皮肤：克制柔和顶部聚光与轻盈浮起质感
+    SpatialGlass,
+}
+
+impl CardSkin {
+    pub const ALL: [CardSkin; 2] = [Self::NativeApple, Self::SpatialGlass];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::NativeApple => "原生雅致",
+            Self::SpatialGlass => "立体光影",
+        }
+    }
+
+    pub fn subtitle(self) -> &'static str {
+        match self {
+            Self::NativeApple => "零扫光 · 默认极速",
+            Self::SpatialGlass => "克制顶光 · 立体浮层",
+        }
+    }
+
+    pub fn blend_target(self) -> f32 {
+        match self {
+            Self::NativeApple => 0.0,
+            Self::SpatialGlass => 1.0,
+        }
+    }
+}
+
 fn default_true() -> bool {
     true
 }
@@ -106,6 +142,8 @@ pub struct StoreConfig {
     pub queue_auto_tab: bool,
     #[serde(default)]
     pub glass_appearance: GlassAppearance,
+    #[serde(default)]
+    pub card_skin: CardSkin,
     #[serde(default = "default_blur_pct")]
     pub blur_concentration_pct: u8,
     #[serde(default = "default_max_history")]
@@ -130,8 +168,8 @@ pub const CORE_HIGHLIGHTS_V27: [(&str, &str); 4] = [
         "Ctrl+T 一键转待办；AI 回复一键褪去 Markdown 符号，表格直粘 Excel 分列。",
     ),
     (
-        "自由流转与极简开关",
-        "Tab 秒切分类，方向键二维选图，按 Ctrl+E 随时切回极简纯净模式。",
+        "双皮肤质感与极简开关",
+        "支持原生雅致与立体光影丝滑切换，Tab 与方向键选卡，按 Ctrl+E 随时切纯净。",
     ),
 ];
 
@@ -161,6 +199,7 @@ impl Default for StoreConfig {
             ],
             queue_auto_tab: false,
             glass_appearance: GlassAppearance::Tinted,
+            card_skin: CardSkin::NativeApple,
             blur_concentration_pct: 38,
             max_history_count: 200,
             single_click_paste: false,

@@ -4612,4 +4612,215 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertNil(nonPermFailure.blockedChatAppName)
         XCTAssertFalse(nonPermFailure.needsRedrop)
     }
+
+    @MainActor
+    func testCardSkinDefaultsPersistenceAndOptimizedSpatialBounds() throws {
+        // 0. 默认值与持久化解析（未知/缺失键默认回归原生雅致，且不污染宿主的 UserDefaults）
+        XCTAssertEqual(ClipboardStore.resolveCardSkin(from: nil), .nativeApple)
+        XCTAssertEqual(ClipboardStore.resolveCardSkin(from: "legacy_unknown"), .nativeApple)
+        XCTAssertEqual(ClipboardStore.resolveCardSkin(from: CardSkinStyle.spatialGlass.rawValue), .spatialGlass)
+        XCTAssertEqual(CardSkinStyle.nativeApple.title, "原生雅致")
+        XCTAssertEqual(CardSkinStyle.spatialGlass.title, "立体光影")
+
+        let encoded = try JSONEncoder().encode(CardSkinStyle.spatialGlass)
+        let decoded = try JSONDecoder().decode(CardSkinStyle.self, from: encoded)
+        XCTAssertEqual(decoded, .spatialGlass)
+
+        let hadSavedKey = UserDefaults.standard.object(forKey: "cardSkinStyle")
+        let store = ClipboardStore.shared
+        let prevSkin = store.cardSkin
+        defer {
+            store.cardSkin = prevSkin
+            if let hadSavedKey {
+                UserDefaults.standard.set(hadSavedKey, forKey: "cardSkinStyle")
+            } else {
+                UserDefaults.standard.removeObject(forKey: "cardSkinStyle")
+            }
+        }
+        store.cardSkin = .spatialGlass
+        XCTAssertEqual(UserDefaults.standard.string(forKey: "cardSkinStyle"), CardSkinStyle.spatialGlass.rawValue)
+        XCTAssertEqual(
+            ClipboardStore.resolveCardSkin(from: UserDefaults.standard.string(forKey: "cardSkinStyle")),
+            .spatialGlass
+        )
+
+        // 1. 原生雅致皮肤：严格零 3D 倾角、零高光扫光、零悬停阴影重写
+        let nativeRowTilt = PhysicalCardSurfaceKind.standardRow.effectiveTilt(
+            skin: .nativeApple,
+            isHovered: true,
+            isScrollDamped: false,
+            pressStage: 0,
+            pressureProgress: 0,
+            reduceMotion: false,
+            norm: CGPoint(x: 1, y: -1)
+        )
+        XCTAssertEqual(nativeRowTilt.angle, 0, accuracy: 0.0001)
+        XCTAssertEqual(
+            PhysicalCardSurfaceKind.specularPeakOpacity(
+                skin: .nativeApple,
+                isHovered: true,
+                isSelected: false,
+                colorScheme: .light,
+                reduceMotion: false
+            ),
+            0,
+            accuracy: 0.0001
+        )
+        let nativeHoverShadow = PhysicalCardSurfaceKind.standardRow.shadowSpec(
+            skin: .nativeApple,
+            isHovered: true,
+            isSelected: false,
+            colorScheme: .light
+        )
+        XCTAssertEqual(nativeHoverShadow.opacity, 0, accuracy: 0.0001)
+
+        // 2. 立体光影皮肤：精确锁定轴向 micro-tilt（行卡 0.85°/1.15°, 图砖 2.6°/3.0°），按压一阶阻尼、二阶归平、浅色不用蓝晕
+        let rowPurePitch = PhysicalCardSurfaceKind.standardRow.effectiveTilt(
+            skin: .spatialGlass,
+            isHovered: true,
+            isScrollDamped: false,
+            pressStage: 0,
+            pressureProgress: 0,
+            reduceMotion: false,
+            norm: CGPoint(x: 0, y: -1)
+        )
+        XCTAssertEqual(rowPurePitch.angle, 0.85, accuracy: 0.0001)
+
+        let rowPureYaw = PhysicalCardSurfaceKind.standardRow.effectiveTilt(
+            skin: .spatialGlass,
+            isHovered: true,
+            isScrollDamped: false,
+            pressStage: 0,
+            pressureProgress: 0,
+            reduceMotion: false,
+            norm: CGPoint(x: 1, y: 0)
+        )
+        XCTAssertEqual(rowPureYaw.angle, 1.15, accuracy: 0.0001)
+
+        let spatialRowTilt = PhysicalCardSurfaceKind.standardRow.effectiveTilt(
+            skin: .spatialGlass,
+            isHovered: true,
+            isScrollDamped: false,
+            pressStage: 0,
+            pressureProgress: 0,
+            reduceMotion: false,
+            norm: CGPoint(x: 1, y: -1)
+        )
+        XCTAssertEqual(spatialRowTilt.angle, hypot(0.85, 1.15), accuracy: 0.0001)
+
+        let tilePurePitch = PhysicalCardSurfaceKind.imageTile.effectiveTilt(
+            skin: .spatialGlass,
+            isHovered: true,
+            isScrollDamped: false,
+            pressStage: 0,
+            pressureProgress: 0,
+            reduceMotion: false,
+            norm: CGPoint(x: 0, y: -1)
+        )
+        XCTAssertEqual(tilePurePitch.angle, 2.6, accuracy: 0.0001)
+
+        let tilePureYaw = PhysicalCardSurfaceKind.imageTile.effectiveTilt(
+            skin: .spatialGlass,
+            isHovered: true,
+            isScrollDamped: false,
+            pressStage: 0,
+            pressureProgress: 0,
+            reduceMotion: false,
+            norm: CGPoint(x: 1, y: 0)
+        )
+        XCTAssertEqual(tilePureYaw.angle, 3.0, accuracy: 0.0001)
+
+        let spatialTileTilt = PhysicalCardSurfaceKind.imageTile.effectiveTilt(
+            skin: .spatialGlass,
+            isHovered: true,
+            isScrollDamped: false,
+            pressStage: 0,
+            pressureProgress: 0,
+            reduceMotion: false,
+            norm: CGPoint(x: 1, y: -1)
+        )
+        XCTAssertEqual(spatialTileTilt.angle, hypot(2.6, 3.0), accuracy: 0.0001)
+
+        let stage1Damped = PhysicalCardSurfaceKind.imageTile.effectiveTilt(
+            skin: .spatialGlass,
+            isHovered: true,
+            isScrollDamped: false,
+            pressStage: 1,
+            pressureProgress: 0.8,
+            reduceMotion: false,
+            norm: CGPoint(x: 1, y: -1)
+        )
+        XCTAssertLessThan(stage1Damped.angle, spatialTileTilt.angle)
+
+        let stage2Flat = PhysicalCardSurfaceKind.imageTile.effectiveTilt(
+            skin: .spatialGlass,
+            isHovered: true,
+            isScrollDamped: false,
+            pressStage: 2,
+            pressureProgress: 1.0,
+            reduceMotion: false,
+            norm: CGPoint(x: 1, y: -1)
+        )
+        XCTAssertEqual(stage2Flat.angle, 0, accuracy: 0.0001)
+
+        let reduceMotionTilt = PhysicalCardSurfaceKind.standardRow.effectiveTilt(
+            skin: .spatialGlass,
+            isHovered: true,
+            isScrollDamped: false,
+            pressStage: 0,
+            pressureProgress: 0,
+            reduceMotion: true,
+            norm: CGPoint(x: 1, y: -1)
+        )
+        XCTAssertEqual(reduceMotionTilt.angle, 0, accuracy: 0.0001)
+
+        let spatialHoverShadowLight = PhysicalCardSurfaceKind.standardRow.shadowSpec(
+            skin: .spatialGlass,
+            isHovered: true,
+            isSelected: false,
+            colorScheme: .light
+        )
+        XCTAssertFalse(spatialHoverShadowLight.usesAccentColor)
+        XCTAssertGreaterThan(spatialHoverShadowLight.opacity, 0)
+
+        // 3. 图片砖块选中态投影：原生深色保持 0.32/r6 基线，浅色全皮肤禁用蓝晕强调色
+        let nativeTileSelDark = PhysicalCardSurfaceKind.imageTile.shadowSpec(
+            skin: .nativeApple,
+            isHovered: false,
+            isSelected: true,
+            colorScheme: .dark
+        )
+        XCTAssertEqual(nativeTileSelDark.opacity, 0.32, accuracy: 0.0001)
+        XCTAssertEqual(nativeTileSelDark.radius, 6, accuracy: 0.0001)
+        XCTAssertTrue(nativeTileSelDark.usesAccentColor)
+
+        let nativeTileSelLight = PhysicalCardSurfaceKind.imageTile.shadowSpec(
+            skin: .nativeApple,
+            isHovered: false,
+            isSelected: true,
+            colorScheme: .light
+        )
+        XCTAssertFalse(nativeTileSelLight.usesAccentColor)
+        XCTAssertEqual(nativeTileSelLight.opacity, 0.16, accuracy: 0.0001)
+
+        let spatialTileSelLight = PhysicalCardSurfaceKind.imageTile.shadowSpec(
+            skin: .spatialGlass,
+            isHovered: true,
+            isSelected: true,
+            colorScheme: .light
+        )
+        XCTAssertFalse(spatialTileSelLight.usesAccentColor)
+        XCTAssertEqual(spatialTileSelLight.opacity, 0.18, accuracy: 0.0001)
+
+        XCTAssertGreaterThan(
+            PhysicalCardSurfaceKind.specularPeakOpacity(
+                skin: .spatialGlass,
+                isHovered: true,
+                isSelected: false,
+                colorScheme: .light,
+                reduceMotion: false
+            ),
+            0.15
+        )
+    }
 }

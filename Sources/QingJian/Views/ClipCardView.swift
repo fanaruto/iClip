@@ -31,6 +31,7 @@ struct ClipCardView: View {
     let surfaceStyle: PanelSurfaceStyle
     let liquidGlassAppearance: LiquidGlassAppearance
     let borderlessPanel: Bool
+    var cardSkin: CardSkinStyle = .nativeApple
     let onSelect: () -> Void
     var onHoverSelect: (() -> Bool)? = nil
     let onPaste: (Bool) -> Void
@@ -277,13 +278,26 @@ struct ClipCardView: View {
         }
         .padding(.horizontal, hasLeadingVisual ? 12 : 14)
         .padding(.vertical, hasLeadingVisual ? 10 : 11)
-        .background(cardBackground)
-        .overlay(cardBorder)
+        .background(
+            ZStack {
+                cardBackground
+                CardSpatialSpecularLayer(
+                    cornerRadius: 14,
+                    cardSkin: cardSkin,
+                    isHovered: isHovered,
+                    isSelected: isSelected,
+                    pointerNorm: .zero
+                )
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        )
+        .overlay(cardBorder.allowsHitTesting(false))
         .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .modifier(
             AppleTVPhysicalCardModifier(
                 itemID: item.id,
                 surfaceKind: .standardRow,
+                cardSkin: cardSkin,
                 isHovered: isHovered,
                 isSelected: isSelected,
                 trailingActionWidth: hoverActionBarEstimateWidth,
@@ -291,7 +305,7 @@ struct ClipCardView: View {
                     hasTodoCheckbox: showsTodoCheckbox,
                     hasInteractiveLeadingLink: hasInteractiveLeadingLink
                 ),
-                bottomChipHeight: !semantic.actions.isEmpty ? 28 : 0,
+                bottomExclusionHeight: !semantic.actions.isEmpty ? 28 : 0,
                 onHoverEnterSelect: {
                     let allowed = onHoverSelect?() ?? {
                         onSelect()
@@ -315,6 +329,7 @@ struct ClipCardView: View {
         )
         .animation(.spring(response: 0.22, dampingFraction: 0.86), value: isHovered)
         .animation(.spring(response: 0.2, dampingFraction: 0.86), value: isSelected)
+        .animation(.spring(response: 0.36, dampingFraction: 0.86), value: cardSkin)
         .zIndex(isHovered ? 30 : (isSelected ? 5 : 0))
         .onDrag {
             ClipboardStore.shared.makeDragItemProvider(for: item)
@@ -614,24 +629,13 @@ struct ClipCardView: View {
         }
     }
 
-    // MARK: - 卡片背景与边框
+    // MARK: - 卡片背景与唯一连续边框（恒定视图身份，零双边与零闪框）
 
-    @ViewBuilder
     private var cardBackground: some View {
-        if isSelected {
+        ZStack {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: [
-                            Color(nsColor: .controlAccentColor),
-                            Color(nsColor: .controlAccentColor).opacity(0.88)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-                .shadow(color: Color(nsColor: .controlAccentColor).opacity(0.28), radius: 6, y: 2)
-        } else if item.isPinned {
+                .fill(glassPalette.clipCardFill(isHovered: isHovered))
+
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(
                     LinearGradient(
@@ -647,32 +651,49 @@ struct ClipCardView: View {
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
                         .fill(glassPalette.pinnedCardBackdrop(isHovered: isHovered))
                 )
-        } else {
+                .opacity(!isSelected && item.isPinned ? 1 : 0)
+
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(glassPalette.clipCardFill(isHovered: isHovered))
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            Color(nsColor: .controlAccentColor),
+                            Color(nsColor: .controlAccentColor).opacity(0.88)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .opacity(isSelected ? 1 : 0)
         }
     }
 
-    @ViewBuilder
     private var cardBorder: some View {
-        if borderlessPanel && !item.isPinned {
-            if surfaceStyle == .liquidGlass {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .strokeBorder(glassPalette.clipCardStroke(isHovered: isHovered), lineWidth: 0.65)
-            } else {
-                EmptyView()
+        let showStroke = !borderlessPanel || item.isPinned || surfaceStyle == .liquidGlass || isSelected
+        let strokeWidth: CGFloat = (!isSelected && item.isPinned) ? 1.0 : (isSelected ? 0.75 : (borderlessPanel ? 0.65 : 0.75))
+        let baseStrokeColor: Color = {
+            if !showStroke { return .clear }
+            if isSelected { return Color.white.opacity(0.32) }
+            if item.isPinned { return Color.orange.opacity(isHovered ? 0.62 : 0.45) }
+            return glassPalette.clipCardStroke(isHovered: isHovered)
+        }()
+        let topStrokeColor: Color = {
+            if !showStroke { return .clear }
+            if cardSkin == .spatialGlass && isHovered && !isSelected {
+                return Color.white.opacity(colorScheme == .dark ? 0.36 : 0.96)
             }
-        } else {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(
-                    isSelected
-                        ? Color.white.opacity(0.32)
-                        : (item.isPinned
-                            ? Color.orange.opacity(isHovered ? 0.62 : 0.45)
-                            : glassPalette.clipCardStroke(isHovered: isHovered)),
-                    lineWidth: (!isSelected && item.isPinned) ? 1.0 : 0.75
-                )
-        }
+            return baseStrokeColor
+        }()
+
+        return RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .strokeBorder(
+                LinearGradient(
+                    colors: [topStrokeColor, baseStrokeColor],
+                    startPoint: .top,
+                    endPoint: .bottom
+                ),
+                lineWidth: showStroke ? strokeWidth : 0
+            )
     }
 
     // MARK: - 右键菜单

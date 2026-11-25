@@ -1079,3 +1079,168 @@ private struct LiquidGlassScenicBackdrop: View {
         }
     }
 }
+
+/// 卡片皮肤选择器（原生雅致默认轻量 vs 轻量化立体光影：常驻唯一选框 120Hz 滑移过渡，零边框割裂）
+struct CardSkinStylePickerCard: View {
+    @Binding var cardSkin: CardSkinStyle
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var hoveredSkin: CardSkinStyle? = nil
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("卡片皮肤")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.primary)
+                Spacer()
+                Text(cardSkin.badgeTitle)
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .padding(.horizontal, 7.5)
+                    .padding(.vertical, 2.5)
+                    .background(Capsule().fill(Color.accentColor.opacity(colorScheme == .dark ? 0.18 : 0.12)))
+                    .animation(.easeInOut(duration: 0.2), value: cardSkin)
+            }
+
+            HStack(spacing: 10) {
+                ForEach(CardSkinStyle.allCases) { skin in
+                    let isSelected = (cardSkin == skin)
+                    let isItemHovered = (hoveredSkin == skin)
+                    Button {
+                        guard cardSkin != skin else { return }
+                        withAnimation(.spring(response: 0.36, dampingFraction: 0.86)) {
+                            cardSkin = skin
+                        }
+                        TactileFeedbackEngine.shared.performNavigationStepHaptic()
+                    } label: {
+                        skinOptionTile(skin: skin, isSelected: isSelected, isItemHovered: isItemHovered)
+                    }
+                    .buttonStyle(.plain)
+                    .onHover { hovering in
+                        withAnimation(.easeOut(duration: 0.14)) {
+                            hoveredSkin = hovering ? skin : (hoveredSkin == skin ? nil : hoveredSkin)
+                        }
+                    }
+                }
+            }
+            .overlay(alignment: .topLeading) {
+                GeometryReader { geo in
+                    let tileW = max(0, (geo.size.width - 10) * 0.5)
+                    RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        .strokeBorder(Color.accentColor, lineWidth: 1.5)
+                        .frame(width: tileW, height: geo.size.height)
+                        .offset(x: cardSkin == .nativeApple ? 0 : tileW + 10)
+                        .animation(.spring(response: 0.36, dampingFraction: 0.86), value: cardSkin)
+                }
+                .allowsHitTesting(false)
+            }
+        }
+    }
+
+    private func skinOptionTile(skin: CardSkinStyle, isSelected: Bool, isItemHovered: Bool) -> some View {
+        let previewBaseFill = colorScheme == .dark
+            ? Color.white.opacity(isSelected ? 0.10 : (isItemHovered ? 0.08 : 0.05))
+            : Color.white.opacity(isSelected ? 0.88 : (isItemHovered ? 0.72 : 0.56))
+        let hairlineColor = colorScheme == .dark
+            ? Color.white.opacity(isItemHovered ? 0.20 : 0.11)
+            : Color.black.opacity(isItemHovered ? 0.11 : 0.06)
+
+        return VStack(alignment: .leading, spacing: 7) {
+            miniCardPreview(skin: skin)
+
+            VStack(alignment: .leading, spacing: 1.5) {
+                HStack(spacing: 4) {
+                    Text(skin.title)
+                        .font(.system(size: 12.2, weight: .semibold))
+                        .foregroundStyle(.primary)
+                    Spacer(minLength: 0)
+                    if isSelected {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(Color.accentColor)
+                            .transition(.scale.combined(with: .opacity))
+                    }
+                }
+                Text(skin.subtitle)
+                    .font(.system(size: 10.2))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+        .padding(9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .fill(previewBaseFill)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .strokeBorder(hairlineColor, lineWidth: 0.7)
+                .opacity(isSelected ? 0 : 1)
+                .animation(.spring(response: 0.36, dampingFraction: 0.86), value: isSelected)
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+    }
+
+    private func miniCardPreview(skin: CardSkinStyle) -> some View {
+        let cardFill = colorScheme == .dark
+            ? Color(red: 0.15, green: 0.16, blue: 0.19)
+            : Color.white.opacity(0.95)
+        let cardStroke = colorScheme == .dark
+            ? Color.white.opacity(skin == .spatialGlass ? 0.24 : 0.12)
+            : Color.black.opacity(skin == .spatialGlass ? 0.06 : 0.08)
+
+        return ZStack {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(colorScheme == .dark ? Color.black.opacity(0.24) : Color(red: 0.91, green: 0.93, blue: 0.97))
+
+            VStack(alignment: .leading, spacing: 4) {
+                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                    .fill(Color.primary.opacity(0.22))
+                    .frame(width: 68, height: 5.5)
+                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                    .fill(Color.secondary.opacity(0.25))
+                    .frame(width: 44, height: 4.5)
+            }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 7)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(cardFill)
+            )
+            .overlay {
+                if skin == .spatialGlass {
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(
+                            RadialGradient(
+                                colors: [Color.white.opacity(colorScheme == .dark ? 0.15 : 0.45), .clear],
+                                center: UnitPoint(x: 0.35, y: 0.15),
+                                startRadius: 1,
+                                endRadius: 56
+                            )
+                        )
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .strokeBorder(cardStroke, lineWidth: 0.7)
+            )
+            .shadow(
+                color: Color.black.opacity(skin == .spatialGlass ? (colorScheme == .dark ? 0.36 : 0.13) : (colorScheme == .dark ? 0.18 : 0.05)),
+                radius: skin == .spatialGlass ? 5 : 2,
+                y: skin == .spatialGlass ? 2.5 : 1
+            )
+            .rotation3DEffect(
+                .degrees(skin == .spatialGlass ? 4.2 : 0),
+                axis: (x: 0.35, y: -0.9, z: 0),
+                perspective: 0.78
+            )
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+        }
+        .frame(height: 52)
+    }
+}

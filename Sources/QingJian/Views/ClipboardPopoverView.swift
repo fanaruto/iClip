@@ -1391,6 +1391,7 @@ struct ClipboardPopoverView: View {
                                         surfaceStyle: store.surfaceStyle,
                                         liquidGlassAppearance: store.liquidGlassAppearance,
                                         borderlessPanel: store.borderlessPanel,
+                                        cardSkin: store.cardSkin,
                                         onSelect: {
                                             nav.selectExplicitly(index)
                                         },
@@ -1482,6 +1483,7 @@ struct ClipboardPopoverView: View {
                                                 item: entry.item,
                                                 index: entry.index,
                                                 isSelected: entry.index == nav.selectedIndex,
+                                                cardSkin: store.cardSkin,
                                                 onSelect: {
                                                     nav.selectExplicitly(entry.index)
                                                 },
@@ -1741,9 +1743,11 @@ struct ClipboardPopoverView: View {
                     }
                 }
 
-                // 苹果官方风格液态玻璃背景模糊浓度（单一滑块 + 实时实景折射预览）
-                settingsGroup(title: "液态玻璃") {
+                // 苹果官方风格液态玻璃背景模糊浓度与轻量化双卡片皮肤切换
+                settingsGroup(title: "液态玻璃与皮肤") {
                     LiquidGlassBlurStyleCard(blurConcentration: $store.liquidGlassMaskOpacity)
+                    Divider().opacity(0.35)
+                    CardSkinStylePickerCard(cardSkin: $store.cardSkin)
                 }
 
                 // 模式与软件更新

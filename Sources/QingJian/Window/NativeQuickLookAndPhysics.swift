@@ -473,46 +473,46 @@ final class SystemQuickLookController: NSObject, QLPreviewPanelDataSource, QLPre
     }
 }
 
-// MARK: - 2. Apple TV 3D 视差卡片 + 触控板原厂一段/二段式 Force Touch 物理弹簧引擎
+// MARK: - 2. 轻量化双皮肤物理弹簧引擎（原生雅致默认极速 / 立体光影克制 3D 视差）
 
 enum PhysicalCardSurfaceKind {
-    /// 标准文本/链接/文件行卡片（显性 3D 浮起 1.018 + 俯仰 4.8° / 偏航 3.2°，一段加压至满蓄力膨起至 1.042）
+    /// 标准文本/链接/文件行卡片（克制 0.85°/1.15° 光学微倾、1.012x 悬停、0.986x 轻按、1.022x 蓄力）
     case standardRow
-    /// 3 列正方形图片海报砖块（Apple TV 原厂级立体浮起 1.045 + 俯仰/偏航 8.5°，一段加压蓄力至 1.078）
+    /// 3 列正方形图片砖块（克制 2.6°/3.0° 光学悬浮、1.028x 悬停、0.972x 轻按、1.044x 蓄力）
     case imageTile
 
     var maxPitchDegrees: Double {
         switch self {
-        case .standardRow: return 4.8
-        case .imageTile:   return 8.5
+        case .standardRow: return 0.85
+        case .imageTile:   return 2.6
         }
     }
 
     var maxYawDegrees: Double {
         switch self {
-        case .standardRow: return 3.2
-        case .imageTile:   return 8.5
+        case .standardRow: return 1.15
+        case .imageTile:   return 3.0
         }
     }
 
     var hoverLiftScale: CGFloat {
         switch self {
-        case .standardRow: return 1.018
-        case .imageTile:   return 1.045
+        case .standardRow: return 1.012
+        case .imageTile:   return 1.028
         }
     }
 
     var pressSinkScale: CGFloat {
         switch self {
-        case .standardRow: return 0.976
-        case .imageTile:   return 0.952
+        case .standardRow: return 0.986
+        case .imageTile:   return 0.972
         }
     }
 
     var peekChargeScale: CGFloat {
         switch self {
-        case .standardRow: return 1.042
-        case .imageTile:   return 1.078
+        case .standardRow: return 1.022
+        case .imageTile:   return 1.044
         }
     }
 
@@ -522,16 +522,141 @@ enum PhysicalCardSurfaceKind {
         case .imageTile:   return 13
         }
     }
+
+    /// 计算当前皮肤下的 3D 合成倾角与方向轴（原生皮肤严格归零，Zero GPU Tilt）
+    func effectiveTilt(
+        skin: CardSkinStyle,
+        isHovered: Bool,
+        isScrollDamped: Bool,
+        pressStage: Int,
+        pressureProgress: CGFloat,
+        reduceMotion: Bool,
+        norm: CGPoint
+    ) -> (angle: Double, axisX: CGFloat, axisY: CGFloat) {
+        guard skin == .spatialGlass,
+              !reduceMotion,
+              isHovered,
+              !isScrollDamped,
+              (pressStage == 0 || pressStage == 1) else {
+            return (0, 1, 0)
+        }
+        let damp = pressStage == 1 ? max(0.35, 1.0 - Double(pressureProgress) * 0.65) : 1.0
+        let pitch = Double(-norm.y) * maxPitchDegrees * damp
+        let yaw = Double(norm.x) * maxYawDegrees * damp
+        let mag = hypot(pitch, yaw)
+        guard mag > 0.03 else { return (0, 1, 0) }
+        return (mag, CGFloat(pitch / mag), CGFloat(yaw / mag))
+    }
+
+    /// 卡片顶部镜面柔光峰值不透明度（原生皮肤为 0；立体光影皮肤悬停呈现克制高光，无斜条纹）
+    static func specularPeakOpacity(
+        skin: CardSkinStyle,
+        isHovered: Bool,
+        isSelected: Bool,
+        colorScheme: ColorScheme,
+        reduceMotion: Bool
+    ) -> Double {
+        guard skin == .spatialGlass, isHovered else { return 0 }
+        let base = colorScheme == .dark
+            ? (isSelected ? 0.16 : 0.13)
+            : (isSelected ? 0.18 : 0.22)
+        return reduceMotion ? base * 0.55 : base
+    }
+
+    /// 离散稳态 GPU 投影规格（不依赖逐帧光标坐标，彻底杜绝滑卡重绘阴影高斯模糊）
+    func shadowSpec(
+        skin: CardSkinStyle,
+        isHovered: Bool,
+        isSelected: Bool,
+        colorScheme: ColorScheme
+    ) -> (opacity: Double, radius: CGFloat, y: CGFloat, usesAccentColor: Bool) {
+        switch self {
+        case .standardRow:
+            if isSelected {
+                return (0.28, 6, 2, true)
+            }
+            if skin == .spatialGlass && isHovered {
+                return (colorScheme == .dark ? 0.28 : 0.12, 9, 3.5, false)
+            }
+            return (0, 0, 0, false)
+
+        case .imageTile:
+            if isSelected {
+                if skin == .nativeApple {
+                    return colorScheme == .dark
+                        ? (0.32, 6, 2, true)
+                        : (0.16, 6, 2, false)
+                }
+                let r: CGFloat = isHovered ? 10 : 8
+                let y: CGFloat = isHovered ? 3.5 : 2
+                return colorScheme == .dark
+                    ? (0.38, r, y, true)
+                    : (0.18, r, y, false)
+            }
+            if isHovered {
+                return (
+                    skin == .spatialGlass ? (colorScheme == .dark ? 0.34 : 0.18) : 0.18,
+                    skin == .spatialGlass ? 11 : 9,
+                    4,
+                    false
+                )
+            }
+            return (0.05, 4, 2, false)
+        }
+    }
+}
+
+/// 严格位于圆角裁切内部、唯一边框之下的轻量化顶部径向镜面高光（原生皮肤透明归零，零离屏纹理与零边框压叠）
+struct CardSpatialSpecularLayer: View {
+    let cornerRadius: CGFloat
+    let cardSkin: CardSkinStyle
+    let isHovered: Bool
+    let isSelected: Bool
+    let pointerNorm: CGPoint
+
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        let peak = PhysicalCardSurfaceKind.specularPeakOpacity(
+            skin: cardSkin,
+            isHovered: isHovered,
+            isSelected: isSelected,
+            colorScheme: colorScheme,
+            reduceMotion: reduceMotion
+        )
+        let nx = (cardSkin == .spatialGlass && isHovered && !reduceMotion) ? pointerNorm.x : 0
+        let ny = (cardSkin == .spatialGlass && isHovered && !reduceMotion) ? pointerNorm.y : 0
+
+        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            .fill(
+                RadialGradient(
+                    colors: [
+                        Color.white,
+                        Color.white.opacity(0.28),
+                        Color.clear
+                    ],
+                    center: UnitPoint(x: 0.5 - nx * 0.24, y: max(0.06, 0.22 - ny * 0.16)),
+                    startRadius: 2,
+                    endRadius: cornerRadius <= 13 ? 115 : 210
+                )
+            )
+            .opacity(peak)
+            .animation(.easeOut(duration: 0.18), value: isHovered)
+            .animation(.spring(response: 0.36, dampingFraction: 0.86), value: cardSkin)
+            .allowsHitTesting(false)
+    }
 }
 
 /// 完全穿透命中测试（`hitTest -> nil`，绝不拦截 SwiftUI 点击、右键菜单、`.onDrag` 拖拽或列表滚动）的原生探针：
 /// - 向 `SystemQuickLookController` 注册弱引用视图供滚动后精确屏幕坐标换算；
-/// - 配置 `NSPressureConfiguration(.primaryDeepClick)` 解锁触控板一段轻按 + `stageTransition` 连续蓄力 + 二段深按（Stage 2）弹出！
+/// - 配置 `NSPressureConfiguration(.primaryDeepClick)` 解锁触控板一段轻按与二段 Force Touch 深按弹出！
 private struct ForceTouchWindowProbe: NSViewRepresentable {
     let itemID: UUID
     let surfaceKind: PhysicalCardSurfaceKind
+    let cardSkin: CardSkinStyle
     let isHovered: Bool
-    let trailingExclusionWidth: CGFloat
+    let trailingActionWidth: CGFloat
     let leadingExclusionWidth: CGFloat
     let bottomExclusionHeight: CGFloat
     let onPressStateChange: (Int, CGFloat) -> Void
@@ -549,7 +674,8 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
         let oldID = context.coordinator.itemID
         context.coordinator.itemID = itemID
         context.coordinator.surfaceKind = surfaceKind
-        context.coordinator.trailingExclusionWidth = trailingExclusionWidth
+        context.coordinator.cardSkin = cardSkin
+        context.coordinator.trailingExclusionWidth = trailingActionWidth
         context.coordinator.leadingExclusionWidth = leadingExclusionWidth
         context.coordinator.bottomExclusionHeight = bottomExclusionHeight
         context.coordinator.onPressStateChange = onPressStateChange
@@ -569,7 +695,8 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
         Coordinator(
             itemID: itemID,
             surfaceKind: surfaceKind,
-            trailingExclusionWidth: trailingExclusionWidth,
+            cardSkin: cardSkin,
+            trailingExclusionWidth: trailingActionWidth,
             leadingExclusionWidth: leadingExclusionWidth,
             bottomExclusionHeight: bottomExclusionHeight,
             onPressStateChange: onPressStateChange,
@@ -582,6 +709,7 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
     final class Coordinator {
         var itemID: UUID
         var surfaceKind: PhysicalCardSurfaceKind
+        var cardSkin: CardSkinStyle
         var trailingExclusionWidth: CGFloat
         var leadingExclusionWidth: CGFloat
         var bottomExclusionHeight: CGFloat
@@ -593,6 +721,7 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
         init(
             itemID: UUID,
             surfaceKind: PhysicalCardSurfaceKind,
+            cardSkin: CardSkinStyle,
             trailingExclusionWidth: CGFloat,
             leadingExclusionWidth: CGFloat,
             bottomExclusionHeight: CGFloat,
@@ -603,6 +732,7 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
         ) {
             self.itemID = itemID
             self.surfaceKind = surfaceKind
+            self.cardSkin = cardSkin
             self.trailingExclusionWidth = trailingExclusionWidth
             self.leadingExclusionWidth = leadingExclusionWidth
             self.bottomExclusionHeight = bottomExclusionHeight
@@ -745,11 +875,12 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
                     triggerDeepPop()
                 } else if event.stage == 1 {
                     maxStageTransition = max(maxStageTransition, CGFloat(event.stageTransition))
-                    // 优先融合连续 pressure 与 stageTransition，让一段轻按后持续加压的每克力度都实时驱动卡片蓄力胀大
-                    let progress = max(0, min(1, max(CGFloat(event.pressure), CGFloat(event.stageTransition))))
-                    if abs(progress - lastReportedProgress) >= 0.025 || progress == 0 || progress >= 0.95 {
-                        lastReportedProgress = progress
-                        coordinator?.onPressStateChange(1, progress)
+                    if coordinator?.cardSkin == .spatialGlass {
+                        let progress = max(0, min(1, max(CGFloat(event.pressure), CGFloat(event.stageTransition))))
+                        if abs(progress - lastReportedProgress) >= 0.08 || progress == 0 || progress >= 0.95 {
+                            lastReportedProgress = progress
+                            coordinator?.onPressStateChange(1, progress)
+                        }
                     }
                 } else if event.stage == 0 {
                     lastReportedProgress = 0
@@ -806,20 +937,22 @@ private struct ForceTouchWindowProbe: NSViewRepresentable {
     }
 }
 
-/// Apple TV 原厂级 3D 视差卡片 + 触控板一段连续蓄力 / 二段 Force Touch 弹出修饰器（纯 GPU 复合层渲染，零外框抖动）
+/// 轻量双皮肤卡片物理引擎修饰器（原生雅致默认零 3D / 零逐帧刷新；立体光影使用纯 GPU 单轴倾角与静态稳态投影，零第二边框）
 struct AppleTVPhysicalCardModifier: ViewModifier {
     let itemID: UUID
     let surfaceKind: PhysicalCardSurfaceKind
+    var cardSkin: CardSkinStyle = .nativeApple
     let isHovered: Bool
     let isSelected: Bool
-    /// 若调用方需共享外部归一化偏移（如图片 Tile 的 Z 轴视差），可传入外部 `pointerNorm`；为 `nil` 时由修饰器内部接管 120Hz 指针追踪，避免卡片宿主视图逐帧重算 `body`
+    /// 若调用方需共享外部归一化偏移（如图片 Tile 的 Z 轴视差），可传入外部 `pointerNorm`
     var pointerNorm: CGPoint? = nil
     var trailingActionWidth: CGFloat = 0
     var leadingExclusionWidth: CGFloat = 0
-    var bottomChipHeight: CGFloat = 0
+    var bottomExclusionHeight: CGFloat = 0
     var onHoverEnterSelect: (() -> Bool)? = nil
     var onHoverEnded: (() -> Void)? = nil
     var onResetHoverFromHide: (() -> Void)? = nil
+    var onPointerNormChange: ((CGPoint) -> Void)? = nil
     var onDeepPressActiveChanged: ((Bool) -> Void)? = nil
     var onDeepPressPreview: (() -> Void)? = nil
 
@@ -834,7 +967,9 @@ struct AppleTVPhysicalCardModifier: ViewModifier {
     @State private var scrollDamped: Bool = false
 
     private var activeNorm: CGPoint {
-        (isHovered && !scrollDamped && pressStage != 2) ? (pointerNorm ?? internalPointerNorm) : .zero
+        (cardSkin == .spatialGlass && isHovered && !scrollDamped && pressStage != 2)
+            ? (pointerNorm ?? internalPointerNorm)
+            : .zero
     }
 
     private var effectiveScale: CGFloat {
@@ -842,12 +977,14 @@ struct AppleTVPhysicalCardModifier: ViewModifier {
             if reduceMotion {
                 return 0.99
             }
-            // 一段轻按先阻尼下沉；持续重压读取触控板连续压力蓄力膨起至 `peekChargeScale`
+            if cardSkin == .nativeApple {
+                return surfaceKind.pressSinkScale
+            }
             let chargeCurve = pow(pressureProgress, 1.25)
             return surfaceKind.pressSinkScale + (surfaceKind.peekChargeScale - surfaceKind.pressSinkScale) * chargeCurve
         }
         if pressStage == 2 {
-            return reduceMotion ? 1.0 : (surfaceKind.peekChargeScale + 0.014)
+            return reduceMotion ? 1.0 : (surfaceKind.peekChargeScale + 0.010)
         }
         if reduceMotion {
             return 1.0
@@ -855,168 +992,33 @@ struct AppleTVPhysicalCardModifier: ViewModifier {
         return isHovered ? surfaceKind.hoverLiftScale : 1.0
     }
 
-    /// 合并俯仰与偏航为单次合成旋转轴与角度（光标所在角落微沉下按，对角微微翘起迎向光源）
-    private var combinedTilt: (angle: Double, axisX: CGFloat, axisY: CGFloat) {
-        guard !reduceMotion, isHovered, !scrollDamped, (pressStage == 0 || pressStage == 1) else {
-            return (0, 1, 0)
-        }
-        let damp = pressStage == 1 ? max(0.35, 1.0 - Double(pressureProgress) * 0.65) : 1.0
-        let pitch = Double(-activeNorm.y) * surfaceKind.maxPitchDegrees * damp
-        let yaw = Double(activeNorm.x) * surfaceKind.maxYawDegrees * damp
-        let mag = hypot(pitch, yaw)
-        guard mag > 0.03 else { return (0, 1, 0) }
-        return (mag, CGFloat(pitch / mag), CGFloat(yaw / mag))
-    }
-
-    private var dynamicShadowColor: Color {
-        if isHovered {
-            if isSelected && surfaceKind == .imageTile {
-                return Color(nsColor: .controlAccentColor).opacity(pressStage == 1 ? 0.56 : 0.44)
-            }
-            let extra = (pressStage == 1) ? Double(pressureProgress) * 0.14 : 0
-            return Color.black.opacity((colorScheme == .dark ? 0.36 : 0.18) + extra)
-        }
-        if surfaceKind == .imageTile {
-            return isSelected
-                ? Color(nsColor: .controlAccentColor).opacity(0.32)
-                : Color.black.opacity(0.05)
-        }
-        return Color.clear
-    }
-
-    private var dynamicShadowRadius: CGFloat {
-        if isHovered {
-            if pressStage == 1 && pressureProgress > 0.05 {
-                return 14 + pressureProgress * 10
-            }
-            return surfaceKind == .imageTile ? 14 : 11
-        }
-        if surfaceKind == .imageTile {
-            return isSelected ? 6 : 4
-        }
-        return 0
-    }
-
-    private var dynamicShadowOffset: CGSize {
-        if !isHovered {
-            return surfaceKind == .imageTile ? CGSize(width: 0, height: 2) : .zero
-        }
-        guard !reduceMotion else {
-            return CGSize(width: 0, height: surfaceKind == .imageTile ? 4 : 2)
-        }
-        let magX: CGFloat = (surfaceKind == .imageTile ? -10 : -7) * activeNorm.x
-        let baseY: CGFloat = (pressStage == 1) ? (5 + pressureProgress * 8) : (surfaceKind == .imageTile ? 7 : 5.5)
-        let magY: CGFloat = baseY - (surfaceKind == .imageTile ? 5 : 3.5) * activeNorm.y
-        return CGSize(width: magX, height: magY)
-    }
-
     func body(content: Content) -> some View {
-        let tilt = combinedTilt
+        let tilt = surfaceKind.effectiveTilt(
+            skin: cardSkin,
+            isHovered: isHovered,
+            isScrollDamped: scrollDamped,
+            pressStage: pressStage,
+            pressureProgress: pressureProgress,
+            reduceMotion: reduceMotion,
+            norm: activeNorm
+        )
+        let shadow = surfaceKind.shadowSpec(
+            skin: cardSkin,
+            isHovered: isHovered,
+            isSelected: isSelected,
+            colorScheme: colorScheme
+        )
+
         let transformed = content
-            .overlay {
-                ZStack {
-                    if isHovered || (pressStage == 1 && pressureProgress > 0.04) {
-                        GeometryReader { geo in
-                        let w = max(1, geo.size.width)
-                        let h = max(1, geo.size.height)
-                        let nx = reduceMotion ? 0 : activeNorm.x
-                        let ny = reduceMotion ? 0 : activeNorm.y
-                        // 统一物理光源：光斑与折射亮缘同位于斜倾翘起的对侧高坡，背光阴面随按压下沉侧自然落影，绝不自相矛盾
-                        let glareX = w * (0.5 - nx * 0.36)
-                        let glareY = h * (0.5 - ny * 0.36)
-                        let radius = max(w, h) * 0.85
-
-                        let darkPeak = isSelected ? 0.28 : 0.22
-                        let lightPeak = isSelected ? 0.32 : 0.42
-                        let rawPeak = (colorScheme == .dark ? darkPeak : lightPeak)
-                        let finalPeak = (reduceMotion ? rawPeak * 0.5 : rawPeak) * (pressStage == 1 ? Double(1.0 + pressureProgress * 0.3) : 1.0)
-
-                        ZStack {
-                            // 1) 浅色模式下于迎光翘起侧提亮、按压下沉侧微铺冷灰蓝，确保曲面立体感一眼可辨
-                            if colorScheme == .light {
-                                RoundedRectangle(cornerRadius: surfaceKind.cornerRadius, style: .continuous)
-                                    .fill(
-                                        LinearGradient(
-                                            colors: [
-                                                Color.white.opacity(0.16),
-                                                Color.clear,
-                                                Color(red: 0.14, green: 0.22, blue: 0.38).opacity(0.07)
-                                            ],
-                                            startPoint: UnitPoint(x: 0.5 - nx * 0.45, y: 0.5 - ny * 0.45),
-                                            endPoint: UnitPoint(x: 0.5 + nx * 0.45, y: 0.5 + ny * 0.45)
-                                        )
-                                    )
-                            }
-
-                            // 2) Apple TV 流动宽幅径向镜面光斑
-                            RoundedRectangle(cornerRadius: surfaceKind.cornerRadius, style: .continuous)
-                                .fill(
-                                    RadialGradient(
-                                        colors: [
-                                            Color.white.opacity(finalPeak),
-                                            Color.white.opacity(finalPeak * 0.32),
-                                            Color.clear
-                                        ],
-                                        center: UnitPoint(x: glareX / w, y: glareY / h),
-                                        startRadius: 2,
-                                        endRadius: radius
-                                    )
-                                )
-
-                            // 3) 斜 45° 细柔玻璃扫光带
-                            if !reduceMotion {
-                                RoundedRectangle(cornerRadius: surfaceKind.cornerRadius, style: .continuous)
-                                    .fill(
-                                        LinearGradient(
-                                            stops: [
-                                                .init(color: .clear, location: max(0.0, 0.26 - nx * 0.18)),
-                                                .init(color: Color.white.opacity(colorScheme == .dark ? 0.12 : 0.22), location: 0.50 - nx * 0.18),
-                                                .init(color: .clear, location: min(1.0, 0.74 - nx * 0.18))
-                                            ],
-                                            startPoint: .topLeading,
-                                            endPoint: .bottomTrailing
-                                        )
-                                    )
-                            }
-
-                            // 4) 统一光源方向折射高光棱边（迎光翘起侧晶透高亮，按压下沉侧柔和收暗）
-                            RoundedRectangle(cornerRadius: surfaceKind.cornerRadius, style: .continuous)
-                                .strokeBorder(
-                                    LinearGradient(
-                                        colors: [
-                                            Color.white.opacity(colorScheme == .dark ? 0.58 : 0.88),
-                                            Color.white.opacity(colorScheme == .dark ? 0.06 : 0.12)
-                                        ],
-                                        startPoint: UnitPoint(x: 0.5 - nx * 0.46, y: 0.5 - ny * 0.46),
-                                        endPoint: UnitPoint(x: 0.5 + nx * 0.46, y: 0.5 + ny * 0.46)
-                                    ),
-                                    lineWidth: 1.0
-                                )
-
-                            if pressStage == 1 && pressureProgress > 0.04 {
-                                RoundedRectangle(cornerRadius: surfaceKind.cornerRadius, style: .continuous)
-                                    .strokeBorder(
-                                        Color(nsColor: .controlAccentColor).opacity(0.28 + Double(pressureProgress) * 0.68),
-                                        lineWidth: 1.1 + pressureProgress * 1.5
-                                    )
-                            }
-                        }
-                        .drawingGroup()
-                    }
-                    .transition(.opacity)
-                    }
-                }
-                .animation(.easeOut(duration: 0.14), value: isHovered)
-                .allowsHitTesting(false)
-            }
             .background(
                 ForceTouchWindowProbe(
                     itemID: itemID,
                     surfaceKind: surfaceKind,
+                    cardSkin: cardSkin,
                     isHovered: isHovered,
-                    trailingExclusionWidth: trailingActionWidth,
+                    trailingActionWidth: trailingActionWidth,
                     leadingExclusionWidth: leadingExclusionWidth,
-                    bottomExclusionHeight: bottomChipHeight,
+                    bottomExclusionHeight: bottomExclusionHeight,
                     onPressStateChange: { stage, progress in
                         let prevStage = pressStage
                         if pressStage != stage {
@@ -1025,6 +1027,7 @@ struct AppleTVPhysicalCardModifier: ViewModifier {
                         if stage == 2 {
                             if internalPointerNorm != .zero {
                                 internalPointerNorm = .zero
+                                onPointerNormChange?(.zero)
                             }
                             if prevStage != 2 {
                                 onDeepPressActiveChanged?(true)
@@ -1032,8 +1035,12 @@ struct AppleTVPhysicalCardModifier: ViewModifier {
                         } else if prevStage == 2 {
                             onDeepPressActiveChanged?(false)
                         }
-                        if abs(pressureProgress - progress) >= 0.02 || progress == 0 || progress == 1 {
-                            pressureProgress = progress
+                        if cardSkin == .spatialGlass {
+                            if abs(pressureProgress - progress) >= 0.06 || progress == 0 || progress == 1 {
+                                pressureProgress = progress
+                            }
+                        } else if pressureProgress != 0 {
+                            pressureProgress = 0
                         }
                     },
                     onScrollReset: {
@@ -1054,6 +1061,7 @@ struct AppleTVPhysicalCardModifier: ViewModifier {
                         pressureProgress = 0
                         scrollDamped = false
                         internalPointerNorm = .zero
+                        onPointerNormChange?(.zero)
                         onDeepPressActiveChanged?(false)
                         onHoverEnded?()
                         onResetHoverFromHide?()
@@ -1061,27 +1069,40 @@ struct AppleTVPhysicalCardModifier: ViewModifier {
                 )
             )
             .shadow(
-                color: dynamicShadowColor,
-                radius: dynamicShadowRadius,
-                x: dynamicShadowOffset.width,
-                y: dynamicShadowOffset.height
+                color: shadow.usesAccentColor
+                    ? Color(nsColor: .controlAccentColor).opacity(shadow.opacity)
+                    : Color.black.opacity(shadow.opacity),
+                radius: shadow.radius,
+                x: 0,
+                y: shadow.y
             )
             .scaleEffect(effectiveScale)
             .rotation3DEffect(
                 .degrees(tilt.angle),
                 axis: (x: tilt.axisX, y: tilt.axisY, z: 0),
-                perspective: 0.44
+                perspective: 0.78
             )
             .animation(.interpolatingSpring(mass: 0.58, stiffness: 360, damping: 24), value: effectiveScale)
             .animation(.interpolatingSpring(mass: 0.58, stiffness: 360, damping: 24), value: pressStage)
             .animation(.interactiveSpring(response: 0.18, dampingFraction: 0.84), value: activeNorm)
+            .animation(.spring(response: 0.36, dampingFraction: 0.86), value: cardSkin)
             .onChange(of: isHovered) { _, hovering in
                 if !hovering {
                     pressStage = 0
                     pressureProgress = 0
                     scrollDamped = false
                     internalPointerNorm = .zero
+                    onPointerNormChange?(.zero)
                     onDeepPressActiveChanged?(false)
+                }
+            }
+            .onChange(of: cardSkin) { _, newSkin in
+                if newSkin == .nativeApple {
+                    pressureProgress = 0
+                    if internalPointerNorm != .zero {
+                        internalPointerNorm = .zero
+                    }
+                    onPointerNormChange?(.zero)
                 }
             }
 
@@ -1108,18 +1129,20 @@ struct AppleTVPhysicalCardModifier: ViewModifier {
                         } else {
                             allowed = true
                         }
-                        if allowed {
-                            let w = max(1, surfaceSize.width)
-                            let h = max(1, surfaceSize.height)
-                            let nx = max(-1, min(1, ((loc.x / w) - 0.5) * 2.0))
-                            let ny = max(-1, min(1, ((loc.y / h) - 0.5) * 2.0))
-                            if abs(nx - internalPointerNorm.x) >= 0.03 || abs(ny - internalPointerNorm.y) >= 0.03 {
-                                internalPointerNorm = CGPoint(x: nx, y: ny)
-                            }
+                        guard allowed, cardSkin == .spatialGlass else { return }
+                        let w = max(1, surfaceSize.width)
+                        let h = max(1, surfaceSize.height)
+                        let nx = max(-1, min(1, ((loc.x / w) - 0.5) * 2.0))
+                        let ny = max(-1, min(1, ((loc.y / h) - 0.5) * 2.0))
+                        if abs(nx - internalPointerNorm.x) >= 0.08 || abs(ny - internalPointerNorm.y) >= 0.08 {
+                            let next = CGPoint(x: nx, y: ny)
+                            internalPointerNorm = next
+                            onPointerNormChange?(next)
                         }
                     case .ended:
                         if internalPointerNorm != .zero {
                             internalPointerNorm = .zero
+                            onPointerNormChange?(.zero)
                         }
                         onHoverEnded?()
                     }

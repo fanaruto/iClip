@@ -58,6 +58,35 @@ enum LiquidGlassAppearance: String, CaseIterable, Identifiable {
     }
 }
 
+/// 卡片视觉皮肤（默认回归克制轻盈的原生苹果风格；可选经过性能优化与光学收敛的「立体光影」皮肤）
+enum CardSkinStyle: String, CaseIterable, Identifiable, Codable {
+    case nativeApple
+    case spatialGlass
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .nativeApple: return "原生雅致"
+        case .spatialGlass: return "立体光影"
+        }
+    }
+
+    var badgeTitle: String {
+        switch self {
+        case .nativeApple: return "默认 · 原生轻量"
+        case .spatialGlass: return "轻量化 3D"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .nativeApple: return "原汁苹果毛玻璃卡片 · 极速零负担"
+        case .spatialGlass: return "克制光学微倾 · 柔和顶部镜面光"
+        }
+    }
+}
+
 /// NSCache 包装盒：缓存单条记录的语义识别快照
 private final class SemanticSnapshotBox {
     let snapshot: SemanticSnapshot
@@ -335,6 +364,17 @@ final class ClipboardStore: ObservableObject {
     @Published var borderlessPanel: Bool {
         didSet { UserDefaults.standard.set(borderlessPanel, forKey: "borderlessPanel") }
     }
+    /// 卡片视觉皮肤（默认 `.nativeApple` 原生雅致，可选 `.spatialGlass` 轻量化立体光影）
+    @Published var cardSkin: CardSkinStyle {
+        didSet { UserDefaults.standard.set(cardSkin.rawValue, forKey: "cardSkinStyle") }
+    }
+
+    static func resolveCardSkin(from rawValue: String?) -> CardSkinStyle {
+        guard let rawValue, let parsed = CardSkinStyle(rawValue: rawValue) else {
+            return .nativeApple
+        }
+        return parsed
+    }
     @Published var autoPasteEnabled: Bool {
         didSet { UserDefaults.standard.set(autoPasteEnabled, forKey: "autoPasteEnabled") }
     }
@@ -508,6 +548,7 @@ final class ClipboardStore: ObservableObject {
         self.liquidGlassMaskOpacity = clampedBlur
         self.liquidGlassAppearance = (clampedBlur < 0.35) ? .clear : .tinted
         self.borderlessPanel = true
+        self.cardSkin = Self.resolveCardSkin(from: UserDefaults.standard.string(forKey: "cardSkinStyle"))
 
         if let shortcutData = UserDefaults.standard.data(forKey: "hotKeyShortcut"),
            let decodedShortcut = try? JSONDecoder().decode(HotKeyShortcut.self, from: shortcutData) {
