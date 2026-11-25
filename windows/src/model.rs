@@ -12,6 +12,85 @@ pub enum PinCategory {
     Template,
 }
 
+fn is_ascii_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric()
+}
+
+fn contains_ascii_word(lower_text: &str, word: &str) -> bool {
+    let hay = lower_text.as_bytes();
+    let needle = word.as_bytes();
+    if needle.is_empty() || hay.len() < needle.len() {
+        return false;
+    }
+    for i in 0..=(hay.len() - needle.len()) {
+        if hay[i..i + needle.len()].eq_ignore_ascii_case(needle) {
+            let left_ok = i == 0 || !is_ascii_word_byte(hay[i - 1]);
+            let right_ok =
+                i + needle.len() == hay.len() || !is_ascii_word_byte(hay[i + needle.len()]);
+            if left_ok && right_ok {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn contains_email_address(lower_text: &str) -> bool {
+    for raw_tok in lower_text.split(|c: char| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                ',' | ';'
+                    | '<'
+                    | '>'
+                    | '('
+                    | ')'
+                    | '['
+                    | ']'
+                    | '{'
+                    | '}'
+                    | '"'
+                    | '\''
+                    | '，'
+                    | '；'
+                    | '：'
+                    | '（'
+                    | '）'
+                    | '【'
+                    | '】'
+            )
+    }) {
+        let Some((local, raw_domain)) = raw_tok.split_once('@') else {
+            continue;
+        };
+        if raw_domain.contains('@') {
+            continue;
+        }
+        let domain =
+            raw_domain.trim_end_matches(|c: char| matches!(c, '.' | ',' | ';' | ':' | '!' | '?'));
+        let local_ok = !local.is_empty()
+            && local.bytes().any(|b| b.is_ascii_alphanumeric())
+            && local
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'+' | b'-'));
+        let domain_ok = domain.contains('.')
+            && !domain.starts_with('.')
+            && !domain.ends_with('.')
+            && domain
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'))
+            && domain
+                .rsplit('.')
+                .next()
+                .map(|tld| tld.len() >= 2 && tld.bytes().all(|b| b.is_ascii_alphabetic()))
+                .unwrap_or(false);
+        if local_ok && domain_ok {
+            return true;
+        }
+    }
+    false
+}
+
 impl PinCategory {
     pub const ALL_CATEGORIES: [PinCategory; 4] =
         [Self::Reply, Self::Invoice, Self::Contact, Self::Template];
@@ -51,18 +130,23 @@ impl PinCategory {
         if combined.trim().is_empty() {
             return None;
         }
-        for kw in ["模板", "合同", "协议", "条款", "甲方", "乙方", "template"] {
+        for kw in ["模板", "合同", "协议", "条款", "甲方", "乙方"] {
             if combined.contains(kw) {
                 return Some(Self::Template);
             }
         }
+        if contains_ascii_word(&combined, "template") {
+            return Some(Self::Template);
+        }
         if let Some(hint) = category_hint {
             let lower_hint = hint.to_lowercase();
-            for kw in [
-                "代码", "脚本", "命令", "终端", "sql", "prompt", "code", "shell", "cmd",
-                "snippet", "dev",
-            ] {
+            for kw in ["代码", "脚本", "命令", "终端"] {
                 if lower_hint.contains(kw) {
+                    return Some(Self::Template);
+                }
+            }
+            for kw in ["sql", "prompt", "code", "shell", "cmd", "snippet", "dev"] {
+                if contains_ascii_word(&lower_hint, kw) {
                     return Some(Self::Template);
                 }
             }
@@ -79,17 +163,33 @@ impl PinCategory {
             "收款",
             "财务",
             "报价",
+            "报销",
+            "账单",
         ] {
             if combined.contains(kw) {
                 return Some(Self::Invoice);
             }
         }
+        for kw in ["invoice", "bank", "finance"] {
+            if contains_ascii_word(&combined, kw) {
+                return Some(Self::Invoice);
+            }
+        }
         for kw in [
             "地址", "收货", "寄件", "快递", "电话", "手机", "名片", "联系", "邮箱", "邮编",
+            "账号",
         ] {
             if combined.contains(kw) {
                 return Some(Self::Contact);
             }
+        }
+        for kw in ["address", "contact", "email", "phone"] {
+            if contains_ascii_word(&combined, kw) {
+                return Some(Self::Contact);
+            }
+        }
+        if contains_email_address(&combined) {
+            return Some(Self::Contact);
         }
         for kw in [
             "话术",
@@ -100,8 +200,15 @@ impl PinCategory {
             "催款",
             "通知",
             "欢迎语",
+            "邮件",
+            "快捷语",
         ] {
             if combined.contains(kw) {
+                return Some(Self::Reply);
+            }
+        }
+        for kw in ["reply", "greeting"] {
+            if contains_ascii_word(&combined, kw) {
                 return Some(Self::Reply);
             }
         }

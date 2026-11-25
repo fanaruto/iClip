@@ -2353,6 +2353,36 @@ pub fn is_chat_image_placeholder_text(text: &str) -> bool {
     t.is_empty() || t == "[图片]" || t == "[图像]" || t.eq_ignore_ascii_case("[image]")
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnicodeClipboardPlan {
+    SkipForInMemoryImage,
+    TryHtmlSingleImageOrFallbackText,
+    IngestText,
+    SkipBlank,
+}
+
+/// 根据剪贴板可用内存位图格式（`CF_DIB` / `CF_DIBV5` / `"PNG"`）与文本内容判定 Unicode 分支去向
+pub fn plan_clipboard_unicode_text(
+    raw_text: &str,
+    has_dib: bool,
+    has_dibv5: bool,
+    has_png: bool,
+) -> UnicodeClipboardPlan {
+    if raw_text.trim().is_empty() {
+        return UnicodeClipboardPlan::SkipBlank;
+    }
+    let has_in_memory_image = has_dib || has_dibv5 || has_png;
+    if is_chat_image_placeholder_text(raw_text) {
+        if has_in_memory_image {
+            UnicodeClipboardPlan::SkipForInMemoryImage
+        } else {
+            UnicodeClipboardPlan::TryHtmlSingleImageOrFallbackText
+        }
+    } else {
+        UnicodeClipboardPlan::IngestText
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HtmlImageSrc {
     InlineBytes(Vec<u8>),

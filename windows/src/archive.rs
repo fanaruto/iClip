@@ -453,6 +453,20 @@ pub fn merge_archive_data_full(
     Ok((working, summary))
 }
 
+pub(crate) fn category_text_for_external_candidate(
+    normalized_body: &str,
+    is_file_path: bool,
+) -> &str {
+    if is_file_path {
+        normalized_body
+            .rsplit(['\\', '/'])
+            .find(|seg| !seg.is_empty())
+            .unwrap_or(normalized_body)
+    } else {
+        normalized_body
+    }
+}
+
 fn merge_external_candidates(
     candidates: &[crate::security::ExternalImportCandidate],
     format_label: &str,
@@ -531,10 +545,11 @@ fn merge_external_candidates(
             ClipItem::new_text(normalized_body.clone(), Some(cand.source_label.clone()))
         };
         let should_pin = cand.is_pinned_hint;
+        let category_text = category_text_for_external_candidate(&normalized_body, is_win_file_path);
         let inferred_cat = if should_pin {
             PinCategory::infer_with_hint(
                 safe_alias.as_deref(),
-                Some(&normalized_body),
+                Some(category_text),
                 cand.category_hint.as_deref(),
             )
         } else {

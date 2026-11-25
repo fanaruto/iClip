@@ -384,7 +384,10 @@ struct ClipboardPopoverView: View {
                     }
 
                     if let blockedChatApp = store.blockedChatImageAppName {
-                        chatImagePermissionBanner(appName: blockedChatApp)
+                        chatImagePermissionBanner(
+                            appName: blockedChatApp,
+                            needsRedrop: store.blockedChatImageNeedsRedrop
+                        )
                             .padding(.horizontal, 14)
                             .padding(.bottom, 7)
                             .transition(.move(edge: .top).combined(with: .opacity))
@@ -2909,13 +2912,17 @@ struct ClipboardPopoverView: View {
         }
     }
 
-    private func chatImagePermissionBanner(appName: String) -> some View {
+    private func chatImagePermissionBanner(appName: String, needsRedrop: Bool) -> some View {
         HStack(spacing: 8) {
             Image(systemName: "photo.badge.exclamationmark")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(Color.orange)
 
-            Text("未能直接读取\(appName)图片原图 · 开启完全磁盘访问后自动显示")
+            Text(
+                needsRedrop
+                    ? "未能直接读取\(appName)图片 · 开启完全磁盘访问权限后请重新拖入"
+                    : "未能直接读取\(appName)图片原图 · 开启完全磁盘访问权限后自动显示"
+            )
                 .font(.system(size: 11.2, weight: .medium))
                 .foregroundStyle(.primary)
                 .lineLimit(1)

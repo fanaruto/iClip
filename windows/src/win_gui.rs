@@ -327,6 +327,30 @@ enum QuickLookHoverTarget {
     PasteSelection,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OnboardingHoverTarget {
+    SetStep(u8),
+    RecordMainHotkey,
+    ImportArchive,
+    SetClickMode(bool),
+    Dismiss,
+}
+
+fn map_onboarding_hover_target(action: &HitAction) -> Option<OnboardingHoverTarget> {
+    match action {
+        HitAction::OnboardingSetStep(step) => Some(OnboardingHoverTarget::SetStep(*step)),
+        HitAction::StartRecordHotkey(WinHotKeySlot::MainToggle) => {
+            Some(OnboardingHoverTarget::RecordMainHotkey)
+        }
+        HitAction::ImportArchive => Some(OnboardingHoverTarget::ImportArchive),
+        HitAction::SetOnboardingClickMode(single) => {
+            Some(OnboardingHoverTarget::SetClickMode(*single))
+        }
+        HitAction::DismissHighlightsOverlay => Some(OnboardingHoverTarget::Dismiss),
+        _ => None,
+    }
+}
+
 fn map_ql_stage_hover_target(action: &HitAction) -> Option<QlStageHoverTarget> {
     match action {
         HitAction::CycleBigBangGranularity => Some(QlStageHoverTarget::Granularity),
@@ -424,6 +448,7 @@ struct WinAppState {
     show_quick_look: bool,
     quick_look_hovered_target: Option<QuickLookHoverTarget>,
     show_highlights_overlay: bool,
+    onboarding_hovered_target: Option<OnboardingHoverTarget>,
     quick_look_diff_mode: bool,
     quick_look_tab: u8,
     quick_look_scroll: usize,
@@ -685,6 +710,7 @@ pub fn run_windows_app() -> i32 {
                 show_quick_look: false,
                 quick_look_hovered_target: None,
                 show_highlights_overlay: init_highlights,
+                onboarding_hovered_target: None,
                 quick_look_diff_mode: false,
                 quick_look_tab: 0,
                 quick_look_scroll: 0,
@@ -888,6 +914,7 @@ pub fn run_windows_self_test() -> Result<(), String> {
             show_quick_look: false,
             quick_look_hovered_target: None,
             show_highlights_overlay: false,
+            onboarding_hovered_target: None,
             quick_look_diff_mode: false,
             quick_look_tab: 0,
             quick_look_scroll: 0,
@@ -1725,6 +1752,7 @@ unsafe fn handle_double_tap_message(hwnd: HWND, mod_code: usize, is_completed_do
             if st.visible && st.show_highlights_overlay && st.onboarding_step == 0 {
                 st.onboarding_hit_trial = true;
                 st.onboarding_step = 1;
+                st.onboarding_hovered_target = None;
                 return true;
             }
             false
@@ -1921,6 +1949,7 @@ unsafe fn hide_panel(hwnd: HWND, restore_focus: bool) {
             st.dragging_slider_track = None;
             st.show_quick_look = false;
             st.quick_look_hovered_target = None;
+            st.onboarding_hovered_target = None;
             st.quick_look_scroll = 0;
             st.quick_look_max_scroll = 0;
             st.ql_stage_visible = false;
@@ -2057,6 +2086,7 @@ unsafe extern "system" fn wnd_proc(
                     if st.visible && st.show_highlights_overlay && st.onboarding_step == 0 {
                         st.onboarding_hit_trial = true;
                         st.onboarding_step = 1;
+                        st.onboarding_hovered_target = None;
                         return true;
                     }
                     false
@@ -2488,7 +2518,9 @@ unsafe extern "system" fn wnd_proc(
                         st.big_bang_sweep_target = None;
                         st.big_bang_sweep_last_pt = None;
                     }
-                    if st.quick_look_hovered_target.take().is_some() {
+                    let ql_cleared = st.quick_look_hovered_target.take().is_some();
+                    let ob_cleared = st.onboarding_hovered_target.take().is_some();
+                    if ql_cleared || ob_cleared {
                         need_redraw = true;
                         full_repaint = true;
                     }
@@ -2570,7 +2602,9 @@ unsafe extern "system" fn wnd_proc(
                             need_redraw = true;
                         }
                         if cursor_outside {
-                            if st.quick_look_hovered_target.take().is_some() {
+                            let ql_cleared = st.quick_look_hovered_target.take().is_some();
+                            let ob_cleared = st.onboarding_hovered_target.take().is_some();
+                            if ql_cleared || ob_cleared {
                                 need_redraw = true;
                             }
                             if st.hovered_visible_pos.take().is_some() {
@@ -2971,8 +3005,14 @@ unsafe fn handle_clipboard_update(hwnd: HWND) {
 
     if IsClipboardFormatAvailable(CF_UNICODETEXT_ID) != FALSE {
         if let Some(mut raw_text) = read_unicode_text_from_clipboard(hwnd) {
-            let is_placeholder = iclip_core::security::is_chat_image_placeholder_text(&raw_text);
-            if is_placeholder && !has_in_memory_image && cf_html_fmt != 0 && IsClipboardFormatAvailable(cf_html_fmt) != FALSE {
+            let unicode_plan = iclip_core::security::plan_clipboard_unicode_text(
+                &raw_text, has_dib, has_dibv5, has_png,
+            );
+            if unicode_plan
+                == iclip_core::security::UnicodeClipboardPlan::TryHtmlSingleImageOrFallbackText
+                && cf_html_fmt != 0
+                && IsClipboardFormatAvailable(cf_html_fmt) != FALSE
+            {
                 if let Some(cf_html) = read_cf_html_from_clipboard(hwnd, cf_html_fmt) {
                     if iclip_core::security::may_contain_single_html_image_src(&cf_html) {
                         dispatch_html_image_from_cf_html(hwnd, cf_html, source_app);
@@ -2980,7 +3020,11 @@ unsafe fn handle_clipboard_update(hwnd: HWND) {
                     }
                 }
             }
-            if !(is_placeholder && has_dib) && !raw_text.trim().is_empty() {
+            if matches!(
+                unicode_plan,
+                iclip_core::security::UnicodeClipboardPlan::IngestText
+                    | iclip_core::security::UnicodeClipboardPlan::TryHtmlSingleImageOrFallbackText
+            ) {
                 let mut rewrite_clipboard_text: Option<String> = None;
                 let mut rewrite_scrub_ms: Option<u32> = None;
                 let mut feedback_toast: Option<String> = None;
@@ -11280,7 +11324,30 @@ fn layout_and_draw_highlights_overlay(
         let btn_w = mw - s(44);
         let btn_h = s(36);
         let btn_y = my + mh - btn_h - s(18);
-        canvas.fill_round_rect(btn_x, btn_y, btn_w, btn_h, sf(18.0), palette.chip_bg);
+        let skip_hov = st.onboarding_hovered_target == Some(OnboardingHoverTarget::SetStep(1));
+        canvas.fill_round_rect(
+            btn_x,
+            btn_y,
+            btn_w,
+            btn_h,
+            sf(18.0),
+            if skip_hov {
+                palette.chip_hover_bg
+            } else {
+                palette.chip_bg
+            },
+        );
+        if skip_hov {
+            canvas.stroke_round_rect(
+                btn_x,
+                btn_y,
+                btn_w,
+                btn_h,
+                sf(18.0),
+                sf(1.0),
+                palette.cobalt.with_alpha(150),
+            );
+        }
         let skip_rc = RECT {
             left: btn_x,
             top: btn_y,
@@ -11322,14 +11389,30 @@ fn layout_and_draw_highlights_overlay(
             right: mx + mw - s(22),
             bottom: my + s(44),
         };
+        let back1_hov = st.onboarding_hovered_target == Some(OnboardingHoverTarget::SetStep(0));
         canvas.fill_round_rect(
             back1_rc.left,
             back1_rc.top,
             back1_rc.right - back1_rc.left,
             back1_rc.bottom - back1_rc.top,
             sf(12.0),
-            palette.chip_bg,
+            if back1_hov {
+                palette.chip_hover_bg
+            } else {
+                palette.chip_bg
+            },
         );
+        if back1_hov {
+            canvas.stroke_round_rect(
+                back1_rc.left,
+                back1_rc.top,
+                back1_rc.right - back1_rc.left,
+                back1_rc.bottom - back1_rc.top,
+                sf(12.0),
+                sf(1.0),
+                palette.cobalt.with_alpha(145),
+            );
+        }
         texts.push(TextDrawCmd {
             text: "上一步".to_string(),
             rect: back1_rc,
@@ -11359,7 +11442,30 @@ fn layout_and_draw_highlights_overlay(
         let bw = mw - s(44);
         let b1y = my + s(100);
         let bh = s(64);
-        canvas.fill_round_rect(bx, b1y, bw, bh, sf(14.0), palette.cobalt);
+        let r1_hov = st.onboarding_hovered_target == Some(OnboardingHoverTarget::SetStep(3));
+        canvas.fill_round_rect(
+            bx,
+            b1y,
+            bw,
+            bh,
+            sf(14.0),
+            if r1_hov {
+                palette.cobalt.lerp(Color4::rgb(255, 255, 255), 0.10)
+            } else {
+                palette.cobalt
+            },
+        );
+        if r1_hov {
+            canvas.stroke_round_rect(
+                bx,
+                b1y,
+                bw,
+                bh,
+                sf(14.0),
+                sf(1.1),
+                Color4::rgba(255, 255, 255, 115),
+            );
+        }
         let r1 = RECT {
             left: bx,
             top: b1y,
@@ -11397,8 +11503,32 @@ fn layout_and_draw_highlights_overlay(
         });
 
         let b2y = b1y + bh + s(14);
-        canvas.fill_round_rect(bx, b2y, bw, bh, sf(14.0), palette.chip_bg);
-        canvas.stroke_round_rect(bx, b2y, bw, bh, sf(14.0), sf(0.9), palette.group_stroke);
+        let r2_hov = st.onboarding_hovered_target == Some(OnboardingHoverTarget::SetStep(2));
+        canvas.fill_round_rect(
+            bx,
+            b2y,
+            bw,
+            bh,
+            sf(14.0),
+            if r2_hov {
+                palette.chip_hover_bg
+            } else {
+                palette.chip_bg
+            },
+        );
+        canvas.stroke_round_rect(
+            bx,
+            b2y,
+            bw,
+            bh,
+            sf(14.0),
+            sf(if r2_hov { 1.1 } else { 0.9 }),
+            if r2_hov {
+                palette.cobalt.with_alpha(165)
+            } else {
+                palette.group_stroke
+            },
+        );
         let r2 = RECT {
             left: bx,
             top: b2y,
@@ -11458,14 +11588,30 @@ fn layout_and_draw_highlights_overlay(
             right: mx + mw - s(22),
             bottom: my + s(42),
         };
+        let back2_hov = st.onboarding_hovered_target == Some(OnboardingHoverTarget::SetStep(1));
         canvas.fill_round_rect(
             back2_rc.left,
             back2_rc.top,
             back2_rc.right - back2_rc.left,
             back2_rc.bottom - back2_rc.top,
             sf(12.0),
-            palette.chip_bg,
+            if back2_hov {
+                palette.chip_hover_bg
+            } else {
+                palette.chip_bg
+            },
         );
+        if back2_hov {
+            canvas.stroke_round_rect(
+                back2_rc.left,
+                back2_rc.top,
+                back2_rc.right - back2_rc.left,
+                back2_rc.bottom - back2_rc.top,
+                sf(12.0),
+                sf(1.0),
+                palette.cobalt.with_alpha(145),
+            );
+        }
         texts.push(TextDrawCmd {
             text: "上一步".to_string(),
             rect: back2_rc,
@@ -11495,15 +11641,33 @@ fn layout_and_draw_highlights_overlay(
         let bw = mw - s(44);
         let rec_y = my + s(80);
         let rec_h = s(76);
-        canvas.fill_round_rect(bx, rec_y, bw, rec_h, sf(14.0), palette.chip_bg);
+        let rec_hov = st.onboarding_hovered_target == Some(OnboardingHoverTarget::RecordMainHotkey);
+        canvas.fill_round_rect(
+            bx,
+            rec_y,
+            bw,
+            rec_h,
+            sf(14.0),
+            if rec_hov && !is_rec {
+                palette.chip_hover_bg
+            } else {
+                palette.chip_bg
+            },
+        );
         canvas.stroke_round_rect(
             bx,
             rec_y,
             bw,
             rec_h,
             sf(14.0),
-            sf(1.1),
-            if is_rec { palette.cobalt } else { palette.group_stroke },
+            sf(if is_rec || rec_hov { 1.15 } else { 1.1 }),
+            if is_rec {
+                palette.cobalt
+            } else if rec_hov {
+                palette.cobalt.with_alpha(165)
+            } else {
+                palette.group_stroke
+            },
         );
         let rec_rc = RECT {
             left: bx,
@@ -11584,7 +11748,26 @@ fn layout_and_draw_highlights_overlay(
         });
         let ib_y = imp_y + s(84);
         let ib_h = s(32);
-        canvas.fill_round_rect(bx + s(14), ib_y, bw - s(28), ib_h, sf(10.0), palette.cobalt.with_alpha(32));
+        let imp_hov = st.onboarding_hovered_target == Some(OnboardingHoverTarget::ImportArchive);
+        canvas.fill_round_rect(
+            bx + s(14),
+            ib_y,
+            bw - s(28),
+            ib_h,
+            sf(10.0),
+            palette.cobalt.with_alpha(if imp_hov { 54 } else { 32 }),
+        );
+        if imp_hov {
+            canvas.stroke_round_rect(
+                bx + s(14),
+                ib_y,
+                bw - s(28),
+                ib_h,
+                sf(10.0),
+                sf(1.0),
+                palette.cobalt.with_alpha(150),
+            );
+        }
         let imp_btn_rc = RECT {
             left: bx + s(14),
             top: ib_y,
@@ -11620,7 +11803,30 @@ fn layout_and_draw_highlights_overlay(
 
         let done_h = s(36);
         let done_y = my + mh - done_h - s(16);
-        canvas.fill_round_rect(bx, done_y, bw, done_h, sf(18.0), palette.cobalt);
+        let step2_next_hov = st.onboarding_hovered_target == Some(OnboardingHoverTarget::SetStep(3));
+        canvas.fill_round_rect(
+            bx,
+            done_y,
+            bw,
+            done_h,
+            sf(18.0),
+            if step2_next_hov {
+                palette.cobalt.lerp(Color4::rgb(255, 255, 255), 0.10)
+            } else {
+                palette.cobalt
+            },
+        );
+        if step2_next_hov {
+            canvas.stroke_round_rect(
+                bx,
+                done_y,
+                bw,
+                done_h,
+                sf(18.0),
+                sf(1.0),
+                Color4::rgba(255, 255, 255, 115),
+            );
+        }
         let done_rc = RECT {
             left: bx,
             top: done_y,
@@ -11662,14 +11868,32 @@ fn layout_and_draw_highlights_overlay(
             right: mx + mw - s(22),
             bottom: my + s(42),
         };
+        let step3_back = resolve_onboarding_step3_back_target(st.onboarding_from_customize);
+        let back3_hov =
+            st.onboarding_hovered_target == Some(OnboardingHoverTarget::SetStep(step3_back));
         canvas.fill_round_rect(
             back3_rc.left,
             back3_rc.top,
             back3_rc.right - back3_rc.left,
             back3_rc.bottom - back3_rc.top,
             sf(12.0),
-            palette.chip_bg,
+            if back3_hov {
+                palette.chip_hover_bg
+            } else {
+                palette.chip_bg
+            },
         );
+        if back3_hov {
+            canvas.stroke_round_rect(
+                back3_rc.left,
+                back3_rc.top,
+                back3_rc.right - back3_rc.left,
+                back3_rc.bottom - back3_rc.top,
+                sf(12.0),
+                sf(1.0),
+                palette.cobalt.with_alpha(145),
+            );
+        }
         texts.push(TextDrawCmd {
             text: "上一步".to_string(),
             rect: back3_rc,
@@ -11680,9 +11904,7 @@ fn layout_and_draw_highlights_overlay(
         st.hit_regions.push(HitRegion {
             rect: back3_rc,
             interactive_cursor: true,
-            action: HitAction::OnboardingSetStep(resolve_onboarding_step3_back_target(
-                st.onboarding_from_customize,
-            )),
+            action: HitAction::OnboardingSetStep(step3_back),
         });
         texts.push(TextDrawCmd {
             text: "已配套好零冲突副手势，后续随时可在设置中切换".to_string(),
@@ -11716,6 +11938,8 @@ fn layout_and_draw_highlights_overlay(
         ];
         for (is_single, title, sub, oy) in opts {
             let active = single_active == is_single;
+            let opt_hov =
+                st.onboarding_hovered_target == Some(OnboardingHoverTarget::SetClickMode(is_single));
             let oh = s(84);
             canvas.fill_round_rect(
                 bx,
@@ -11724,7 +11948,15 @@ fn layout_and_draw_highlights_overlay(
                 oh,
                 sf(14.0),
                 if active {
-                    palette.cobalt.with_alpha(if st.is_dark_mode { 44 } else { 22 })
+                    palette.cobalt.with_alpha(if st.is_dark_mode {
+                        if opt_hov { 58 } else { 44 }
+                    } else if opt_hov {
+                        34
+                    } else {
+                        22
+                    })
+                } else if opt_hov {
+                    palette.chip_hover_bg
                 } else {
                     palette.chip_bg
                 },
@@ -11735,8 +11967,14 @@ fn layout_and_draw_highlights_overlay(
                 bw,
                 oh,
                 sf(14.0),
-                sf(if active { 1.5 } else { 0.85 }),
-                if active { palette.cobalt } else { palette.group_stroke },
+                sf(if active { 1.5 } else if opt_hov { 1.15 } else { 0.85 }),
+                if active {
+                    palette.cobalt
+                } else if opt_hov {
+                    palette.cobalt.with_alpha(160)
+                } else {
+                    palette.group_stroke
+                },
             );
             texts.push(TextDrawCmd {
                 text: title.to_string(),
@@ -11776,7 +12014,30 @@ fn layout_and_draw_highlights_overlay(
 
         let done_h = s(36);
         let done_y = my + mh - done_h - s(18);
-        canvas.fill_round_rect(bx, done_y, bw, done_h, sf(18.0), palette.cobalt);
+        let done_hov = st.onboarding_hovered_target == Some(OnboardingHoverTarget::Dismiss);
+        canvas.fill_round_rect(
+            bx,
+            done_y,
+            bw,
+            done_h,
+            sf(18.0),
+            if done_hov {
+                palette.cobalt.lerp(Color4::rgb(255, 255, 255), 0.10)
+            } else {
+                palette.cobalt
+            },
+        );
+        if done_hov {
+            canvas.stroke_round_rect(
+                bx,
+                done_y,
+                bw,
+                done_h,
+                sf(18.0),
+                sf(1.0),
+                Color4::rgba(255, 255, 255, 115),
+            );
+        }
         let done_rc = RECT {
             left: bx,
             top: done_y,
@@ -11901,7 +12162,30 @@ fn layout_and_draw_highlights_overlay(
     let btn_h = s(36);
     let btn_y = my + mh - btn_h - s(18);
     let half_w = (btn_w - s(8)) / 2;
-    canvas.fill_round_rect(btn_x, btn_y, half_w, btn_h, sf(18.0), palette.chip_bg);
+    let setup_hov = st.onboarding_hovered_target == Some(OnboardingHoverTarget::SetStep(0));
+    canvas.fill_round_rect(
+        btn_x,
+        btn_y,
+        half_w,
+        btn_h,
+        sf(18.0),
+        if setup_hov {
+            palette.chip_hover_bg
+        } else {
+            palette.chip_bg
+        },
+    );
+    if setup_hov {
+        canvas.stroke_round_rect(
+            btn_x,
+            btn_y,
+            half_w,
+            btn_h,
+            sf(18.0),
+            sf(1.0),
+            palette.cobalt.with_alpha(150),
+        );
+    }
     let setup_rc = RECT {
         left: btn_x,
         top: btn_y,
@@ -11922,7 +12206,30 @@ fn layout_and_draw_highlights_overlay(
     });
 
     let go_x = btn_x + half_w + s(8);
-    canvas.fill_round_rect(go_x, btn_y, half_w, btn_h, sf(18.0), Color4::rgb(30, 94, 255));
+    let go_hov = st.onboarding_hovered_target == Some(OnboardingHoverTarget::Dismiss);
+    canvas.fill_round_rect(
+        go_x,
+        btn_y,
+        half_w,
+        btn_h,
+        sf(18.0),
+        if go_hov {
+            Color4::rgb(30, 94, 255).lerp(Color4::rgb(255, 255, 255), 0.12)
+        } else {
+            Color4::rgb(30, 94, 255)
+        },
+    );
+    if go_hov {
+        canvas.stroke_round_rect(
+            go_x,
+            btn_y,
+            half_w,
+            btn_h,
+            sf(18.0),
+            sf(1.0),
+            Color4::rgba(255, 255, 255, 115),
+        );
+    }
     let go_rc = RECT {
         left: go_x,
         top: btn_y,
@@ -12067,6 +12374,29 @@ unsafe fn handle_mouse_move(hwnd: HWND, x: i32, y: i32, left_held: bool) {
                 }
                 if st.quick_look_hovered_target != found_ql_hover {
                     st.quick_look_hovered_target = found_ql_hover;
+                    changed = true;
+                }
+                return;
+            }
+            if st.show_highlights_overlay && st.view_mode == ActiveViewMode::MainList {
+                let c1 = st.hovered_visible_pos.take().is_some();
+                let c2 = st.hovered_link_badge_store_idx.take().is_some();
+                let c3 = st.hovered_card_btn.take().is_some();
+                st.hover_card_nx = 0.0;
+                st.hover_card_ny = 0.0;
+                if c1 || c2 || c3 {
+                    changed = true;
+                }
+                let mut found_ob_hover = None;
+                for reg in &st.hit_regions {
+                    if point_in_rect(x, y, &reg.rect) {
+                        use_hand = reg.interactive_cursor;
+                        found_ob_hover = map_onboarding_hover_target(&reg.action);
+                        break;
+                    }
+                }
+                if st.onboarding_hovered_target != found_ob_hover {
+                    st.onboarding_hovered_target = found_ob_hover;
                     changed = true;
                 }
                 return;
@@ -12876,6 +13206,7 @@ unsafe fn handle_left_click(hwnd: HWND, x: i32, y: i32, is_double: bool) {
                     st.view_mode = ActiveViewMode::MainList;
                     st.onboarding_step = if st.store.config.has_seen_highlights_v27 { 4 } else { 0 };
                     st.onboarding_from_customize = false;
+                    st.onboarding_hovered_target = None;
                     st.show_highlights_overlay = true;
                 }
             });
@@ -12885,6 +13216,7 @@ unsafe fn handle_left_click(hwnd: HWND, x: i32, y: i32, is_double: bool) {
             APP_STATE.with(|c| {
                 if let Some(st) = c.borrow_mut().as_mut() {
                     st.show_highlights_overlay = false;
+                    st.onboarding_hovered_target = None;
                     st.recording_slot = None;
                     st.onboarding_import_feedback = None;
                     st.onboarding_from_customize = false;
@@ -12904,6 +13236,7 @@ unsafe fn handle_left_click(hwnd: HWND, x: i32, y: i32, is_double: bool) {
                 if let Some(st) = c.borrow_mut().as_mut() {
                     let was_recording = st.recording_slot.is_some();
                     st.onboarding_step = step;
+                    st.onboarding_hovered_target = None;
                     if step == 2 {
                         st.onboarding_from_customize = true;
                     } else if step <= 1 {
@@ -13225,27 +13558,34 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
         return;
     }
 
-    let dismissed_highlights = APP_STATE.with(|c| {
+    let (handled_highlights, dismissed_highlights) = APP_STATE.with(|c| {
         let mut b = c.borrow_mut();
-        let Some(st) = b.as_mut() else { return false };
+        let Some(st) = b.as_mut() else {
+            return (false, false);
+        };
         if st.show_highlights_overlay && st.view_mode == ActiveViewMode::MainList {
-            if vk == VK_ESCAPE as u32
-                || vk == VK_RETURN as u32
-                || vk == VK_SPACE as u32
+            let can_dismiss = vk == VK_ESCAPE as u32
                 || (ctrl_down && !alt_down && !shift_down && vk == 0x57)
-            {
+                || (st.onboarding_step == 4
+                    && (vk == VK_RETURN as u32 || vk == VK_SPACE as u32));
+            if can_dismiss {
                 st.show_highlights_overlay = false;
+                st.onboarding_hovered_target = None;
+                st.onboarding_import_feedback = None;
+                st.onboarding_from_customize = false;
                 if !st.store.config.has_seen_highlights_v27 {
                     st.store.config.has_seen_highlights_v27 = true;
                     st.store.save_config();
                 }
             }
-            return true;
+            return (true, can_dismiss);
         }
-        false
+        (false, false)
     });
-    if dismissed_highlights {
-        let _ = InvalidateRect(hwnd, null(), FALSE);
+    if handled_highlights {
+        if dismissed_highlights {
+            let _ = InvalidateRect(hwnd, null(), FALSE);
+        }
         return;
     }
 

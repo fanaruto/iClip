@@ -4500,4 +4500,116 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertFalse(gate.isActive)
         XCTAssertFalse(gate.completeIfCurrent(generation: gen3))
     }
+
+    func testChatContainerMultiDirReadabilityAndImportedFilePinCategory() throws {
+        // 1. 验证多聊天容器权限探测不得在首个可读目录就提前返回 true，且必须穿透核验 Documents 子目录
+        let dirs = ["/Users/u/Library/Containers/com.tencent.xinWeChat/Data", "/Users/u/Library/Containers/com.tencent.WeWorkMac/Data"]
+        XCTAssertFalse(
+            ClipboardStore.evaluateChatContainerReadability(
+                probeDirs: dirs,
+                directoryExists: { $0 == dirs[0] || $0 == dirs[1] },
+                canListDirectory: { $0 == dirs[0] }
+            )
+        )
+        XCTAssertFalse(
+            ClipboardStore.evaluateChatContainerReadability(
+                probeDirs: dirs,
+                directoryExists: { $0 == dirs[0] || $0 == "\(dirs[0])/Documents" },
+                canListDirectory: { $0 == dirs[0] }
+            )
+        )
+        XCTAssertTrue(
+            ClipboardStore.evaluateChatContainerReadability(
+                probeDirs: dirs,
+                directoryExists: { $0 == dirs[0] || $0 == "\(dirs[0])/Documents" || $0 == dirs[1] },
+                canListDirectory: { _ in true }
+            )
+        )
+        XCTAssertTrue(
+            ClipboardStore.evaluateChatContainerReadability(
+                probeDirs: dirs,
+                directoryExists: { _ in false },
+                canListDirectory: { _ in false }
+            )
+        )
+
+        // 2. 验证外部竞品导入本地文件收藏支持自动匹配 PinCategory 与增量补全别名
+        let newInvoiceFile = "file:///Users/alice/Documents/invoice_2026.pdf"
+        let (merged, summary) = ArchiveBackupService.mergeExternalCompetitorCandidates(
+            [
+                UniversalCompetitorImporter.ExternalCandidate(
+                    text: newInvoiceFile,
+                    alias: "报销凭证",
+                    sourceLabel: "Raycast",
+                    createdAt: nil,
+                    isPinnedHint: true,
+                    categoryHint: "财务报销"
+                )
+            ],
+            formatLabel: "JSON",
+            into: []
+        )
+        XCTAssertEqual(summary.importedNewCount, 1)
+        let importedInvoice = try XCTUnwrap(merged.first(where: { $0.filePaths == ["/Users/alice/Documents/invoice_2026.pdf"] }))
+        XCTAssertTrue(importedInvoice.isPinned)
+        XCTAssertEqual(importedInvoice.pinCategory, .invoice)
+        XCTAssertEqual(importedInvoice.customAlias, "报销凭证")
+
+        // 对同路径无别名旧条目进行重复导入升级：应自动置顶、补全别名并推断模板分类
+        let bareExisting = ClipItem(
+            type: .file,
+            filePaths: ["/Users/alice/Documents/contract.pdf"],
+            contentHash: ArchiveBackupService.mergeExternalCompetitorCandidates(
+                [UniversalCompetitorImporter.ExternalCandidate(text: "file:///Users/alice/Documents/contract.pdf", alias: nil, sourceLabel: "Paste", createdAt: nil, isPinnedHint: false, categoryHint: nil)],
+                formatLabel: "JSON",
+                into: []
+            ).mergedItems[0].contentHash
+        )
+        let (upgraded, upgradeSummary) = ArchiveBackupService.mergeExternalCompetitorCandidates(
+            [
+                UniversalCompetitorImporter.ExternalCandidate(
+                    text: "file:///Users/alice/Documents/contract.pdf",
+                    alias: "标准合作合同",
+                    sourceLabel: "Paste",
+                    createdAt: nil,
+                    isPinnedHint: true,
+                    categoryHint: "模板"
+                )
+            ],
+            formatLabel: "JSON",
+            into: [bareExisting]
+        )
+        XCTAssertEqual(upgradeSummary.updatedExistingCount, 1)
+        XCTAssertEqual(upgraded.count, 1)
+        XCTAssertTrue(upgraded[0].isPinned)
+        XCTAssertEqual(upgraded[0].customAlias, "标准合作合同")
+        XCTAssertEqual(upgraded[0].pinCategory, .template)
+
+        // 3. 验证 PinCategory 英文按词边界匹配与双端一致邮箱边界，避免 gmail/iPhone/error message 与异常域名误分类
+        XCTAssertEqual(PinCategory.infer(alias: nil, text: "foo@gmail.com"), .contact)
+        XCTAssertEqual(PinCategory.infer(alias: nil, text: "{a@b.co}"), .contact)
+        XCTAssertNil(PinCategory.infer(alias: nil, text: "a@.b.co"))
+        XCTAssertNil(PinCategory.infer(alias: nil, text: "https://mail.google.com/mail/u/0/"))
+        XCTAssertNil(PinCategory.infer(alias: nil, text: "hotmail"))
+        XCTAssertNil(PinCategory.infer(alias: nil, text: "iPhone 15 Pro"))
+        XCTAssertNil(PinCategory.infer(alias: nil, text: "console.log(\"error message\")"))
+
+        // 4. 验证拖拽沙盒受阻决策：仅确认 permissionDenied 时显示横幅、标记 needsRedrop 并统一术语，非权限失败不误亮横幅
+        let dragDenied = ClipboardStore.resolveDropBlockFeedback(
+            path: "/Users/alice/Library/Containers/com.tencent.xinWeChat/Data/temp.jpg",
+            confirmedPermissionDenied: true
+        )
+        XCTAssertEqual(dragDenied.blockedChatAppName, "微信")
+        XCTAssertTrue(dragDenied.needsRedrop)
+        XCTAssertTrue(dragDenied.toastMessage.contains("完全磁盘访问权限"))
+        XCTAssertTrue(dragDenied.toastMessage.contains("重新拖入"))
+        XCTAssertFalse(dragDenied.toastMessage.contains("自动显示"))
+
+        let nonPermFailure = ClipboardStore.resolveDropBlockFeedback(
+            path: "/Users/alice/Library/Containers/com.tencent.xinWeChat/Data/temp.jpg",
+            confirmedPermissionDenied: false
+        )
+        XCTAssertNil(nonPermFailure.blockedChatAppName)
+        XCTAssertFalse(nonPermFailure.needsRedrop)
+    }
 }

@@ -456,9 +456,29 @@ enum ArchiveBackupService {
             if let fPath = resolvedFilePath {
                 let hash = SHA256.hash(data: Data(fPath.utf8)).map { String(format: "%02x", $0) }.joined()
                 let contentHash = "file:\(hash)"
+                let fileName = (fPath as NSString).lastPathComponent
+                let shouldPin = cand.isPinnedHint
+                let inferredCat = shouldPin
+                    ? PinCategory.infer(alias: safeAlias, text: fileName, categoryHint: cand.categoryHint)
+                    : nil
                 if let idx = working.firstIndex(where: { $0.contentHash == contentHash }) {
-                    if cand.isPinnedHint && !working[idx].isPinned {
-                        working[idx].isPinned = true
+                    var cur = working[idx]
+                    var changed = false
+                    if shouldPin && !cur.isPinned {
+                        cur.isPinned = true
+                        changed = true
+                    }
+                    if (cur.customAlias?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true),
+                       let alias = safeAlias, !alias.isEmpty {
+                        cur.customAlias = alias
+                        changed = true
+                    }
+                    if cur.pinCategory == nil, let cat = inferredCat {
+                        cur.pinCategory = cat
+                        changed = true
+                    }
+                    if changed {
+                        working[idx] = cur
                         updatedExisting += 1
                     }
                 } else {
@@ -468,12 +488,13 @@ enum ArchiveBackupService {
                         contentHash: contentHash,
                         sourceAppName: cand.sourceLabel,
                         createdAt: cand.createdAt ?? Date(),
-                        isPinned: cand.isPinnedHint,
+                        isPinned: shouldPin,
+                        pinCategory: inferredCat,
                         customAlias: safeAlias
                     ))
                     importedNew += 1
                     fileCount += 1
-                    if cand.isPinnedHint { pinCount += 1 }
+                    if shouldPin { pinCount += 1 }
                 }
                 continue
             }

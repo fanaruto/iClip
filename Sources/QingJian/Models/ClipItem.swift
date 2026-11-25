@@ -30,6 +30,63 @@ enum PinCategory: String, Codable, CaseIterable, Identifiable {
         }
     }
 
+    private static func isASCIIWordByte(_ b: UInt8) -> Bool {
+        (b >= 97 && b <= 122) || (b >= 48 && b <= 57)
+    }
+
+    private static func containsASCIIWord(_ lowerText: String, word: String) -> Bool {
+        let hay = Array(lowerText.utf8)
+        let needle = Array(word.lowercased().utf8)
+        guard !needle.isEmpty, hay.count >= needle.count else { return false }
+        let limit = hay.count - needle.count
+        var i = 0
+        while i <= limit {
+            var matched = true
+            for j in 0..<needle.count where hay[i + j] != needle[j] {
+                matched = false
+                break
+            }
+            if matched {
+                let leftOK = (i == 0) || !isASCIIWordByte(hay[i - 1])
+                let rightOK = (i + needle.count == hay.count) || !isASCIIWordByte(hay[i + needle.count])
+                if leftOK && rightOK {
+                    return true
+                }
+            }
+            i += 1
+        }
+        return false
+    }
+
+    private static func containsEmailAddress(_ lowerText: String) -> Bool {
+        let separators = CharacterSet.whitespacesAndNewlines
+            .union(CharacterSet(charactersIn: ",;<>()[]{}\"'，；：<>（）【】"))
+        for token in lowerText.components(separatedBy: separators) where token.contains("@") {
+            let parts = token.split(separator: "@", omittingEmptySubsequences: false)
+            guard parts.count == 2 else { continue }
+            let local = parts[0]
+            var domainStr = String(parts[1])
+            while let last = domainStr.last, ".,;:!?".contains(last) {
+                domainStr.removeLast()
+            }
+            let domain = domainStr[...]
+            guard !local.isEmpty,
+                  local.unicodeScalars.contains(where: { CharacterSet.alphanumerics.contains($0) }),
+                  local.unicodeScalars.allSatisfy({ $0.isASCII && (CharacterSet.alphanumerics.contains($0) || "._+-".unicodeScalars.contains($0)) }),
+                  domain.contains("."),
+                  !domain.hasPrefix("."),
+                  !domain.hasSuffix("."),
+                  domain.unicodeScalars.allSatisfy({ $0.isASCII && (CharacterSet.alphanumerics.contains($0) || ".-".unicodeScalars.contains($0)) }),
+                  let tld = domain.split(separator: ".").last,
+                  tld.count >= 2,
+                  tld.allSatisfy({ $0.isLetter }) else {
+                continue
+            }
+            return true
+        }
+        return false
+    }
+
     /// 根据用户备注名、原软件分类目录名与正文特征自动推断收藏分组（无明确特征时返回 nil 保持通用收藏）
     static func infer(alias: String?, text: String?, categoryHint: String? = nil) -> PinCategory? {
         if let rawText = text, SnippetTemplateEngine.containsPlaceholders(rawText) {
@@ -39,22 +96,38 @@ enum PinCategory: String, Codable, CaseIterable, Identifiable {
         guard !combined.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return nil
         }
-        for kw in ["模板", "合同", "协议", "条款", "甲方", "乙方", "template"] {
+        for kw in ["模板", "合同", "协议", "条款", "甲方", "乙方"] {
             if combined.contains(kw) { return .template }
         }
+        if containsASCIIWord(combined, word: "template") { return .template }
         if let hint = categoryHint?.lowercased(), !hint.isEmpty {
-            for kw in ["代码", "脚本", "命令", "终端", "sql", "prompt", "code", "shell", "cmd", "snippet", "dev"] {
+            for kw in ["代码", "脚本", "命令", "终端"] {
                 if hint.contains(kw) { return .template }
             }
+            for kw in ["sql", "prompt", "code", "shell", "cmd", "snippet", "dev"] {
+                if containsASCIIWord(hint, word: kw) { return .template }
+            }
         }
-        for kw in ["税号", "开票", "发票", "抬头", "开户行", "对公", "联行号", "纳税人", "收款", "财务", "报价", "报销", "账单", "invoice", "bank", "finance"] {
+        for kw in ["税号", "开票", "发票", "抬头", "开户行", "对公", "联行号", "纳税人", "收款", "财务", "报价", "报销", "账单"] {
             if combined.contains(kw) { return .invoice }
         }
-        for kw in ["地址", "收货", "寄件", "快递", "电话", "手机", "名片", "联系", "邮箱", "邮编", "账号", "address", "contact", "email", "phone"] {
+        for kw in ["invoice", "bank", "finance"] {
+            if containsASCIIWord(combined, word: kw) { return .invoice }
+        }
+        for kw in ["地址", "收货", "寄件", "快递", "电话", "手机", "名片", "联系", "邮箱", "邮编", "账号"] {
             if combined.contains(kw) { return .contact }
         }
-        for kw in ["话术", "回复", "客服", "问候", "售后", "催款", "通知", "欢迎语", "邮件", "快捷语", "reply", "greeting", "mail", "message"] {
+        for kw in ["address", "contact", "email", "phone"] {
+            if containsASCIIWord(combined, word: kw) { return .contact }
+        }
+        if containsEmailAddress(combined) {
+            return .contact
+        }
+        for kw in ["话术", "回复", "客服", "问候", "售后", "催款", "通知", "欢迎语", "邮件", "快捷语"] {
             if combined.contains(kw) { return .reply }
+        }
+        for kw in ["reply", "greeting"] {
+            if containsASCIIWord(combined, word: kw) { return .reply }
         }
         return nil
     }

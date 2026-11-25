@@ -3264,4 +3264,100 @@ mod tests {
         assert!(nan_done);
         assert_eq!(nan_safe, 1.0);
     }
+
+    #[test]
+    fn test_chat_image_placeholder_skip_and_pin_category_parity() {
+        use crate::archive::category_text_for_external_candidate;
+        use crate::security::{plan_clipboard_unicode_text, UnicodeClipboardPlan};
+
+        // 1. 仅携带 CF_DIBV5 / PNG（无老式 CF_DIB）时，占位符必须跳过纯文本入库；无任何位图时走 HTML 或保留纯文本
+        assert_eq!(
+            plan_clipboard_unicode_text("[图片]", false, true, false),
+            UnicodeClipboardPlan::SkipForInMemoryImage
+        );
+        assert_eq!(
+            plan_clipboard_unicode_text(" [Image] \u{FFFC}", false, false, true),
+            UnicodeClipboardPlan::SkipForInMemoryImage
+        );
+        assert_eq!(
+            plan_clipboard_unicode_text("[图像]", true, false, false),
+            UnicodeClipboardPlan::SkipForInMemoryImage
+        );
+        assert_eq!(
+            plan_clipboard_unicode_text("   ", false, true, true),
+            UnicodeClipboardPlan::SkipBlank
+        );
+        assert_eq!(
+            plan_clipboard_unicode_text("[图片]", false, false, false),
+            UnicodeClipboardPlan::TryHtmlSingleImageOrFallbackText
+        );
+        assert_eq!(
+            plan_clipboard_unicode_text("正常聊天文字", false, true, true),
+            UnicodeClipboardPlan::IngestText
+        );
+
+        // 2. 双端收藏自动分类关键词 100% 对齐，且防止 gmail/iPhone/error message 等子串或通用词误判
+        assert_eq!(
+            PinCategory::infer_with_hint(Some("差旅报销单"), Some("Invoice #2026-11"), None),
+            Some(PinCategory::Invoice)
+        );
+        assert_eq!(
+            PinCategory::infer_with_hint(None, Some("Company finance bank transfer"), None),
+            Some(PinCategory::Invoice)
+        );
+        assert_eq!(
+            PinCategory::infer_with_hint(Some("Shipping"), Some("address: 北京市朝阳区"), None),
+            Some(PinCategory::Contact)
+        );
+        assert_eq!(
+            PinCategory::infer_with_hint(None, Some("foo@gmail.com"), None),
+            Some(PinCategory::Contact)
+        );
+        assert_eq!(
+            PinCategory::infer_with_hint(None, Some("{a@b.co}"), None),
+            Some(PinCategory::Contact)
+        );
+        assert_eq!(
+            PinCategory::infer_with_hint(None, Some("a@.b.co"), None),
+            None
+        );
+        assert_eq!(
+            PinCategory::infer_with_hint(Some("快捷语"), Some("Thank you for your reply and greeting"), None),
+            Some(PinCategory::Reply)
+        );
+        assert_eq!(
+            PinCategory::infer_with_hint(None, Some("https://mail.google.com/mail/u/0/"), None),
+            None
+        );
+        assert_eq!(
+            PinCategory::infer_with_hint(None, Some("hotmail"), None),
+            None
+        );
+        assert_eq!(
+            PinCategory::infer_with_hint(None, Some("iPhone 15 Pro"), None),
+            None
+        );
+        assert_eq!(
+            PinCategory::infer_with_hint(None, Some("console.log(\"error message\")"), None),
+            None
+        );
+
+        // 3. 验证导入本地文件路径仅提取纯文件名参与分类，避免 `D:\contact\a.pdf` 母目录误触 Contact
+        let raw_dir_leak_path = r"D:\contact\a.pdf";
+        assert_eq!(
+            PinCategory::infer_with_hint(Some("普通文件"), Some(raw_dir_leak_path), None),
+            Some(PinCategory::Contact)
+        );
+        let file_cat_text = category_text_for_external_candidate(raw_dir_leak_path, true);
+        assert_eq!(file_cat_text, "a.pdf");
+        assert_eq!(
+            PinCategory::infer_with_hint(Some("普通文件"), Some(file_cat_text), None),
+            None
+        );
+        let inv_file_text = category_text_for_external_candidate(r"D:\Docs\invoice_2026.pdf", true);
+        assert_eq!(
+            PinCategory::infer_with_hint(None, Some(inv_file_text), None),
+            Some(PinCategory::Invoice)
+        );
+    }
 }

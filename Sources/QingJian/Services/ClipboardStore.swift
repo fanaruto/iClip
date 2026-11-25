@@ -411,7 +411,15 @@ final class ClipboardStore: ObservableObject {
     /// 是否存在处于 8 秒保护窗口内可按 ⌘Z 恢复的最近一次删除/清空快照
     @Published private(set) var canUndoLastDeletion: Bool = false
     /// 当复制微信/飞书等沙盒容器内图片因 macOS 权限未开启而被迫暂存为「文件」时记录对应应用名称（用于面板提醒与设置引导）
-    @Published var blockedChatImageAppName: String? = nil
+    @Published var blockedChatImageAppName: String? = nil {
+        didSet {
+            if blockedChatImageAppName == nil && blockedChatImageNeedsRedrop {
+                blockedChatImageNeedsRedrop = false
+            }
+        }
+    }
+    /// 区分横幅来源：`false` 为剪贴板自动升级队列（授权后自动显示）；`true` 为拖入被拒未入库（授权后需重新拖入）
+    @Published var blockedChatImageNeedsRedrop: Bool = false
     private var isHealingChatImages: Bool = false
     /// 在外部浏览器直接打开链接后通知悬浮窗丝滑收起（不抢回原应用焦点）
     var onAfterOpenExternalURL: (() -> Void)? = nil
@@ -1734,7 +1742,11 @@ final class ClipboardStore: ObservableObject {
                    ImageStudioEngine.hasSafeImageDimensions(in: memData),
                    let normalized = Self.normalizeImageForClipboard(from: memData) {
                     await MainActor.run { [weak self] in
-                        self?.ingestCapturedImageData(
+                        guard let self else { return }
+                        if self.blockedChatImageAppName != nil {
+                            self.blockedChatImageAppName = nil
+                        }
+                        self.ingestCapturedImageData(
                             pngData: normalized.pngData,
                             sourceApp: sourceApp,
                             effectiveBundleID: effectiveBundleID
@@ -1749,28 +1761,52 @@ final class ClipboardStore: ObservableObject {
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 if isBlockedChat, let chatApp {
+                    self.blockedChatImageNeedsRedrop = false
                     self.blockedChatImageAppName = chatApp
-                    self.showToast("未能直接读取\(chatApp)图片 · 点顶部指引完成系统授权后自动显示原图", duration: 4.2)
+                    self.showToast("未能直接读取\(chatApp)图片 · 点顶部指引开启完全磁盘访问权限后自动显示原图", duration: 4.2)
                 }
                 self.ingestFilePathsRecord(paths: [path], sourceApp: sourceApp, effectiveBundleID: effectiveBundleID)
             }
         }
     }
 
+    nonisolated static func evaluateChatContainerReadability(
+        probeDirs: [String],
+        directoryExists: (String) -> Bool,
+        canListDirectory: (String) -> Bool
+    ) -> Bool {
+        for dir in probeDirs where directoryExists(dir) {
+            if !canListDirectory(dir) {
+                return false
+            }
+            let docsDir = (dir as NSString).appendingPathComponent("Documents")
+            if directoryExists(docsDir), !canListDirectory(docsDir) {
+                return false
+            }
+        }
+        return true
+    }
+
     nonisolated static func hasChatContainerReadAccess() -> Bool {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let probeDirs = [
             "\(home)/Library/Containers/com.tencent.xinWeChat/Data",
-            "\(home)/Library/Containers/com.tencent.WeWorkMac/Data"
+            "\(home)/Library/Containers/com.tencent.WeWorkMac/Data",
+            "\(home)/Library/Containers/com.bytedance.lark/Data",
+            "\(home)/Library/Containers/com.bytedance.feishu/Data",
+            "\(home)/Library/Containers/com.electron.lark/Data"
         ]
         let fm = FileManager.default
-        for dir in probeDirs where fm.fileExists(atPath: dir) {
-            if (try? fm.contentsOfDirectory(atPath: dir)) == nil {
-                return false
+        return evaluateChatContainerReadability(
+            probeDirs: probeDirs,
+            directoryExists: { path in
+                var isDir: ObjCBool = false
+                return fm.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
+            },
+            canListDirectory: { path in
+                (try? fm.contentsOfDirectory(atPath: path)) != nil
             }
-            return true
-        }
-        return true
+        )
     }
 
     func openFullDiskAccessSettings() {
@@ -2201,6 +2237,9 @@ final class ClipboardStore: ObservableObject {
                         if Self.supportedImageExtensions.contains(ext) || Self.looksLikeRasterImage(fileData),
                            let normalized = Self.normalizeImageForClipboard(from: fileData) {
                             let fileName = (cleanPath as NSString).lastPathComponent
+                            if blockedChatImageAppName != nil {
+                                blockedChatImageAppName = nil
+                            }
                             commitNormalizedImageToPasteboard(
                                 normalized,
                                 sourceApp: sourceLabel,
@@ -2209,7 +2248,7 @@ final class ClipboardStore: ObservableObject {
                             return true
                         }
                     case .permissionDenied:
-                        handleContainerPermissionBlocked(path: cleanPath)
+                        handleContainerPermissionBlocked(path: cleanPath, confirmedPermissionDenied: true)
                         return false
                     case .failed:
                         break
@@ -2224,16 +2263,29 @@ final class ClipboardStore: ObservableObject {
             }
             guard !cleanURLs.isEmpty else { return false }
 
-            // 若单文件位于其他 App 受保护沙盒容器且无读取权限，防止 writeObjects 失败把系统剪贴板清空成空数组
+            // 若单文件位于其他 App 受保护沙盒容器且确因 TCC 权限受阻（lstat/access EPERM/EACCES），防止 writeObjects 失败把系统剪贴板清空成空数组
             if let firstPath = cleanURLs[0].path,
-               firstPath.contains("/Library/Containers/"),
-               !FileManager.default.isReadableFile(atPath: firstPath) {
-                let scoped = droppedNSURLs[0].startAccessingSecurityScopedResource()
-                let readable = FileManager.default.isReadableFile(atPath: firstPath)
-                if scoped { droppedNSURLs[0].stopAccessingSecurityScopedResource() }
-                if !readable {
-                    handleContainerPermissionBlocked(path: firstPath)
-                    return false
+               firstPath.contains("/Library/Containers/") {
+                var sb = stat()
+                var deniedByPermission = false
+                if Darwin.lstat(firstPath, &sb) != 0 {
+                    deniedByPermission = (errno == EPERM || errno == EACCES)
+                } else if Darwin.access(firstPath, R_OK) != 0 {
+                    deniedByPermission = (errno == EPERM || errno == EACCES)
+                }
+                if deniedByPermission {
+                    let scoped = droppedNSURLs[0].startAccessingSecurityScopedResource()
+                    var sbAfter = stat()
+                    let readable = (Darwin.lstat(firstPath, &sbAfter) == 0 && Darwin.access(firstPath, R_OK) == 0)
+                    let stillDenied = !readable && (errno == EPERM || errno == EACCES)
+                    if scoped { droppedNSURLs[0].stopAccessingSecurityScopedResource() }
+                    if !readable {
+                        handleContainerPermissionBlocked(
+                            path: firstPath,
+                            confirmedPermissionDenied: stillDenied
+                        )
+                        return false
+                    }
                 }
             }
 
@@ -2242,7 +2294,7 @@ final class ClipboardStore: ObservableObject {
             tempCheckPB.releaseGlobally()
             guard canWrite else {
                 if let firstPath = cleanURLs[0].path {
-                    handleContainerPermissionBlocked(path: firstPath)
+                    handleContainerPermissionBlocked(path: firstPath, confirmedPermissionDenied: false)
                 } else {
                     showToast("无法读取拖入的文件")
                 }
@@ -2510,13 +2562,45 @@ final class ClipboardStore: ObservableObject {
 
     /// 当 macOS TCC 拦截跨沙盒容器（如微信 `~/Library/Containers/com.tencent.xinWeChat`）文件读取时：
     /// 绝不清空原剪贴板、绝不写入损坏记录，并清晰指引用户授权
-    private func handleContainerPermissionBlocked(path: String) {
-        let isWeChat = path.contains("com.tencent.xinWeChat")
-        if isWeChat {
-            showToast("微信沙盒受系统保护，请在「隐私与安全性 › 完全磁盘访问权限」开启 iClip")
-        } else {
-            showToast("应用沙盒受系统保护，请在「隐私与安全性 › 完全磁盘访问权限」开启 iClip")
+    nonisolated static func resolveDropBlockFeedback(
+        path: String,
+        confirmedPermissionDenied: Bool
+    ) -> (blockedChatAppName: String?, needsRedrop: Bool, toastMessage: String, toastDuration: TimeInterval) {
+        if confirmedPermissionDenied,
+           let chatApp = detectProtectedChatContainerAppName(path: path, bundleID: nil) {
+            return (
+                blockedChatAppName: chatApp,
+                needsRedrop: true,
+                toastMessage: "未能直接读取\(chatApp)图片 · 点顶部指引开启完全磁盘访问权限后请重新拖入",
+                toastDuration: 4.2
+            )
         }
+        if confirmedPermissionDenied {
+            return (
+                blockedChatAppName: nil,
+                needsRedrop: false,
+                toastMessage: "应用沙盒受系统保护 · 开启完全磁盘访问权限后请重新拖入",
+                toastDuration: 2.8
+            )
+        }
+        return (
+            blockedChatAppName: nil,
+            needsRedrop: false,
+            toastMessage: "无法读取或写入拖入的文件（请检查文件是否存在或权限）",
+            toastDuration: 2.2
+        )
+    }
+
+    private func handleContainerPermissionBlocked(path: String, confirmedPermissionDenied: Bool = true) {
+        let resolution = Self.resolveDropBlockFeedback(
+            path: path,
+            confirmedPermissionDenied: confirmedPermissionDenied
+        )
+        if let chatApp = resolution.blockedChatAppName {
+            blockedChatImageNeedsRedrop = resolution.needsRedrop
+            blockedChatImageAppName = chatApp
+        }
+        showToast(resolution.toastMessage, duration: resolution.toastDuration)
     }
 
     private func ingestDroppedImageData(rawPNG: Data?, rawTIFF: Data?, sourceApp: String) {
