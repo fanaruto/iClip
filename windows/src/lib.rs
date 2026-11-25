@@ -3234,4 +3234,34 @@ mod tests {
             (0.0, 0.0)
         );
     }
+
+    #[test]
+    fn test_sweep_sampling_and_dt_independent_spring_lerp() {
+        use crate::canvas_ui::{compute_spring_lerp_step, sample_sweep_points};
+
+        // 1. sweep 采样：零距离只出终点；斜线 8px 步进不漏点；跨屏上限 256+1 防卡顿
+        assert_eq!(sample_sweep_points((10, 20), (10, 20), 8, true), vec![(10, 20)]);
+        let pts = sample_sweep_points((0, 0), (32, 0), 8, false);
+        assert_eq!(pts.len(), 4);
+        assert_eq!(pts.first(), Some(&(8, 0)));
+        assert_eq!(pts.last(), Some(&(32, 0)));
+        let huge = sample_sweep_points((0, 0), (10000, 10000), 1, false);
+        assert!(huge.len() <= 256);
+        assert_eq!(huge.last(), Some(&(10000, 10000)));
+
+        // 2. 帧率无关指数阻尼：60Hz 一帧 (dt=0.016) 与 120Hz 两帧 (dt=0.008*2) 数学收敛严格一致
+        let (step_60, settled_60) = compute_spring_lerp_step(0.0, 2.0, 0.016, 28.0, 0.008);
+        assert!(!settled_60);
+        let (h1, _) = compute_spring_lerp_step(0.0, 2.0, 0.008, 28.0, 0.008);
+        let (step_120_x2, _) = compute_spring_lerp_step(h1, 2.0, 0.008, 28.0, 0.008);
+        assert!((step_60 - step_120_x2).abs() < 0.0005);
+
+        // 3. epsilon 吸附归位 + 非有限数值防御
+        let (snap, done) = compute_spring_lerp_step(1.995, 2.0, 0.016, 28.0, 0.008);
+        assert!(done);
+        assert_eq!(snap, 2.0);
+        let (nan_safe, nan_done) = compute_spring_lerp_step(f32::NAN, 1.0, 0.016, 28.0, 0.008);
+        assert!(nan_done);
+        assert_eq!(nan_safe, 1.0);
+    }
 }

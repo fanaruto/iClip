@@ -26,6 +26,8 @@ struct ClipImageGridTile: View {
     @State private var asyncThumbnail: NSImage? = nil
     @State private var lastTapUptime: TimeInterval = 0
     @State private var showCopiedInlineFlash: Bool = false
+    @State private var copiedFlashGate = InlineFlashGate()
+    @State private var copiedFlashTask: Task<Void, Never>? = nil
     @State private var isDeepPressFlat: Bool = false
 
     var body: some View {
@@ -363,8 +365,13 @@ struct ClipImageGridTile: View {
                 if !isHovered { isHovered = true }
                 onSelect()
                 onCopyOnly()
+                copiedFlashTask?.cancel()
+                let gen = copiedFlashGate.trigger()
                 withAnimation(.easeOut(duration: 0.14)) { showCopiedInlineFlash = true }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                copiedFlashTask = Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    guard !Task.isCancelled, copiedFlashGate.completeIfCurrent(generation: gen) else { return }
+                    copiedFlashTask = nil
                     withAnimation(.easeOut(duration: 0.2)) { showCopiedInlineFlash = false }
                 }
             }
@@ -452,5 +459,11 @@ struct ClipImageGridTile: View {
             }
         }
         .zIndex(isHovered ? 30 : (isSelected ? 5 : 0))
+        .onDisappear {
+            copiedFlashTask?.cancel()
+            copiedFlashTask = nil
+            copiedFlashGate.cancel()
+            showCopiedInlineFlash = false
+        }
     }
 }

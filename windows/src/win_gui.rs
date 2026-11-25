@@ -2,10 +2,10 @@
 
 use iclip_core::canvas_ui::{
     build_display_rows_ext, clamp_image_pan_offset, clamp_quick_look_scroll,
-    compute_cursor_anchored_zoom_pan, compute_wrapped_text_scroll_bounds,
+    compute_cursor_anchored_zoom_pan, compute_spring_lerp_step, compute_wrapped_text_scroll_bounds,
     decode_cf_dib_bytes_to_rgba, estimate_mono_text_px, estimate_text_px, fit_image_in_viewport,
-    grid_move_selection, image_grid_row_height, pack_big_bang_chip_rows, standard_card_height,
-    Color4, DisplayRow, GlassPalette, GridMoveDir, PixelCanvas,
+    grid_move_selection, image_grid_row_height, pack_big_bang_chip_rows, sample_sweep_points,
+    standard_card_height, Color4, DisplayRow, GlassPalette, GridMoveDir, PixelCanvas,
 };
 use iclip_core::engines::{
     analyze_file_actions, analyze_text_actions, clean_tracking_url, compress_png_to_white_bg_jpeg,
@@ -304,6 +304,58 @@ enum HoveredCardButton {
     QuickAction(usize, usize),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum QlStageHoverTarget {
+    Granularity,
+    ToggleBigBang,
+    Close,
+    Token(usize),
+    SelectAllOrClear,
+    CopySelection,
+    PasteSelection,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum QuickLookHoverTarget {
+    Tab(u8),
+    Close,
+    Granularity(BigBangGranularity),
+    SelectAll,
+    Clear,
+    Token(usize),
+    CopySelection,
+    PasteSelection,
+}
+
+fn map_ql_stage_hover_target(action: &HitAction) -> Option<QlStageHoverTarget> {
+    match action {
+        HitAction::CycleBigBangGranularity => Some(QlStageHoverTarget::Granularity),
+        HitAction::ToggleQlStageBigBang => Some(QlStageHoverTarget::ToggleBigBang),
+        HitAction::CloseOverlay => Some(QlStageHoverTarget::Close),
+        HitAction::ToggleBigBangToken(id) => Some(QlStageHoverTarget::Token(*id)),
+        HitAction::SelectAllBigBang | HitAction::ClearBigBangSelection => {
+            Some(QlStageHoverTarget::SelectAllOrClear)
+        }
+        HitAction::CopyBigBangSelection => Some(QlStageHoverTarget::CopySelection),
+        HitAction::PasteBigBangSelection => Some(QlStageHoverTarget::PasteSelection),
+        _ => None,
+    }
+}
+
+fn map_quick_look_hover_target(action: &HitAction) -> Option<QuickLookHoverTarget> {
+    match action {
+        HitAction::SetQuickLookTab(tab) => Some(QuickLookHoverTarget::Tab(*tab)),
+        HitAction::CloseOverlay => Some(QuickLookHoverTarget::Close),
+        HitAction::SetBigBangGranularity(g) => Some(QuickLookHoverTarget::Granularity(*g)),
+        HitAction::SelectAllBigBang => Some(QuickLookHoverTarget::SelectAll),
+        HitAction::ClearBigBangSelection => Some(QuickLookHoverTarget::Clear),
+        HitAction::ToggleBigBangToken(id) => Some(QuickLookHoverTarget::Token(*id)),
+        HitAction::CopyBigBangSelection => Some(QuickLookHoverTarget::CopySelection),
+        HitAction::PasteBigBangSelection => Some(QuickLookHoverTarget::PasteSelection),
+        _ => None,
+    }
+}
+
 struct DecodedThumb {
     file_name: String,
     width: u32,
@@ -326,6 +378,7 @@ struct WinAppState {
     selected_tab: ClipFilterTab,
     seg_pill_ratio: f32,
     seg_pill_target_ratio: f32,
+    seg_pill_last_tick: Option<Instant>,
     selected_pin_category: Option<PinCategory>,
     search_query: String,
     selected_visible_pos: usize,
@@ -353,6 +406,8 @@ struct WinAppState {
     ql_stage_ocr_selected: HashSet<usize>,
     ql_stage_rendered_big_bang_ids: Vec<usize>,
     ql_stage_sweep_target: Option<bool>,
+    ql_stage_sweep_last_pt: Option<(i32, i32)>,
+    ql_stage_hovered_target: Option<QlStageHoverTarget>,
     ql_stage_tracking_mouse_leave: bool,
     ql_stage_hit_regions: Vec<HitRegion>,
     ql_stage_zoom: f32,
@@ -367,6 +422,7 @@ struct WinAppState {
     hotkey_conflict_error: Option<String>,
     hotkey_recording_hint: Option<String>,
     show_quick_look: bool,
+    quick_look_hovered_target: Option<QuickLookHoverTarget>,
     show_highlights_overlay: bool,
     quick_look_diff_mode: bool,
     quick_look_tab: u8,
@@ -375,6 +431,7 @@ struct WinAppState {
     big_bang_granularity: BigBangGranularity,
     big_bang_selected_ids: HashSet<usize>,
     big_bang_sweep_target: Option<bool>,
+    big_bang_sweep_last_pt: Option<(i32, i32)>,
     editing_alias_item_id: Option<String>,
     alias_draft: String,
     toast_message: Option<String>,
@@ -582,6 +639,7 @@ pub fn run_windows_app() -> i32 {
                 selected_tab: ClipFilterTab::All,
                 seg_pill_ratio: 0.0,
                 seg_pill_target_ratio: 0.0,
+                seg_pill_last_tick: None,
                 selected_pin_category: None,
                 search_query: String::new(),
                 selected_visible_pos: 0,
@@ -609,6 +667,8 @@ pub fn run_windows_app() -> i32 {
                 ql_stage_ocr_selected: HashSet::new(),
                 ql_stage_rendered_big_bang_ids: Vec::new(),
                 ql_stage_sweep_target: None,
+                ql_stage_sweep_last_pt: None,
+                ql_stage_hovered_target: None,
                 ql_stage_tracking_mouse_leave: false,
                 ql_stage_hit_regions: Vec::new(),
                 ql_stage_zoom: 1.0,
@@ -623,6 +683,7 @@ pub fn run_windows_app() -> i32 {
                 hotkey_conflict_error: None,
                 hotkey_recording_hint: None,
                 show_quick_look: false,
+                quick_look_hovered_target: None,
                 show_highlights_overlay: init_highlights,
                 quick_look_diff_mode: false,
                 quick_look_tab: 0,
@@ -631,6 +692,7 @@ pub fn run_windows_app() -> i32 {
                 big_bang_granularity: BigBangGranularity::Word,
                 big_bang_selected_ids: HashSet::new(),
                 big_bang_sweep_target: None,
+                big_bang_sweep_last_pt: None,
                 editing_alias_item_id: None,
                 alias_draft: String::new(),
                 toast_message: None,
@@ -780,6 +842,7 @@ pub fn run_windows_self_test() -> Result<(), String> {
             selected_tab: ClipFilterTab::All,
             seg_pill_ratio: 0.0,
             seg_pill_target_ratio: 0.0,
+            seg_pill_last_tick: None,
             selected_pin_category: None,
             search_query: String::new(),
             selected_visible_pos: 0,
@@ -807,6 +870,8 @@ pub fn run_windows_self_test() -> Result<(), String> {
             ql_stage_ocr_selected: HashSet::new(),
             ql_stage_rendered_big_bang_ids: Vec::new(),
             ql_stage_sweep_target: None,
+            ql_stage_sweep_last_pt: None,
+            ql_stage_hovered_target: None,
             ql_stage_tracking_mouse_leave: false,
             ql_stage_hit_regions: Vec::new(),
             ql_stage_zoom: 1.0,
@@ -821,6 +886,7 @@ pub fn run_windows_self_test() -> Result<(), String> {
             hotkey_conflict_error: None,
             hotkey_recording_hint: None,
             show_quick_look: false,
+            quick_look_hovered_target: None,
             show_highlights_overlay: false,
             quick_look_diff_mode: false,
             quick_look_tab: 0,
@@ -829,6 +895,7 @@ pub fn run_windows_self_test() -> Result<(), String> {
             big_bang_granularity: BigBangGranularity::Word,
             big_bang_selected_ids: HashSet::new(),
             big_bang_sweep_target: None,
+            big_bang_sweep_last_pt: None,
             editing_alias_item_id: None,
             alias_draft: String::new(),
             toast_message: None,
@@ -1238,9 +1305,11 @@ unsafe fn start_tab_spring_to(hwnd: HWND, next_tab: ClipFilterTab) {
             let idx = tabs.iter().position(|&t| t == next_tab).unwrap_or(0);
             st.seg_pill_target_ratio = idx as f32;
             if (st.seg_pill_target_ratio - st.seg_pill_ratio).abs() > 0.01 {
+                st.seg_pill_last_tick = Some(Instant::now());
                 need_timer = true;
             } else {
                 st.seg_pill_ratio = st.seg_pill_target_ratio;
+                st.seg_pill_last_tick = None;
             }
         }
     });
@@ -1801,6 +1870,9 @@ unsafe fn show_panel_near_cursor(hwnd: HWND) {
             let idx = tabs.iter().position(|&t| t == st.selected_tab).unwrap_or(0);
             st.seg_pill_ratio = idx as f32;
             st.seg_pill_target_ratio = idx as f32;
+            st.seg_pill_last_tick = None;
+            st.quick_look_hovered_target = None;
+            st.big_bang_sweep_last_pt = None;
         }
     });
 
@@ -1838,6 +1910,7 @@ unsafe fn hide_panel(hwnd: HWND, restore_focus: bool) {
     APP_STATE.with(|cell| {
         if let Some(st) = cell.borrow_mut().as_mut() {
             st.visible = false;
+            st.seg_pill_last_tick = None;
             st.tracking_mouse_leave = false;
             st.hovered_visible_pos = None;
             st.hover_card_nx = 0.0;
@@ -1847,6 +1920,7 @@ unsafe fn hide_panel(hwnd: HWND, restore_focus: bool) {
             st.hovered_card_btn = None;
             st.dragging_slider_track = None;
             st.show_quick_look = false;
+            st.quick_look_hovered_target = None;
             st.quick_look_scroll = 0;
             st.quick_look_max_scroll = 0;
             st.ql_stage_visible = false;
@@ -1859,10 +1933,14 @@ unsafe fn hide_panel(hwnd: HWND, restore_focus: bool) {
             st.ql_stage_ocr_text = None;
             st.ql_stage_ocr_selected.clear();
             st.ql_stage_rendered_big_bang_ids.clear();
+            st.ql_stage_sweep_target = None;
+            st.ql_stage_sweep_last_pt = None;
+            st.ql_stage_hovered_target = None;
             st.ql_stage_hit_regions.clear();
             reset_ql_stage_zoom_and_pan(st);
             st.big_bang_selected_ids.clear();
             st.big_bang_sweep_target = None;
+            st.big_bang_sweep_last_pt = None;
             st.editing_alias_item_id = None;
             if st.recording_slot.is_some() {
                 st.recording_slot = None;
@@ -1921,6 +1999,7 @@ unsafe extern "system" fn wnd_proc(
                         st.store.lock_down_ephemeral_buffers();
                         st.search_query.clear();
                         st.show_quick_look = false;
+                        st.quick_look_hovered_target = None;
                         st.ql_stage_visible = false;
                         st.ql_stage_rgba = None;
                         st.ql_stage_hi_rgba = None;
@@ -1931,9 +2010,13 @@ unsafe extern "system" fn wnd_proc(
                         st.ql_stage_ocr_text = None;
                         st.ql_stage_ocr_selected.clear();
                         st.ql_stage_rendered_big_bang_ids.clear();
+                        st.ql_stage_sweep_target = None;
+                        st.ql_stage_sweep_last_pt = None;
+                        st.ql_stage_hovered_target = None;
                         st.ql_stage_hit_regions.clear();
                         st.big_bang_selected_ids.clear();
                         st.big_bang_sweep_target = None;
+                        st.big_bang_sweep_last_pt = None;
                         st.editing_alias_item_id = None;
                         st.alias_draft.clear();
                     }
@@ -1950,6 +2033,9 @@ unsafe extern "system" fn wnd_proc(
                         st.store.lock_down_ephemeral_buffers();
                         st.search_query.clear();
                         st.show_quick_look = false;
+                        st.quick_look_hovered_target = None;
+                        st.big_bang_sweep_target = None;
+                        st.big_bang_sweep_last_pt = None;
                         st.editing_alias_item_id = None;
                         st.alias_draft.clear();
                     }
@@ -2171,15 +2257,27 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_TIMER => {
             if wparam == TIMER_ID_SPRING_ANIM {
+                let now = Instant::now();
                 let mut stop = true;
                 APP_STATE.with(|c| {
                     if let Some(st) = c.borrow_mut().as_mut() {
-                        let diff = st.seg_pill_target_ratio - st.seg_pill_ratio;
-                        if diff.abs() > 0.008 {
-                            st.seg_pill_ratio += diff * 0.36;
-                            stop = false;
+                        let dt = st
+                            .seg_pill_last_tick
+                            .map(|prev| now.saturating_duration_since(prev).as_secs_f32())
+                            .unwrap_or(0.016);
+                        let (next, settled) = compute_spring_lerp_step(
+                            st.seg_pill_ratio,
+                            st.seg_pill_target_ratio,
+                            dt,
+                            28.0,
+                            0.008,
+                        );
+                        st.seg_pill_ratio = next;
+                        if settled {
+                            st.seg_pill_last_tick = None;
                         } else {
-                            st.seg_pill_ratio = st.seg_pill_target_ratio;
+                            st.seg_pill_last_tick = Some(now);
+                            stop = false;
                         }
                     }
                 });
@@ -2198,6 +2296,9 @@ unsafe extern "system" fn wnd_proc(
                                 + s.store.archive_expired_completed_todos(n);
                             if cnt > 0 && s.show_quick_look {
                                 s.show_quick_look = false;
+                                s.quick_look_hovered_target = None;
+                                s.big_bang_sweep_target = None;
+                                s.big_bang_sweep_last_pt = None;
                             }
                             cnt > 0 || auto_resumed
                         })
@@ -2385,6 +2486,11 @@ unsafe extern "system" fn wnd_proc(
                     st.tracking_mouse_leave = false;
                     if !holding_capture {
                         st.big_bang_sweep_target = None;
+                        st.big_bang_sweep_last_pt = None;
+                    }
+                    if st.quick_look_hovered_target.take().is_some() {
+                        need_redraw = true;
+                        full_repaint = true;
                     }
                     let old_hovered = st.hovered_visible_pos.take();
                     if let Some(old_pos) = old_hovered {
@@ -2435,6 +2541,7 @@ unsafe extern "system" fn wnd_proc(
                 if let Some(st) = c.borrow_mut().as_mut() {
                     st.dragging_slider_track = None;
                     st.big_bang_sweep_target = None;
+                    st.big_bang_sweep_last_pt = None;
                     if st.pressed_visible_pos.take().is_some() {
                         need_redraw = true;
                     }
@@ -2458,10 +2565,14 @@ unsafe extern "system" fn wnd_proc(
                         st.tracking_mouse_leave = false;
                         st.dragging_slider_track = None;
                         st.big_bang_sweep_target = None;
+                        st.big_bang_sweep_last_pt = None;
                         if st.pressed_visible_pos.take().is_some() {
                             need_redraw = true;
                         }
                         if cursor_outside {
+                            if st.quick_look_hovered_target.take().is_some() {
+                                need_redraw = true;
+                            }
                             if st.hovered_visible_pos.take().is_some() {
                                 need_redraw = true;
                             }
@@ -2516,6 +2627,7 @@ unsafe extern "system" fn wnd_proc(
                         return true;
                     }
                     if st.show_quick_look {
+                        let prev_scroll = st.quick_look_scroll;
                         let step = if st.quick_look_tab == 0 { 1 } else { 3 };
                         if delta < 0 {
                             st.quick_look_scroll = st
@@ -2524,6 +2636,9 @@ unsafe extern "system" fn wnd_proc(
                                 .min(st.quick_look_max_scroll);
                         } else if delta > 0 {
                             st.quick_look_scroll = st.quick_look_scroll.saturating_sub(step);
+                        }
+                        if st.quick_look_scroll != prev_scroll {
+                            st.quick_look_hovered_target = None;
                         }
                     } else if st.view_mode == ActiveViewMode::Settings {
                         let step = 48;
@@ -3261,6 +3376,9 @@ unsafe fn delete_item_and_scrub_clipboard_if_needed(hwnd: HWND, id: &str) {
             }
             if st.show_quick_look {
                 st.show_quick_look = false;
+                st.quick_look_hovered_target = None;
+                st.big_bang_sweep_target = None;
+                st.big_bang_sweep_last_pt = None;
                 st.editing_alias_item_id = None;
                 st.alias_draft.clear();
             }
@@ -10148,6 +10266,7 @@ fn layout_and_draw_quick_look_overlay(
     );
     let Some(&store_idx) = filtered.get(st.selected_visible_pos) else {
         st.show_quick_look = false;
+        st.quick_look_hovered_target = None;
         return;
     };
     let item = st.store.items[store_idx].clone();
@@ -10161,6 +10280,7 @@ fn layout_and_draw_quick_look_overlay(
         let tx = mx + s(12) + (i as i32) * (tab_w + s(5));
         let ty = my + s(11);
         let active = st.quick_look_tab == tab_idx;
+        let is_hov = st.quick_look_hovered_target == Some(QuickLookHoverTarget::Tab(tab_idx));
         canvas.fill_round_rect(
             tx,
             ty,
@@ -10173,6 +10293,38 @@ fn layout_and_draw_quick_look_overlay(
                 palette.chip_bg
             },
         );
+        if is_hov {
+            if active {
+                canvas.fill_round_rect(tx, ty, tab_w, tab_h, sf(12.0), Color4::rgba(255, 255, 255, 34));
+                canvas.stroke_round_rect(
+                    tx,
+                    ty,
+                    tab_w,
+                    tab_h,
+                    sf(12.0),
+                    sf(0.9),
+                    Color4::rgba(255, 255, 255, 175),
+                );
+            } else {
+                canvas.fill_round_rect(
+                    tx,
+                    ty,
+                    tab_w,
+                    tab_h,
+                    sf(12.0),
+                    palette.cobalt.with_alpha(if st.is_dark_mode { 48 } else { 30 }),
+                );
+                canvas.stroke_round_rect(
+                    tx,
+                    ty,
+                    tab_w,
+                    tab_h,
+                    sf(12.0),
+                    sf(0.9),
+                    palette.cobalt.with_alpha(165),
+                );
+            }
+        }
         let rc = RECT {
             left: tx,
             top: ty,
@@ -10184,6 +10336,8 @@ fn layout_and_draw_quick_look_overlay(
             rect: rc,
             color: if active {
                 Color4::rgb(255, 255, 255)
+            } else if is_hov {
+                palette.cobalt_text
             } else {
                 palette.text_secondary
             },
@@ -10200,18 +10354,36 @@ fn layout_and_draw_quick_look_overlay(
     let close_sz = s(24);
     let cx = mx + mw - close_sz - s(10);
     let cy = my + s(11);
+    let close_hov = st.quick_look_hovered_target == Some(QuickLookHoverTarget::Close);
     canvas.fill_circle(
         (cx + close_sz / 2) as f32,
         (cy + close_sz / 2) as f32,
         sf(12.0),
-        palette.chip_bg,
+        if close_hov {
+            palette.danger.with_alpha(if st.is_dark_mode { 64 } else { 38 })
+        } else {
+            palette.chip_bg
+        },
     );
+    if close_hov {
+        canvas.stroke_circle(
+            (cx + close_sz / 2) as f32,
+            (cy + close_sz / 2) as f32,
+            sf(12.0),
+            sf(1.0),
+            palette.danger.with_alpha(195),
+        );
+    }
     canvas.draw_icon_close(
         (cx + close_sz / 2) as f32,
         (cy + close_sz / 2) as f32,
         sf(9.5),
         sf(1.5),
-        palette.text_primary,
+        if close_hov {
+            palette.danger
+        } else {
+            palette.text_primary
+        },
     );
     st.hit_regions.push(HitRegion {
         rect: RECT {
@@ -10367,6 +10539,7 @@ fn layout_and_draw_quick_look_overlay(
         ] {
             let gw = s(44);
             let active = st.big_bang_granularity == g;
+            let g_hov = st.quick_look_hovered_target == Some(QuickLookHoverTarget::Granularity(g));
             canvas.fill_round_rect(
                 gx,
                 gy,
@@ -10375,6 +10548,38 @@ fn layout_and_draw_quick_look_overlay(
                 sf(11.0),
                 if active { palette.cobalt } else { palette.chip_bg },
             );
+            if g_hov {
+                if active {
+                    canvas.fill_round_rect(gx, gy, gw, gh, sf(11.0), Color4::rgba(255, 255, 255, 32));
+                    canvas.stroke_round_rect(
+                        gx,
+                        gy,
+                        gw,
+                        gh,
+                        sf(11.0),
+                        sf(0.9),
+                        Color4::rgba(255, 255, 255, 165),
+                    );
+                } else {
+                    canvas.fill_round_rect(
+                        gx,
+                        gy,
+                        gw,
+                        gh,
+                        sf(11.0),
+                        palette.cobalt.with_alpha(if st.is_dark_mode { 48 } else { 30 }),
+                    );
+                    canvas.stroke_round_rect(
+                        gx,
+                        gy,
+                        gw,
+                        gh,
+                        sf(11.0),
+                        sf(0.9),
+                        palette.cobalt.with_alpha(175),
+                    );
+                }
+            }
             let grc = RECT {
                 left: gx,
                 top: gy,
@@ -10386,6 +10591,8 @@ fn layout_and_draw_quick_look_overlay(
                 rect: grc,
                 color: if active {
                     Color4::rgb(255, 255, 255)
+                } else if g_hov {
+                    palette.cobalt_text
                 } else {
                     palette.text_secondary
                 },
@@ -10404,7 +10611,27 @@ fn layout_and_draw_quick_look_overlay(
         let all_w = s(44);
         let all_x = mx + mw - s(14) - all_w
             - if st.big_bang_selected_ids.is_empty() { 0 } else { clear_w + s(6) };
+        let all_hov = st.quick_look_hovered_target == Some(QuickLookHoverTarget::SelectAll);
         canvas.fill_round_rect(all_x, gy, all_w, gh, sf(11.0), palette.chip_bg);
+        if all_hov {
+            canvas.fill_round_rect(
+                all_x,
+                gy,
+                all_w,
+                gh,
+                sf(11.0),
+                palette.cobalt.with_alpha(if st.is_dark_mode { 56 } else { 34 }),
+            );
+            canvas.stroke_round_rect(
+                all_x,
+                gy,
+                all_w,
+                gh,
+                sf(11.0),
+                sf(0.9),
+                palette.cobalt.with_alpha(175),
+            );
+        }
         let all_rc = RECT {
             left: all_x,
             top: gy,
@@ -10426,7 +10653,31 @@ fn layout_and_draw_quick_look_overlay(
 
         if !st.big_bang_selected_ids.is_empty() {
             let cx_btn = all_x + all_w + s(6);
+            let clear_hov = st.quick_look_hovered_target == Some(QuickLookHoverTarget::Clear);
             canvas.fill_round_rect(cx_btn, gy, clear_w, gh, sf(11.0), palette.chip_bg);
+            if clear_hov {
+                canvas.fill_round_rect(
+                    cx_btn,
+                    gy,
+                    clear_w,
+                    gh,
+                    sf(11.0),
+                    if st.is_dark_mode {
+                        Color4::rgba(255, 255, 255, 42)
+                    } else {
+                        Color4::rgba(15, 23, 42, 24)
+                    },
+                );
+                canvas.stroke_round_rect(
+                    cx_btn,
+                    gy,
+                    clear_w,
+                    gh,
+                    sf(11.0),
+                    sf(0.9),
+                    palette.text_secondary.with_alpha(145),
+                );
+            }
             let cl_rc = RECT {
                 left: cx_btn,
                 top: gy,
@@ -10436,7 +10687,11 @@ fn layout_and_draw_quick_look_overlay(
             texts.push(TextDrawCmd {
                 text: "清空".to_string(),
                 rect: cl_rc,
-                color: palette.text_secondary,
+                color: if clear_hov {
+                    palette.text_primary
+                } else {
+                    palette.text_secondary
+                },
                 font_kind: FontKind::BadgeBold,
                 flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
             });
@@ -10500,23 +10755,35 @@ fn layout_and_draw_quick_look_overlay(
                 let tx = chips_left + cell.x_offset;
                 let cw = cell.width;
                 let is_sel = st.big_bang_selected_ids.contains(&tok.id);
+                let is_hov = st.quick_look_hovered_target == Some(QuickLookHoverTarget::Token(tok.id));
                 canvas.fill_round_rect(
                     tx,
                     ty,
                     cw,
                     chip_h,
                     sf(7.0),
-                    if is_sel { palette.cobalt } else { palette.chip_bg },
+                    if is_sel {
+                        palette.cobalt
+                    } else if is_hov {
+                        palette.cobalt.with_alpha(if st.is_dark_mode { 56 } else { 34 })
+                    } else {
+                        palette.chip_bg
+                    },
                 );
+                if is_sel && is_hov {
+                    canvas.fill_round_rect(tx, ty, cw, chip_h, sf(7.0), Color4::rgba(255, 255, 255, 28));
+                }
                 canvas.stroke_round_rect(
                     tx,
                     ty,
                     cw,
                     chip_h,
                     sf(7.0),
-                    sf(0.75),
+                    sf(if is_hov { 1.0 } else { 0.75 }),
                     if is_sel {
-                        Color4::rgba(255, 255, 255, 92)
+                        Color4::rgba(255, 255, 255, if is_hov { 188 } else { 92 })
+                    } else if is_hov {
+                        palette.cobalt.with_alpha(190)
                     } else {
                         palette.group_stroke
                     },
@@ -10615,7 +10882,31 @@ fn layout_and_draw_quick_look_overlay(
             flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
         });
 
+        let copy_hov = st.quick_look_hovered_target == Some(QuickLookHoverTarget::CopySelection);
         canvas.fill_round_rect(c_btn_x, act_y, c_btn_w, act_h, sf(12.0), palette.chip_bg);
+        if copy_hov {
+            canvas.fill_round_rect(
+                c_btn_x,
+                act_y,
+                c_btn_w,
+                act_h,
+                sf(12.0),
+                if st.is_dark_mode {
+                    Color4::rgba(255, 255, 255, 36)
+                } else {
+                    Color4::rgba(15, 23, 42, 20)
+                },
+            );
+            canvas.stroke_round_rect(
+                c_btn_x,
+                act_y,
+                c_btn_w,
+                act_h,
+                sf(12.0),
+                sf(0.9),
+                palette.cobalt.with_alpha(150),
+            );
+        }
         let c_rc = RECT {
             left: c_btn_x,
             top: act_y,
@@ -10635,7 +10926,27 @@ fn layout_and_draw_quick_look_overlay(
             action: HitAction::CopyBigBangSelection,
         });
 
+        let paste_hov = st.quick_look_hovered_target == Some(QuickLookHoverTarget::PasteSelection);
         canvas.fill_round_rect(p_btn_x, act_y, p_btn_w, act_h, sf(12.0), palette.cobalt);
+        if paste_hov {
+            canvas.fill_round_rect(
+                p_btn_x,
+                act_y,
+                p_btn_w,
+                act_h,
+                sf(12.0),
+                Color4::rgba(255, 255, 255, 36),
+            );
+            canvas.stroke_round_rect(
+                p_btn_x,
+                act_y,
+                p_btn_w,
+                act_h,
+                sf(12.0),
+                sf(0.95),
+                Color4::rgba(255, 255, 255, 176),
+            );
+        }
         let p_rc = RECT {
             left: p_btn_x,
             top: act_y,
@@ -11694,6 +12005,7 @@ unsafe fn handle_mouse_move(hwnd: HWND, x: i32, y: i32, left_held: bool) {
         if !left_held {
             st.dragging_slider_track = None;
             st.big_bang_sweep_target = None;
+            st.big_bang_sweep_last_pt = None;
         }
         st.dragging_slider_track
     });
@@ -11717,34 +12029,45 @@ unsafe fn handle_mouse_move(hwnd: HWND, x: i32, y: i32, left_held: bool) {
 
     APP_STATE.with(|cell| {
         if let Some(st) = cell.borrow_mut().as_mut() {
-            if left_held && st.show_quick_look && st.quick_look_tab == 0 {
-                for reg in &st.hit_regions {
-                    if let HitAction::ToggleBigBangToken(tok_id) = reg.action {
-                        if point_in_rect(x, y, &reg.rect) {
-                            let target_state = st
-                                .big_bang_sweep_target
-                                .unwrap_or_else(|| !st.big_bang_selected_ids.contains(&tok_id));
-                            st.big_bang_sweep_target = Some(target_state);
-                            let modified = if target_state {
-                                st.big_bang_selected_ids.insert(tok_id)
-                            } else {
-                                st.big_bang_selected_ids.remove(&tok_id)
-                            };
-                            if modified {
-                                changed = true;
+            if st.show_quick_look {
+                if left_held && st.quick_look_tab == 0 {
+                    let prev_pt = st.big_bang_sweep_last_pt;
+                    let start_pt = prev_pt.unwrap_or((x, y));
+                    for (sx, sy) in sample_sweep_points(start_pt, (x, y), 8, prev_pt.is_none()) {
+                        for reg in &st.hit_regions {
+                            if let HitAction::ToggleBigBangToken(tok_id) = reg.action {
+                                if point_in_rect(sx, sy, &reg.rect) {
+                                    let target_state = st
+                                        .big_bang_sweep_target
+                                        .unwrap_or_else(|| !st.big_bang_selected_ids.contains(&tok_id));
+                                    st.big_bang_sweep_target = Some(target_state);
+                                    let modified = if target_state {
+                                        st.big_bang_selected_ids.insert(tok_id)
+                                    } else {
+                                        st.big_bang_selected_ids.remove(&tok_id)
+                                    };
+                                    if modified {
+                                        changed = true;
+                                    }
+                                    use_hand = true;
+                                    break;
+                                }
                             }
-                            use_hand = true;
-                            return;
                         }
                     }
+                    st.big_bang_sweep_last_pt = Some((x, y));
                 }
-            }
-            if st.show_quick_look {
+                let mut found_ql_hover = None;
                 for reg in &st.hit_regions {
                     if point_in_rect(x, y, &reg.rect) {
                         use_hand = reg.interactive_cursor;
+                        found_ql_hover = map_quick_look_hover_target(&reg.action);
                         break;
                     }
+                }
+                if st.quick_look_hovered_target != found_ql_hover {
+                    st.quick_look_hovered_target = found_ql_hover;
+                    changed = true;
                 }
                 return;
             }
@@ -12202,6 +12525,9 @@ unsafe fn handle_left_click(hwnd: HWND, x: i32, y: i32, is_double: bool) {
             APP_STATE.with(|c| {
                 if let Some(st) = c.borrow_mut().as_mut() {
                     st.show_quick_look = false;
+                    st.quick_look_hovered_target = None;
+                    st.big_bang_sweep_target = None;
+                    st.big_bang_sweep_last_pt = None;
                     st.quick_look_scroll = 0;
                     st.quick_look_max_scroll = 0;
                     st.editing_alias_item_id = None;
@@ -12216,6 +12542,8 @@ unsafe fn handle_left_click(hwnd: HWND, x: i32, y: i32, is_double: bool) {
                     st.quick_look_diff_mode = tab == 2;
                     st.quick_look_scroll = 0;
                     st.quick_look_max_scroll = 0;
+                    st.big_bang_sweep_target = None;
+                    st.big_bang_sweep_last_pt = None;
                 }
             });
             let _ = InvalidateRect(hwnd, null(), FALSE);
@@ -12231,6 +12559,7 @@ unsafe fn handle_left_click(hwnd: HWND, x: i32, y: i32, is_double: bool) {
                         true
                     };
                     st.big_bang_sweep_target = Some(next);
+                    st.big_bang_sweep_last_pt = Some((x, y));
                 }
             });
             let _ = SetCapture(hwnd);
@@ -12321,7 +12650,10 @@ unsafe fn handle_left_click(hwnd: HWND, x: i32, y: i32, is_double: bool) {
                 let had_selection = !assembled.is_empty();
                 let text = if had_selection { assembled } else { full_src };
                 st.show_quick_look = false;
+                st.quick_look_hovered_target = None;
                 st.big_bang_selected_ids.clear();
+                st.big_bang_sweep_target = None;
+                st.big_bang_sweep_last_pt = None;
                 Some((text, had_selection))
             });
             if let Some((text, had_sel)) = out_opt {
@@ -12349,6 +12681,9 @@ unsafe fn handle_left_click(hwnd: HWND, x: i32, y: i32, is_double: bool) {
                 if let Some(st) = c.borrow_mut().as_mut() {
                     st.ql_stage_big_bang = !st.ql_stage_big_bang;
                     st.ql_stage_ocr_selected.clear();
+                    st.ql_stage_sweep_target = None;
+                    st.ql_stage_sweep_last_pt = None;
+                    st.ql_stage_hovered_target = None;
                     reset_ql_stage_zoom_and_pan(st);
                 }
             });
@@ -12926,11 +13261,17 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
                 st.ql_stage_orig_dims = None;
                 st.ql_stage_hi_loading_key = None;
                 st.ql_stage_cached_key = None;
+                st.ql_stage_hovered_target = None;
+                st.ql_stage_sweep_target = None;
+                st.ql_stage_sweep_last_pt = None;
                 closed_ql_stage = true;
                 return true;
             }
             if st.show_quick_look {
                 st.show_quick_look = false;
+                st.quick_look_hovered_target = None;
+                st.big_bang_sweep_target = None;
+                st.big_bang_sweep_last_pt = None;
                 return true;
             }
             if st.view_mode == ActiveViewMode::Settings {
@@ -13257,16 +13598,22 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
             if alt_down {
                 if st.show_quick_look && st.quick_look_diff_mode {
                     st.show_quick_look = false;
+                    st.quick_look_hovered_target = None;
                     st.quick_look_scroll = 0;
                     st.quick_look_max_scroll = 0;
                     st.big_bang_selected_ids.clear();
+                    st.big_bang_sweep_target = None;
+                    st.big_bang_sweep_last_pt = None;
                 } else {
                     st.show_quick_look = true;
+                    st.quick_look_hovered_target = None;
                     st.quick_look_diff_mode = true;
                     st.quick_look_tab = 2;
                     st.quick_look_scroll = 0;
                     st.quick_look_max_scroll = 0;
                     st.big_bang_selected_ids.clear();
+                    st.big_bang_sweep_target = None;
+                    st.big_bang_sweep_last_pt = None;
                 }
                 return true;
             }
@@ -13276,6 +13623,9 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
                     st.ql_stage_big_bang = false;
                     st.ql_stage_ocr_selected.clear();
                     st.ql_stage_rendered_big_bang_ids.clear();
+                    st.ql_stage_sweep_target = None;
+                    st.ql_stage_sweep_last_pt = None;
+                    st.ql_stage_hovered_target = None;
                     st.ql_stage_hit_regions.clear();
                     need_dismiss_ql_stage = true;
                     return false;
@@ -13296,12 +13646,14 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
                     }
                 }
                 st.show_quick_look = !st.show_quick_look;
+                st.quick_look_hovered_target = None;
                 st.quick_look_diff_mode = false;
                 st.quick_look_tab = 0;
                 st.quick_look_scroll = 0;
                 st.quick_look_max_scroll = 0;
                 st.big_bang_selected_ids.clear();
                 st.big_bang_sweep_target = None;
+                st.big_bang_sweep_last_pt = None;
                 return true;
             }
             false
@@ -13324,6 +13676,9 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
                 st.ql_stage_big_bang = !st.ql_stage_big_bang;
                 st.ql_stage_ocr_selected.clear();
                 st.ql_stage_rendered_big_bang_ids.clear();
+                st.ql_stage_sweep_target = None;
+                st.ql_stage_sweep_last_pt = None;
+                st.ql_stage_hovered_target = None;
                 reset_ql_stage_zoom_and_pan(st);
                 return true;
             }
@@ -13580,6 +13935,9 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
                     st.quick_look_diff_mode = st.quick_look_tab == 2;
                     st.quick_look_scroll = 0;
                     st.quick_look_max_scroll = 0;
+                    st.quick_look_hovered_target = None;
+                    st.big_bang_sweep_target = None;
+                    st.big_bang_sweep_last_pt = None;
                     return true;
                 }
                 false
@@ -13618,8 +13976,12 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
                 if st.selected_visible_pos != prev_pos {
                     st.big_bang_selected_ids.clear();
                     st.big_bang_sweep_target = None;
+                    st.big_bang_sweep_last_pt = None;
+                    st.quick_look_hovered_target = None;
                     st.ql_stage_ocr_selected.clear();
                     st.ql_stage_sweep_target = None;
+                    st.ql_stage_sweep_last_pt = None;
+                    st.ql_stage_hovered_target = None;
                     st.quick_look_scroll = 0;
                     st.quick_look_max_scroll = 0;
                 }
@@ -13642,8 +14004,10 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
                         ) {
                             PreviewStepTarget::PromoteToImageStage => {
                                 st.show_quick_look = false;
+                                st.quick_look_hovered_target = None;
                                 st.quick_look_diff_mode = false;
                                 st.big_bang_selected_ids.clear();
+                                st.big_bang_sweep_last_pt = None;
                                 if !present_or_update_large_ql_stage(hwnd, st, next_idx) {
                                     if st.ql_stage_visible {
                                         st.ql_stage_visible = false;
@@ -13654,6 +14018,8 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
                                         st.ql_stage_cached_key = None;
                                         st.ql_stage_big_bang = false;
                                         st.ql_stage_sweep_target = None;
+                                        st.ql_stage_sweep_last_pt = None;
+                                        st.ql_stage_hovered_target = None;
                                         need_dismiss_ql_stage = true;
                                     }
                                     st.show_quick_look = true;
@@ -13671,14 +14037,18 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
                                 st.ql_stage_cached_key = None;
                                 st.ql_stage_big_bang = false;
                                 st.ql_stage_sweep_target = None;
+                                st.ql_stage_sweep_last_pt = None;
+                                st.ql_stage_hovered_target = None;
                                 need_dismiss_ql_stage = true;
                                 st.show_quick_look = true;
+                                st.quick_look_hovered_target = None;
                                 st.quick_look_diff_mode = false;
                                 st.quick_look_tab = 0;
                                 st.quick_look_scroll = 0;
                                 st.quick_look_max_scroll = 0;
                                 st.big_bang_selected_ids.clear();
                                 st.big_bang_sweep_target = None;
+                                st.big_bang_sweep_last_pt = None;
                             }
                             PreviewStepTarget::KeepCurrent => {}
                         }
@@ -13739,11 +14109,15 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
                 let had_sel = !assembled.is_empty();
                 let txt = if had_sel { assembled } else { full_src };
                 st.show_quick_look = false;
+                st.quick_look_hovered_target = None;
                 st.big_bang_selected_ids.clear();
+                st.big_bang_sweep_target = None;
+                st.big_bang_sweep_last_pt = None;
                 return Some((txt, had_sel));
             }
             if st.show_quick_look {
                 st.show_quick_look = false;
+                st.quick_look_hovered_target = None;
             }
             None
         });
@@ -13778,6 +14152,8 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
                     st.ql_stage_big_bang = false;
                     st.ql_stage_ocr_selected.clear();
                     st.ql_stage_sweep_target = None;
+                    st.ql_stage_sweep_last_pt = None;
+                    st.ql_stage_hovered_target = None;
                     had_ql_stage = true;
                 }
             }
@@ -14933,11 +15309,15 @@ fn set_shared_big_bang_granularity(st: &mut WinAppState, granularity: BigBangGra
     st.big_bang_granularity = granularity;
     st.quick_look_scroll = 0;
     st.quick_look_max_scroll = 0;
+    st.quick_look_hovered_target = None;
     st.big_bang_selected_ids.clear();
     st.big_bang_sweep_target = None;
+    st.big_bang_sweep_last_pt = None;
+    st.ql_stage_hovered_target = None;
     st.ql_stage_ocr_selected.clear();
     st.ql_stage_rendered_big_bang_ids.clear();
     st.ql_stage_sweep_target = None;
+    st.ql_stage_sweep_last_pt = None;
 }
 
 fn select_all_ql_stage_big_bang_tokens(st: &mut WinAppState) -> bool {
@@ -15117,6 +15497,8 @@ unsafe fn dismiss_large_ql_stage() {
             if let Some(st) = b.as_mut() {
                 st.ql_stage_tracking_mouse_leave = false;
                 st.ql_stage_sweep_target = None;
+                st.ql_stage_sweep_last_pt = None;
+                st.ql_stage_hovered_target = None;
                 reset_ql_stage_zoom_and_pan(st);
             }
         }
@@ -15210,6 +15592,8 @@ unsafe fn present_or_update_large_ql_stage(
     st.ql_stage_ocr_selected.clear();
     st.ql_stage_rendered_big_bang_ids.clear();
     st.ql_stage_sweep_target = None;
+    st.ql_stage_sweep_last_pt = None;
+    st.ql_stage_hovered_target = None;
     st.ql_stage_big_bang = false;
     reset_ql_stage_zoom_and_pan(st);
 
@@ -15351,6 +15735,8 @@ unsafe fn handle_ql_stage_wnd_proc(
                             st.ql_stage_ocr_selected.clear();
                             st.ql_stage_rendered_big_bang_ids.clear();
                             st.ql_stage_sweep_target = None;
+                            st.ql_stage_sweep_last_pt = None;
+                            st.ql_stage_hovered_target = None;
                         }
                     });
                     dismiss_large_ql_stage();
@@ -15362,6 +15748,8 @@ unsafe fn handle_ql_stage_wnd_proc(
                             st.ql_stage_ocr_selected.clear();
                             st.ql_stage_rendered_big_bang_ids.clear();
                             st.ql_stage_sweep_target = None;
+                            st.ql_stage_sweep_last_pt = None;
+                            st.ql_stage_hovered_target = None;
                             reset_ql_stage_zoom_and_pan(st);
                         }
                     });
@@ -15396,6 +15784,7 @@ unsafe fn handle_ql_stage_wnd_proc(
                         if let Some(st) = c.borrow_mut().as_mut() {
                             st.ql_stage_ocr_selected.clear();
                             st.ql_stage_sweep_target = None;
+                            st.ql_stage_sweep_last_pt = None;
                         }
                     });
                     let _ = InvalidateRect(hwnd, null(), FALSE);
@@ -15405,6 +15794,7 @@ unsafe fn handle_ql_stage_wnd_proc(
                         if let Some(st) = c.borrow_mut().as_mut() {
                             let target = !st.ql_stage_ocr_selected.contains(&id);
                             st.ql_stage_sweep_target = Some(target);
+                            st.ql_stage_sweep_last_pt = Some((x, y));
                             if target {
                                 st.ql_stage_ocr_selected.insert(id);
                             } else {
@@ -15429,6 +15819,8 @@ unsafe fn handle_ql_stage_wnd_proc(
                         st.ql_stage_ocr_selected.clear();
                         st.ql_stage_rendered_big_bang_ids.clear();
                         st.ql_stage_sweep_target = None;
+                        st.ql_stage_sweep_last_pt = None;
+                        st.ql_stage_hovered_target = None;
                         Some(payload)
                     });
                     dismiss_large_ql_stage();
@@ -15464,6 +15856,7 @@ unsafe fn handle_ql_stage_wnd_proc(
                             if st.ql_stage_big_bang {
                                 st.ql_stage_ocr_selected.clear();
                                 st.ql_stage_sweep_target = None;
+                                st.ql_stage_sweep_last_pt = None;
                                 should_dismiss = false;
                             } else if point_in_ql_stage_image(x, y, cw, ch, sc, st) {
                                 should_dismiss = false;
@@ -15476,6 +15869,8 @@ unsafe fn handle_ql_stage_wnd_proc(
                                 st.ql_stage_visible = false;
                                 st.ql_stage_big_bang = false;
                                 st.ql_stage_sweep_target = None;
+                                st.ql_stage_sweep_last_pt = None;
+                                st.ql_stage_hovered_target = None;
                             }
                         }
                     });
@@ -15612,13 +16007,14 @@ unsafe fn handle_ql_stage_wnd_proc(
             let avail_w = ((rc.right - rc.left) - sv(36)).max(1);
             let avail_h = ((rc.bottom - rc.top) - sv(82)).max(1);
 
-            let (pan_changed, sweep_changed, use_hand, is_panning) = APP_STATE.with(|c| {
+            let (pan_changed, sweep_changed, hover_changed, use_hand, is_panning) = APP_STATE.with(|c| {
                 let mut b = c.borrow_mut();
                 let Some(st) = b.as_mut() else {
-                    return (false, false, false, false);
+                    return (false, false, false, false, false);
                 };
                 if !left_held {
                     st.ql_stage_sweep_target = None;
+                    st.ql_stage_sweep_last_pt = None;
                     st.ql_stage_pan_drag = None;
                 }
                 let mut pan_changed = false;
@@ -15647,28 +16043,45 @@ unsafe fn handle_ql_stage_wnd_proc(
                         }
                     }
                 }
+                let mut sweep_changed = false;
+                if left_held && st.ql_stage_big_bang {
+                    if let Some(target) = st.ql_stage_sweep_target {
+                        let prev_pt = st.ql_stage_sweep_last_pt;
+                        let start_pt = prev_pt.unwrap_or((x, y));
+                        for (sx, sy) in sample_sweep_points(start_pt, (x, y), 8, prev_pt.is_none()) {
+                            for r in &st.ql_stage_hit_regions {
+                                if let HitAction::ToggleBigBangToken(id) = r.action {
+                                    if point_in_rect(sx, sy, &r.rect) {
+                                        let m = if target {
+                                            st.ql_stage_ocr_selected.insert(id)
+                                        } else {
+                                            st.ql_stage_ocr_selected.remove(&id)
+                                        };
+                                        if m {
+                                            sweep_changed = true;
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        st.ql_stage_sweep_last_pt = Some((x, y));
+                    }
+                }
                 let mut hand = false;
-                let mut hit_token_id = None;
+                let mut found_hover = None;
                 for r in &st.ql_stage_hit_regions {
                     if point_in_rect(x, y, &r.rect) {
                         hand = r.interactive_cursor;
-                        if let HitAction::ToggleBigBangToken(id) = r.action {
-                            hit_token_id = Some(id);
-                        }
+                        found_hover = map_ql_stage_hover_target(&r.action);
                         break;
                     }
                 }
-                let mut sweep_changed = false;
-                if left_held && st.ql_stage_big_bang {
-                    if let (Some(target), Some(id)) = (st.ql_stage_sweep_target, hit_token_id) {
-                        sweep_changed = if target {
-                            st.ql_stage_ocr_selected.insert(id)
-                        } else {
-                            st.ql_stage_ocr_selected.remove(&id)
-                        };
-                    }
+                let hover_changed = st.ql_stage_hovered_target != found_hover;
+                if hover_changed {
+                    st.ql_stage_hovered_target = found_hover;
                 }
-                (pan_changed, sweep_changed, hand, panning)
+                (pan_changed, sweep_changed, hover_changed, hand, panning)
             });
             SetCursor(LoadCursorW(
                 null_mut(),
@@ -15680,7 +16093,7 @@ unsafe fn handle_ql_stage_wnd_proc(
                     IDC_ARROW
                 },
             ));
-            if pan_changed && !sweep_changed {
+            if pan_changed && !sweep_changed && !hover_changed {
                 let vp_rc = RECT {
                     left: sv(18),
                     top: sv(42),
@@ -15688,34 +16101,55 @@ unsafe fn handle_ql_stage_wnd_proc(
                     bottom: (rc.bottom - sv(40)).max(sv(42) + 1),
                 };
                 let _ = InvalidateRect(hwnd, &vp_rc, FALSE);
-            } else if pan_changed || sweep_changed {
+            } else if pan_changed || sweep_changed || hover_changed {
                 let _ = InvalidateRect(hwnd, null(), FALSE);
             }
             0
         }
         WM_MOUSELEAVE_MSG => {
             let holding_capture = GetCapture() == hwnd;
+            let mut hover_cleared = false;
             APP_STATE.with(|c| {
                 if let Some(st) = c.borrow_mut().as_mut() {
                     st.ql_stage_tracking_mouse_leave = false;
                     if !holding_capture {
                         st.ql_stage_sweep_target = None;
+                        st.ql_stage_sweep_last_pt = None;
                         st.ql_stage_pan_drag = None;
+                    }
+                    if st.ql_stage_hovered_target.take().is_some() {
+                        hover_cleared = true;
                     }
                 }
             });
+            if hover_cleared {
+                let _ = InvalidateRect(hwnd, null(), FALSE);
+            }
             0
         }
         WM_CAPTURECHANGED_MSG => {
+            let mut pt: POINT = zeroed();
+            let mut rc: RECT = zeroed();
+            let cursor_outside = GetCursorPos(&mut pt) != FALSE
+                && GetWindowRect(hwnd, &mut rc) != FALSE
+                && !point_in_rect(pt.x, pt.y, &rc);
+            let mut hover_cleared = false;
             APP_STATE.with(|c| {
                 if let Ok(mut b) = c.try_borrow_mut() {
                     if let Some(st) = b.as_mut() {
                         st.ql_stage_tracking_mouse_leave = false;
                         st.ql_stage_sweep_target = None;
+                        st.ql_stage_sweep_last_pt = None;
                         st.ql_stage_pan_drag = None;
+                        if cursor_outside && st.ql_stage_hovered_target.take().is_some() {
+                            hover_cleared = true;
+                        }
                     }
                 }
             });
+            if hover_cleared {
+                let _ = InvalidateRect(hwnd, null(), FALSE);
+            }
             0
         }
         WM_LBUTTONUP => {
@@ -15725,6 +16159,7 @@ unsafe fn handle_ql_stage_wnd_proc(
             APP_STATE.with(|c| {
                 if let Some(st) = c.borrow_mut().as_mut() {
                     st.ql_stage_sweep_target = None;
+                    st.ql_stage_sweep_last_pt = None;
                     st.ql_stage_pan_drag = None;
                 }
             });
@@ -15880,6 +16315,7 @@ unsafe fn handle_ql_stage_wnd_proc(
                                     right: gr_x + gr_w,
                                     bottom: cy + bb_h,
                                 };
+                                let gr_hov = st.ql_stage_hovered_target == Some(QlStageHoverTarget::Granularity);
                                 canvas.fill_round_rect(
                                     gr_x,
                                     cy,
@@ -15888,10 +16324,29 @@ unsafe fn handle_ql_stage_wnd_proc(
                                     sf(12.0),
                                     palette.chip_bg,
                                 );
+                                if gr_hov {
+                                    canvas.fill_round_rect(
+                                        gr_x,
+                                        cy,
+                                        gr_w,
+                                        bb_h,
+                                        sf(12.0),
+                                        palette.cobalt.with_alpha(if st.is_dark_mode { 56 } else { 36 }),
+                                    );
+                                    canvas.stroke_round_rect(
+                                        gr_x,
+                                        cy,
+                                        gr_w,
+                                        bb_h,
+                                        sf(12.0),
+                                        sf(0.95),
+                                        palette.cobalt.with_alpha(190),
+                                    );
+                                }
                                 texts.push(TextDrawCmd {
                                     text: format!("{} (G)", st.big_bang_granularity.title()),
                                     rect: gr_rc,
-                                    color: palette.text_primary,
+                                    color: if gr_hov { palette.cobalt_text } else { palette.text_primary },
                                     font_kind: FontKind::BadgeBold,
                                     flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
                                 });
@@ -15901,6 +16356,7 @@ unsafe fn handle_ql_stage_wnd_proc(
                                     action: HitAction::CycleBigBangGranularity,
                                 });
                             }
+                            let bb_hov = st.ql_stage_hovered_target == Some(QlStageHoverTarget::ToggleBigBang);
                             canvas.fill_round_rect(
                                 bb_x,
                                 cy,
@@ -15913,6 +16369,45 @@ unsafe fn handle_ql_stage_wnd_proc(
                                     palette.chip_bg
                                 },
                             );
+                            if bb_hov {
+                                if st.ql_stage_big_bang {
+                                    canvas.fill_round_rect(
+                                        bb_x,
+                                        cy,
+                                        bb_w,
+                                        bb_h,
+                                        sf(12.0),
+                                        Color4::rgba(255, 255, 255, 36),
+                                    );
+                                    canvas.stroke_round_rect(
+                                        bb_x,
+                                        cy,
+                                        bb_w,
+                                        bb_h,
+                                        sf(12.0),
+                                        sf(0.95),
+                                        Color4::rgba(255, 255, 255, 176),
+                                    );
+                                } else {
+                                    canvas.fill_round_rect(
+                                        bb_x,
+                                        cy,
+                                        bb_w,
+                                        bb_h,
+                                        sf(12.0),
+                                        palette.cobalt.with_alpha(if st.is_dark_mode { 52 } else { 34 }),
+                                    );
+                                    canvas.stroke_round_rect(
+                                        bb_x,
+                                        cy,
+                                        bb_w,
+                                        bb_h,
+                                        sf(12.0),
+                                        sf(0.95),
+                                        palette.cobalt.with_alpha(190),
+                                    );
+                                }
+                            }
                             let bb_rc = RECT {
                                 left: bb_x,
                                 top: cy,
@@ -15941,18 +16436,36 @@ unsafe fn handle_ql_stage_wnd_proc(
                                 action: HitAction::ToggleQlStageBigBang,
                             });
 
+                            let close_hov = st.ql_stage_hovered_target == Some(QlStageHoverTarget::Close);
                             canvas.fill_circle(
                                 (cx + c_sz / 2) as f32,
                                 (cy + c_sz / 2) as f32,
                                 sf(12.0),
-                                palette.chip_bg,
+                                if close_hov {
+                                    palette.danger.with_alpha(if st.is_dark_mode { 64 } else { 38 })
+                                } else {
+                                    palette.chip_bg
+                                },
                             );
+                            if close_hov {
+                                canvas.stroke_circle(
+                                    (cx + c_sz / 2) as f32,
+                                    (cy + c_sz / 2) as f32,
+                                    sf(12.0),
+                                    sf(1.0),
+                                    palette.danger.with_alpha(195),
+                                );
+                            }
                             canvas.draw_icon_close(
                                 (cx + c_sz / 2) as f32,
                                 (cy + c_sz / 2) as f32,
                                 sf(9.5),
                                 sf(1.5),
-                                palette.text_primary,
+                                if close_hov {
+                                    palette.danger
+                                } else {
+                                    palette.text_primary
+                                },
                             );
                             st.ql_stage_hit_regions.push(HitRegion {
                                 rect: RECT {
@@ -16039,6 +16552,8 @@ unsafe fn handle_ql_stage_wnd_proc(
                                             break;
                                         }
                                         let is_sel = st.ql_stage_ocr_selected.contains(&tok.id);
+                                        let is_hov = st.ql_stage_hovered_target
+                                            == Some(QlStageHoverTarget::Token(tok.id));
                                         canvas.fill_round_rect(
                                             tx,
                                             ty,
@@ -16047,10 +16562,42 @@ unsafe fn handle_ql_stage_wnd_proc(
                                             sf(7.0),
                                             if is_sel {
                                                 palette.cobalt
+                                            } else if is_hov {
+                                                Color4::rgba(255, 255, 255, 78)
                                             } else {
                                                 Color4::rgba(255, 255, 255, 36)
                                             },
                                         );
+                                        if is_sel && is_hov {
+                                            canvas.fill_round_rect(
+                                                tx,
+                                                ty,
+                                                cw,
+                                                ch,
+                                                sf(7.0),
+                                                Color4::rgba(255, 255, 255, 28),
+                                            );
+                                        }
+                                        if is_sel || is_hov {
+                                            canvas.stroke_round_rect(
+                                                tx,
+                                                ty,
+                                                cw,
+                                                ch,
+                                                sf(7.0),
+                                                sf(if is_hov { 1.0 } else { 0.75 }),
+                                                if is_sel {
+                                                    Color4::rgba(
+                                                        255,
+                                                        255,
+                                                        255,
+                                                        if is_hov { 195 } else { 110 },
+                                                    )
+                                                } else {
+                                                    palette.cobalt.with_alpha(220)
+                                                },
+                                            );
+                                        }
                                         let trc = RECT {
                                             left: tx,
                                             top: ty,
@@ -16160,14 +16707,31 @@ unsafe fn handle_ql_stage_wnd_proc(
                                         });
                                     }
 
+                                    let toggle_hov = st.ql_stage_hovered_target
+                                        == Some(QlStageHoverTarget::SelectAllOrClear);
                                     canvas.fill_round_rect(
                                         tx_all,
                                         by,
                                         tb_w,
                                         bh,
                                         sf(12.0),
-                                        Color4::rgba(255, 255, 255, 38),
+                                        if toggle_hov {
+                                            Color4::rgba(255, 255, 255, 72)
+                                        } else {
+                                            Color4::rgba(255, 255, 255, 38)
+                                        },
                                     );
+                                    if toggle_hov {
+                                        canvas.stroke_round_rect(
+                                            tx_all,
+                                            by,
+                                            tb_w,
+                                            bh,
+                                            sf(12.0),
+                                            sf(0.9),
+                                            Color4::rgba(255, 255, 255, 136),
+                                        );
+                                    }
                                     let trc_all = RECT {
                                         left: tx_all,
                                         top: by,
@@ -16187,14 +16751,31 @@ unsafe fn handle_ql_stage_wnd_proc(
                                         action: toggle_act,
                                     });
 
+                                    let copy_hov = st.ql_stage_hovered_target
+                                        == Some(QlStageHoverTarget::CopySelection);
                                     canvas.fill_round_rect(
                                         cx_ocr,
                                         by,
                                         cb_w,
                                         bh,
                                         sf(12.0),
-                                        Color4::rgba(255, 255, 255, 48),
+                                        if copy_hov {
+                                            Color4::rgba(255, 255, 255, 86)
+                                        } else {
+                                            Color4::rgba(255, 255, 255, 48)
+                                        },
                                     );
+                                    if copy_hov {
+                                        canvas.stroke_round_rect(
+                                            cx_ocr,
+                                            by,
+                                            cb_w,
+                                            bh,
+                                            sf(12.0),
+                                            sf(0.9),
+                                            Color4::rgba(255, 255, 255, 148),
+                                        );
+                                    }
                                     let crc = RECT {
                                         left: cx_ocr,
                                         top: by,
@@ -16214,7 +16795,28 @@ unsafe fn handle_ql_stage_wnd_proc(
                                         action: HitAction::CopyBigBangSelection,
                                     });
 
+                                    let paste_hov = st.ql_stage_hovered_target
+                                        == Some(QlStageHoverTarget::PasteSelection);
                                     canvas.fill_round_rect(px, by, pb_w, bh, sf(12.0), palette.cobalt);
+                                    if paste_hov {
+                                        canvas.fill_round_rect(
+                                            px,
+                                            by,
+                                            pb_w,
+                                            bh,
+                                            sf(12.0),
+                                            Color4::rgba(255, 255, 255, 36),
+                                        );
+                                        canvas.stroke_round_rect(
+                                            px,
+                                            by,
+                                            pb_w,
+                                            bh,
+                                            sf(12.0),
+                                            sf(0.95),
+                                            Color4::rgba(255, 255, 255, 176),
+                                        );
+                                    }
                                     let prc = RECT {
                                         left: px,
                                         top: by,

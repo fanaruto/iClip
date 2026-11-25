@@ -4456,4 +4456,48 @@ final class CoreFeatureTests: XCTestCase {
         )
         XCTAssertEqual(reset, .zero)
     }
+
+    func testTokenFrameRegistryHitTestAndInlineFlashGateGenerationGuard() {
+        // 1. TokenFrameRegistry：精确命中优先、最小 ID 确定性、扩展容差最近中心命中、会话切换自动失效
+        let registry = TokenFrameRegistry()
+        let sessionA = "itemA-word-2"
+        registry.setFrame(CGRect(x: 10, y: 10, width: 40, height: 24), for: 2, session: sessionA)
+        registry.setFrame(CGRect(x: 10, y: 10, width: 40, height: 24), for: 1, session: sessionA)
+        registry.setFrame(CGRect(x: 60, y: 10, width: 40, height: 24), for: 3, session: sessionA)
+
+        // 重叠精确命中取最小 ID，杜绝 Dictionary 遍历随机性
+        XCTAssertEqual(
+            registry.hitTestTokenID(at: CGPoint(x: 30, y: 22), session: sessionA, insetX: 0, insetY: 0),
+            1
+        )
+        // 间隙精准悬停（inset = 0）返回 nil；扫选扩展容差（inset = -3, -4）按最近中心命中
+        XCTAssertNil(
+            registry.hitTestTokenID(at: CGPoint(x: 58, y: 22), session: sessionA, insetX: 0, insetY: 0)
+        )
+        XCTAssertEqual(
+            registry.hitTestTokenID(at: CGPoint(x: 58, y: 22), session: sessionA, insetX: -3, insetY: -4),
+            3
+        )
+        // 切换会话后旧会话帧自动失效
+        registry.setFrame(CGRect(x: 0, y: 0, width: 30, height: 20), for: 9, session: "itemB-word-1")
+        XCTAssertNil(registry.hitTestTokenID(at: CGPoint(x: 30, y: 22), session: sessionA))
+
+        // 2. InlineFlashGate：单次完成、连点旧代际拒绝、cancel 后旧代际失效
+        var gate = InlineFlashGate()
+        let gen1 = gate.trigger()
+        XCTAssertTrue(gate.isActive)
+        let gen2 = gate.trigger()
+        XCTAssertNotEqual(gen1, gen2)
+        // 旧定时器回调不得提前关闭新一次复制的闪徽
+        XCTAssertFalse(gate.completeIfCurrent(generation: gen1))
+        XCTAssertTrue(gate.isActive)
+        XCTAssertTrue(gate.completeIfCurrent(generation: gen2))
+        XCTAssertFalse(gate.isActive)
+        XCTAssertFalse(gate.completeIfCurrent(generation: gen2))
+
+        let gen3 = gate.trigger()
+        gate.cancel()
+        XCTAssertFalse(gate.isActive)
+        XCTAssertFalse(gate.completeIfCurrent(generation: gen3))
+    }
 }

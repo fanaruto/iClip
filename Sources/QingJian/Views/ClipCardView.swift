@@ -1,6 +1,28 @@
 import SwiftUI
 import AppKit
 
+struct InlineFlashGate: Equatable {
+    private(set) var generation: UInt64 = 0
+    private(set) var isActive: Bool = false
+
+    mutating func trigger() -> UInt64 {
+        generation &+= 1
+        isActive = true
+        return generation
+    }
+
+    mutating func completeIfCurrent(generation token: UInt64) -> Bool {
+        guard isActive, generation == token else { return false }
+        isActive = false
+        return true
+    }
+
+    mutating func cancel() {
+        generation &+= 1
+        isActive = false
+    }
+}
+
 /// 单条 iOS 风格剪贴板卡片（搭载微秒级语义感知与瞬时变换胶囊条）
 struct ClipCardView: View {
     let item: ClipItem
@@ -28,6 +50,8 @@ struct ClipCardView: View {
     @State private var asyncThumbnail: NSImage? = nil
     @State private var lastTapUptime: TimeInterval = 0
     @State private var showCopiedInlineFlash: Bool = false
+    @State private var copiedFlashGate = InlineFlashGate()
+    @State private var copiedFlashTask: Task<Void, Never>? = nil
 
     private var glassPalette: LiquidGlassPalette {
         LiquidGlassPalette(colorScheme: colorScheme, surfaceStyle: surfaceStyle, appearance: liquidGlassAppearance)
@@ -301,6 +325,12 @@ struct ClipCardView: View {
         .contextMenu {
             contextMenuItems
         }
+        .onDisappear {
+            copiedFlashTask?.cancel()
+            copiedFlashTask = nil
+            copiedFlashGate.cancel()
+            showCopiedInlineFlash = false
+        }
     }
 
     private func handleCardTap() {
@@ -346,10 +376,15 @@ struct ClipCardView: View {
     }
 
     private func triggerCopiedInlineFlash() {
+        copiedFlashTask?.cancel()
+        let gen = copiedFlashGate.trigger()
         withAnimation(.easeOut(duration: 0.14)) {
             showCopiedInlineFlash = true
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) {
+        copiedFlashTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_100_000_000)
+            guard !Task.isCancelled, copiedFlashGate.completeIfCurrent(generation: gen) else { return }
+            copiedFlashTask = nil
             withAnimation(.easeOut(duration: 0.22)) {
                 showCopiedInlineFlash = false
             }

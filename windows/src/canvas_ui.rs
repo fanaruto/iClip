@@ -2354,6 +2354,72 @@ pub fn compute_cursor_anchored_zoom_pan(
     )
 }
 
+/// 沿拖拽起止线段以固定步长采样补点，确保快速横扫大爆炸词块时不跨越漏选，且上限 256 步防卡顿
+pub fn sample_sweep_points(
+    from: (i32, i32),
+    to: (i32, i32),
+    step_px: i32,
+    include_start: bool,
+) -> Vec<(i32, i32)> {
+    let dx = (to.0 - from.0) as f32;
+    let dy = (to.1 - from.1) as f32;
+    let dist = dx.hypot(dy);
+    if dist < 0.5 {
+        return vec![to];
+    }
+    let step = step_px.max(1) as f32;
+    let steps = ((dist / step).ceil() as usize).clamp(1, 256);
+    let start_i = if include_start { 0 } else { 1 };
+    let mut out = Vec::with_capacity(steps - start_i + 1);
+    for i in start_i..steps {
+        let t = (i as f32) / (steps as f32);
+        let px = from.0 + (dx * t).round() as i32;
+        let py = from.1 + (dy * t).round() as i32;
+        out.push((px, py));
+    }
+    out.push(to);
+    out
+}
+
+/// 基于真实经过时间 dt 的刷新率无关指数阻尼步进（60Hz / 120Hz / 240Hz 动画总时长一致）
+pub fn compute_spring_lerp_step(
+    current: f32,
+    target: f32,
+    dt_secs: f32,
+    rate_per_sec: f32,
+    epsilon: f32,
+) -> (f32, bool) {
+    if !current.is_finite() || !target.is_finite() {
+        return (if target.is_finite() { target } else { 0.0 }, true);
+    }
+    let eps = if epsilon.is_finite() {
+        epsilon.max(0.0001)
+    } else {
+        0.0001
+    };
+    let diff = target - current;
+    if diff.abs() <= eps {
+        return (target, true);
+    }
+    let dt = if dt_secs.is_finite() {
+        dt_secs.clamp(0.001, 0.1)
+    } else {
+        0.016
+    };
+    let rate = if rate_per_sec.is_finite() {
+        rate_per_sec.max(0.1)
+    } else {
+        0.1
+    };
+    let alpha = (1.0 - (-rate * dt).exp()).clamp(0.01, 1.0);
+    let next = current + diff * alpha;
+    if (target - next).abs() <= eps {
+        (target, true)
+    } else {
+        (next, false)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BigBangChipRowItem {
     pub token_idx: usize,
