@@ -317,6 +317,7 @@ struct ClipboardPopoverView: View {
     @ObservedObject var nav: PanelNavigationModel
     @ObservedObject private var updater = UpdateManager.shared
     @ObservedObject private var playground = InteractivePlaygroundController.shared
+    @ObservedObject private var oneMind = OneMindKernel.shared
     let onDismiss: () -> Void
     let onQuit: () -> Void
 
@@ -364,6 +365,8 @@ struct ClipboardPopoverView: View {
                         .padding(.bottom, nav.searchText.trimmingCharacters(in: .whitespaces).hasPrefix("@") ? 6 : 10)
 
                     searchCommandOverlayBanner
+
+                    oneMindRecallBanner
 
                     if !store.minimalModeEnabled && nav.selectedTab == .todo && (!filteredItems.isEmpty || store.completedTodoCount > 0) {
                         todoSummaryBar
@@ -712,6 +715,64 @@ struct ClipboardPopoverView: View {
         }
     }
 
+    @ViewBuilder
+    private var oneMindRecallBanner: some View {
+        if !store.minimalModeEnabled,
+           nav.selectedTab == .all,
+           nav.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           let recall = oneMind.preferredRecallItem(from: filteredItems, activeTargetApp: store.activeTargetAppName) {
+            let meta = store.cardRenderMeta(for: recall.item)
+            HStack(spacing: 7) {
+                HStack(spacing: 3.5) {
+                    Image(systemName: "sparkle")
+                        .font(.system(size: 10, weight: .bold))
+                    Text(recall.badge)
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .lineLimit(1)
+                }
+                .foregroundStyle(Color.accentColor)
+                .fixedSize(horizontal: true, vertical: false)
+
+                Text(meta.plainDisplayTitle)
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(.primary.opacity(0.88))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                Button {
+                    store.copyAndOptionallyPaste(
+                        recall.item,
+                        plainTextOnly: false,
+                        shouldAutoPaste: true,
+                        onBeforePaste: onDismiss
+                    )
+                } label: {
+                    Text("直出")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 8.5)
+                        .padding(.vertical, 3.5)
+                        .background(Capsule().fill(Color.accentColor))
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .fill(Color.accentColor.opacity(0.08))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .strokeBorder(Color.accentColor.opacity(0.18), lineWidth: 0.5)
+            )
+            .padding(.horizontal, 14)
+            .padding(.bottom, 8)
+            .transition(.opacity.combined(with: .move(edge: .top)))
+        }
+    }
+
     // MARK: - 顶部胶囊搜索栏
 
     private var headerBar: some View {
@@ -760,8 +821,8 @@ struct ClipboardPopoverView: View {
 
                     TextField(
                         nav.selectedTab == .todo
-                            ? "搜索待办，或直接输入事项按 ↵ 新建..."
-                            : (store.minimalModeEnabled ? "搜索剪贴历史..." : "搜索历史、拼音首字母或图片文字..."),
+                            ? "搜索待办或输入事项..."
+                            : "搜索历史或输入待办...",
                         text: $nav.searchText
                     )
                         .textFieldStyle(.plain)
@@ -790,71 +851,70 @@ struct ClipboardPopoverView: View {
                         .strokeBorder(glassPalette.controlCapsuleStroke, lineWidth: 0.75)
                 }
 
-                // 窗口始终在前一键固定圆钮（⌘P）
-                AlwaysOnTopPinButton(store: store, glassPalette: glassPalette)
+                // 按需回显：仅在置顶/暂停/极简处于激活状态时显现对应状态圆钮，常驻保持极致清爽
+                if store.alwaysOnTop {
+                    AlwaysOnTopPinButton(store: store, glassPalette: glassPalette)
+                        .transition(.scale(scale: 0.86).combined(with: .opacity))
+                }
 
-                // 极简纯净模式（基础功能版）一键切换圆钮（⌘E）
-                Button {
-                    withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
-                        store.toggleMinimalMode()
+                if store.isPaused {
+                    Button {
+                        store.toggleTimedPause(defaultMinutes: 15)
+                    } label: {
+                        Image(systemName: "pause.circle.fill")
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundStyle(Color.orange)
+                            .frame(width: 32, height: 32)
+                            .background(Circle().fill(glassPalette.controlCapsuleFill))
+                            .overlay(Circle().strokeBorder(glassPalette.controlCapsuleStroke.opacity(0.85), lineWidth: 0.65))
                     }
-                } label: {
-                    Image(systemName: store.minimalModeEnabled ? "leaf.fill" : "leaf")
-                        .font(.system(size: 13.5, weight: .medium))
-                        .foregroundStyle(store.minimalModeEnabled ? Color.white : Color.secondary)
-                        .frame(width: 32, height: 32)
-                        .background(
-                            Circle()
-                                .fill(store.minimalModeEnabled ? Color.green : glassPalette.controlCapsuleFill)
-                        )
-                        .overlay(
-                            Circle()
-                                .strokeBorder(glassPalette.controlCapsuleStroke.opacity(store.minimalModeEnabled ? 0.3 : 0.85), lineWidth: 0.65)
-                        )
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("极简纯净模式开关")
-                .help(store.minimalModeEnabled ? "极简基础版已开启（点击或按 ⌘E 恢复进阶功能）" : "开启极简纯净模式（基础功能版 · ⌘E）")
-
-                // 暂停/恢复监听按钮（单击开启 15 分钟无痕自动恢复暂停，右键可选时长或持续暂停）
-                Button {
-                    store.toggleTimedPause(defaultMinutes: 15)
-                } label: {
-                    Image(systemName: store.isPaused ? "pause.circle.fill" : "record.circle")
-                        .font(.system(size: 15, weight: .medium))
-                        .foregroundStyle(store.isPaused ? Color.orange : Color.secondary)
-                        .frame(width: 32, height: 32)
-                        .background(Circle().fill(glassPalette.controlCapsuleFill))
-                        .overlay(Circle().strokeBorder(glassPalette.controlCapsuleStroke.opacity(0.85), lineWidth: 0.65))
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(store.isPaused ? "恢复记录剪贴板" : "无痕暂停记录剪贴板")
-                .help(store.pauseStatusSummary)
-                .contextMenu {
-                    if store.isPaused {
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("恢复记录剪贴板")
+                    .help(store.pauseStatusSummary)
+                    .contextMenu {
                         Button("立即恢复记录剪贴板") { store.resumeCapture() }
                         Divider()
+                        Button("无痕暂停 5 分钟（自动恢复）") {
+                            store.pauseCapture(forMinutes: 5)
+                            store.showToast("已开启 5 分钟无痕暂停（到点自动恢复）")
+                        }
+                        Button("无痕暂停 15 分钟（推荐 · 自动恢复）") {
+                            store.pauseCapture(forMinutes: 15)
+                            store.showToast("已开启 15 分钟无痕暂停（到点自动恢复）")
+                        }
+                        Button("无痕暂停 60 分钟（自动恢复）") {
+                            store.pauseCapture(forMinutes: 60)
+                            store.showToast("已开启 60 分钟无痕暂停（到点自动恢复）")
+                        }
+                        Divider()
+                        Button("持续暂停（直到手动恢复）") {
+                            store.pauseCapture(forMinutes: nil)
+                            store.showToast("已持续暂停记录剪贴板")
+                        }
                     }
-                    Button("无痕暂停 5 分钟（自动恢复）") {
-                        store.pauseCapture(forMinutes: 5)
-                        store.showToast("已开启 5 分钟无痕暂停（到点自动恢复）")
-                    }
-                    Button("无痕暂停 15 分钟（推荐 · 自动恢复）") {
-                        store.pauseCapture(forMinutes: 15)
-                        store.showToast("已开启 15 分钟无痕暂停（到点自动恢复）")
-                    }
-                    Button("无痕暂停 60 分钟（自动恢复）") {
-                        store.pauseCapture(forMinutes: 60)
-                        store.showToast("已开启 60 分钟无痕暂停（到点自动恢复）")
-                    }
-                    Divider()
-                    Button("持续暂停（直到手动恢复）") {
-                        store.pauseCapture(forMinutes: nil)
-                        store.showToast("已持续暂停记录剪贴板")
-                    }
+                    .transition(.scale(scale: 0.86).combined(with: .opacity))
                 }
 
-                // 设置按钮（有 GitHub 新版本时右上角展示蓝点提示）
+                if store.minimalModeEnabled {
+                    Button {
+                        withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
+                            store.toggleMinimalMode()
+                        }
+                    } label: {
+                        Image(systemName: "leaf.fill")
+                            .font(.system(size: 13.5, weight: .medium))
+                            .foregroundStyle(Color.white)
+                            .frame(width: 32, height: 32)
+                            .background(Circle().fill(Color.green))
+                            .overlay(Circle().strokeBorder(glassPalette.controlCapsuleStroke.opacity(0.3), lineWidth: 0.65))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("极简纯净模式开关")
+                    .help("极简基础版已开启（点击或按 ⌘E 恢复智能增强）")
+                    .transition(.scale(scale: 0.86).combined(with: .opacity))
+                }
+
+                // 唯一常驻右侧圆钮：偏好设置（右键直达置顶/暂停/极简快捷控制）
                 Button {
                     store.refreshAccessibilityStatus()
                     nav.showSettings = true
@@ -878,9 +938,23 @@ struct ClipboardPopoverView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("偏好设置")
-                .help(updater.hasUpdateAvailable ? "发现新版本，点击进入设置更新" : "偏好设置")
+                .help(updater.hasUpdateAvailable ? "发现新版本，点击进入设置更新（右键可快捷控制置顶/暂停）" : "偏好设置（右键可快捷控制置顶/暂停/极简）")
+                .contextMenu {
+                    Button(store.alwaysOnTop ? "✓ 取消窗口置顶（⌘P）" : "固定窗口始终在前（⌘P）") {
+                        store.alwaysOnTop.toggle()
+                    }
+                    Button(store.isPaused ? "立即恢复记录剪贴板" : "无痕暂停 15 分钟（自动恢复）") {
+                        store.toggleTimedPause(defaultMinutes: 15)
+                    }
+                    Button(store.minimalModeEnabled ? "✓ 退出极简纯净模式（⌘E）" : "开启极简纯净模式（⌘E）") {
+                        store.toggleMinimalMode()
+                    }
+                }
             }
         }
+        .animation(.spring(response: 0.24, dampingFraction: 0.86), value: store.alwaysOnTop)
+        .animation(.spring(response: 0.24, dampingFraction: 0.86), value: store.isPaused)
+        .animation(.spring(response: 0.24, dampingFraction: 0.86), value: store.minimalModeEnabled)
     }
 
     // MARK: - iOS 滑动胶囊分类条（独立隔离渲染 + 常驻 GPU 硬件偏移滑块，120Hz 满帧零列表重绘干扰）
@@ -1175,22 +1249,16 @@ struct ClipboardPopoverView: View {
     private var pinnedTemplateToolbar: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                HStack(spacing: 5) {
-                    Image(systemName: "wand.and.stars")
-                        .font(.system(size: 11.5, weight: .semibold))
-                        .foregroundStyle(Color.indigo)
-                    Text("支持 {{clip}} / {{clip_redacted}} / {{datetime}} / {{uuid}} 动态插值")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
+                Text("快捷模板")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
                 Spacer()
                 Button {
                     withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
                         nav.isCreatingTemplate.toggle()
                     }
                 } label: {
-                    Text(nav.isCreatingTemplate ? "收起" : "+ 新建模板")
+                    Text(nav.isCreatingTemplate ? "收起" : "+ 模板")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(nav.isCreatingTemplate ? Color.secondary : Color.accentColor)
                         .padding(.horizontal, 9)
@@ -1567,7 +1635,14 @@ struct ClipboardPopoverView: View {
     // MARK: - 底部状态栏
 
     private var footerBar: some View {
-        HStack(spacing: 8) {
+        let selectedItem: ClipItem? = (nav.selectedIndex >= 0 && nav.selectedIndex < filteredItems.count)
+            ? filteredItems[nav.selectedIndex]
+            : nil
+        let primaryAction: TransformAction? = (!store.minimalModeEnabled
+            ? selectedItem.flatMap { store.semanticSnapshot(for: $0).actions.first }
+            : nil)
+
+        return HStack(spacing: 8) {
             HStack(spacing: 6) {
                 Circle()
                     .fill(store.isPaused ? Color.orange : Color.green)
@@ -1582,14 +1657,62 @@ struct ClipboardPopoverView: View {
 
             Spacer(minLength: 6)
 
-            // 恒定提示项：禁止在图片与文字 hover 切换时动态增删胶囊，确保外框与底栏零抖动
-            HStack(spacing: 7) {
-                keyHint("↵", "键入")
-                if !store.minimalModeEnabled {
-                    keyHint("⇧↵", "智变")
+            // 固定 22pt 行高的按需回显区：依据当前焦点与 OneMind 记忆只呈现最需要的一项行动，零抖动
+            Group {
+                if let action = primaryAction, let item = selectedItem {
+                    let habitTop = oneMind.isHabitPreferred(actionID: action.id, sourceApp: item.sourceAppName)
+                    Button {
+                        pasteSmartTransformedSelected()
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: habitTop ? "sparkle" : action.symbolName)
+                                .font(.system(size: 10, weight: .semibold))
+                            Text(action.title)
+                                .font(.system(size: 10.8, weight: .semibold))
+                                .lineLimit(1)
+                            Text("⇧↵")
+                                .font(.system(size: 9.5, weight: .semibold))
+                                .opacity(0.75)
+                        }
+                        .foregroundStyle(action.isSecurityAction ? Color.orange : Color.accentColor)
+                        .padding(.horizontal, 8.5)
+                        .padding(.vertical, 3)
+                        .background(
+                            Capsule()
+                                .fill((action.isSecurityAction ? Color.orange : Color.accentColor).opacity(0.12))
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .help("按 ⇧↵ 直接执行「\(action.title)」并键入")
+                } else if !store.minimalModeEnabled, let item = selectedItem, item.isPendingTodo {
+                    Button {
+                        toggleTodoForSelected()
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "checkmark.circle")
+                                .font(.system(size: 10, weight: .semibold))
+                            Text("完成待办 ⌘T")
+                                .font(.system(size: 10.8, weight: .semibold))
+                                .lineLimit(1)
+                        }
+                        .foregroundStyle(Color.green)
+                        .padding(.horizontal, 8.5)
+                        .padding(.vertical, 3)
+                        .background(Capsule().fill(Color.green.opacity(0.12)))
+                    }
+                    .buttonStyle(.plain)
+                } else if !store.minimalModeEnabled && oneMind.totalLearnedInteractions > 0 {
+                    HStack(spacing: 4) {
+                        Image(systemName: "sparkle")
+                            .font(.system(size: 9.5, weight: .semibold))
+                        Text("OneMind · 已记 \(oneMind.totalLearnedInteractions) 次习惯")
+                            .font(.system(size: 10.5, weight: .medium))
+                            .lineLimit(1)
+                    }
+                    .foregroundStyle(.secondary)
+                } else {
+                    keyHint("↵", "键入")
                 }
-                keyHint("⇥", "类目")
-                keyHint("ESC", "关闭")
             }
 
             if store.items.contains(where: { !$0.isPinned }) {
@@ -1609,6 +1732,7 @@ struct ClipboardPopoverView: View {
                 .help("清空未收藏记录")
             }
         }
+        .frame(height: 22)
     }
 
     private func keyHint(_ key: String, _ label: String) -> some View {
@@ -1824,9 +1948,9 @@ struct ClipboardPopoverView: View {
                     }
                 }
 
-                // 智能辅助（极简模式下自动隐藏）
+                // OneMind 主动智能（极简模式下自动隐藏）
                 if !store.minimalModeEnabled {
-                    settingsGroup(title: "智能辅助") {
+                    settingsGroup(title: "OneMind 主动智能") {
                         AdaptiveIntelligenceSettingsSection(store: store)
                     }
                 }

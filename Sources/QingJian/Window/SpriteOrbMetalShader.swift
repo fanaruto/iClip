@@ -95,15 +95,16 @@ enum SpriteOrbMetalShader {
         return lenQ - (24.5f + organic + lean + cap);
     }
 
-    // 梯度修正近似椭圆距离场（保持丝带等宽且无分段锯齿）
+    // 梯度修正椭圆距离场（先归一化 nr 再求真实梯度方向，消除斜角与远场溢出伪影）
     inline float sdWavyEllipseStroke(float2 rq, float amp, float tiltY, float speedT, float rIdx) {
         float th = atan2(rq.y, rq.x);
         float wave = sin(th * 2.0f + speedT * 1.8f + rIdx) * 3.2f;
         float rx = max(2.0f, amp + wave);
         float ry = max(2.0f, amp * tiltY + wave * 0.5f);
         float2 nr = float2(rq.x / rx, rq.y / ry);
-        float f = length(nr) - 1.0f;
-        float2 grad = float2(rq.x / (rx * rx), rq.y / (ry * ry));
+        float lenNr = max(0.0001f, length(nr));
+        float f = lenNr - 1.0f;
+        float2 grad = float2(rq.x / (rx * rx), rq.y / (ry * ry)) / lenNr;
         float gLen = max(0.0001f, length(grad));
         return abs(f) / gLen;
     }
@@ -114,8 +115,9 @@ enum SpriteOrbMetalShader {
         float rx = max(2.0f, amp + wave);
         float ry = max(2.0f, amp * tiltY + wave * 0.5f);
         float2 nr = float2(rq.x / rx, rq.y / ry);
-        float f = length(nr) - 1.0f;
-        float2 grad = float2(rq.x / (rx * rx), rq.y / (ry * ry));
+        float lenNr = max(0.0001f, length(nr));
+        float f = lenNr - 1.0f;
+        float2 grad = float2(rq.x / (rx * rx), rq.y / (ry * ry)) / lenNr;
         float gLen = max(0.0001f, length(grad));
         return f / gLen;
     }
@@ -235,12 +237,12 @@ enum SpriteOrbMetalShader {
         // 主材质渲染：0 露珠 / 1 表冠 / 2 软玉 / 3 极光丝灵
         // ============================================================
         if (styleIdx == 0u) {
-            // 1. 解析式透镜底影
+            // 1. 解析式透镜底影（收敛外延确保贴边零截断）
             float2 shPos = q - float2(0.0f, 5.0f + breathWave * 1.2f);
             float dSh = sdPrismDew(shPos, tensionAngle, tensionPull, time, capillaryAmp);
-            float shStrength = isDark ? 0.44f : 0.17f;
-            float shFalloff = exp(-max(0.0f, dSh + 1.5f) * 0.19f) * (1.0f - smoothstep(-10.0f, 20.0f, dSh) * 0.1f);
-            float shAlpha = smoothstep(14.0f, -6.0f, dSh) * shStrength * shFalloff;
+            float shStrength = isDark ? 0.42f : 0.17f;
+            float shFalloff = exp(-max(0.0f, dSh + 1.5f) * 0.24f) * (1.0f - smoothstep(-10.0f, 16.0f, dSh) * 0.1f);
+            float shAlpha = smoothstep(10.5f, -5.0f, dSh) * shStrength * shFalloff;
             float3 shColor = isDark ? float3(0.0f) : float3(0.059f, 0.090f, 0.165f);
             dst = blendOver(dst, shColor, shAlpha);
 
@@ -322,7 +324,7 @@ enum SpriteOrbMetalShader {
             float rDial = 25.0f;
             float2 shPos = q - float2(0.0f, 5.0f + breathWave * 1.0f);
             float dSh = length(shPos) - rDial;
-            float shAlpha = smoothstep(13.0f, -5.0f, dSh) * (isDark ? 0.52f : 0.20f) * exp(-max(0.0f, dSh + 1.5f) * 0.20f);
+            float shAlpha = smoothstep(10.5f, -5.0f, dSh) * (isDark ? 0.48f : 0.20f) * exp(-max(0.0f, dSh + 1.5f) * 0.24f);
             dst = blendOver(dst, isDark ? float3(0.0f) : float3(0.059f, 0.090f, 0.165f), shAlpha);
 
             float lenQ = length(q);
@@ -436,7 +438,7 @@ enum SpriteOrbMetalShader {
             // 风格 3 · 活体有机软玉
             float2 shPos = q - float2(0.0f, 4.5f + breathWave * 1.2f);
             float dSh = sdOrganicJade(shPos, tensionAngle, tensionPull, time, capillaryAmp);
-            float shAlpha = smoothstep(13.0f, -5.0f, dSh) * (isDark ? 0.48f : 0.16f) * exp(-max(0.0f, dSh + 1.5f) * 0.18f);
+            float shAlpha = smoothstep(10.5f, -5.0f, dSh) * (isDark ? 0.44f : 0.16f) * exp(-max(0.0f, dSh + 1.5f) * 0.24f);
             dst = blendOver(dst, isDark ? float3(0.0f) : float3(0.059f, 0.090f, 0.165f), shAlpha);
 
             float dJade = sdOrganicJade(q, tensionAngle, tensionPull, time, capillaryAmp);
@@ -489,10 +491,11 @@ enum SpriteOrbMetalShader {
                 pal[2] = mix(pal[2], coralRed, cancelBlend * 0.8f);
             }
 
-            // 极微底层氛围柔晕
-            float auraR = 32.0f + breathWave * 4.0f + audioLevel * 8.0f;
+            // 紧凑无边氛围柔晕（二次平滑衰减至零，避免窗口边角溢出）
+            float auraR = min(29.0f, 23.0f + breathWave * 2.5f + audioLevel * 4.5f);
             float auraDist = clamp((length(q) - 2.0f) / max(4.0f, auraR - 2.0f), 0.0f, 1.0f);
-            float auraA = (1.0f - smoothstep(0.0f, 1.0f, auraDist)) * (isDark ? 0.22f : 0.14f);
+            float auraFall = 1.0f - smoothstep(0.0f, 1.0f, auraDist);
+            float auraA = auraFall * auraFall * (isDark ? 0.16f : 0.10f);
             dst = blendOver(dst, accent, auraA);
 
             float amp = (19.0f + breathWave * 3.8f + hoverBlend * 3.5f + audioLevel * 5.2f) * (1.0f - vortexBlend * 0.25f);
@@ -513,7 +516,8 @@ enum SpriteOrbMetalShader {
                 float dStroke = sdWavyEllipseStroke(rq, amp, tiltY, speedT, float(rIdx));
                 float halfWidth = (rIdx == 0) ? 1.25f : 0.92f;
                 float strokeMask = 1.0f - smoothstep(halfWidth - 0.35f, halfWidth + 0.65f, dStroke * breathScale);
-                float softGlow = exp(-max(0.0f, dStroke * breathScale - halfWidth) * 0.55f) * 0.20f;
+                float dGlow = max(0.0f, dStroke * breathScale - halfWidth);
+                float softGlow = exp(-dGlow * 0.90f) * 0.14f * (1.0f - smoothstep(4.0f, 11.0f, dStroke * breathScale));
                 float strokeOpacity = (isDark ? 0.70f : 0.74f) + float(rIdx) * 0.06f;
                 dst = blendOver(dst, pal[rIdx], max(strokeMask * strokeOpacity, softGlow));
             }
@@ -562,7 +566,13 @@ enum SpriteOrbMetalShader {
             }
         }
 
-        return dst * overallOpacity;
+        float edgeDist = min(min(p.x, panelSize - p.x), min(p.y, panelSize - p.y));
+        float edgeFeather = smoothstep(0.0f, 6.0f, edgeDist);
+        float4 outColor = dst * (overallOpacity * edgeFeather);
+        if (outColor.a < 0.0045f) {
+            return float4(0.0f);
+        }
+        return outColor;
     }
     """#
 }

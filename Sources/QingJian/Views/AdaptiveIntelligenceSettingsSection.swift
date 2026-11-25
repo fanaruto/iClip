@@ -531,13 +531,60 @@ struct QuickCaptureCommandBanner: View {
     }
 }
 
-/// 设置页「智能辅助」精简模块（内化情境排序、双击 ⌘C 触发与黄金驻留时长，仅保留核心可感知开关）
+/// 设置页「OneMind 主动智能」精简模块（内化本地持久记忆、情境排序与拟态节奏，越用越顺手）
 struct AdaptiveIntelligenceSettingsSection: View {
     @ObservedObject var store: ClipboardStore
     @ObservedObject var engine = AdaptiveIntelligenceEngine.shared
 
     var body: some View {
+        let summary = engine.oneMindMemorySummary
+
         VStack(alignment: .leading, spacing: 11) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 6) {
+                    Image(systemName: "sparkle")
+                        .font(.system(size: 11.5, weight: .bold))
+                        .foregroundStyle(Color.accentColor)
+                    Text("OneMind 主动心智内核")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("本地加密留存")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Color.accentColor)
+                        .padding(.horizontal, 6.5)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Color.accentColor.opacity(0.12)))
+                    Spacer()
+                    if summary.totalInteractions > 0 {
+                        Button("重置记忆") {
+                            engine.resetLearnedWeights()
+                            store.showToast("已重置 OneMind 习惯记忆")
+                        }
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .buttonStyle(.plain)
+                    }
+                }
+
+                HStack(spacing: 6) {
+                    oneMindStatTile(value: "\(summary.totalInteractions)", label: "习惯留存")
+                    oneMindStatTile(value: "\(summary.rememberedAppCount)", label: "熟悉应用")
+                    oneMindStatTile(value: "\(summary.completedNudgeCount)", label: "推进待办")
+                    oneMindStatTile(value: "\(summary.adaptiveNudgeMinutes)m", label: "拟态节奏")
+                }
+
+                if summary.voiceTodoCount > 0 || summary.autoRuleCount > 0 {
+                    Text("已记住 \(summary.autoRuleCount) 条自动契约 · \(summary.voiceTodoCount) 次语音录入待办，全本机离线留存")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(10)
+            .background(
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .fill(Color.primary.opacity(0.04))
+            )
+
+            Divider().opacity(0.35)
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("复制时显示光标角「灵动微星标」")
@@ -663,5 +710,23 @@ struct AdaptiveIntelligenceSettingsSection: View {
                 }
             }
         }
+    }
+
+    private func oneMindStatTile(value: String, label: String) -> some View {
+        VStack(spacing: 1.5) {
+            Text(value)
+                .font(.system(size: 12.5, weight: .bold))
+                .monospacedDigit()
+                .foregroundStyle(.primary)
+            Text(label)
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 5)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.primary.opacity(0.045))
+        )
     }
 }

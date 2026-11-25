@@ -174,6 +174,8 @@ final class ActionSparkController {
     var onProactiveTodoCompleted: ((UUID) -> Void)?
     /// 主动拟态待办卡片点击「稍后 30 分」回调
     var onProactiveTodoSnoozed: ((UUID) -> Void)?
+    /// 主动拟态待办卡片点击关闭 `×` 回调
+    var onProactiveTodoDismissed: ((UUID) -> Void)?
 
     var isOfferingInteractiveCard: Bool {
         guard panel?.isVisible == true, !fadeCoordinator.isFadingOut else { return false }
@@ -779,11 +781,12 @@ final class ActionSparkController {
     }
 
     private func handleExplicitDismiss() {
-        if activeProactiveCandidate != nil {
+        if let candidate = activeProactiveCandidate {
             didInteractInCurrentSession = true
             activeProactiveCandidate = nil
             dismissWorkItem?.cancel()
             TactileFeedbackEngine.shared.performNavigationStepHaptic()
+            onProactiveTodoDismissed?(candidate.itemID)
             onSuggestionDismissed?()
             scheduleFadeOut(after: 0.02, recordPassiveTimeout: false)
             return
@@ -890,8 +893,8 @@ private struct ActionSparkPillView: View {
 
             RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                 .strokeBorder(
-                    colorScheme == .dark ? Color.white.opacity(0.18) : Color.black.opacity(0.09),
-                    lineWidth: 0.65
+                    colorScheme == .dark ? Color.white.opacity(0.10) : Color.black.opacity(0.055),
+                    lineWidth: 0.5
                 )
 
             switch viewModel.phase {

@@ -5482,4 +5482,111 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertTrue(stage.textTokens.contains(where: { $0.id == targetURLToken.id && $0.text == "https://app.webfooo.com/iClip" }))
         XCTAssertEqual(stage.textSelectedTokenIDs, [untouchedFirstID, targetURLToken.id])
     }
+
+    @MainActor
+    func testOneMindMemoryPersistenceSnoozeAdaptiveCadenceAndRecall() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("iclip-onemind-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let engine = OneMindKernel(customDirectoryURL: tempDir)
+        let now = Calendar.current.date(from: DateComponents(year: 2026, month: 11, day: 26, hour: 10, minute: 30))!
+        let todoDoneID = UUID()
+        let todoSnoozedID = UUID()
+        let todoExpiredID = UUID()
+
+        XCTAssertEqual(engine.recommendedProactiveNudgeInterval(), 18 * 60, accuracy: 0.1)
+
+        engine.recordTodoNudgeSnoozed(itemID: todoDoneID, until: now.addingTimeInterval(30 * 60))
+        XCTAssertEqual(engine.recommendedProactiveNudgeInterval(), 30 * 60, accuracy: 0.1)
+
+        engine.recordTodoNudgeDismissed()
+        XCTAssertEqual(engine.recommendedProactiveNudgeInterval(), 45 * 60, accuracy: 0.1)
+
+        engine.recordTodoNudgeDismissed()
+        XCTAssertEqual(engine.recommendedProactiveNudgeInterval(), 75 * 60, accuracy: 0.1)
+
+        engine.recordTodoNudgeCompleted(itemID: todoDoneID, at: now)
+        engine.recordTodoNudgeCompleted(itemID: UUID(), at: now)
+        XCTAssertEqual(engine.recommendedProactiveNudgeInterval(), 18 * 60, accuracy: 0.1)
+        XCTAssertTrue(engine.preferredNudgeHourSet().contains(10))
+
+        engine.recordTodoNudgeSnoozed(itemID: todoExpiredID, until: now.addingTimeInterval(-60))
+        engine.recordTodoNudgeSnoozed(itemID: todoSnoozedID, until: now.addingTimeInterval(20 * 60))
+        engine.recordTodoNudgeCompleted(itemID: todoDoneID, at: now)
+        engine.recordVoiceTodoCaptured(count: 3)
+
+        let topItem = ClipItem(type: .text, text: "刚复制的最新临时文本", contentHash: "text:top")
+        let weChatFav = ClipItem(type: .text, text: "公司标准对外收款账号信息", contentHash: "text:wechat-fav")
+        let otherItem = ClipItem(type: .text, text: "其他常规记录", contentHash: "text:other")
+        engine.recordPasteToTargetApp(contentHash: weChatFav.contentHash, targetApp: "微信")
+        engine.recordPasteToTargetApp(contentHash: weChatFav.contentHash, targetApp: "微信")
+
+        engine.flushPersistenceNow()
+
+        let reloaded = OneMindKernel(customDirectoryURL: tempDir)
+        let activeSnoozes = reloaded.activeSnoozedTodosMap(now: now)
+        XCTAssertNil(activeSnoozes[todoExpiredID])
+        XCTAssertNil(activeSnoozes[todoDoneID])
+        XCTAssertNotNil(activeSnoozes[todoSnoozedID])
+
+        let summary = reloaded.oneMindMemorySummary
+        XCTAssertEqual(summary.completedNudgeCount, 3)
+        XCTAssertEqual(summary.voiceTodoCount, 3)
+        XCTAssertTrue(reloaded.preferredNudgeHourSet().contains(10))
+
+        let recalled = try XCTUnwrap(
+            reloaded.preferredRecallItem(from: [topItem, weChatFav, otherItem], activeTargetApp: "微信")
+        )
+        XCTAssertEqual(reloaded.preferredRecallItem(from: [weChatFav, topItem], activeTargetApp: "微信")?.item.id, nil)
+        XCTAssertEqual(recalled.item.id, weChatFav.id)
+        XCTAssertNil(reloaded.preferredRecallItem(from: [topItem, weChatFav, otherItem], activeTargetApp: "Safari"))
+
+        let aged13MinTodo = ClipItem(
+            type: .text,
+            text: "整理每周产品同步文档",
+            contentHash: "todo:13m",
+            createdAt: now.addingTimeInterval(-13 * 60),
+            isTodoItem: true
+        )
+        XCTAssertNil(
+            ProactiveTodoNudgePlanner.selectNudgeCandidate(
+                from: [aged13MinTodo],
+                now: now,
+                lastGlobalNudgeAt: nil,
+                snoozedUntil: [:],
+                preferredHours: []
+            )
+        )
+        let goldenCandidate = try XCTUnwrap(
+            ProactiveTodoNudgePlanner.selectNudgeCandidate(
+                from: [aged13MinTodo],
+                now: now,
+                lastGlobalNudgeAt: nil,
+                snoozedUntil: [:],
+                preferredHours: reloaded.preferredNudgeHourSet()
+            )
+        )
+        XCTAssertEqual(goldenCandidate.headline, "OneMind 黄金节奏")
+
+        reloaded.resetLearnedWeights()
+        let wiped = reloaded.oneMindMemorySummary
+        XCTAssertEqual(wiped.totalInteractions, 0)
+        XCTAssertEqual(wiped.completedNudgeCount, 0)
+        XCTAssertEqual(wiped.voiceTodoCount, 0)
+        XCTAssertEqual(wiped.adaptiveNudgeMinutes, 18)
+        XCTAssertTrue(reloaded.activeSnoozedTodosMap(now: now).isEmpty)
+        XCTAssertTrue(reloaded.preferredNudgeHourSet().isEmpty)
+    }
+
+    func testSpriteOrbMetalShaderBorderlessGradientAndEdgeFeather() throws {
+        XCTAssertTrue(SpriteOrbMetalShader.source.contains("/ lenNr"))
+        XCTAssertTrue(SpriteOrbMetalShader.source.contains("edgeFeather"))
+        XCTAssertTrue(SpriteOrbMetalShader.source.contains("0.0045f"))
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            return
+        }
+        let lib = try device.makeLibrary(source: SpriteOrbMetalShader.source, options: nil)
+        XCTAssertNotNil(lib.makeFunction(name: "spriteOrbVertex"))
+        XCTAssertNotNil(lib.makeFunction(name: "spriteOrbFragment"))
+    }
 }

@@ -108,6 +108,16 @@ struct AdaptiveSparkCandidate: Equatable {
     let payload: Payload
 }
 
+/// OneMind 主动心智内核记忆留存概览（纯值类型展示用）
+struct OneMindMemorySummary: Equatable {
+    let totalInteractions: Int
+    let rememberedAppCount: Int
+    let autoRuleCount: Int
+    let completedNudgeCount: Int
+    let voiceTodoCount: Int
+    let adaptiveNudgeMinutes: Int
+}
+
 /// 持久化心智状态（纯本地轻量 JSON，< 32 KB，零网络上传）
 private struct AdaptiveBrainState: Codable {
     var sparkEnabled: Bool = true
@@ -128,13 +138,22 @@ private struct AdaptiveBrainState: Codable {
     var targetAppPasteCounts: [String: [String: Int]]? = [:]
     var targetAppDisplayNames: [String: String]? = [:]
     var totalLearnedInteractions: Int = 0
+    // OneMind 主动推进与语音记忆持久化字段（向后兼容 Optional）
+    var todoNudgeSnoozedUntil: [String: Date]? = [:]
+    var todoNudgeCompletedCount: Int? = 0
+    var todoNudgeDismissStreak: Int? = 0
+    var preferredTodoNudgeHours: [Int: Int]? = [:]
+    var voiceTodosCapturedCount: Int? = 0
 }
 
-/// iClip 自适应心智引擎：
+/// OneMind 主动心智内核别名（便于各模块统一以 OneMind 语义调用）
+typealias OneMindKernel = AdaptiveIntelligenceEngine
+
+/// iClip OneMind 自适应心智引擎：
 /// 1. 隐式学习「来源应用 × 内容类型 → 常用转换动作」亲和权重，动态置顶高频动作；
 /// 2. 感知用户忽略与关闭反馈，对低需求提示自动退避静默，绝不死缠烂打；
 /// 3. 连续 3 次重复同一操作时主动请示晋升为全自动契约；
-/// 4. 解析并立即采纳用户的自然语言调教建议，将开放需求沉淀至自省进化队列。
+/// 4. 留存主动待办推进反馈、黄金响应时段与语音待办节奏，让用户越用越顺手。
 @MainActor
 final class AdaptiveIntelligenceEngine: ObservableObject {
     static let shared = AdaptiveIntelligenceEngine()
@@ -516,6 +535,121 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
             return String(trimmed.prefix(7)) + "…"
         }
         return trimmed
+    }
+
+    // MARK: - 2.5 OneMind 主动推进记忆、黄金节奏与情境按需回显
+
+    /// 返回当前仍在推迟期内的待办映射（自动过滤已过期条目）
+    func activeSnoozedTodosMap(now: Date = Date()) -> [UUID: Date] {
+        guard let stored = state.todoNudgeSnoozedUntil, !stored.isEmpty else { return [:] }
+        var active: [UUID: Date] = [:]
+        var cleaned: [String: Date] = [:]
+        for (rawID, until) in stored where until > now {
+            if let uuid = UUID(uuidString: rawID) {
+                active[uuid] = until
+                cleaned[rawID] = until
+            }
+        }
+        if cleaned.count != stored.count {
+            state.todoNudgeSnoozedUntil = cleaned
+            scheduleSave()
+        }
+        return active
+    }
+
+    /// 按历史推迟/关闭退避次数自适应调节主动提醒冷却节奏（18m → 30m → 45m → 75m）
+    func recommendedProactiveNudgeInterval() -> TimeInterval {
+        let streak = max(0, state.todoNudgeDismissStreak ?? 0)
+        switch streak {
+        case 0: return 18 * 60
+        case 1: return 30 * 60
+        case 2: return 45 * 60
+        default: return 75 * 60
+        }
+    }
+
+    /// 返回历史完成待办次数 ≥ 2 的黄金小时段集合
+    func preferredNudgeHourSet() -> Set<Int> {
+        guard let hours = state.preferredTodoNudgeHours, !hours.isEmpty else { return [] }
+        return Set(hours.filter { $0.value >= 2 }.map(\.key))
+    }
+
+    /// 记录用户从拟态提醒卡片完成待办：清零退避、累计完成次数并记忆当前高效小时段
+    func recordTodoNudgeCompleted(itemID: UUID, at date: Date = Date()) {
+        state.todoNudgeSnoozedUntil?.removeValue(forKey: itemID.uuidString)
+        state.todoNudgeDismissStreak = 0
+        state.todoNudgeCompletedCount = (state.todoNudgeCompletedCount ?? 0) + 1
+        let hour = Calendar.current.component(.hour, from: date)
+        var hours = state.preferredTodoNudgeHours ?? [:]
+        hours[hour] = min((hours[hour] ?? 0) + 1, 999)
+        state.preferredTodoNudgeHours = hours
+
+        state.totalLearnedInteractions += 1
+        totalLearnedInteractions = state.totalLearnedInteractions
+        revision &+= 1
+        scheduleSave()
+    }
+
+    /// 记录用户推迟拟态提醒：持久化至本地并温和拉长后续提醒间隔
+    func recordTodoNudgeSnoozed(itemID: UUID, until: Date) {
+        var map = state.todoNudgeSnoozedUntil ?? [:]
+        map[itemID.uuidString] = until
+        state.todoNudgeSnoozedUntil = map
+        state.todoNudgeDismissStreak = min((state.todoNudgeDismissStreak ?? 0) + 1, 10)
+
+        state.totalLearnedInteractions += 1
+        totalLearnedInteractions = state.totalLearnedInteractions
+        revision &+= 1
+        scheduleSave()
+    }
+
+    /// 记录用户主动关闭拟态提醒卡片：递增退避节奏，做到有分寸不打扰
+    func recordTodoNudgeDismissed() {
+        state.todoNudgeDismissStreak = min((state.todoNudgeDismissStreak ?? 0) + 1, 10)
+        revision &+= 1
+        scheduleSave()
+    }
+
+    /// 记录通过长按精灵成功语音录入待办
+    func recordVoiceTodoCaptured(count: Int) {
+        guard count > 0 else { return }
+        state.voiceTodosCapturedCount = (state.voiceTodosCapturedCount ?? 0) + count
+        state.totalLearnedInteractions += count
+        totalLearnedInteractions = state.totalLearnedInteractions
+        revision &+= 1
+        scheduleSave()
+    }
+
+    /// 为当前正在使用的目标应用按需回显排在后面但高频贴入过的剪贴内容（排除已在首位的条目）
+    func preferredRecallItem(from items: [ClipItem], activeTargetApp: String?) -> (item: ClipItem, badge: String)? {
+        guard smartContextRankingEnabled else { return nil }
+        guard let appKey = normalizedAppKey(activeTargetApp) else { return nil }
+        guard let bucket = state.targetAppPasteCounts?[appKey], !bucket.isEmpty else { return nil }
+
+        var winner: (item: ClipItem, count: Int, badge: String)?
+        for (index, item) in items.enumerated() where index > 0 {
+            let count = bucket[item.contentHash] ?? 0
+            guard count >= 2,
+                  let badge = preferredTargetAppBadge(for: item.contentHash, activeTargetApp: activeTargetApp) else {
+                continue
+            }
+            if winner == nil || count > winner!.count {
+                winner = (item, count, badge)
+            }
+        }
+        guard let winner else { return nil }
+        return (winner.item, winner.badge)
+    }
+
+    var oneMindMemorySummary: OneMindMemorySummary {
+        OneMindMemorySummary(
+            totalInteractions: totalLearnedInteractions,
+            rememberedAppCount: state.targetAppPasteCounts?.count ?? 0,
+            autoRuleCount: enabledAutoRules.count,
+            completedNudgeCount: state.todoNudgeCompletedCount ?? 0,
+            voiceTodoCount: state.voiceTodosCapturedCount ?? 0,
+            adaptiveNudgeMinutes: Int(round(recommendedProactiveNudgeInterval() / 60.0))
+        )
     }
 
     // MARK: - 3. 已采纳的「复制即自动处理」契约执行
@@ -1209,6 +1343,11 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
         state.declinedAutoRules.removeAll()
         state.targetAppPasteCounts?.removeAll()
         state.targetAppDisplayNames?.removeAll()
+        state.todoNudgeSnoozedUntil?.removeAll()
+        state.todoNudgeCompletedCount = 0
+        state.todoNudgeDismissStreak = 0
+        state.preferredTodoNudgeHours?.removeAll()
+        state.voiceTodosCapturedCount = 0
         state.totalLearnedInteractions = 0
         totalLearnedInteractions = 0
         revision &+= 1
@@ -1336,6 +1475,25 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
         }
         saveWorkItem = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
+    }
+
+    /// 立即同步落盘当前 OneMind 状态（用于测试验证或退出前无损刷盘）
+    func flushPersistenceNow() {
+        saveWorkItem?.cancel()
+        saveWorkItem = nil
+        let snapshot = self.state
+        let url = self.brainFileURL
+        let customDir = self.isCustomDirectory
+        let gate = self.persistenceGate
+        let parentPath = url.deletingLastPathComponent().path
+        ioQueue.sync {
+            gate.performIfOpen(requireCustomDir: customDir, dirPath: parentPath) {
+                if let data = try? JSONEncoder().encode(snapshot) {
+                    let payload = LocalVaultCrypto.sealSnapshotData(data) ?? data
+                    try? LocalVaultCrypto.writeProtectedFile(payload, to: url)
+                }
+            }
+        }
     }
 
     private func saveSuggestions() {

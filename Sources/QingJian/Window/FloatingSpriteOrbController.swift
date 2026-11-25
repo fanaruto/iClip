@@ -135,7 +135,7 @@ enum ProactiveTodoNudgePlanner {
         "尽快", "紧急", "截止", "deadline", "ASAP"
     ]
 
-    /// 基于截止词紧迫度、积压时长与冷却防打扰策略选出一条拟态待办推进建议
+    /// 基于截止词紧迫度、积压时长、OneMind 黄金时段与冷却防打扰策略选出一条拟态待办推进建议
     static func selectNudgeCandidate(
         from items: [ClipItem],
         now: Date,
@@ -143,6 +143,7 @@ enum ProactiveTodoNudgePlanner {
         snoozedUntil: [UUID: Date],
         minimumGlobalInterval: TimeInterval = 18 * 60,
         minimumItemAge: TimeInterval = 25 * 60,
+        preferredHours: Set<Int> = [],
         forceImmediate: Bool = false
     ) -> ProactiveTodoNudgeCandidate? {
         let pending = items.filter(\.isPendingTodo)
@@ -159,6 +160,9 @@ enum ProactiveTodoNudgePlanner {
             return true
         }
         guard !eligible.isEmpty else { return nil }
+
+        let hour = Calendar.current.component(.hour, from: now)
+        let isPreferredHour = preferredHours.contains(hour)
 
         struct Scored {
             let item: ClipItem
@@ -182,7 +186,8 @@ enum ProactiveTodoNudgePlanner {
             let lower = cleanBody.lowercased()
             let urgent = urgencyKeywords.contains(where: { lower.contains($0.lowercased()) })
             if !forceImmediate {
-                let requiredAge = urgent ? min(minimumItemAge, 8 * 60) : minimumItemAge
+                let baseAge = isPreferredHour ? min(minimumItemAge, 12 * 60) : minimumItemAge
+                let requiredAge = urgent ? min(minimumItemAge, 8 * 60) : baseAge
                 if age < requiredAge {
                     return nil
                 }
@@ -190,6 +195,7 @@ enum ProactiveTodoNudgePlanner {
 
             var pts = min(72.0, age / 3600.0) * 10.0
             if urgent { pts += 1000.0 }
+            if isPreferredHour { pts += 15.0 }
             if item.isPinned { pts += 5.0 }
             return Scored(item: item, score: pts, isUrgent: urgent, ageSeconds: age, displayBody: cleanBody)
         }
@@ -201,12 +207,14 @@ enum ProactiveTodoNudgePlanner {
             return nil
         }
 
-        let hour = Calendar.current.component(.hour, from: now)
         let headline: String
         let personaLine: String
         if top.isUrgent {
             headline = "临近时间节点"
             personaLine = "这项快到点啦，先推进一下？"
+        } else if isPreferredHour {
+            headline = "OneMind 黄金节奏"
+            personaLine = "你常在这个时段推进待办，顺手处理这条？"
         } else if hour >= 17 && hour <= 20 {
             headline = "今日待办收个尾"
             personaLine = "快到收尾时间，还有 \(pending.count) 项待办，先处理这条？"
@@ -1512,11 +1520,17 @@ final class FloatingSpriteOrbController {
         }
 
         let now = Date()
+        let oneMind = OneMindKernel.shared
+        let mergedSnoozes = oneMind.activeSnoozedTodosMap(now: now).merging(snoozedTodosUntil) { persisted, local in
+            max(persisted, local)
+        }
         guard let candidate = ProactiveTodoNudgePlanner.selectNudgeCandidate(
             from: store.items,
             now: now,
             lastGlobalNudgeAt: lastGlobalNudgeAt,
-            snoozedUntil: snoozedTodosUntil,
+            snoozedUntil: mergedSnoozes,
+            minimumGlobalInterval: oneMind.recommendedProactiveNudgeInterval(),
+            preferredHours: oneMind.preferredNudgeHourSet(),
             forceImmediate: forceImmediate
         ) else {
             if forceImmediate {
@@ -1575,6 +1589,8 @@ final class FloatingSpriteOrbController {
             if let item = store.items.first(where: { $0.id == itemID && $0.isPendingTodo }) {
                 store.toggleTodoCompletion(item)
             }
+            OneMindKernel.shared.recordTodoNudgeCompleted(itemID: itemID)
+            self.snoozedTodosUntil.removeValue(forKey: itemID)
             self.activeProactiveNudge = nil
             self.physicsInput.proactiveNudgeActive = false
             self.physicsState.triggerAcceptedCelebration()
@@ -1583,8 +1599,15 @@ final class FloatingSpriteOrbController {
         }
         ActionSparkController.shared.onProactiveTodoSnoozed = { [weak self] itemID in
             guard let self else { return }
-            self.snoozedTodosUntil[itemID] = Date().addingTimeInterval(30 * 60)
+            let until = Date().addingTimeInterval(30 * 60)
+            self.snoozedTodosUntil[itemID] = until
+            OneMindKernel.shared.recordTodoNudgeSnoozed(itemID: itemID, until: until)
             self.clearActiveProactiveNudge(shrink: true)
+        }
+        ActionSparkController.shared.onProactiveTodoDismissed = { [weak self] _ in
+            guard let self else { return }
+            OneMindKernel.shared.recordTodoNudgeDismissed()
+            self.clearActiveProactiveNudge(shrink: false)
         }
     }
 
@@ -1877,6 +1900,7 @@ final class FloatingSpriteOrbController {
                     }
                 }
                 if insertedCount > 0 {
+                    OneMindKernel.shared.recordVoiceTodoCaptured(count: insertedCount)
                     TactileFeedbackEngine.shared.perform(.magicTransform)
                     self.physicsState.triggerAcceptedCelebration()
                     self.scheduleTemporaryGlyph(.done, duration: 1.2)
@@ -2268,6 +2292,14 @@ final class FloatingSpriteOrbController {
         let titleItem = NSMenuItem(title: "iClip 悬浮精灵 · 长按语音记待办", action: nil, keyEquivalent: "")
         titleItem.isEnabled = false
         menu.addItem(titleItem)
+
+        let oneMind = OneMindKernel.shared.oneMindMemorySummary
+        let oneMindTitle = oneMind.totalInteractions > 0
+            ? "OneMind 记忆 · 已留存 \(oneMind.totalInteractions) 次习惯"
+            : "OneMind 记忆 · 自动学习中"
+        let oneMindItem = NSMenuItem(title: oneMindTitle, action: nil, keyEquivalent: "")
+        oneMindItem.isEnabled = false
+        menu.addItem(oneMindItem)
 
         let toggleTitle = physicsInput.isClipboardPanelOpen ? "收起剪贴板面板" : "打开 iClip 剪贴板"
         let toggleItem = NSMenuItem(title: toggleTitle, action: #selector(contextTogglePanel), keyEquivalent: "")

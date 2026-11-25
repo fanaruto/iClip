@@ -89,12 +89,7 @@ struct ClipCardView: View {
     }
 
     private var hoverActionBarEstimateWidth: CGFloat {
-        var count = 2
-        if item.type == .link || renderMeta.hasEmbeddedWebLink { count += 1 }
-        if !ClipboardStore.shared.minimalModeEnabled {
-            if item.isTodo && onEditAlias != nil { count += 1 }
-            if onToggleTodo != nil { count += 1 }
-        }
+        let count = 2 + ((!ClipboardStore.shared.minimalModeEnabled && onToggleTodo != nil) ? 1 : 0)
         return ClipCardLayoutMetrics.hoverActionBarWidth(buttonCount: count)
     }
 
@@ -113,12 +108,7 @@ struct ClipCardView: View {
         }()
         let interactiveLeadingLink = item.type == .link || (item.type == .text && snap.parsedColorRGBA == nil && embeddedWebLink)
         let actionBarWidth: CGFloat = {
-            var count = 2
-            if item.type == .link || embeddedWebLink { count += 1 }
-            if !minimalMode {
-                if item.isTodo && onEditAlias != nil { count += 1 }
-                if onToggleTodo != nil { count += 1 }
-            }
+            let count = 2 + ((!minimalMode && onToggleTodo != nil) ? 1 : 0)
             return ClipCardLayoutMetrics.hoverActionBarWidth(buttonCount: count)
         }()
 
@@ -174,6 +164,12 @@ struct ClipCardView: View {
                             Text("·")
                         }
 
+                        // 单一优先状态徽标（高危/即焚 > 待办 > OneMind 常用回忆 > 语义种类），避免多标签堆砌
+                        let contextBadge = !minimalMode
+                            ? OneMindKernel.shared.preferredTargetAppBadge(for: item.contentHash, activeTargetApp: store.activeTargetAppName)
+                            : nil
+                        let reuse = (!minimalMode && !item.isPinned) ? OneMindKernel.shared.reuseCount(for: item.contentHash) : 0
+
                         if item.isBurnAfterPaste {
                             Text("粘贴即焚")
                                 .font(.system(size: 10, weight: .semibold))
@@ -195,9 +191,15 @@ struct ClipCardView: View {
                                 .lineLimit(1)
                                 .layoutPriority(1)
                             Text("·")
-                        }
-
-                        if todoCheckboxVisible {
+                        } else if !item.isBurnAfterPaste, let secKind = meta.detectedSensitiveKind {
+                            let ttlHint = (!item.isPinned && !item.isPendingTodo && store.autoExpireUnpinnedSecrets) ? " · 24h自毁" : ""
+                            Text(secKind.shieldBadgeTitle + ttlHint)
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.orange)
+                                .lineLimit(1)
+                                .layoutPriority(1)
+                            Text("·")
+                        } else if todoCheckboxVisible {
                             Text(item.isTodoCompleted ? "已完成" : "待办")
                                 .font(.system(size: 10, weight: .semibold))
                                 .foregroundStyle(
@@ -208,24 +210,24 @@ struct ClipCardView: View {
                                 .lineLimit(1)
                                 .layoutPriority(1)
                             Text("·")
-                        }
-
-                        if let kind = snap.primaryKind {
-                            Text(kind.badgeTitle)
+                        } else if let contextBadge {
+                            Text(contextBadge)
                                 .font(.system(size: 10, weight: .semibold))
-                                .foregroundStyle(
-                                    isSelected
-                                        ? Color.white.opacity(0.95)
-                                        : (kind == .sensitiveSecret ? Color.orange : Color.accentColor)
-                                )
+                                .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.accentColor)
                                 .lineLimit(1)
                                 .layoutPriority(1)
                             Text("·")
-                        } else if !item.isBurnAfterPaste, let secKind = meta.detectedSensitiveKind {
-                            let ttlHint = (!item.isPinned && !item.isPendingTodo && store.autoExpireUnpinnedSecrets) ? " · 24h自毁" : ""
-                            Text(secKind.shieldBadgeTitle + ttlHint)
+                        } else if reuse >= 3 {
+                            Text("高频 ×\(reuse)")
                                 .font(.system(size: 10, weight: .semibold))
                                 .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.orange)
+                                .lineLimit(1)
+                                .layoutPriority(1)
+                            Text("·")
+                        } else if let kind = snap.primaryKind {
+                            Text(kind.badgeTitle)
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.accentColor)
                                 .lineLimit(1)
                                 .layoutPriority(1)
                             Text("·")
@@ -249,27 +251,6 @@ struct ClipCardView: View {
                                 .fixedSize(horizontal: true, vertical: false)
                                 .layoutPriority(2)
                                 .transition(.opacity)
-                        } else if !ClipboardStore.shared.minimalModeEnabled {
-                            if let contextBadge = AdaptiveIntelligenceEngine.shared.preferredTargetAppBadge(
-                                for: item.contentHash,
-                                activeTargetApp: ClipboardStore.shared.activeTargetAppName
-                            ) {
-                                Text("·")
-                                Text(contextBadge)
-                                    .font(.system(size: 10, weight: .semibold))
-                                    .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.accentColor)
-                                    .lineLimit(1)
-                            } else if !item.isPinned {
-                                let reuse = AdaptiveIntelligenceEngine.shared.reuseCount(for: item.contentHash)
-                                if reuse >= 3 {
-                                    Text("·")
-                                    Text("高频 ×\(reuse)")
-                                        .font(.system(size: 10, weight: .semibold))
-                                        .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.orange)
-                                        .lineLimit(1)
-                                        .layoutPriority(1)
-                                }
-                            }
                         }
 
                         Spacer(minLength: 4)
@@ -295,14 +276,6 @@ struct ClipCardView: View {
                         shortcutBadge
                     }
                 }
-            }
-
-            // 常驻布局占位 + 悬停/选中亮度提振：彻底根除鼠标滑过卡片时的纵向伸缩抖动与横向撑宽
-            if !snap.actions.isEmpty {
-                transformActionStrip(actions: snap.actions)
-                    .opacity((isSelected || isHovered) ? 1.0 : 0.78)
-                    .animation(.easeOut(duration: 0.10), value: isSelected)
-                    .padding(.leading, (todoCheckboxVisible ? 29 : 0) + (leadingVisualVisible ? (item.type == .text ? 48 : 54) : 0))
             }
         }
         .padding(.horizontal, leadingVisualVisible ? 12 : 14)
@@ -343,7 +316,7 @@ struct ClipCardView: View {
                     hasTodoCheckbox: todoCheckboxVisible,
                     hasInteractiveLeadingLink: interactiveLeadingLink
                 ),
-                bottomExclusionHeight: !snap.actions.isEmpty ? 28 : 0,
+                bottomExclusionHeight: 0,
                 onHoverEnterSelect: {
                     let allowed = onHoverSelect?() ?? {
                         onSelect()
@@ -465,64 +438,6 @@ struct ClipCardView: View {
         }
     }
 
-    // MARK: - 瞬时语义变换胶囊条
-
-    private func transformActionStrip(actions: [TransformAction]) -> some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 6) {
-                ForEach(Array(actions.enumerated()), id: \.element.id) { idx, action in
-                    let habitTop = (idx == 0) && AdaptiveIntelligenceEngine.shared.isHabitPreferred(actionID: action.id, sourceApp: item.sourceAppName)
-                    Button {
-                        onApplyTransform(action, true)
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: action.symbolName)
-                                .font(.system(size: 10, weight: .semibold))
-                            Text(action.title)
-                                .font(.system(size: 11, weight: .medium))
-                                .lineLimit(1)
-                            if habitTop {
-                                Image(systemName: "sparkle")
-                                    .font(.system(size: 8.5, weight: .bold))
-                                    .foregroundStyle(isSelected ? Color.white : Color.accentColor)
-                            }
-                            Text(idx == 0 ? "⇧↵" : "⌃\(idx + 1)")
-                                .font(.system(size: 9.5, weight: .semibold))
-                                .opacity(0.72)
-                        }
-                        .foregroundStyle(chipForeground(for: action))
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3.5)
-                        .background(
-                            Capsule()
-                                .fill(chipBackground(for: action))
-                        )
-                        .overlay(
-                            Capsule()
-                                .strokeBorder(habitTop && !isSelected ? Color.accentColor.opacity(0.40) : Color.clear, lineWidth: 0.65)
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .help(habitTop ? "已按你在「\(item.sourceAppName ?? "当前应用")」中的习惯自动置顶（⇧↵ 直出）" : "点击直接执行「\(action.title)」并键入光标处")
-                }
-            }
-        }
-    }
-
-    private func chipForeground(for action: TransformAction) -> Color {
-        if isSelected {
-            return .white
-        }
-        return action.isSecurityAction ? Color.orange : Color.primary.opacity(0.88)
-    }
-
-    private func chipBackground(for action: TransformAction) -> Color {
-        if isSelected {
-            return action.isSecurityAction ? Color.orange.opacity(0.38) : Color.white.opacity(0.20)
-        }
-        return action.isSecurityAction ? Color.orange.opacity(0.14) : Color.primary.opacity(0.075)
-    }
-
     // MARK: - 左侧视觉预览
 
     @ViewBuilder
@@ -629,30 +544,6 @@ struct ClipCardView: View {
     private var hoverActions: some View {
         let surface: HoverActionSurface = isSelected ? .onSelectedCard : .onStandardCard
         return HStack(spacing: 5) {
-            if item.type == .link || hasEmbeddedWebLink {
-                HoverActionCircleButton(
-                    symbolName: "arrow.up.right",
-                    size: 22,
-                    iconSize: 10.5,
-                    surface: surface,
-                    kind: .openURL,
-                    helpText: "在浏览器中打开链接（⌘O / ⌘单击）",
-                    action: { _ = ClipboardStore.shared.openItemExternally(item) }
-                )
-            }
-
-            if !ClipboardStore.shared.minimalModeEnabled, item.isTodo, let onEditAlias {
-                HoverActionCircleButton(
-                    symbolName: "pencil",
-                    size: 22,
-                    iconSize: 10.0,
-                    surface: surface,
-                    kind: .alias,
-                    helpText: (item.customAlias?.isEmpty == false) ? "修改待办标题（⌘R）" : "添加待办标题说明（⌘R）",
-                    action: onEditAlias
-                )
-            }
-
             if !ClipboardStore.shared.minimalModeEnabled, let onToggleTodo {
                 HoverActionCircleButton(
                     symbolName: item.isTodoCompleted ? "checkmark.circle.fill" : (item.isTodo ? "circle.inset.filled" : "checkmark.circle"),
