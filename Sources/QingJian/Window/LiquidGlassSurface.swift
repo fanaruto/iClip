@@ -108,6 +108,39 @@ final class LiquidGlassSurfaceHost {
         refreshInPlace()
     }
 
+    /// 伴生浮卡等动态尺寸切换时，同步更新出血根框、玻璃透镜与柔焦层几何
+    func updateGeometry(cardSize: NSSize, bleed: CGFloat, cornerRadius: CGFloat, on panel: NSWindow) {
+        self.cornerRadius = cornerRadius
+        let totalSize = NSSize(width: cardSize.width + bleed * 2, height: cardSize.height + bleed * 2)
+        let cardFrame = NSRect(x: bleed, y: bleed, width: cardSize.width, height: cardSize.height)
+        let zeroBounds = NSRect(origin: .zero, size: cardSize)
+
+        if panel.contentView?.frame.size != totalSize {
+            panel.setContentSize(totalSize)
+        }
+        if let bleedRoot = panel.contentView as? LiquidGlassBleedRootView {
+            bleedRoot.frame = NSRect(origin: .zero, size: totalSize)
+            bleedRoot.cardFrame = cardFrame
+        }
+        if let blur = backdropBlurView {
+            blur.frame = cardFrame
+            blur.maskImage = Self.continuousCornerMaskImage(size: cardSize, radius: cornerRadius)
+            blur.layer?.cornerRadius = cornerRadius
+        }
+        if #available(macOS 26.0, *), let glass = activeGlassView as? NSGlassEffectView {
+            glass.frame = cardFrame
+            glass.cornerRadius = cornerRadius
+        }
+        if let container = containerView {
+            container.frame = zeroBounds
+            container.layer?.cornerRadius = cornerRadius
+            for sub in container.subviews {
+                sub.frame = zeroBounds
+            }
+        }
+        panel.invalidateShadow()
+    }
+
     /// 系统外观或辅助功能变化时原地刷新
     func refreshInPlace() {
         guard currentStyle == .liquidGlass else { return }
@@ -1245,13 +1278,23 @@ struct CardSkinStylePickerCard: View {
     }
 }
 
+/// 苹果物理按压微弹簧按钮样式（全应用微交互共用）
+struct PhysicalSpringButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.965 : 1.0)
+            .opacity(configuration.isPressed ? 0.88 : 1.0)
+            .animation(.spring(response: 0.24, dampingFraction: 0.68), value: configuration.isPressed)
+    }
+}
+
 /// 悬浮精灵小球设置卡片：控制显隐、4 套视觉皮肤选择及靠边/自由停靠习惯
 struct SpriteOrbSettingsCard: View {
     @Binding var enabled: Bool
     @Binding var style: SpriteOrbStyle
     @Binding var dockMode: SpriteOrbDockMode
-    @Binding var proactiveNudgeEnabled: Bool
     @Environment(\.colorScheme) private var colorScheme
+    @Namespace private var styleSelectionNS
     @State private var hoveredStyle: SpriteOrbStyle? = nil
 
     private let columns = [
@@ -1261,9 +1304,9 @@ struct SpriteOrbSettingsCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Toggle(isOn: $enabled) {
+            Toggle(isOn: $enabled.animation(.spring(response: 0.34, dampingFraction: 0.82))) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("悬浮精灵小球（实验）")
+                    Text("悬浮精灵小球")
                         .font(.system(size: 13.5, weight: .medium))
                     Text("单击剪贴板 · 拖动换位 · 长按语音记待办")
                         .font(.system(size: 11))
@@ -1273,68 +1316,58 @@ struct SpriteOrbSettingsCard: View {
             }
 
             if enabled {
-                LazyVGrid(columns: columns, spacing: 8) {
-                    ForEach(SpriteOrbStyle.allCases) { item in
-                        let isSelected = (style == item)
-                        let isHovered = (hoveredStyle == item)
-                        Button {
-                            guard style != item else { return }
-                            withAnimation(.spring(response: 0.32, dampingFraction: 0.85)) {
-                                style = item
+                VStack(alignment: .leading, spacing: 10) {
+                    LazyVGrid(columns: columns, spacing: 8) {
+                        ForEach(SpriteOrbStyle.allCases) { item in
+                            let isSelected = (style == item)
+                            let isHovered = (hoveredStyle == item)
+                            Button {
+                                guard style != item else { return }
+                                withAnimation(.spring(response: 0.34, dampingFraction: 0.78)) {
+                                    style = item
+                                }
+                                TactileFeedbackEngine.shared.performNavigationStepHaptic()
+                            } label: {
+                                styleOptionCard(item: item, isSelected: isSelected, isHovered: isHovered)
                             }
-                            TactileFeedbackEngine.shared.performNavigationStepHaptic()
-                        } label: {
-                            styleOptionCard(item: item, isSelected: isSelected, isHovered: isHovered)
-                        }
-                        .buttonStyle(.plain)
-                        .onHover { hovering in
-                            withAnimation(.easeOut(duration: 0.14)) {
-                                hoveredStyle = hovering ? item : (hoveredStyle == item ? nil : hoveredStyle)
+                            .buttonStyle(PhysicalSpringButtonStyle())
+                            .onHover { hovering in
+                                withAnimation(.easeOut(duration: 0.14)) {
+                                    hoveredStyle = hovering ? item : (hoveredStyle == item ? nil : hoveredStyle)
+                                }
                             }
                         }
                     }
-                }
 
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("闲置停靠方式")
-                        .font(.system(size: 11.5, weight: .medium))
-                        .foregroundStyle(.secondary)
-                    Picker("", selection: $dockMode) {
-                        ForEach(SpriteOrbDockMode.allCases) { mode in
-                            Text(mode.shortLabel).tag(mode)
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("闲置停靠方式")
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(.secondary)
+                        Picker("", selection: $dockMode.animation(.spring(response: 0.30, dampingFraction: 0.82))) {
+                            ForEach(SpriteOrbDockMode.allCases) { mode in
+                                Text(mode.shortLabel).tag(mode)
+                            }
                         }
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    Text(dockMode.subtitle)
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(.secondary)
-                }
-
-                Divider().opacity(0.3)
-
-                Toggle(isOn: $proactiveNudgeEnabled) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("主动拟态待办推进提醒")
-                            .font(.system(size: 12.5, weight: .medium))
-                        Text("识别截止词与长期搁置待办，适时轻碰气泡邀你推进")
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        Text(dockMode.subtitle)
                             .font(.system(size: 10.5))
                             .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
+                .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .top)))
             }
         }
-        .animation(.easeInOut(duration: 0.2), value: enabled)
+        .animation(.spring(response: 0.34, dampingFraction: 0.82), value: enabled)
     }
 
     private func styleOptionCard(item: SpriteOrbStyle, isSelected: Bool, isHovered: Bool) -> some View {
         let fillColor = colorScheme == .dark
             ? Color.white.opacity(isSelected ? 0.11 : (isHovered ? 0.08 : 0.045))
             : Color.white.opacity(isSelected ? 0.90 : (isHovered ? 0.76 : 0.58))
-        let borderColor = isSelected
-            ? Color.accentColor
-            : (colorScheme == .dark ? Color.white.opacity(isHovered ? 0.22 : 0.11) : Color.black.opacity(isHovered ? 0.13 : 0.07))
+        let idleBorder = colorScheme == .dark
+            ? Color.white.opacity(isHovered ? 0.22 : 0.11)
+            : Color.black.opacity(isHovered ? 0.13 : 0.07)
 
         return HStack(spacing: 8) {
             miniStyleGlyph(for: item)
@@ -1360,8 +1393,15 @@ struct SpriteOrbSettingsCard: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(borderColor, lineWidth: isSelected ? 1.45 : 0.7)
+                .strokeBorder(idleBorder, lineWidth: 0.7)
         )
+        .overlay {
+            if isSelected {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(Color.accentColor, lineWidth: 1.5)
+                    .matchedGeometryEffect(id: "orbStyleSelectionRing", in: styleSelectionNS)
+            }
+        }
         .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 

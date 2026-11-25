@@ -335,6 +335,7 @@ struct ClipboardPopoverView: View {
     @State private var aliasEditingItem: ClipItem? = nil
     @State private var aliasDraftText: String = ""
     @State private var showShortcutReference: Bool = false
+    @State private var showAdvancedPrivacyControls: Bool = false
     @FocusState private var isAliasFieldFocused: Bool
 
     var filteredItems: [ClipItem] {
@@ -1794,8 +1795,8 @@ struct ClipboardPopoverView: View {
                     }
                 }
 
-                // 苹果官方风格液态玻璃背景模糊浓度与轻量化双卡片皮肤切换
-                settingsGroup(title: "液态玻璃与皮肤") {
+                // 1. 外观与悬浮精灵
+                settingsGroup(title: "外观与悬浮精灵") {
                     LiquidGlassBlurStyleCard(blurConcentration: $store.liquidGlassMaskOpacity)
                     Divider().opacity(0.35)
                     CardSkinStylePickerCard(cardSkin: $store.cardSkin)
@@ -1803,18 +1804,257 @@ struct ClipboardPopoverView: View {
                     SpriteOrbSettingsCard(
                         enabled: $store.spriteOrbEnabled,
                         style: $store.spriteOrbStyle,
-                        dockMode: $store.spriteOrbDockMode,
-                        proactiveNudgeEnabled: $store.spriteOrbProactiveNudgeEnabled
+                        dockMode: $store.spriteOrbDockMode
                     )
                 }
 
-                // 模式与软件更新
-                settingsGroup(title: "模式与更新") {
-                    RoleAndOTASettingsSection(store: store, updater: updater)
+                // 2. OneMind 主动智能（含极简开关、核心智能开关与本地持久记忆看板）
+                settingsGroup(title: "OneMind 主动智能") {
+                    AdaptiveIntelligenceSettingsSection(store: store)
                 }
 
-                // 通用与快捷键
-                settingsGroup(title: "通用与快捷键") {
+                // 3. 隐私护盾与历史（一主开关 + 默认收起细项 + 历史管理）
+                settingsGroup(title: "隐私护盾与历史") {
+                    let shieldMasterOn = store.screenSharePrivacyEnabled
+                        && store.maskSensitivePreviews
+                        && store.autoRedactOnPaste
+
+                    HStack(spacing: 7) {
+                        Image(systemName: shieldMasterOn ? "lock.shield.fill" : "shield")
+                            .font(.system(size: 12.5, weight: .semibold))
+                            .foregroundStyle(shieldMasterOn ? Color.green : .secondary)
+                        Text("本机钥匙串 AES-256-GCM 透明加密 · 零联网上传")
+                            .font(.system(size: 11.2, weight: .medium))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text(shieldMasterOn ? "护盾守护中" : "基础保护")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(shieldMasterOn ? Color.green : .secondary)
+                            .padding(.horizontal, 6.5)
+                            .padding(.vertical, 2)
+                            .background(Capsule().fill((shieldMasterOn ? Color.green : Color.primary).opacity(0.10)))
+                    }
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 6)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill((shieldMasterOn ? Color.green : Color.primary).opacity(0.08))
+                    )
+                    .animation(.spring(response: 0.28, dampingFraction: 0.82), value: shieldMasterOn)
+
+                    HStack {
+                        VStack(alignment: .leading, spacing: 1.5) {
+                            Text("隐私安全护盾")
+                                .font(.system(size: 13.5, weight: .medium))
+                            Text("一键开启投屏隐身、防肩窥圆点遮罩与粘贴自动脱敏")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Toggle("", isOn: Binding(
+                            get: { shieldMasterOn },
+                            set: { newVal in
+                                withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
+                                    store.screenSharePrivacyEnabled = newVal
+                                    store.maskSensitivePreviews = newVal
+                                    store.autoRedactOnPaste = newVal
+                                }
+                                TactileFeedbackEngine.shared.performNavigationStepHaptic()
+                            }
+                        ))
+                        .toggleStyle(.switch)
+                        .labelsHidden()
+                    }
+
+                    Divider().opacity(0.35)
+
+                    Button {
+                        withAnimation(.spring(response: 0.30, dampingFraction: 0.84)) {
+                            showAdvancedPrivacyControls.toggle()
+                        }
+                        TactileFeedbackEngine.shared.performNavigationStepHaptic()
+                    } label: {
+                        HStack {
+                            Text("细项护盾、微落点与忽略应用")
+                                .font(.system(size: 12.5, weight: .medium))
+                                .foregroundStyle(.primary.opacity(0.88))
+                            Spacer()
+                            Image(systemName: showAdvancedPrivacyControls ? "chevron.up" : "chevron.down")
+                                .font(.system(size: 10.5, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(PhysicalSpringButtonStyle())
+
+                    if showAdvancedPrivacyControls {
+                        VStack(alignment: .leading, spacing: 9) {
+                            Toggle("投屏与录屏光学隐身", isOn: $store.screenSharePrivacyEnabled)
+                                .font(.system(size: 12.5))
+                                .toggleStyle(.switch)
+                                .controlSize(.small)
+
+                            Toggle("敏感凭据防肩窥圆点遮罩", isOn: $store.maskSensitivePreviews)
+                                .font(.system(size: 12.5))
+                                .toggleStyle(.switch)
+                                .controlSize(.small)
+
+                            Toggle("粘贴敏感凭据自动脱敏（⌥↵ 贴明文）", isOn: $store.autoRedactOnPaste)
+                                .font(.system(size: 12.5))
+                                .toggleStyle(.switch)
+                                .controlSize(.small)
+
+                            Toggle("密码剪贴板 60 秒残留擦除", isOn: $store.autoClearConcealedPasteboard)
+                                .font(.system(size: 12.5))
+                                .toggleStyle(.switch)
+                                .controlSize(.small)
+
+                            Toggle("未收藏敏感凭据 24h 自动销毁", isOn: $store.autoExpireUnpinnedSecrets)
+                                .font(.system(size: 12.5))
+                                .toggleStyle(.switch)
+                                .controlSize(.small)
+
+                            Toggle("复制链接自动剥离追踪尾巴", isOn: $store.autoCleanTrackingURL)
+                                .font(.system(size: 12.5))
+                                .toggleStyle(.switch)
+                                .controlSize(.small)
+
+                            Toggle("拖拽途中按 ⌥ 呼出「微落点」", isOn: Binding(
+                                get: { oneMind.cursorDropPodEnabled },
+                                set: { oneMind.cursorDropPodEnabled = $0 }
+                            ))
+                            .font(.system(size: 12.5))
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+
+                            Divider().opacity(0.3)
+
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("隐私忽略应用（不记录其复制内容）")
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(.secondary)
+
+                                let visibleIgnoredApps = store.ignoredApps.filter {
+                                    ClipboardStore.isAppAvailableOnSystem(bundleIdentifier: $0.bundleIdentifier)
+                                }
+
+                                if !visibleIgnoredApps.isEmpty {
+                                    VStack(spacing: 5) {
+                                        ForEach(visibleIgnoredApps) { app in
+                                            HStack(spacing: 8) {
+                                                if let icon = store.appIcon(forBundleID: app.bundleIdentifier) {
+                                                    Image(nsImage: icon)
+                                                        .resizable()
+                                                        .scaledToFit()
+                                                        .frame(width: 18, height: 18)
+                                                }
+                                                Text(app.displayName)
+                                                    .font(.system(size: 12, weight: .medium))
+                                                    .lineLimit(1)
+                                                Spacer()
+                                                Button {
+                                                    withAnimation(.easeOut(duration: 0.16)) {
+                                                        store.removeIgnoredApp(bundleIdentifier: app.bundleIdentifier)
+                                                    }
+                                                } label: {
+                                                    Image(systemName: "xmark.circle.fill")
+                                                        .font(.system(size: 13))
+                                                        .foregroundStyle(.secondary.opacity(0.75))
+                                                }
+                                                .buttonStyle(PhysicalSpringButtonStyle())
+                                                .help("移出忽略名单")
+                                            }
+                                            .padding(.horizontal, 8)
+                                            .padding(.vertical, 5)
+                                            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.primary.opacity(0.045)))
+                                        }
+                                    }
+                                }
+
+                                HStack(spacing: 8) {
+                                    Menu {
+                                        let candidates = store.runningCandidateAppsForIgnore()
+                                        if candidates.isEmpty {
+                                            Text("暂无可添加的运行中应用")
+                                        } else {
+                                            ForEach(candidates) { candidate in
+                                                Button(candidate.displayName) {
+                                                    store.addIgnoredApp(
+                                                        bundleIdentifier: candidate.bundleIdentifier,
+                                                        displayName: candidate.displayName
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    } label: {
+                                        Label("添加运行中应用", systemImage: "plus.circle")
+                                            .font(.system(size: 12, weight: .medium))
+                                    }
+                                    .menuStyle(.borderlessButton)
+                                    .fixedSize()
+
+                                    Spacer()
+
+                                    Button("选择应用...") {
+                                        pickAppToIgnore()
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
+                                }
+                            }
+                        }
+                        .padding(.top, 2)
+                        .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .top)))
+                    }
+
+                    Divider().opacity(0.35)
+
+                    VStack(alignment: .leading, spacing: 7) {
+                        HStack {
+                            Text("历史保留上限")
+                                .font(.system(size: 13.5, weight: .medium))
+                            Spacer()
+                            Text("收藏记录永不清理")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        }
+                        Picker("", selection: $store.maxHistoryCount) {
+                            Text("50 条").tag(50)
+                            Text("100 条").tag(100)
+                            Text("200 条").tag(200)
+                            Text("500 条").tag(500)
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                    }
+
+                    Divider().opacity(0.35)
+
+                    HStack(spacing: 8) {
+                        VStack(alignment: .leading, spacing: 1.5) {
+                            Text("收藏归档")
+                                .font(.system(size: 13, weight: .medium))
+                            Text("已收藏 \(store.pinnedItemCount) 条 · 支持 .iclip / Raycast / Maccy")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("导入...") {
+                            importPinnedArchiveAction()
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+
+                        Button("导出 (.iclip)") {
+                            exportPinnedArchiveAction()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                    }
+                }
+
+                // 4. 通用与关于
+                settingsGroup(title: "通用与关于") {
                     VStack(alignment: .leading, spacing: 7) {
                         HStack {
                             Text("默认键入方式")
@@ -1827,61 +2067,13 @@ struct ClipboardPopoverView: View {
                         }
                         .pickerStyle(.segmented)
                         .labelsHidden()
+                        .onChange(of: store.cardClickPasteMode) { _, _ in
+                            TactileFeedbackEngine.shared.performNavigationStepHaptic()
+                        }
                         Text(store.cardClickPasteMode.companionGestureSummary)
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
-                    }
-
-                    Divider().opacity(0.35)
-
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("窗口始终在前（⌘P）")
-                                .font(.system(size: 13.5, weight: .medium))
-                            Text("固定面板置顶，切换窗口与连续粘贴时不自动收起")
-                                .font(.system(size: 11.5))
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Toggle("", isOn: $store.alwaysOnTop)
-                            .toggleStyle(.switch)
-                            .labelsHidden()
-                    }
-
-                    Divider().opacity(0.35)
-
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("开机自动启动")
-                                .font(.system(size: 13.5, weight: .medium))
-                            Text("登录 macOS 后自动在菜单栏常驻运行")
-                                .font(.system(size: 11.5))
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Toggle("", isOn: Binding(
-                            get: { store.launchAtLoginEnabled },
-                            set: { store.setLaunchAtLogin($0) }
-                        ))
-                        .toggleStyle(.switch)
-                        .labelsHidden()
-                    }
-
-                    Divider().opacity(0.35)
-
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("交互音效反馈")
-                                .font(.system(size: 13.5, weight: .medium))
-                            Text("键入、收藏与转换时播放轻柔微音效（关闭后仍保留触控板震动）")
-                                .font(.system(size: 11.5))
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Toggle("", isOn: $store.soundEffectsEnabled)
-                            .toggleStyle(.switch)
-                            .labelsHidden()
                     }
 
                     Divider().opacity(0.35)
@@ -1928,7 +2120,7 @@ struct ClipboardPopoverView: View {
                                         .fill(hasConflict ? Color.red : (nav.isRecordingHotKey ? Color.accentColor : Color.primary.opacity(0.08)))
                                 )
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(PhysicalSpringButtonStyle())
 
                         if store.hotKeyShortcut != .defaultShortcut && !nav.isRecordingHotKey {
                             Button {
@@ -1942,248 +2134,98 @@ struct ClipboardPopoverView: View {
                                     .frame(width: 22, height: 22)
                                     .background(Circle().fill(Color.primary.opacity(0.07)))
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(PhysicalSpringButtonStyle())
                             .help("恢复默认 ⌥ V")
                         }
                     }
-                }
-
-                // OneMind 主动智能（极简模式下自动隐藏）
-                if !store.minimalModeEnabled {
-                    settingsGroup(title: "OneMind 主动智能") {
-                        AdaptiveIntelligenceSettingsSection(store: store)
-                    }
-                }
-
-                // 隐私护盾与迁移整合分组
-                settingsGroup(title: "隐私护盾与迁移") {
-                    HStack(spacing: 7) {
-                        Image(systemName: "lock.shield.fill")
-                            .font(.system(size: 12.5, weight: .semibold))
-                            .foregroundStyle(.green)
-                        Text("本机钥匙串 AES-256-GCM 透明加密已启用 · 零联网上传")
-                            .font(.system(size: 11.5, weight: .medium))
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                    }
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 6)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(Color.green.opacity(0.09))
-                    )
-
-                    Toggle(isOn: $store.screenSharePrivacyEnabled) {
-                        VStack(alignment: .leading, spacing: 1.5) {
-                            Text("投屏与录屏光学隐身护盾")
-                                .font(.system(size: 13.5, weight: .medium))
-                            Text("腾讯会议 / 飞书共享屏幕及录屏中自动隐去 iClip，本机可见")
-                                .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .toggleStyle(.switch)
-                    .controlSize(.small)
-
-                    Toggle(isOn: $store.maskSensitivePreviews) {
-                        VStack(alignment: .leading, spacing: 1.5) {
-                            Text("敏感凭据防肩窥圆点遮罩")
-                                .font(.system(size: 13.5, weight: .medium))
-                            Text("API 密钥与私钥默认圆点雾化，选中或悬停即刻原位显影")
-                                .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .toggleStyle(.switch)
-                    .controlSize(.small)
-
-                    Toggle(isOn: $store.autoClearConcealedPasteboard) {
-                        VStack(alignment: .leading, spacing: 1.5) {
-                            Text("密码剪贴板 60 秒残留擦除")
-                                .font(.system(size: 13.5, weight: .medium))
-                            Text("从 1Password / 系统密码复制密码后超时自动清空系统剪贴板")
-                                .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .toggleStyle(.switch)
-                    .controlSize(.small)
-
-                    Toggle(isOn: $store.autoExpireUnpinnedSecrets) {
-                        VStack(alignment: .leading, spacing: 1.5) {
-                            Text("未收藏敏感凭据 24h 自动销毁")
-                                .font(.system(size: 13.5, weight: .medium))
-                            Text("临时密钥与身份证卡号满 24 小时自动无痕代谢，收藏项永久守护")
-                                .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .toggleStyle(.switch)
-                    .controlSize(.small)
 
                     Divider().opacity(0.35)
 
-                    VStack(alignment: .leading, spacing: 7) {
-                        HStack {
-                            Text("历史保留上限")
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("开机自动启动")
                                 .font(.system(size: 13.5, weight: .medium))
-                            Spacer()
-                            Text("收藏记录永不清理")
-                                .font(.system(size: 11))
+                            Text("登录 macOS 后自动在菜单栏常驻运行")
+                                .font(.system(size: 11.5))
                                 .foregroundStyle(.secondary)
                         }
-                        Picker("", selection: $store.maxHistoryCount) {
-                            Text("50 条").tag(50)
-                            Text("100 条").tag(100)
-                            Text("200 条").tag(200)
-                            Text("500 条").tag(500)
-                        }
-                        .pickerStyle(.segmented)
+                        Spacer()
+                        Toggle("", isOn: Binding(
+                            get: { store.launchAtLoginEnabled },
+                            set: { store.setLaunchAtLogin($0) }
+                        ))
+                        .toggleStyle(.switch)
                         .labelsHidden()
                     }
 
                     Divider().opacity(0.35)
 
-                    VStack(alignment: .leading, spacing: 7) {
-                        Text("隐私忽略应用（不记录其复制内容）")
-                            .font(.system(size: 12.5, weight: .medium))
-
-                        let visibleIgnoredApps = store.ignoredApps.filter {
-                            ClipboardStore.isAppAvailableOnSystem(bundleIdentifier: $0.bundleIdentifier)
-                        }
-
-                        if !visibleIgnoredApps.isEmpty {
-                            VStack(spacing: 5) {
-                                ForEach(visibleIgnoredApps) { app in
-                                    HStack(spacing: 8) {
-                                        if let icon = store.appIcon(forBundleID: app.bundleIdentifier) {
-                                            Image(nsImage: icon)
-                                                .resizable()
-                                                .scaledToFit()
-                                                .frame(width: 18, height: 18)
-                                        }
-
-                                        Text(app.displayName)
-                                            .font(.system(size: 12.5, weight: .medium))
-                                            .lineLimit(1)
-
-                                        Spacer()
-
-                                        Button {
-                                            withAnimation(.easeOut(duration: 0.16)) {
-                                                store.removeIgnoredApp(bundleIdentifier: app.bundleIdentifier)
-                                            }
-                                        } label: {
-                                            Image(systemName: "xmark.circle.fill")
-                                                .font(.system(size: 13))
-                                                .foregroundStyle(.secondary.opacity(0.75))
-                                        }
-                                        .buttonStyle(.plain)
-                                        .help("移出忽略名单")
-                                    }
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 5)
-                                    .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.primary.opacity(0.045)))
-                                }
-                            }
-                        }
-
-                        HStack(spacing: 8) {
-                            Menu {
-                                let candidates = store.runningCandidateAppsForIgnore()
-                                if candidates.isEmpty {
-                                    Text("暂无可添加的运行中应用")
-                                } else {
-                                    ForEach(candidates) { candidate in
-                                        Button(candidate.displayName) {
-                                            store.addIgnoredApp(
-                                                bundleIdentifier: candidate.bundleIdentifier,
-                                                displayName: candidate.displayName
-                                            )
-                                        }
-                                    }
-                                }
-                            } label: {
-                                Label("添加运行中应用", systemImage: "plus.circle")
-                                    .font(.system(size: 12, weight: .medium))
-                            }
-                            .menuStyle(.borderlessButton)
-                            .fixedSize()
-
-                            Spacer()
-
-                            Button("选择应用...") {
-                                pickAppToIgnore()
-                            }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                        }
-                    }
-
-                    Divider().opacity(0.35)
-
-                    HStack(spacing: 8) {
+                    HStack {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("收藏归档与跨软件一键搬家")
+                            Text("交互音效反馈")
                                 .font(.system(size: 13.5, weight: .medium))
-                            Text("已收藏 \(store.pinnedItemCount) 条 · 支持 .iclip / Raycast / Maccy / CSV")
+                            Text("键入与转换时播放轻柔微音效（开启即刻试音）")
                                 .font(.system(size: 11.5))
                                 .foregroundStyle(.secondary)
                         }
                         Spacer()
-
-                        Button("导入...") {
-                            importPinnedArchiveAction()
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-
-                        Button("导出 (.iclip)") {
-                            exportPinnedArchiveAction()
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
+                        Toggle("", isOn: $store.soundEffectsEnabled)
+                            .toggleStyle(.switch)
+                            .labelsHidden()
                     }
-                }
-
-                // 按需查看的新手引导与键盘快捷键速查表（默认折叠，告别长列表刷屏）
-                settingsGroup(title: "帮助") {
-                    Button {
-                        nav.showSettings = false
-                        playground.showHighlights()
-                    } label: {
-                        HStack {
-                            Text("查看新手与新功能引导")
-                                .font(.system(size: 13, weight: .medium))
-                                .foregroundStyle(.primary)
-                            Spacer()
-                            Image(systemName: "sparkles")
-                                .font(.system(size: 11.5, weight: .semibold))
-                                .foregroundStyle(Color.accentColor)
+                    .onChange(of: store.soundEffectsEnabled) { _, on in
+                        if on {
+                            TactileFeedbackEngine.shared.perform(.pasteCommit)
+                        } else {
+                            TactileFeedbackEngine.shared.performNavigationStepHaptic()
                         }
-                        .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
 
                     Divider().opacity(0.35)
 
-                    Button {
-                        withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
-                            showShortcutReference.toggle()
+                    RoleAndOTASettingsSection(store: store, updater: updater)
+
+                    Divider().opacity(0.35)
+
+                    HStack(spacing: 12) {
+                        Button {
+                            nav.showSettings = false
+                            playground.showHighlights()
+                        } label: {
+                            HStack(spacing: 5) {
+                                Image(systemName: "sparkles")
+                                    .font(.system(size: 11.5, weight: .semibold))
+                                    .foregroundStyle(Color.accentColor)
+                                Text("新手引导")
+                                    .font(.system(size: 12.5, weight: .medium))
+                                    .foregroundStyle(.primary)
+                            }
+                            .padding(.vertical, 3)
+                            .contentShape(Rectangle())
                         }
-                    } label: {
-                        HStack {
-                            Text("键盘快捷键速查")
-                                .font(.system(size: 13, weight: .medium))
-                                .foregroundStyle(.primary)
-                            Spacer()
-                            Image(systemName: showShortcutReference ? "chevron.up" : "chevron.down")
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(.secondary)
+                        .buttonStyle(PhysicalSpringButtonStyle())
+
+                        Spacer()
+
+                        Button {
+                            withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
+                                showShortcutReference.toggle()
+                            }
+                            TactileFeedbackEngine.shared.performNavigationStepHaptic()
+                        } label: {
+                            HStack(spacing: 4) {
+                                Text("快捷键速查")
+                                    .font(.system(size: 12.5, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                                Image(systemName: showShortcutReference ? "chevron.up" : "chevron.down")
+                                    .font(.system(size: 10.5, weight: .semibold))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.vertical, 3)
+                            .contentShape(Rectangle())
                         }
-                        .contentShape(Rectangle())
+                        .buttonStyle(PhysicalSpringButtonStyle())
                     }
-                    .buttonStyle(.plain)
 
                     if showShortcutReference {
                         Divider().opacity(0.35)
@@ -2232,7 +2274,7 @@ struct ClipboardPopoverView: View {
                             .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.primary.opacity(0.06)))
                             .foregroundStyle(.primary.opacity(0.85))
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(PhysicalSpringButtonStyle())
 
                     Button {
                         onQuit()
@@ -2244,7 +2286,7 @@ struct ClipboardPopoverView: View {
                             .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.red.opacity(0.10)))
                             .foregroundStyle(.red)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(PhysicalSpringButtonStyle())
                 }
             }
             .padding(.horizontal, 14)

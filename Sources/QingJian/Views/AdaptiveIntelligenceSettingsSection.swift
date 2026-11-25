@@ -538,6 +538,7 @@ struct AdaptiveIntelligenceSettingsSection: View {
 
     var body: some View {
         let summary = engine.oneMindMemorySummary
+        let isSensingActive = !store.minimalModeEnabled && (engine.sparkEnabled || store.spriteOrbProactiveNudgeEnabled)
 
         VStack(alignment: .leading, spacing: 11) {
             VStack(alignment: .leading, spacing: 8) {
@@ -547,21 +548,29 @@ struct AdaptiveIntelligenceSettingsSection: View {
                         .foregroundStyle(Color.accentColor)
                     Text("OneMind 主动心智内核")
                         .font(.system(size: 13, weight: .semibold))
-                    Text("本地加密留存")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(Color.accentColor)
-                        .padding(.horizontal, 6.5)
-                        .padding(.vertical, 2)
-                        .background(Capsule().fill(Color.accentColor.opacity(0.12)))
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(isSensingActive ? Color.green : Color.secondary.opacity(0.5))
+                            .frame(width: 6, height: 6)
+                        Text(isSensingActive ? "主动感知中" : "静默待命")
+                            .font(.system(size: 10, weight: .semibold))
+                    }
+                    .foregroundStyle(isSensingActive ? Color.green : .secondary)
+                    .padding(.horizontal, 6.5)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill((isSensingActive ? Color.green : Color.primary).opacity(0.10)))
+                    .animation(.spring(response: 0.28, dampingFraction: 0.8), value: isSensingActive)
+
                     Spacer()
                     if summary.totalInteractions > 0 {
                         Button("重置记忆") {
                             engine.resetLearnedWeights()
+                            TactileFeedbackEngine.shared.performNavigationStepHaptic()
                             store.showToast("已重置 OneMind 习惯记忆")
                         }
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)
-                        .buttonStyle(.plain)
+                        .buttonStyle(PhysicalSpringButtonStyle())
                     }
                 }
 
@@ -585,66 +594,85 @@ struct AdaptiveIntelligenceSettingsSection: View {
             )
 
             Divider().opacity(0.35)
+
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("复制时显示光标角「灵动微星标」")
-                        .font(.system(size: 13.5, weight: .medium))
-                    Text("复制账单、断行 PDF 或二维码时轻浮一键转换，再按一次 ⌘C 零离手触发")
+                    HStack(spacing: 5) {
+                        Image(systemName: "leaf.fill")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(store.minimalModeEnabled ? Color.green : .secondary)
+                        Text("极简纯净模式（⌘E）")
+                            .font(.system(size: 13.5, weight: .medium))
+                    }
+                    Text(store.minimalModeEnabled ? "已静默所有智能推荐与浮标，仅保留纯粹复制粘贴" : "只留核心能力与主动智能，关闭即切入零打扰极简体验")
                         .font(.system(size: 11.5))
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                Toggle("", isOn: $engine.sparkEnabled)
+                Toggle("", isOn: $store.minimalModeEnabled.animation(.spring(response: 0.30, dampingFraction: 0.84)))
                     .toggleStyle(.switch)
                     .labelsHidden()
             }
-
-            Divider().opacity(0.35)
-
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("拖拽途中按 ⌥ 呼出「微落点」")
-                        .font(.system(size: 13.5, weight: .medium))
-                    Text("拖起网页图片或文本时轻按 ⌥，在光标旁原地松手即存或套样机")
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Toggle("", isOn: $engine.cursorDropPodEnabled)
-                    .toggleStyle(.switch)
-                    .labelsHidden()
+            .onChange(of: store.minimalModeEnabled) { _, _ in
+                TactileFeedbackEngine.shared.performNavigationStepHaptic()
             }
 
-            Divider().opacity(0.35)
+            if !store.minimalModeEnabled {
+                VStack(alignment: .leading, spacing: 11) {
+                    Divider().opacity(0.35)
 
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("复制链接自动剥离追踪参数")
-                        .font(.system(size: 13.5, weight: .medium))
-                    Text("自动移除 utm_source、spm、fbclid 等营销尾巴")
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(.secondary)
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("复制智能微星标")
+                                .font(.system(size: 13.5, weight: .medium))
+                            Text("复制后轻浮一键转换或建待办，连按两次 ⌘C 零离手直出")
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Toggle("", isOn: $engine.sparkEnabled.animation(.spring(response: 0.28, dampingFraction: 0.82)))
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+                    }
+                    .onChange(of: engine.sparkEnabled) { _, _ in
+                        TactileFeedbackEngine.shared.performNavigationStepHaptic()
+                    }
+
+                    Divider().opacity(0.35)
+
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 6) {
+                                Text("主动拟态待办推进")
+                                    .font(.system(size: 13.5, weight: .medium))
+                                if store.spriteOrbProactiveNudgeEnabled && store.spriteOrbEnabled {
+                                    Button("轻碰试看") {
+                                        TactileFeedbackEngine.shared.performNavigationStepHaptic()
+                                        FloatingSpriteOrbController.shared.evaluateAndTriggerProactiveNudgeIfNeeded(forceImmediate: true)
+                                    }
+                                    .font(.system(size: 10.5, weight: .semibold))
+                                    .foregroundStyle(Color.accentColor)
+                                    .padding(.horizontal, 7.5)
+                                    .padding(.vertical, 2.5)
+                                    .background(Capsule().fill(Color.accentColor.opacity(0.12)))
+                                    .buttonStyle(PhysicalSpringButtonStyle())
+                                    .transition(.scale(scale: 0.88).combined(with: .opacity))
+                                }
+                            }
+                            Text("识别截止词、搁置时长与黄金时段，轻碰气泡邀你顺手推进")
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Toggle("", isOn: $store.spriteOrbProactiveNudgeEnabled.animation(.spring(response: 0.28, dampingFraction: 0.82)))
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+                    }
+                    .onChange(of: store.spriteOrbProactiveNudgeEnabled) { _, _ in
+                        TactileFeedbackEngine.shared.performNavigationStepHaptic()
+                    }
                 }
-                Spacer()
-                Toggle("", isOn: $store.autoCleanTrackingURL)
-                    .toggleStyle(.switch)
-                    .labelsHidden()
-            }
-
-            Divider().opacity(0.35)
-
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("粘贴敏感凭据时自动脱敏守护")
-                        .font(.system(size: 13.5, weight: .medium))
-                    Text("双击或回车默认贴掩码，按 ⌥↵ 才贴原始明文")
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Toggle("", isOn: $store.autoRedactOnPaste)
-                    .toggleStyle(.switch)
-                    .labelsHidden()
+                .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .top)))
             }
 
             if !engine.mutedSourceApps.isEmpty {

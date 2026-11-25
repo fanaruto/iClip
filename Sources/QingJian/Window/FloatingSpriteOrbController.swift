@@ -496,7 +496,7 @@ enum SpriteOrbPhysicsGeometry {
         )
     }
 
-    /// 计算智能伴生卡片紧贴精灵旁侧的安全坐标
+    /// 计算智能伴生卡片紧贴精灵旁侧的安全坐标（预留 22pt 声波环净空）
     static func sparkAnchorOrigin(
         forOrbCoreFrame orbRect: NSRect,
         sparkSize: NSSize,
@@ -504,8 +504,8 @@ enum SpriteOrbPhysicsGeometry {
     ) -> NSPoint {
         let placeOnLeft = orbRect.midX >= visibleFrame.midX
         let rawX = placeOnLeft
-            ? (orbRect.minX - sparkSize.width - 12)
-            : (orbRect.maxX + 12)
+            ? (orbRect.minX - sparkSize.width - 22)
+            : (orbRect.maxX + 22)
         let minX = visibleFrame.minX + 10
         let maxX = max(minX, visibleFrame.maxX - sparkSize.width - 10)
         let x = min(max(rawX, minX), maxX)
@@ -1282,6 +1282,7 @@ final class FloatingSpriteOrbController {
     private var voiceSessionID: UUID = UUID()
     private var latestPartialTranscript: String = ""
     private var particleStagingBuffer: [SIMD4<Float>] = Array(repeating: .zero, count: SpriteOrbMetalShader.particleCapacity)
+    private var visibilityEpoch: UInt64 = 0
 
     private init() {}
 
@@ -1327,6 +1328,7 @@ final class FloatingSpriteOrbController {
                 guard let self else { return }
                 self.currentStyle = style
                 self.physicsState.triggerStyleSwitch()
+                self.physicsState.triggerClick(panelOpening: true)
                 self.markInteractionActive()
             }
             .store(in: &cancellables)
@@ -1337,7 +1339,9 @@ final class FloatingSpriteOrbController {
             .sink { [weak self] mode in
                 guard let self else { return }
                 self.currentDockMode = mode
+                self.physicsState.triggerDockBounce()
                 self.reanchorCurrentPosition(animated: true)
+                TactileFeedbackEngine.shared.performNavigationStepHaptic()
             }
             .store(in: &cancellables)
 
@@ -1345,8 +1349,19 @@ final class FloatingSpriteOrbController {
             .dropFirst()
             .receive(on: RunLoop.main)
             .sink { [weak self] enabled in
-                if !enabled, self?.activeProactiveNudge != nil {
-                    self?.clearActiveProactiveNudge(shrink: true)
+                guard let self else { return }
+                if enabled {
+                    if let panel = self.panel, panel.isVisible {
+                        self.physicsState.triggerProactiveNudgePeek(accent: .amber)
+                        self.scheduleTemporaryGlyph(.biomimeticBlink, duration: 1.6)
+                        self.markInteractionActive()
+                        TactileFeedbackEngine.shared.performNavigationStepHaptic()
+                    }
+                } else {
+                    if self.activeProactiveNudge != nil {
+                        self.clearActiveProactiveNudge(shrink: true)
+                        ActionSparkController.shared.dismiss()
+                    }
                 }
             }
             .store(in: &cancellables)
@@ -2089,22 +2104,55 @@ final class FloatingSpriteOrbController {
     private func updatePanelVisibility() {
         guard let store = boundStore else { return }
         if !store.spriteOrbEnabled || ProcessInfo.processInfo.arguments.contains("--demo") {
-            metalView?.pauseDisplayLink()
-            panel?.orderOut(nil)
+            visibilityEpoch &+= 1
+            let hideEpoch = visibilityEpoch
+            ActionSparkController.shared.dismiss()
+            guard let panel, panel.isVisible else {
+                metalView?.pauseDisplayLink()
+                panel?.orderOut(nil)
+                return
+            }
+            physicsState.scaleImpulse = -0.35
+            TactileFeedbackEngine.shared.performNavigationStepHaptic()
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = 0.16
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
+                panel.animator().alphaValue = 0
+            }, completionHandler: { [weak self] in
+                Task { @MainActor [weak self] in
+                    guard let self, self.visibilityEpoch == hideEpoch else { return }
+                    self.metalView?.pauseDisplayLink()
+                    self.panel?.orderOut(nil)
+                }
+            })
             return
         }
+
+        visibilityEpoch &+= 1
         ensurePanel()
         guard let panel else { return }
-        if !panel.isVisible {
+        let wasVisible = panel.isVisible
+        if !wasVisible {
             restoreSavedOriginOnLaunch()
-            panel.alphaValue = 1.0
+            panel.alphaValue = 0
+            physicsState.scaleImpulse = -0.45
+            physicsState.triggerClick(panelOpening: true)
             panel.orderFrontRegardless()
             panel.enforceUnifiedActiveAppearance()
+            metalView?.startDisplayLink()
+            markInteractionActive()
+            TactileFeedbackEngine.shared.performNavigationStepHaptic()
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.22
+                ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
+                panel.animator().alphaValue = 1.0
+            }
         } else {
+            panel.alphaValue = 1.0
             panel.enforceUnifiedActiveAppearance()
+            metalView?.startDisplayLink()
+            markInteractionActive()
         }
-        metalView?.startDisplayLink()
-        markInteractionActive()
     }
 
     private func ensurePanel() {

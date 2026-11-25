@@ -145,9 +145,11 @@ final class ActionSparkController {
     }
 
     private var panel: NSPanel?
-    private var bleedRootRef: LiquidGlassBleedRootView?
-    private var glassViewRef: NSView?
+    private let surfaceHost = LiquidGlassSurfaceHost()
+    private let shadowBleed: CGFloat = 20
     private var hostingView: NSHostingView<ActionSparkPillView>?
+    private weak var boundStoreRef: ClipboardStore?
+    private var hasSubscribedSurfacePreferences: Bool = false
     private let viewModel = ViewModel()
     private var dismissWorkItem: DispatchWorkItem?
     private var fadeCompletionWorkItem: DispatchWorkItem?
@@ -227,12 +229,15 @@ final class ActionSparkController {
             let orbCenter = NSPoint(x: orbFrame.midX, y: orbFrame.midY)
             let screen = NSScreen.screens.first(where: { $0.frame.contains(orbCenter) }) ?? NSScreen.main ?? NSScreen.screens[0]
             let visible = screen.visibleFrame
-            let origin = SpriteOrbPhysicsGeometry.sparkAnchorOrigin(
+            let cardOrigin = SpriteOrbPhysicsGeometry.sparkAnchorOrigin(
                 forOrbCoreFrame: orbFrame,
                 sparkSize: size,
                 visibleFrame: visible
             )
-            return (origin, orbFrame.midX >= visible.midX)
+            return (
+                NSPoint(x: cardOrigin.x - shadowBleed, y: cardOrigin.y - shadowBleed),
+                orbFrame.midX >= visible.midX
+            )
         }
         let mouse = NSEvent.mouseLocation
         let screen = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) ?? NSScreen.main ?? NSScreen.screens[0]
@@ -245,7 +250,27 @@ final class ActionSparkController {
         if originY < visible.minY + 10 {
             originY = min(visible.maxY - size.height - 10, mouse.y + 18)
         }
-        return (NSPoint(x: originX, y: originY), false)
+        return (NSPoint(x: originX - shadowBleed, y: originY - shadowBleed), false)
+    }
+
+    private func animateSpringEntrance(of panel: NSPanel) {
+        guard let rootLayer = panel.contentView?.layer else { return }
+        rootLayer.removeAnimation(forKey: "companionSpringPop")
+        let cx = rootLayer.bounds.midX
+        let cy = rootLayer.bounds.midY
+        var fromTransform = CATransform3DMakeTranslation(cx, cy, 0)
+        fromTransform = CATransform3DScale(fromTransform, 0.95, 0.95, 1.0)
+        fromTransform = CATransform3DTranslate(fromTransform, -cx, -cy, 0)
+
+        let spring = CASpringAnimation(keyPath: "transform")
+        spring.fromValue = fromTransform
+        spring.toValue = CATransform3DIdentity
+        spring.stiffness = 340
+        spring.damping = 26
+        spring.mass = 1.0
+        spring.duration = spring.settlingDuration
+        spring.isRemovedOnCompletion = true
+        rootLayer.add(spring, forKey: "companionSpringPop")
     }
 
     /// 锁屏、休眠或主面板收起时立即静默关闭光标微星标并清空内存候选
@@ -394,9 +419,9 @@ final class ActionSparkController {
         doubleCopyMachine.clearActiveOffer()
 
         viewModel.isOrbCompanion = true
-        ensurePanel(size: orbVoiceCardSize, cornerRadius: 16.0, store: store)
+        ensurePanel(size: orbVoiceCardSize, cornerRadius: 20.0, store: store)
         guard let panel else { return }
-        resizePanelIfNeeded(to: orbVoiceCardSize, cornerRadius: 16.0)
+        resizePanelIfNeeded(to: orbVoiceCardSize, cornerRadius: 20.0)
         cancelFadeTimersAndRestoreOpacity(of: panel)
 
         viewModel.isHovered = false
@@ -410,8 +435,9 @@ final class ActionSparkController {
             panel.alphaValue = 0
             panel.orderFrontRegardless()
             (panel as? UnifiedActiveFloatingPanel)?.enforceUnifiedActiveAppearance()
+            animateSpringEntrance(of: panel)
             NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.20
+                ctx.duration = 0.22
                 ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
                 panel.animator().alphaValue = 1
                 panel.animator().setFrameOrigin(targetOrigin)
@@ -436,9 +462,9 @@ final class ActionSparkController {
         didInteractInCurrentSession = true
         viewModel.isOrbCompanion = true
 
-        ensurePanel(size: orbVoicePermissionSize, cornerRadius: 16.0, store: store)
+        ensurePanel(size: orbVoicePermissionSize, cornerRadius: 20.0, store: store)
         guard let panel else { return }
-        resizePanelIfNeeded(to: orbVoicePermissionSize, cornerRadius: 16.0)
+        resizePanelIfNeeded(to: orbVoicePermissionSize, cornerRadius: 20.0)
         cancelFadeTimersAndRestoreOpacity(of: panel)
 
         viewModel.phase = .voicePermissionNeeded(message: message)
@@ -446,6 +472,7 @@ final class ActionSparkController {
         panel.setFrameOrigin(anchor.origin)
         panel.alphaValue = 1
         panel.orderFrontRegardless()
+        animateSpringEntrance(of: panel)
         (panel as? UnifiedActiveFloatingPanel)?.enforceUnifiedActiveAppearance()
         scheduleAutoDismiss(after: 5.5)
     }
@@ -458,9 +485,9 @@ final class ActionSparkController {
         didInteractInCurrentSession = true
         viewModel.isOrbCompanion = true
 
-        ensurePanel(size: orbVoiceCommittedSize, cornerRadius: 16.0, store: store)
+        ensurePanel(size: orbVoiceCommittedSize, cornerRadius: 20.0, store: store)
         guard let panel else { return }
-        resizePanelIfNeeded(to: orbVoiceCommittedSize, cornerRadius: 16.0)
+        resizePanelIfNeeded(to: orbVoiceCommittedSize, cornerRadius: 20.0)
         cancelFadeTimersAndRestoreOpacity(of: panel)
 
         viewModel.phase = .voiceCommitted(count: count, summary: summary)
@@ -468,6 +495,7 @@ final class ActionSparkController {
         panel.setFrameOrigin(anchor.origin)
         panel.alphaValue = 1
         panel.orderFrontRegardless()
+        animateSpringEntrance(of: panel)
         (panel as? UnifiedActiveFloatingPanel)?.enforceUnifiedActiveAppearance()
         scheduleFadeOut(after: 2.8, recordPassiveTimeout: false)
     }
@@ -481,9 +509,9 @@ final class ActionSparkController {
         doubleCopyMachine.clearActiveOffer()
         viewModel.isOrbCompanion = true
 
-        ensurePanel(size: orbProactiveNudgeSize, cornerRadius: 16.0, store: store)
+        ensurePanel(size: orbProactiveNudgeSize, cornerRadius: 20.0, store: store)
         guard let panel else { return }
-        resizePanelIfNeeded(to: orbProactiveNudgeSize, cornerRadius: 16.0)
+        resizePanelIfNeeded(to: orbProactiveNudgeSize, cornerRadius: 20.0)
         cancelFadeTimersAndRestoreOpacity(of: panel)
 
         viewModel.isHovered = false
@@ -495,6 +523,7 @@ final class ActionSparkController {
         panel.setFrameOrigin(startOrigin)
         panel.alphaValue = 0
         panel.orderFrontRegardless()
+        animateSpringEntrance(of: panel)
         (panel as? UnifiedActiveFloatingPanel)?.enforceUnifiedActiveAppearance()
 
         NSAnimationContext.runAnimationGroup { ctx in
@@ -518,7 +547,7 @@ final class ActionSparkController {
         } else {
             targetSize = compactSize
         }
-        let targetCornerRadius: CGFloat = isOrb ? 16.0 : (targetSize.height / 2)
+        let targetCornerRadius: CGFloat = isOrb ? 20.0 : (targetSize.height / 2)
         viewModel.isOrbCompanion = isOrb
         activeProactiveCandidate = nil
 
@@ -551,10 +580,11 @@ final class ActionSparkController {
         panel.setFrameOrigin(startOrigin)
         panel.alphaValue = 0
         panel.orderFrontRegardless()
+        animateSpringEntrance(of: panel)
         (panel as? UnifiedActiveFloatingPanel)?.enforceUnifiedActiveAppearance()
 
         NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = isOrb ? 0.22 : 0.16
+            ctx.duration = isOrb ? 0.24 : 0.16
             ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
             panel.animator().alphaValue = 1
             panel.animator().setFrameOrigin(targetOrigin)
@@ -565,33 +595,52 @@ final class ActionSparkController {
 
     private func resizePanelIfNeeded(to size: NSSize, cornerRadius: CGFloat) {
         guard let panel else { return }
-        if panel.frame.size != size {
-            panel.setContentSize(size)
-            let rect = NSRect(origin: .zero, size: size)
-            bleedRootRef?.frame = rect
-            bleedRootRef?.cardFrame = rect
-            hostingView?.frame = rect
-            glassViewRef?.frame = rect
-        }
-        if #available(macOS 26.0, *), let glass = glassViewRef as? NSGlassEffectView {
-            if abs(glass.cornerRadius - cornerRadius) > 0.2 {
-                glass.cornerRadius = cornerRadius
-            }
-        } else if let effect = glassViewRef as? NSVisualEffectView {
-            effect.maskImage = LiquidGlassSurfaceHost.continuousCornerMaskImage(size: size, radius: cornerRadius)
-            effect.layer?.cornerRadius = cornerRadius
-        }
-        panel.invalidateShadow()
+        surfaceHost.updateGeometry(cardSize: size, bleed: shadowBleed, cornerRadius: cornerRadius, on: panel)
     }
 
     private func ensurePanel(size: NSSize, cornerRadius: CGFloat, store: ClipboardStore) {
+        boundStoreRef = store
+        if !hasSubscribedSurfacePreferences {
+            hasSubscribedSurfacePreferences = true
+            store.$liquidGlassMaskOpacity
+                .dropFirst()
+                .receive(on: RunLoop.main)
+                .sink { [weak self, weak store] opacity in
+                    guard let self, let store else { return }
+                    self.surfaceHost.updateLiquidGlass(appearance: store.liquidGlassAppearance, maskOpacity: opacity)
+                }
+                .store(in: &appActivityCancellables)
+
+            store.$surfaceStyle
+                .dropFirst()
+                .receive(on: RunLoop.main)
+                .sink { [weak self, weak store] newStyle in
+                    guard let self, let store, let panel = self.panel, let hostingView = self.hostingView else { return }
+                    let currentCardSize = hostingView.frame.size
+                    let currentRadius: CGFloat = self.viewModel.isOrbCompanion ? 20.0 : (currentCardSize.height / 2)
+                    self.surfaceHost.install(
+                        on: panel,
+                        hostingView: hostingView,
+                        bounds: NSRect(origin: .zero, size: currentCardSize),
+                        bleed: self.shadowBleed,
+                        cornerRadius: currentRadius,
+                        style: newStyle,
+                        appearance: store.liquidGlassAppearance,
+                        maskOpacity: store.liquidGlassMaskOpacity,
+                        autoResizeWithWindow: false
+                    )
+                }
+                .store(in: &appActivityCancellables)
+        }
+
         if let existing = panel {
             existing.sharingType = store.screenSharePrivacyEnabled ? .none : .readOnly
             return
         }
-        let rect = NSRect(origin: .zero, size: size)
+        let windowSize = NSSize(width: size.width + shadowBleed * 2, height: size.height + shadowBleed * 2)
+        let cardBounds = NSRect(origin: .zero, size: size)
         let p = UnifiedActiveFloatingPanel(
-            contentRect: rect,
+            contentRect: NSRect(origin: .zero, size: windowSize),
             styleMask: [.nonactivatingPanel, .borderless],
             backing: .buffered,
             defer: false
@@ -639,40 +688,26 @@ final class ActionSparkController {
         )
         let hosting = NSHostingView(rootView: root)
         hosting.sizingOptions = []
-        hosting.frame = rect
+        hosting.frame = cardBounds
         hosting.autoresizingMask = [.width, .height]
+        hosting.wantsLayer = true
+        hosting.layer?.backgroundColor = NSColor.clear.cgColor
+        hosting.layer?.cornerCurve = .continuous
+        hosting.layer?.cornerRadius = cornerRadius
+        hosting.layer?.masksToBounds = true
 
-        let bleedRoot = LiquidGlassBleedRootView(frame: rect, cardFrame: rect)
-        bleedRoot.autoresizingMask = [.width, .height]
+        surfaceHost.install(
+            on: p,
+            hostingView: hosting,
+            bounds: cardBounds,
+            bleed: shadowBleed,
+            cornerRadius: cornerRadius,
+            style: store.surfaceStyle,
+            appearance: store.liquidGlassAppearance,
+            maskOpacity: store.liquidGlassMaskOpacity,
+            autoResizeWithWindow: false
+        )
 
-        if #available(macOS 26.0, *) {
-            let glass = NSGlassEffectView(frame: rect)
-            glass.autoresizingMask = [.width, .height]
-            glass.cornerRadius = cornerRadius
-            glass.style = .regular
-            glass.tintColor = nil
-            glass.contentView = hosting
-            bleedRoot.addSubview(glass)
-            p.contentView = bleedRoot
-            self.glassViewRef = glass
-        } else {
-            let effect = NSVisualEffectView(frame: rect)
-            effect.autoresizingMask = [.width, .height]
-            effect.material = .popover
-            effect.blendingMode = .behindWindow
-            effect.state = .active
-            effect.maskImage = LiquidGlassSurfaceHost.continuousCornerMaskImage(size: size, radius: cornerRadius)
-            effect.wantsLayer = true
-            effect.layer?.cornerCurve = .continuous
-            effect.layer?.cornerRadius = cornerRadius
-            effect.layer?.masksToBounds = true
-            effect.addSubview(hosting)
-            bleedRoot.addSubview(effect)
-            p.contentView = bleedRoot
-            self.glassViewRef = effect
-        }
-
-        self.bleedRootRef = bleedRoot
         self.hostingView = hosting
         self.panel = p
     }
@@ -877,26 +912,7 @@ private struct ActionSparkPillView: View {
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        let isCard = viewModel.isOrbCompanion && {
-            switch viewModel.phase {
-            case .offering, .completed, .voiceListening, .voicePermissionNeeded, .voiceCommitted, .proactiveTodoNudge:
-                return true
-            case .restored, .notice, .none:
-                return false
-            }
-        }()
-        let cornerRadius: CGFloat = isCard ? 16 : 19
-
         ZStack {
-            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .fill(colorScheme == .dark ? Color.black.opacity(0.46) : Color.white.opacity(0.68))
-
-            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .strokeBorder(
-                    colorScheme == .dark ? Color.white.opacity(0.10) : Color.black.opacity(0.055),
-                    lineWidth: 0.5
-                )
-
             switch viewModel.phase {
             case .offering(let candidate, let showDoubleCopyHint):
                 if viewModel.isOrbCompanion {
@@ -1005,6 +1021,7 @@ private struct ActionSparkPillView: View {
                     }
                 }
                 .frame(height: 15)
+                .animation(.spring(response: 0.16, dampingFraction: 0.62), value: audioLevel)
             }
 
             Text(transcript)
@@ -1018,8 +1035,8 @@ private struct ActionSparkPillView: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
     }
 
     private func orbVoicePermissionCard(message: String) -> some View {
@@ -1039,7 +1056,7 @@ private struct ActionSparkPillView: View {
                         .frame(width: 20, height: 20)
                         .background(Circle().fill(Color.primary.opacity(0.08)))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(PhysicalSpringButtonStyle())
             }
 
             HStack(spacing: 8) {
@@ -1057,11 +1074,11 @@ private struct ActionSparkPillView: View {
                         .padding(.vertical, 5)
                         .background(Capsule().fill(Color.accentColor))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(PhysicalSpringButtonStyle())
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
     }
 
     private func orbVoiceCommittedCard(count: Int, summary: String) -> some View {
@@ -1082,7 +1099,7 @@ private struct ActionSparkPillView: View {
                         .padding(.vertical, 3.5)
                         .background(Capsule().fill(Color.accentColor.opacity(0.14)))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(PhysicalSpringButtonStyle())
             }
 
             Text(summary)
@@ -1091,8 +1108,8 @@ private struct ActionSparkPillView: View {
                 .lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
     }
 
     private func orbProactiveNudgeCard(candidate: ProactiveTodoNudgeCandidate) -> some View {
@@ -1117,7 +1134,7 @@ private struct ActionSparkPillView: View {
                         .frame(width: 20, height: 20)
                         .background(Circle().fill(Color.primary.opacity(0.08)))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(PhysicalSpringButtonStyle())
             }
 
             Text(candidate.todoText)
@@ -1137,7 +1154,7 @@ private struct ActionSparkPillView: View {
                         .padding(.vertical, 4.5)
                         .background(Capsule().fill(tone))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(PhysicalSpringButtonStyle())
 
                 Button {
                     onSnoozeProactiveTodo(candidate.itemID)
@@ -1149,7 +1166,7 @@ private struct ActionSparkPillView: View {
                         .padding(.vertical, 4.5)
                         .background(Capsule().fill(Color.primary.opacity(0.08)))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(PhysicalSpringButtonStyle())
 
                 Spacer(minLength: 0)
 
@@ -1161,11 +1178,11 @@ private struct ActionSparkPillView: View {
                         .padding(.vertical, 4.5)
                         .background(Capsule().fill(Color.accentColor.opacity(0.13)))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(PhysicalSpringButtonStyle())
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
     }
 
     private func orbCompanionOfferingCard(candidate: AdaptiveSparkCandidate, showDoubleCopyHint: Bool) -> some View {
@@ -1199,7 +1216,7 @@ private struct ActionSparkPillView: View {
                         .frame(width: 20, height: 20)
                         .background(Circle().fill(Color.primary.opacity(0.08)))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(PhysicalSpringButtonStyle())
                 .help("收拢并减少此类推荐")
             }
 
@@ -1213,7 +1230,7 @@ private struct ActionSparkPillView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(PhysicalSpringButtonStyle())
 
                 if candidate.promotableRule != nil {
                     Button(action: onPromoteAndAccept) {
@@ -1224,7 +1241,7 @@ private struct ActionSparkPillView: View {
                             .padding(.vertical, 4.5)
                             .background(Capsule().fill(moodColor.opacity(0.14)))
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(PhysicalSpringButtonStyle())
                     .help("以后复制同类内容直接自动处理")
                 }
 
@@ -1236,11 +1253,11 @@ private struct ActionSparkPillView: View {
                         .padding(.vertical, 5)
                         .background(Capsule().fill(moodColor))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(PhysicalSpringButtonStyle())
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
     }
 
     private func compactOfferingRow(candidate: AdaptiveSparkCandidate, showDoubleCopyHint: Bool) -> some View {

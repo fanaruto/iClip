@@ -1,36 +1,13 @@
 import SwiftUI
 import AppKit
 
-/// 设置页「极简纯净模式与软件更新」统一控制视图（One iClip 单一主线）
+/// 设置页「版本与软件更新」精简状态条（One iClip 单一主线）
 struct RoleAndOTASettingsSection: View {
     @ObservedObject var store: ClipboardStore
     @ObservedObject var updater: UpdateManager
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 5) {
-                        Image(systemName: "leaf.fill")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(store.minimalModeEnabled ? Color.green : .secondary)
-                        Text("极简纯净模式（⌘E）")
-                            .font(.system(size: 13.5, weight: .medium))
-                    }
-                    Text("收起按需转换胶囊与智能浮标，只保留纯粹复制粘贴")
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Toggle("", isOn: $store.minimalModeEnabled.animation(.spring(response: 0.24, dampingFraction: 0.86)))
-                    .toggleStyle(.switch)
-                    .labelsHidden()
-            }
-
-            Divider().opacity(0.35)
-
-            otaStatusFooter
-        }
+        otaStatusFooter
     }
 
     @ViewBuilder

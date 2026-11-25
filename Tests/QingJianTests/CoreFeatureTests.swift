@@ -5152,6 +5152,7 @@ final class CoreFeatureTests: XCTestCase {
             visibleFrame: visible
         )
         XCTAssertLessThan(sparkRight.x + sparkSize.width, rightOrbCore.minX)
+        XCTAssertGreaterThanOrEqual(rightOrbCore.minX - (sparkRight.x + sparkSize.width), 20.0)
         XCTAssertGreaterThanOrEqual(sparkRight.y, visible.minY + 10)
 
         let sparkLeft = SpriteOrbPhysicsGeometry.sparkAnchorOrigin(
@@ -5160,6 +5161,7 @@ final class CoreFeatureTests: XCTestCase {
             visibleFrame: visible
         )
         XCTAssertGreaterThan(sparkLeft.x, leftOrbCore.maxX)
+        XCTAssertGreaterThanOrEqual(sparkLeft.x - leftOrbCore.maxX, 20.0)
         XCTAssertLessThanOrEqual(sparkLeft.x + sparkSize.width, visible.maxX - 10)
     }
 
