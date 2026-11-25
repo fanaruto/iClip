@@ -11034,7 +11034,7 @@ fn layout_and_draw_quick_look_overlay(
             .or_else(|| item.file_paths.as_ref().map(|p| p.join("\n")))
             .unwrap_or_default();
         let bounded: String = source.chars().take(2400).collect();
-        let _ = sync_inline_big_bang_tokens(st, &bounded);
+        sync_inline_big_bang_tokens(st, &bounded);
         let tokens = st.big_bang_tokens.clone();
         let can_explode_more = st.big_bang_granularity != BigBangGranularity::Char
             || tokens
@@ -13553,8 +13553,9 @@ unsafe fn handle_left_click(hwnd: HWND, x: i32, y: i32, is_double: bool) {
                             .or_else(|| st.store.items[s_idx].file_paths.as_ref().map(|p| p.join("\n")))
                             .unwrap_or_default();
                         let bounded: String = source.chars().take(2400).collect();
-                        let tokens = sync_inline_big_bang_tokens(st, &bounded);
-                        st.big_bang_selected_ids = tokens
+                        sync_inline_big_bang_tokens(st, &bounded);
+                        st.big_bang_selected_ids = st
+                            .big_bang_tokens
                             .iter()
                             .filter(|t| !t.is_line_break)
                             .take(600)
@@ -13592,8 +13593,9 @@ unsafe fn handle_left_click(hwnd: HWND, x: i32, y: i32, is_double: bool) {
                     .or_else(|| item.file_paths.as_ref().map(|p| p.join("\n")))
                     .unwrap_or_default();
                 let bounded: String = full_src.chars().take(2400).collect();
-                let tokens = sync_inline_big_bang_tokens(st, &bounded);
-                let assembled = assemble_big_bang_selection(tokens, &st.big_bang_selected_ids);
+                sync_inline_big_bang_tokens(st, &bounded);
+                let assembled =
+                    assemble_big_bang_selection(&st.big_bang_tokens, &st.big_bang_selected_ids);
                 let had_selection = !assembled.is_empty();
                 let text = if had_selection { assembled } else { full_src };
                 st.show_quick_look = false;
@@ -14793,7 +14795,7 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
             let mut b = c.borrow_mut();
             let Some(st) = b.as_mut() else { return 0u8 };
             if st.ql_stage_visible && st.ql_stage_big_bang {
-                let _ = sync_ql_stage_big_bang_tokens(st);
+                sync_ql_stage_big_bang_tokens(st);
                 if let Some(burst_ids) = explode_active_big_bang_selection_or_step(st, true) {
                     if !burst_ids.is_empty() {
                         trigger_big_bang_burst_anim(hwnd, st, burst_ids);
@@ -14816,7 +14818,7 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
                         .or_else(|| st.store.items[s_idx].file_paths.as_ref().map(|p| p.join("\n")))
                         .unwrap_or_default();
                     let bounded: String = src.chars().take(2400).collect();
-                    let _ = sync_inline_big_bang_tokens(st, &bounded);
+                    sync_inline_big_bang_tokens(st, &bounded);
                 }
                 if let Some(burst_ids) = explode_active_big_bang_selection_or_step(st, false) {
                     if !burst_ids.is_empty() {
@@ -14901,8 +14903,9 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
                         .or_else(|| item.file_paths.as_ref().map(|p| p.join("\n")))
                         .unwrap_or_default();
                     let bounded: String = full_src.chars().take(2400).collect();
-                    let tokens = sync_inline_big_bang_tokens(st, &bounded);
-                    st.big_bang_selected_ids = tokens
+                    sync_inline_big_bang_tokens(st, &bounded);
+                    st.big_bang_selected_ids = st
+                        .big_bang_tokens
                         .iter()
                         .filter(|t| !t.is_line_break)
                         .take(600)
@@ -14940,8 +14943,11 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
             if st.ql_stage_visible {
                 if st.ql_stage_big_bang {
                     if let Some(ocr) = st.ql_stage_ocr_text.clone().filter(|s| !s.is_empty()) {
-                        let tokens = sync_ql_stage_big_bang_tokens(st);
-                        let sel = assemble_big_bang_selection(tokens, &st.ql_stage_ocr_selected);
+                        sync_ql_stage_big_bang_tokens(st);
+                        let sel = assemble_big_bang_selection(
+                            &st.ql_stage_tokens,
+                            &st.ql_stage_ocr_selected,
+                        );
                         let had_sel = !sel.is_empty();
                         let payload = if had_sel { sel } else { ocr };
                         let toast = if had_sel {
@@ -14986,9 +14992,11 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
                             .unwrap_or_default();
                         if !full_src.is_empty() {
                             let bounded: String = full_src.chars().take(2400).collect();
-                            let tokens = sync_inline_big_bang_tokens(st, &bounded);
-                            let assembled =
-                                assemble_big_bang_selection(tokens, &st.big_bang_selected_ids);
+                            sync_inline_big_bang_tokens(st, &bounded);
+                            let assembled = assemble_big_bang_selection(
+                                &st.big_bang_tokens,
+                                &st.big_bang_selected_ids,
+                            );
                             let had_sel = !assembled.is_empty();
                             let payload = if had_sel { assembled } else { full_src };
                             let toast = if had_sel {
@@ -15251,8 +15259,9 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
                     .or_else(|| item.file_paths.as_ref().map(|p| p.join("\n")))
                     .unwrap_or_default();
                 let bounded: String = full_src.chars().take(2400).collect();
-                let tokens = sync_inline_big_bang_tokens(st, &bounded);
-                let assembled = assemble_big_bang_selection(tokens, &st.big_bang_selected_ids);
+                sync_inline_big_bang_tokens(st, &bounded);
+                let assembled =
+                    assemble_big_bang_selection(&st.big_bang_tokens, &st.big_bang_selected_ids);
                 let had_sel = !assembled.is_empty();
                 let txt = if had_sel { assembled } else { full_src };
                 st.show_quick_look = false;
@@ -15286,8 +15295,11 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
                 if st.ql_stage_visible {
                     if st.ql_stage_big_bang {
                         if let Some(ocr) = st.ql_stage_ocr_text.clone() {
-                            let tokens = sync_ql_stage_big_bang_tokens(st);
-                            let sel = assemble_big_bang_selection(tokens, &st.ql_stage_ocr_selected);
+                            sync_ql_stage_big_bang_tokens(st);
+                            let sel = assemble_big_bang_selection(
+                                &st.ql_stage_tokens,
+                                &st.ql_stage_ocr_selected,
+                            );
                             let had_sel = !sel.is_empty();
                             let payload = if had_sel { sel } else { ocr };
                             if !payload.is_empty() {
@@ -16483,10 +16495,7 @@ unsafe fn trigger_big_bang_burst_anim(
     }
 }
 
-fn sync_inline_big_bang_tokens<'a>(
-    st: &'a mut WinAppState,
-    bounded_src: &str,
-) -> &'a [BigBangToken] {
+fn sync_inline_big_bang_tokens(st: &mut WinAppState, bounded_src: &str) {
     let key = format!("{:?}\x1f{}", st.big_bang_granularity, bounded_src);
     if st.big_bang_tokens_key != key {
         st.big_bang_tokens = tokenize_big_bang(bounded_src, st.big_bang_granularity);
@@ -16497,10 +16506,9 @@ fn sync_inline_big_bang_tokens<'a>(
         st.big_bang_prev_click_sel = None;
         clear_big_bang_burst(st);
     }
-    &st.big_bang_tokens
 }
 
-fn sync_ql_stage_big_bang_tokens(st: &mut WinAppState) -> &[BigBangToken] {
+fn sync_ql_stage_big_bang_tokens(st: &mut WinAppState) {
     let ocr = st.ql_stage_ocr_text.as_deref().unwrap_or("");
     let key = format!("{:?}\x1f{}", st.big_bang_granularity, ocr);
     if st.ql_stage_tokens_key != key {
@@ -16512,7 +16520,6 @@ fn sync_ql_stage_big_bang_tokens(st: &mut WinAppState) -> &[BigBangToken] {
         st.ql_stage_prev_click_sel = None;
         clear_big_bang_burst(st);
     }
-    &st.ql_stage_tokens
 }
 
 fn explode_token_vec_in_place(
@@ -16697,8 +16704,9 @@ fn select_all_ql_stage_big_bang_tokens(st: &mut WinAppState) -> bool {
         return true;
     }
     if st.ql_stage_ocr_text.as_ref().is_some_and(|s| !s.trim().is_empty()) {
-        let tokens = sync_ql_stage_big_bang_tokens(st);
-        st.ql_stage_ocr_selected = tokens
+        sync_ql_stage_big_bang_tokens(st);
+        st.ql_stage_ocr_selected = st
+            .ql_stage_tokens
             .iter()
             .filter(|t| !t.is_line_break)
             .take(600)
@@ -17146,7 +17154,7 @@ unsafe fn handle_ql_stage_wnd_proc(
                     let main_h = MAIN_HWND_RAW.load(Ordering::SeqCst) as HWND;
                     APP_STATE.with(|c| {
                         if let Some(st) = c.borrow_mut().as_mut() {
-                            let _ = sync_ql_stage_big_bang_tokens(st);
+                            sync_ql_stage_big_bang_tokens(st);
                             if let Some(burst_ids) = explode_active_big_bang_selection_or_step(st, true) {
                                 if !burst_ids.is_empty() {
                                     trigger_big_bang_burst_anim(main_h, st, burst_ids);
@@ -17236,8 +17244,11 @@ unsafe fn handle_ql_stage_wnd_proc(
                         let mut b = c.borrow_mut();
                         let st = b.as_mut()?;
                         let ocr = st.ql_stage_ocr_text.clone()?;
-                        let tokens = sync_ql_stage_big_bang_tokens(st);
-                        let sel = assemble_big_bang_selection(tokens, &st.ql_stage_ocr_selected);
+                        sync_ql_stage_big_bang_tokens(st);
+                        let sel = assemble_big_bang_selection(
+                            &st.ql_stage_tokens,
+                            &st.ql_stage_ocr_selected,
+                        );
                         let payload = if sel.is_empty() { ocr } else { sel };
                         st.ql_stage_visible = false;
                         st.ql_stage_big_bang = false;
@@ -17976,7 +17987,7 @@ unsafe fn handle_ql_stage_wnd_proc(
                                     .as_ref()
                                     .is_some_and(|t| !t.trim().is_empty())
                                 {
-                                    let _ = sync_ql_stage_big_bang_tokens(st);
+                                    sync_ql_stage_big_bang_tokens(st);
                                     let tokens = st.ql_stage_tokens.clone();
                                     let can_explode_more = st.big_bang_granularity != BigBangGranularity::Char
                                         || tokens
