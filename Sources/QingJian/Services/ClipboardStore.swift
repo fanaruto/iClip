@@ -478,6 +478,11 @@ final class ClipboardStore: ObservableObject {
         didSet { UserDefaults.standard.set(spriteOrbDockMode.rawValue, forKey: "spriteOrbDockMode") }
     }
 
+    /// 悬浮精灵主动拟态待办推进提醒开关
+    @Published var spriteOrbProactiveNudgeEnabled: Bool {
+        didSet { UserDefaults.standard.set(spriteOrbProactiveNudgeEnabled, forKey: "spriteOrbProactiveNudgeEnabled") }
+    }
+
     static func resolveSpriteOrbStyle(from rawValue: String?) -> SpriteOrbStyle {
         guard let rawValue, let parsed = SpriteOrbStyle(rawValue: rawValue) else {
             return .prismDew
@@ -670,6 +675,7 @@ final class ClipboardStore: ObservableObject {
         self.spriteOrbEnabled = UserDefaults.standard.object(forKey: "spriteOrbEnabled") as? Bool ?? true
         self.spriteOrbStyle = Self.resolveSpriteOrbStyle(from: UserDefaults.standard.string(forKey: "spriteOrbStyle"))
         self.spriteOrbDockMode = Self.resolveSpriteOrbDockMode(from: UserDefaults.standard.string(forKey: "spriteOrbDockMode"))
+        self.spriteOrbProactiveNudgeEnabled = UserDefaults.standard.object(forKey: "spriteOrbProactiveNudgeEnabled") as? Bool ?? true
 
         if let shortcutData = UserDefaults.standard.data(forKey: "hotKeyShortcut"),
            let decodedShortcut = try? JSONDecoder().decode(HotKeyShortcut.self, from: shortcutData) {

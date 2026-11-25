@@ -1679,7 +1679,8 @@ struct ClipboardPopoverView: View {
                     SpriteOrbSettingsCard(
                         enabled: $store.spriteOrbEnabled,
                         style: $store.spriteOrbStyle,
-                        dockMode: $store.spriteOrbDockMode
+                        dockMode: $store.spriteOrbDockMode,
+                        proactiveNudgeEnabled: $store.spriteOrbProactiveNudgeEnabled
                     )
                 }
 

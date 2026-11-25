@@ -1,5 +1,7 @@
 import AppKit
 import Combine
+import Metal
+import QuartzCore
 import SwiftUI
 
 /// 悬浮精灵吸附的屏幕边缘方向
@@ -8,36 +10,28 @@ enum SpriteOrbEdgeSide: String, Equatable {
     case right
 }
 
-/// 悬浮精灵根据复制内容或智能建议实时映射的心情光色
+/// 悬浮精灵根据复制内容、语音或拟态建议实时映射的心情光色
 enum SpriteOrbMoodAccent: Equatable {
     case cobalt
     case emerald
     case amber
+    case coral
 
-    var swiftUIColor: Color {
+    var rgbTuple: (Float, Float, Float) {
         switch self {
         case .cobalt:
-            return Color(red: 0.118, green: 0.369, blue: 1.0) // #1E5EFF 电光蓝
+            return (0.118, 0.369, 1.0) // #1E5EFF 电光蓝
         case .emerald:
-            return Color(red: 0.063, green: 0.725, blue: 0.506) // #10B981 翡翠绿
+            return (0.063, 0.725, 0.506) // #10B981 翡翠绿
         case .amber:
-            return Color(red: 0.961, green: 0.620, blue: 0.043) // #F59E0B 琥珀金
-        }
-    }
-
-    var secondaryColor: Color {
-        switch self {
-        case .cobalt:
-            return Color(red: 0.22, green: 0.74, blue: 0.97)
-        case .emerald:
-            return Color(red: 0.20, green: 0.86, blue: 0.70)
-        case .amber:
-            return Color(red: 0.99, green: 0.78, blue: 0.28)
+            return (0.961, 0.620, 0.043) // #F59E0B 琥珀金
+        case .coral:
+            return (0.957, 0.247, 0.369) // #F43F5E 珊瑚红
         }
     }
 }
 
-/// 风格 2「精密点阵表冠」中心 5×5 LED 语义点阵字模
+/// 风格 2「精密点阵表冠」中心 5×5 LED 语义点阵字模与态模式
 enum SpriteOrbMatrixGlyph: Equatable {
     case none
     case todo
@@ -46,13 +40,16 @@ enum SpriteOrbMatrixGlyph: Equatable {
     case image
     case panelOpen
     case done
+    case voiceEqualizer
+    case biomimeticBlink
 
-    var bitmask25: [Int]? {
+    var bitmask25: UInt32? {
+        let bits: [Int]
         switch self {
-        case .none:
+        case .none, .voiceEqualizer, .biomimeticBlink:
             return nil
         case .todo:
-            return [
+            bits = [
                 0, 1, 1, 1, 0,
                 1, 0, 0, 0, 1,
                 1, 0, 1, 0, 1,
@@ -60,7 +57,7 @@ enum SpriteOrbMatrixGlyph: Equatable {
                 0, 1, 1, 1, 0
             ]
         case .link:
-            return [
+            bits = [
                 0, 0, 1, 1, 1,
                 0, 1, 0, 0, 1,
                 0, 0, 1, 0, 0,
@@ -68,7 +65,7 @@ enum SpriteOrbMatrixGlyph: Equatable {
                 1, 1, 1, 0, 0
             ]
         case .clean:
-            return [
+            bits = [
                 0, 0, 1, 0, 0,
                 0, 1, 1, 1, 0,
                 1, 1, 1, 1, 1,
@@ -76,7 +73,7 @@ enum SpriteOrbMatrixGlyph: Equatable {
                 0, 0, 1, 0, 0
             ]
         case .image:
-            return [
+            bits = [
                 1, 1, 1, 1, 1,
                 1, 1, 0, 0, 1,
                 1, 0, 1, 0, 1,
@@ -84,7 +81,7 @@ enum SpriteOrbMatrixGlyph: Equatable {
                 1, 1, 1, 1, 1
             ]
         case .panelOpen:
-            return [
+            bits = [
                 1, 1, 1, 1, 1,
                 0, 0, 0, 0, 0,
                 1, 1, 1, 1, 1,
@@ -92,7 +89,7 @@ enum SpriteOrbMatrixGlyph: Equatable {
                 1, 1, 1, 0, 0
             ]
         case .done:
-            return [
+            bits = [
                 0, 0, 0, 0, 0,
                 0, 0, 0, 0, 1,
                 1, 0, 0, 1, 0,
@@ -100,15 +97,254 @@ enum SpriteOrbMatrixGlyph: Equatable {
                 0, 0, 0, 0, 0
             ]
         }
+        var packed: UInt32 = 1 << 25
+        for (idx, bit) in bits.enumerated() where bit == 1 {
+            packed |= (1 << UInt32(idx))
+        }
+        return packed
+    }
+
+    var packedShaderMask: UInt32 {
+        switch self {
+        case .none:
+            return 0
+        case .voiceEqualizer:
+            return 1 << 26
+        case .biomimeticBlink:
+            return 1 << 27
+        default:
+            return bitmask25 ?? 0
+        }
     }
 }
 
-/// 悬浮精灵纯几何定位、手势阈值与多窗非对称零溢出停靠算法
+// MARK: - 主动智能拟态待办推进策略大脑（纯值类型可单元测试）
+
+struct ProactiveTodoNudgeCandidate: Equatable {
+    let itemID: UUID
+    let todoText: String
+    let pendingCount: Int
+    let headline: String
+    let personaLine: String
+    let isUrgent: Bool
+}
+
+enum ProactiveTodoNudgePlanner {
+    private static let urgencyKeywords = [
+        "下班前", "今晚前", "中午前", "点前", "今天", "马上",
+        "尽快", "紧急", "截止", "deadline", "ASAP"
+    ]
+
+    /// 基于截止词紧迫度、积压时长与冷却防打扰策略选出一条拟态待办推进建议
+    static func selectNudgeCandidate(
+        from items: [ClipItem],
+        now: Date,
+        lastGlobalNudgeAt: Date?,
+        snoozedUntil: [UUID: Date],
+        minimumGlobalInterval: TimeInterval = 18 * 60,
+        minimumItemAge: TimeInterval = 25 * 60,
+        forceImmediate: Bool = false
+    ) -> ProactiveTodoNudgeCandidate? {
+        let pending = items.filter(\.isPendingTodo)
+        guard !pending.isEmpty else { return nil }
+
+        if !forceImmediate, let last = lastGlobalNudgeAt, now.timeIntervalSince(last) < minimumGlobalInterval {
+            return nil
+        }
+
+        let eligible = pending.filter { item in
+            if let snoozeDate = snoozedUntil[item.id], snoozeDate > now {
+                return false
+            }
+            return true
+        }
+        guard !eligible.isEmpty else { return nil }
+
+        struct Scored {
+            let item: ClipItem
+            let score: Double
+            let isUrgent: Bool
+            let ageSeconds: TimeInterval
+            let displayBody: String
+        }
+
+        let scored: [Scored] = eligible.compactMap { item in
+            let age = max(0, now.timeIntervalSince(item.createdAt))
+            let bodySource = (item.customAlias?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+                ? (item.customAlias ?? item.rawContentPreview)
+                : item.rawContentPreview
+            let cleanBody = bodySource
+                .replacingOccurrences(of: "\r", with: "")
+                .replacingOccurrences(of: "\n", with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !cleanBody.isEmpty else { return nil }
+
+            let lower = cleanBody.lowercased()
+            let urgent = urgencyKeywords.contains(where: { lower.contains($0.lowercased()) })
+            if !forceImmediate {
+                let requiredAge = urgent ? min(minimumItemAge, 8 * 60) : minimumItemAge
+                if age < requiredAge {
+                    return nil
+                }
+            }
+
+            var pts = min(72.0, age / 3600.0) * 10.0
+            if urgent { pts += 1000.0 }
+            if item.isPinned { pts += 5.0 }
+            return Scored(item: item, score: pts, isUrgent: urgent, ageSeconds: age, displayBody: cleanBody)
+        }
+
+        guard let top = scored.sorted(by: { lhs, rhs in
+            if lhs.score != rhs.score { return lhs.score > rhs.score }
+            return lhs.item.createdAt < rhs.item.createdAt
+        }).first else {
+            return nil
+        }
+
+        let hour = Calendar.current.component(.hour, from: now)
+        let headline: String
+        let personaLine: String
+        if top.isUrgent {
+            headline = "临近时间节点"
+            personaLine = "这项快到点啦，先推进一下？"
+        } else if hour >= 17 && hour <= 20 {
+            headline = "今日待办收个尾"
+            personaLine = "快到收尾时间，还有 \(pending.count) 项待办，先处理这条？"
+        } else if top.ageSeconds >= 3600 {
+            headline = "搁置超过 1 小时"
+            personaLine = "这条已等了挺久，要不要先勾选推进？"
+        } else {
+            headline = "轻碰你一下 · 余 \(pending.count) 项待办"
+            personaLine = "手头闲下来时，顺手把这条推进掉？"
+        }
+
+        return ProactiveTodoNudgeCandidate(
+            itemID: top.item.id,
+            todoText: top.displayBody,
+            pendingCount: pending.count,
+            headline: headline,
+            personaLine: personaLine,
+            isUrgent: top.isUrgent
+        )
+    }
+}
+
+// MARK: - 零冲突三态手势仲裁器（单击剪贴板 / 拖动换位 / 原地长按语音记待办）
+
+enum SpriteOrbArbiterAction: Equatable {
+    case none
+    case enteredDragging
+    case triggerClick
+    case endDragging
+    case startedVoice
+    case voiceCancelStateChanged(Bool)
+    case commitVoice
+    case cancelVoice
+}
+
+struct SpriteOrbGestureArbiter: Equatable {
+    enum Phase: Equatable {
+        case idle
+        case pressing(startScreenPoint: CGPoint, startUptime: TimeInterval)
+        case dragging
+        case voiceRecording(startScreenPoint: CGPoint, isCancelling: Bool)
+    }
+
+    static let dragThreshold: CGFloat = 5.0
+    static let longPressDelay: TimeInterval = 0.36
+    static let chargeRevealDelay: TimeInterval = 0.12
+    static let voiceCancelSlideDistance: CGFloat = 52.0
+
+    private(set) var phase: Phase = .idle
+
+    var isPressingOrRecording: Bool {
+        switch phase {
+        case .pressing, .voiceRecording:
+            return true
+        case .idle, .dragging:
+            return false
+        }
+    }
+
+    mutating func pointerDown(atScreenPoint point: CGPoint, uptime: TimeInterval) {
+        phase = .pressing(startScreenPoint: point, startUptime: uptime)
+    }
+
+    mutating func pointerMoved(toScreenPoint point: CGPoint) -> SpriteOrbArbiterAction {
+        switch phase {
+        case .pressing(let start, _):
+            let dist = hypot(point.x - start.x, point.y - start.y)
+            if dist > Self.dragThreshold {
+                phase = .dragging
+                return .enteredDragging
+            }
+            return .none
+
+        case .voiceRecording(let start, let prevCancel):
+            let dist = hypot(point.x - start.x, point.y - start.y)
+            let nowCancel = dist > Self.voiceCancelSlideDistance
+            if nowCancel != prevCancel {
+                phase = .voiceRecording(startScreenPoint: start, isCancelling: nowCancel)
+                return .voiceCancelStateChanged(nowCancel)
+            }
+            return .none
+
+        case .idle, .dragging:
+            return .none
+        }
+    }
+
+    mutating func checkLongPressActivation(atUptime uptime: TimeInterval) -> (activated: Bool, chargeProgress: Double) {
+        guard case .pressing(let startPt, let startUptime) = phase else {
+            return (false, 0.0)
+        }
+        let elapsed = max(0, uptime - startUptime)
+        if elapsed >= Self.longPressDelay {
+            phase = .voiceRecording(startScreenPoint: startPt, isCancelling: false)
+            return (true, 1.0)
+        }
+        if elapsed >= Self.chargeRevealDelay {
+            let span = max(0.01, Self.longPressDelay - Self.chargeRevealDelay)
+            let p = min(max((elapsed - Self.chargeRevealDelay) / span, 0.0), 1.0)
+            return (false, p)
+        }
+        return (false, 0.0)
+    }
+
+    mutating func pointerUp(atScreenPoint point: CGPoint, uptime: TimeInterval) -> SpriteOrbArbiterAction {
+        _ = uptime
+        switch phase {
+        case .idle:
+            return .none
+
+        case .pressing(let start, _):
+            let dist = hypot(point.x - start.x, point.y - start.y)
+            phase = .idle
+            return (dist <= Self.dragThreshold) ? .triggerClick : .endDragging
+
+        case .dragging:
+            phase = .idle
+            return .endDragging
+
+        case .voiceRecording(let start, _):
+            let dist = hypot(point.x - start.x, point.y - start.y)
+            phase = .idle
+            return (dist > Self.voiceCancelSlideDistance) ? .cancelVoice : .commitVoice
+        }
+    }
+
+    mutating func reset() {
+        phase = .idle
+    }
+}
+
+// MARK: - 悬浮精灵纯几何定位、手势阈值与非对称零溢出停靠算法
+
 enum SpriteOrbPhysicsGeometry {
     static let panelDimension: CGFloat = 140
     static let orbVisualRadius: CGFloat = 25
     static let hitTestRadius: CGFloat = 31
-    static let dragThreshold: CGFloat = 5.0
+    static let dragThreshold: CGFloat = SpriteOrbGestureArbiter.dragThreshold
     static let edgeVisualMargin: CGFloat = 13.0
 
     /// 判定指针移动距离是否属于「单击启动剪贴板」而非「拖拽换位」
@@ -116,8 +352,7 @@ enum SpriteOrbPhysicsGeometry {
         dragDistance <= dragThreshold
     }
 
-    /// 根据当前停靠模式计算球体静息中心在 140×140 SwiftUI 舞台（左上原点，Y 向下）内的锚点
-    /// - 靠屏边时向屏幕内侧留足 102pt 舞台，既让实球距屏边保持 13pt，又容纳磁吸、波纹与流光粒子且绝不溢出屏幕
+    /// 根据当前停靠模式计算球体静息中心在 140×140 舞台（左上原点，Y 向下）内的锚点
     static func anchorInPanel(for dockedSide: SpriteOrbEdgeSide?) -> CGPoint {
         let midY = panelDimension * 0.5
         let edgeCenterOffset = orbVisualRadius + edgeVisualMargin // 38pt
@@ -131,7 +366,7 @@ enum SpriteOrbPhysicsGeometry {
         }
     }
 
-    /// 由 140×140 含动态粒子舞台的面板外框推导出核心 50×50 实球体的屏幕坐标
+    /// 由 140×140 舞台外框推导出核心 50×50 实球体的屏幕坐标
     static func orbCoreFrame(fromPanelFrame panelFrame: NSRect, dockedSide: SpriteOrbEdgeSide? = nil) -> NSRect {
         let anchor = anchorInPanel(for: dockedSide)
         let centerX = panelFrame.minX + anchor.x
@@ -154,7 +389,7 @@ enum SpriteOrbPhysicsGeometry {
         )
     }
 
-    /// 首次启动时的默认初始位置：贴靠主屏右侧中下区（视觉不遮挡工作区正文）
+    /// 首次启动时的默认初始位置：贴靠主屏右侧中下区
     static func defaultInitialOrigin(panelSize: NSSize, visibleFrame: NSRect) -> NSPoint {
         let x = max(visibleFrame.minX, visibleFrame.maxX - panelSize.width)
         let rawY = visibleFrame.minY + visibleFrame.height * 0.34
@@ -227,7 +462,7 @@ enum SpriteOrbPhysicsGeometry {
         return (rx, ry)
     }
 
-    /// 计算单击精灵时主剪贴板面板的就近绽放坐标（避让精灵本体的同时完整收敛在可用屏幕内）
+    /// 计算单击精灵时主剪贴板面板的就近绽放坐标
     static func panelAnchorOrigin(
         forOrbCoreFrame orbRect: NSRect,
         panelSize: NSSize,
@@ -253,7 +488,7 @@ enum SpriteOrbPhysicsGeometry {
         )
     }
 
-    /// 计算智能提醒卡片（Action Spark）紧贴精灵旁侧的安全坐标
+    /// 计算智能伴生卡片紧贴精灵旁侧的安全坐标
     static func sparkAnchorOrigin(
         forOrbCoreFrame orbRect: NSRect,
         sparkSize: NSSize,
@@ -275,7 +510,7 @@ enum SpriteOrbPhysicsGeometry {
     }
 }
 
-// MARK: - 120Hz 连续二阶弹簧与粒子物理引擎（纯值类型可测试核心）
+// MARK: - 120Hz 连续二阶弹簧与粒子物理引擎（纯值类型可单元测试核心）
 
 struct SpriteInflowParticle: Equatable {
     var startOffsetX: Double
@@ -309,6 +544,7 @@ struct SpriteRippleWave: Equatable {
 struct SpritePendingInflowImpact: Equatable {
     var delay: Double
     var accent: SpriteOrbMoodAccent
+    var isNudgeBeat: Bool = false
 }
 
 struct SpriteOrbPhysicsInput: Equatable {
@@ -318,26 +554,34 @@ struct SpriteOrbPhysicsInput: Equatable {
     var isDragTargeted: Bool = false
     var isClipboardPanelOpen: Bool = false
     var smartSuggestionActive: Bool = false
-    /// 指针相对于精灵静态锚点的坐标偏移（Y 向下，Canvas 坐标系）；超出视距外时可传 nil
+    var proactiveNudgeActive: Bool = false
+    var voiceActive: Bool = false
+    var voiceCancelSlide: Bool = false
+    var audioLevel: Double = 0.0
+    var chargeProgress: Double = 0.0
+    var nudgePeekOffsetX: Double = 0.0
     var pointerOffsetFromAnchor: CGPoint? = nil
-    /// 拖拽过程瞬时速度（pt/s，Y 向下）
     var dragStepVelocity: CGVector = .zero
 }
 
 struct SpriteOrbPhysicsState: Equatable {
     var time: Double = 0
 
-    // 二阶位置弹簧与速度（相对静态 anchor 的偏移，Y 向下）
+    // 二阶位置弹簧与速度（相对静态 anchor 偏移，Y 向下）
     var offsetX: Double = 0
     var offsetY: Double = 0
     var vx: Double = 0
     var vy: Double = 0
 
-    // 光标磁吸与表面张力平滑通道
+    // 光标磁吸、张力、语音与取消滑态平滑通道
     var hoverBlend: Double = 0
     var pressBlend: Double = 0
     var tensionPull: Double = 0
     var tensionAngle: Double = 0
+    var voiceActiveBlend: Double = 0
+    var cancelSlideBlend: Double = 0
+    var smoothedAudioLevel: Double = 0
+    var idleRestBlend: Double = 0
 
     // 二阶缩放脉冲弹簧 + 毛细水波 + 极光漩涡 + 表冠追指角
     var scaleImpulse: Double = 0
@@ -361,6 +605,14 @@ struct SpriteOrbPhysicsState: Equatable {
         sin(time * 2.05)
     }
 
+    var breathScale: Double {
+        var s = 1.0 + breathWave * 0.08 + scaleImpulse + hoverBlend * 0.05 - pressBlend * 0.09
+        if smoothedAudioLevel > 0.01 {
+            s += smoothedAudioLevel * 0.07
+        }
+        return s
+    }
+
     var hasActiveEffects: Bool {
         !inflowParticles.isEmpty
             || !pendingInflowImpacts.isEmpty
@@ -370,11 +622,15 @@ struct SpriteOrbPhysicsState: Equatable {
             || abs(scaleVel) > 0.015
             || capillaryAmp > 0.01
             || vortexBlend > 0.01
-            || abs(vx) > 2.0
-            || abs(vy) > 2.0
+            || voiceActiveBlend > 0.02
+            || abs(vx) > 1.8
+            || abs(vy) > 1.8
     }
 
-    func activeAccent(smartSuggestionActive: Bool) -> SpriteOrbMoodAccent {
+    func activeAccent(smartSuggestionActive: Bool, proactiveNudgeActive: Bool) -> SpriteOrbMoodAccent {
+        if proactiveNudgeActive {
+            return .amber
+        }
         if smartSuggestionActive {
             return smartSuggestionAccent
         }
@@ -384,7 +640,7 @@ struct SpriteOrbPhysicsState: Equatable {
         return .cobalt
     }
 
-    mutating func step(dt rawDt: Double, input: SpriteOrbPhysicsInput) {
+    mutating func step(dt rawDt: Double, input: SpriteOrbPhysicsInput, idleRestingTarget: Bool = false) {
         let dt = min(max(rawDt, 0.0005), 0.04)
         time += dt
 
@@ -392,15 +648,26 @@ struct SpriteOrbPhysicsState: Equatable {
             captureMoodRemaining = max(0, captureMoodRemaining - dt)
         }
 
+        // 平滑录音态、划出取消态、音频响度与静息透明度
+        let voiceTarget = input.voiceActive ? 1.0 : 0.0
+        voiceActiveBlend += (voiceTarget - voiceActiveBlend) * (1.0 - exp(-15.0 * dt))
+        let cancelTarget = (input.voiceActive && input.voiceCancelSlide) ? 1.0 : 0.0
+        cancelSlideBlend += (cancelTarget - cancelSlideBlend) * (1.0 - exp(-14.0 * dt))
+        let audioTarget = input.voiceActive ? min(max(input.audioLevel, 0.0), 1.0) : 0.0
+        let audioRate = (audioTarget > smoothedAudioLevel) ? 26.0 : 12.0
+        smoothedAudioLevel += (audioTarget - smoothedAudioLevel) * (1.0 - exp(-audioRate * dt))
+        let restTarget = idleRestingTarget ? 1.0 : 0.0
+        idleRestBlend += (restTarget - idleRestBlend) * (1.0 - exp(-5.0 * dt))
+
         // 1. 远场光标磁吸（< 142pt 轻盈探身）与表面张力形变（< 130pt）
-        var targetX = 0.0
+        var targetX = input.proactiveNudgeActive ? input.nudgePeekOffsetX : 0.0
         var targetY = sin(time * 1.95) * 3.2
 
         var mouseDist = 999.0
         var hasPointer = false
         var mdx = 0.0
         var mdy = 0.0
-        if let ptr = input.pointerOffsetFromAnchor, !input.isDragging {
+        if let ptr = input.pointerOffsetFromAnchor, !input.isDragging && !input.voiceActive {
             hasPointer = true
             mdx = Double(ptr.x)
             mdy = Double(ptr.y)
@@ -415,10 +682,10 @@ struct SpriteOrbPhysicsState: Equatable {
         let hoverTarget: Double = (!input.isDragging && (input.isHoveredOnCore || (hasPointer && mouseDist < 60.0))) ? 1.0 : 0.0
         hoverBlend += (hoverTarget - hoverBlend) * (1.0 - exp(-11.0 * dt))
 
-        let pressTarget: Double = input.isPressed ? 1.0 : 0.0
+        let pressTarget: Double = (input.isPressed && !input.voiceActive) ? 1.0 : 0.0
         pressBlend += (pressTarget - pressBlend) * (1.0 - exp(-22.0 * dt))
 
-        let tensionTarget: Double = (!input.isDragging && hasPointer && mouseDist < 130.0)
+        let tensionTarget: Double = (!input.isDragging && !input.voiceActive && hasPointer && mouseDist < 130.0)
             ? pow(1.0 - mouseDist / 130.0, 1.2)
             : 0.0
         tensionPull += (tensionTarget - tensionPull) * (1.0 - exp(-14.0 * dt))
@@ -462,23 +729,28 @@ struct SpriteOrbPhysicsState: Equatable {
             crownAngle += sin(time * 0.8) * 0.12 * dt
         }
 
-        // 5. 待触发的粒子撞击回弹计时
+        // 5. 待触发延迟脉冲（复制吸收撞击 / 拟态心跳二连搏）
         for idx in pendingInflowImpacts.indices.reversed() {
             pendingInflowImpacts[idx].delay -= dt
             if pendingInflowImpacts[idx].delay <= 0 {
-                let impactAccent = pendingInflowImpacts[idx].accent
+                let impact = pendingInflowImpacts[idx]
                 pendingInflowImpacts.remove(at: idx)
-                scaleImpulse = 0.30
-                capillaryAmp = 0.95
-                vortexBlend = 1.0
+                if impact.isNudgeBeat {
+                    scaleImpulse = 0.20
+                    capillaryAmp = 0.65
+                } else {
+                    scaleImpulse = 0.30
+                    capillaryAmp = 0.95
+                    vortexBlend = 1.0
+                }
                 ripples.append(
                     SpriteRippleWave(
                         offsetX: offsetX,
                         offsetY: offsetY,
                         radius: 22.0,
-                        maxRadius: 84.0,
-                        alpha: 0.92,
-                        accent: impactAccent
+                        maxRadius: impact.isNudgeBeat ? 76.0 : 84.0,
+                        alpha: impact.isNudgeBeat ? 0.72 : 0.92,
+                        accent: impact.accent
                     )
                 )
             }
@@ -545,7 +817,42 @@ struct SpriteOrbPhysicsState: Equatable {
         scaleImpulse = -0.14
     }
 
-    /// 触发复制内容弧线粒子流入：12 颗微粒分波沿二阶贝塞尔弧吸入球心，0.22s 后触发弹性回弹与波纹
+    mutating func triggerVoiceWakePulse() {
+        scaleImpulse = 0.24
+        capillaryAmp = 0.80
+        captureAccent = .emerald
+        captureMoodRemaining = 1.5
+        ripples.append(
+            SpriteRippleWave(
+                offsetX: offsetX,
+                offsetY: offsetY,
+                radius: 23.0,
+                maxRadius: 78.0,
+                alpha: 0.78,
+                accent: .emerald
+            )
+        )
+    }
+
+    /// 触发拟态待办推进提醒的“心脏二连轻搏（lub-dub）”
+    mutating func triggerProactiveNudgePeek(accent: SpriteOrbMoodAccent = .amber) {
+        scaleImpulse = 0.24
+        capillaryAmp = 0.60
+        captureAccent = accent
+        captureMoodRemaining = 4.5
+        ripples.append(
+            SpriteRippleWave(
+                offsetX: offsetX,
+                offsetY: offsetY,
+                radius: 22.0,
+                maxRadius: 70.0,
+                alpha: 0.70,
+                accent: accent
+            )
+        )
+        pendingInflowImpacts.append(SpritePendingInflowImpact(delay: 0.19, accent: accent, isNudgeBeat: true))
+    }
+
     mutating func triggerCopyInflow(incomingAngle: Double, accent: SpriteOrbMoodAccent) {
         captureAccent = accent
         captureMoodRemaining = 3.8
@@ -571,10 +878,9 @@ struct SpriteOrbPhysicsState: Equatable {
                 )
             )
         }
-        pendingInflowImpacts.append(SpritePendingInflowImpact(delay: 0.22, accent: accent))
+        pendingInflowImpacts.append(SpritePendingInflowImpact(delay: 0.22, accent: accent, isNudgeBeat: false))
     }
 
-    /// 触发采纳智能建议庆贺：翡翠绿扩纹 + 12 颗受重力落体火花 + Q 弹回响
     mutating func triggerAcceptedCelebration() {
         scaleImpulse = 0.28
         capillaryAmp = 0.85
@@ -607,864 +913,61 @@ struct SpriteOrbPhysicsState: Equatable {
     }
 }
 
-/// 非 `@Published` 实时仿真引擎：由 `TimelineView` 独占步进并在 `Canvas` 直接读取，零视图树 diff
-@MainActor
-final class SpriteOrbSimulationEngine {
-    var state = SpriteOrbPhysicsState()
-    var input = SpriteOrbPhysicsInput()
-    var lastFrameUptime: TimeInterval = ProcessInfo.processInfo.systemUptime
+// MARK: - 对齐的 Metal 着色器 Uniform 结构体
 
-    func advance(to now: TimeInterval) {
-        let dt = now - lastFrameUptime
-        lastFrameUptime = now
-        if dt > 0 {
-            state.step(dt: dt, input: input)
-        }
-    }
+private struct SpriteOrbMetalUniforms {
+    var dims: SIMD4<Float> = .zero
+    var motion: SIMD4<Float> = .zero
+    var states: SIMD4<Float> = .zero
+    var stretch: SIMD4<Float> = .zero
+    var accentRGB: SIMD4<Float> = .zero
+    var voiceAndNudge: SIMD4<Float> = .zero
+    var flags: SIMD4<UInt32> = .zero
+    var extra: SIMD4<Float> = .zero
+    var ripple0: SIMD4<Float> = .zero
+    var ripple1: SIMD4<Float> = .zero
+    var ripple2: SIMD4<Float> = .zero
 }
 
-/// 驱动低频切换信号与偏好样式的轻量状态模型（绝不承载每帧 120Hz 坐标！）
+// MARK: - 全 GPU Metal 视图 + 交互宿主（NSView.displayLink 120Hz 原生 VSync）
+
 @MainActor
-final class SpriteOrbViewModel: ObservableObject {
-    @Published var style: SpriteOrbStyle = .prismDew
-    @Published var dockMode: SpriteOrbDockMode = .edgeSnap
-    @Published var dockedSide: SpriteOrbEdgeSide? = .right
-
-    @Published var isIdleResting: Bool = false
-    @Published var isDragTargeted: Bool = false
-    @Published var isClipboardPanelOpen: Bool = false
-    @Published var smartSuggestionActive: Bool = false
-    @Published var isHighFrequencyActive: Bool = false
-    @Published var activeMatrixGlyph: SpriteOrbMatrixGlyph = .none
-}
-
-/// 原生 120Hz 悬浮精灵控制器：全天候非抢焦常驻，串联点击呼出、近场磁吸、拖拽吸边与智能提醒联动
-@MainActor
-final class FloatingSpriteOrbController {
-    static let shared = FloatingSpriteOrbController()
-
-    private static let posXDefaultsKey = "spriteOrbPosXRatio"
-    private static let posYDefaultsKey = "spriteOrbPosYRatio"
-
-    var onToggleClipboardPanel: ((NSRect) -> Void)?
-    var onOpenTodoList: (() -> Void)?
-    var onOpenSettings: (() -> Void)?
-
-    private let viewModel = SpriteOrbViewModel()
-    private let simulation = SpriteOrbSimulationEngine()
-
-    private var panel: UnifiedActiveFloatingPanel?
-    private var hostingView: NSHostingView<SpriteOrbRootView>?
-    private var interactiveView: SpriteOrbInteractiveView?
-    private weak var boundStore: ClipboardStore?
-    private var cancellables = Set<AnyCancellable>()
-    private var screenObserver: NSObjectProtocol?
-    private var globalMouseMonitor: Any?
-    private var localMouseMonitor: Any?
-    private var isStarted: Bool = false
-
-    private var idleRestWorkItem: DispatchWorkItem?
-    private var highFreqCooldownWorkItem: DispatchWorkItem?
-    private var smartMatrixResetWorkItem: DispatchWorkItem?
-
-    private init() {}
-
-    /// 若精灵可见，返回当前真实核心球体（含弹簧漂移后位置）的屏幕坐标，供主面板与提醒卡精准贴旁
-    var visibleOrbCoreScreenFrame: NSRect? {
-        guard let panel, panel.isVisible else { return nil }
-        let base = SpriteOrbPhysicsGeometry.orbCoreFrame(
-            fromPanelFrame: panel.frame,
-            dockedSide: viewModel.dockedSide
-        )
-        return NSRect(
-            x: base.minX + simulation.state.offsetX,
-            y: base.minY - simulation.state.offsetY,
-            width: base.width,
-            height: base.height
-        )
-    }
-
-    /// 供主面板外部点击豁免判断（包含微光晕扩边），避免收起面板同时误触发二次呼出
-    var visibleHitScreenFrame: NSRect? {
-        guard let core = visibleOrbCoreScreenFrame else { return nil }
-        return core.insetBy(dx: -6, dy: -6)
-    }
-
-    func start(store: ClipboardStore) {
-        boundStore = store
-        guard !isStarted else {
-            syncPreferences(from: store)
-            updatePanelVisibility()
-            return
-        }
-        isStarted = true
-        syncPreferences(from: store)
-
-        store.$spriteOrbEnabled
-            .dropFirst()
-            .receive(on: RunLoop.main)
-            .sink { [weak self] _ in
-                self?.updatePanelVisibility()
-            }
-            .store(in: &cancellables)
-
-        store.$spriteOrbStyle
-            .dropFirst()
-            .receive(on: RunLoop.main)
-            .sink { [weak self] style in
-                guard let self else { return }
-                self.viewModel.style = style
-                self.simulation.state.triggerStyleSwitch()
-                self.activateHighFrequencyWindow(duration: 0.9)
-                self.bumpInteractionWakefulness()
-            }
-            .store(in: &cancellables)
-
-        store.$spriteOrbDockMode
-            .dropFirst()
-            .receive(on: RunLoop.main)
-            .sink { [weak self] mode in
-                guard let self else { return }
-                self.viewModel.dockMode = mode
-                self.reanchorCurrentPosition(animated: true)
-            }
-            .store(in: &cancellables)
-
-        store.$screenSharePrivacyEnabled
-            .dropFirst()
-            .receive(on: RunLoop.main)
-            .sink { [weak self] enabled in
-                self?.panel?.sharingType = enabled ? .none : .readOnly
-            }
-            .store(in: &cancellables)
-
-        screenObserver = NotificationCenter.default.addObserver(
-            forName: NSApplication.didChangeScreenParametersNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.reanchorCurrentPosition(animated: false)
-            }
-        }
-
-        installCursorNearFieldMonitors()
-        updatePanelVisibility()
-    }
-
-    func stop() {
-        idleRestWorkItem?.cancel()
-        idleRestWorkItem = nil
-        highFreqCooldownWorkItem?.cancel()
-        highFreqCooldownWorkItem = nil
-        smartMatrixResetWorkItem?.cancel()
-        smartMatrixResetWorkItem = nil
-        cancellables.removeAll()
-        if let screenObserver {
-            NotificationCenter.default.removeObserver(screenObserver)
-            self.screenObserver = nil
-        }
-        if let globalMouseMonitor {
-            NSEvent.removeMonitor(globalMouseMonitor)
-            self.globalMouseMonitor = nil
-        }
-        if let localMouseMonitor {
-            NSEvent.removeMonitor(localMouseMonitor)
-            self.localMouseMonitor = nil
-        }
-        panel?.orderOut(nil)
-        isStarted = false
-    }
-
-    func setClipboardPanelVisible(_ visible: Bool) {
-        viewModel.isClipboardPanelOpen = visible
-        simulation.input.isClipboardPanelOpen = visible
-        refreshActiveMatrixGlyph()
-        if visible {
-            wakeFromIdle()
-        } else {
-            scheduleIdleRestIfEligible()
-        }
-    }
-
-    /// 监听新剪贴板内容流入：从屏内方向喷射 12 颗二阶贝塞尔流光粒子吸入球心，并按内容点亮语义色
-    func notifyClipboardCaptured(itemType: ClipContentType, previewText: String?) {
-        guard isStarted, boundStore?.spriteOrbEnabled == true else { return }
-        let accent: SpriteOrbMoodAccent
-        let tempGlyph: SpriteOrbMatrixGlyph
-        if let text = previewText, TodoChecklistExtractor.hasActionableSingleTodoIntent(text) {
-            accent = .amber
-            tempGlyph = .todo
-        } else {
-            switch itemType {
-            case .text:
-                accent = .cobalt
-                tempGlyph = .clean
-            case .link:
-                accent = .emerald
-                tempGlyph = .link
-            case .image, .file:
-                accent = .cobalt
-                tempGlyph = .image
-            }
-        }
-
-        // 流光颗粒默认从屏内方向朝停靠球体优雅飞入（左停靠从右侧 0 rad 飞入；右停靠从左侧 π rad 飞入）
-        let incomingAngle: Double = {
-            switch viewModel.dockedSide {
-            case .left:
-                return 0.0
-            case .right:
-                return .pi
-            case nil:
-                return -.pi * 0.72
-            }
-        }()
-        simulation.state.triggerCopyInflow(incomingAngle: incomingAngle, accent: accent)
-        if !viewModel.smartSuggestionActive && !viewModel.isClipboardPanelOpen {
-            viewModel.activeMatrixGlyph = tempGlyph
-            smartMatrixResetWorkItem?.cancel()
-            let reset = DispatchWorkItem { [weak self] in
-                Task { @MainActor [weak self] in
-                    self?.refreshActiveMatrixGlyph()
-                }
-            }
-            smartMatrixResetWorkItem = reset
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.35, execute: reset)
-        }
-        activateHighFrequencyWindow(duration: 1.4)
-        bumpInteractionWakefulness()
-    }
-
-    /// 由 ActionSparkController 同步当前智能提醒卡片显隐，点亮精灵呼应光环与 5×5 点阵图标
-    func setSmartSuggestionState(active: Bool, categoryKey: String?, actionID: String? = nil) {
-        guard isStarted else { return }
-        smartMatrixResetWorkItem?.cancel()
-        smartMatrixResetWorkItem = nil
-        viewModel.smartSuggestionActive = active
-        simulation.input.smartSuggestionActive = active
-
-        if active {
-            switch categoryKey {
-            case "todo_capture":
-                simulation.state.smartSuggestionAccent = .amber
-            case "frequent_reuse", "security":
-                simulation.state.smartSuggestionAccent = .emerald
-            default:
-                simulation.state.smartSuggestionAccent = .cobalt
-            }
-            if categoryKey == "todo_capture" {
-                viewModel.activeMatrixGlyph = .todo
-            } else if actionID?.contains("url") == true || actionID?.contains("link") == true || actionID?.contains("qr") == true {
-                viewModel.activeMatrixGlyph = .link
-            } else if categoryKey == "image" {
-                viewModel.activeMatrixGlyph = .image
-            } else {
-                viewModel.activeMatrixGlyph = .clean
-            }
-            wakeFromIdle()
-        } else {
-            refreshActiveMatrixGlyph()
-            scheduleIdleRestIfEligible()
-        }
-    }
-
-    /// 当用户采纳提醒动作后触发 12 颗翡翠火花 + 扩纹 + 5×5 对勾
-    func triggerSuggestionAcceptedPulse() {
-        guard isStarted else { return }
-        smartMatrixResetWorkItem?.cancel()
-        viewModel.smartSuggestionActive = false
-        simulation.input.smartSuggestionActive = false
-        simulation.state.triggerAcceptedCelebration()
-        viewModel.activeMatrixGlyph = .done
-
-        let reset = DispatchWorkItem { [weak self] in
-            Task { @MainActor [weak self] in
-                self?.refreshActiveMatrixGlyph()
-            }
-        }
-        smartMatrixResetWorkItem = reset
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: reset)
-
-        activateHighFrequencyWindow(duration: 1.25)
-        bumpInteractionWakefulness()
-    }
-
-    /// 当用户主动关闭智能提醒卡片时给予轻柔收拢反馈
-    func triggerSuggestionDismissedPulse() {
-        guard isStarted else { return }
-        viewModel.smartSuggestionActive = false
-        simulation.input.smartSuggestionActive = false
-        simulation.state.triggerDismissShrink()
-        refreshActiveMatrixGlyph()
-        activateHighFrequencyWindow(duration: 0.65)
-        scheduleIdleRestIfEligible()
-    }
-
-    // MARK: - 全局近场光标零轮询监听
-
-    private func installCursorNearFieldMonitors() {
-        if let globalMouseMonitor { NSEvent.removeMonitor(globalMouseMonitor) }
-        if let localMouseMonitor { NSEvent.removeMonitor(localMouseMonitor) }
-
-        globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged]) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.updateNearFieldCursorPosition()
-            }
-        }
-        localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged]) { [weak self] event in
-            self?.updateNearFieldCursorPosition()
-            return event
-        }
-    }
-
-    private func updateNearFieldCursorPosition() {
-        guard let panel, panel.isVisible, boundStore?.spriteOrbEnabled == true else { return }
-        let mouseScreen = NSEvent.mouseLocation
-        let panelFrame = panel.frame
-        let anchor = SpriteOrbPhysicsGeometry.anchorInPanel(for: viewModel.dockedSide)
-
-        // 转入 SwiftUI Canvas 局部坐标（Y 向下）并求与静态锚点相对位移
-        let canvasX = mouseScreen.x - panelFrame.minX
-        let canvasY = panelFrame.height - (mouseScreen.y - panelFrame.minY)
-        let dx = canvasX - anchor.x
-        let dy = canvasY - anchor.y
-        let dist = hypot(dx, dy)
-
-        if dist < 260.0 {
-            simulation.input.pointerOffsetFromAnchor = CGPoint(x: dx, y: dy)
-        } else {
-            simulation.input.pointerOffsetFromAnchor = nil
-        }
-
-        let inHighFreqZone = dist < 165.0
-        if inHighFreqZone != viewModel.isHighFrequencyActive {
-            if inHighFreqZone {
-                highFreqCooldownWorkItem?.cancel()
-                viewModel.isHighFrequencyActive = true
-            } else if !simulation.state.hasActiveEffects {
-                viewModel.isHighFrequencyActive = false
-            }
-        }
-        if dist < 110.0 {
-            wakeFromIdle()
-        } else if !simulation.input.isDragging && !simulation.input.isHoveredOnCore {
-            scheduleIdleRestIfEligible()
-        }
-    }
-
-    private func refreshActiveMatrixGlyph() {
-        if viewModel.isClipboardPanelOpen {
-            viewModel.activeMatrixGlyph = .panelOpen
-        } else if !viewModel.smartSuggestionActive {
-            viewModel.activeMatrixGlyph = .none
-        }
-    }
-
-    // MARK: - 窗口装配与显隐调度
-
-    private func syncPreferences(from store: ClipboardStore) {
-        viewModel.style = store.spriteOrbStyle
-        viewModel.dockMode = store.spriteOrbDockMode
-        panel?.sharingType = store.screenSharePrivacyEnabled ? .none : .readOnly
-    }
-
-    private func updatePanelVisibility() {
-        guard let store = boundStore else { return }
-        if !store.spriteOrbEnabled || ProcessInfo.processInfo.arguments.contains("--demo") {
-            idleRestWorkItem?.cancel()
-            panel?.orderOut(nil)
-            return
-        }
-        ensurePanel()
-        guard let panel else { return }
-        if !panel.isVisible {
-            restoreSavedOriginOnLaunch()
-            panel.alphaValue = 0
-            panel.orderFrontRegardless()
-            panel.enforceUnifiedActiveAppearance()
-            NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.24
-                ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
-                panel.animator().alphaValue = 1
-            }
-        } else {
-            panel.enforceUnifiedActiveAppearance()
-        }
-        scheduleIdleRestIfEligible()
-    }
-
-    private func ensurePanel() {
-        guard panel == nil else { return }
-        let side = SpriteOrbPhysicsGeometry.panelDimension
-        let rect = NSRect(origin: .zero, size: NSSize(width: side, height: side))
-
-        let p = UnifiedActiveFloatingPanel(
-            contentRect: rect,
-            styleMask: [.nonactivatingPanel, .borderless],
-            backing: .buffered,
-            defer: false
-        )
-        p.isFloatingPanel = true
-        p.level = .statusBar
-        p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        p.isOpaque = false
-        p.backgroundColor = .clear
-        p.hasShadow = false
-        p.hidesOnDeactivate = false
-        p.isMovable = false
-        p.sharingType = (boundStore?.screenSharePrivacyEnabled ?? true) ? .none : .readOnly
-
-        let interactive = SpriteOrbInteractiveView(frame: rect)
-        interactive.autoresizingMask = [.width, .height]
-
-        let rootView = SpriteOrbRootView(model: viewModel, simulation: simulation)
-        let hosting = NSHostingView(rootView: rootView)
-        hosting.sizingOptions = []
-        hosting.frame = rect
-        hosting.autoresizingMask = [.width, .height]
-        interactive.addSubview(hosting)
-
-        // 提供动态渲染圆心给 hitTest，保证外周光晕完全穿透不误拦底层窗口事件
-        interactive.liveOrbCenterProvider = { [weak self] in
-            guard let self else {
-                return CGPoint(x: side * 0.5, y: side * 0.5)
-            }
-            let anchor = SpriteOrbPhysicsGeometry.anchorInPanel(for: self.viewModel.dockedSide)
-            let cx = anchor.x + self.simulation.state.offsetX
-            // AppKit Y 向上
-            let cy = side - (anchor.y + self.simulation.state.offsetY)
-            return CGPoint(x: cx, y: cy)
-        }
-        interactive.onHoverStateChanged = { [weak self] hovering in
-            self?.handleCoreHoverChanged(hovering)
-        }
-        interactive.onPressChanged = { [weak self] pressed in
-            self?.handlePressChanged(pressed)
-        }
-        interactive.onDragMoved = { [weak self] newOrigin, velocity in
-            self?.handleDragMoved(to: newOrigin, velocity: velocity)
-        }
-        interactive.onPointerReleased = { [weak self] didDrag, finalOrigin in
-            self?.handlePointerReleased(didDrag: didDrag, finalOrigin: finalOrigin)
-        }
-        interactive.onDragTargetedChanged = { [weak self] targeted in
-            self?.handleExternalDragTargeted(targeted)
-        }
-        interactive.onPerformExternalDrop = { [weak self] pb in
-            self?.handleExternalDrop(pasteboard: pb) ?? false
-        }
-        interactive.onBuildContextMenu = { [weak self] in
-            self?.buildContextMenu() ?? NSMenu()
-        }
-
-        p.contentView = interactive
-        self.interactiveView = interactive
-        self.hostingView = hosting
-        self.panel = p
-    }
-
-    private func restoreSavedOriginOnLaunch() {
-        guard let panel else { return }
-        let size = panel.frame.size
-        let screens = NSScreen.screens
-        guard !screens.isEmpty else { return }
-
-        let defaults = UserDefaults.standard
-        if let ratioX = defaults.object(forKey: Self.posXDefaultsKey) as? Double,
-           let ratioY = defaults.object(forKey: Self.posYDefaultsKey) as? Double {
-            let screen = targetScreenForOrigin(panel.frame.origin)
-            let resolved = SpriteOrbPhysicsGeometry.origin(
-                fromRatios: CGFloat(ratioX),
-                ratioY: CGFloat(ratioY),
-                panelSize: size,
-                visibleFrame: screen.visibleFrame,
-                dockMode: viewModel.dockMode
-            )
-            panel.setFrameOrigin(resolved.origin)
-            viewModel.dockedSide = resolved.dockedSide
-        } else {
-            let screen = NSScreen.main ?? screens[0]
-            let initial = SpriteOrbPhysicsGeometry.defaultInitialOrigin(
-                panelSize: size,
-                visibleFrame: screen.visibleFrame
-            )
-            panel.setFrameOrigin(initial)
-            viewModel.dockedSide = (viewModel.dockMode == .edgeSnap) ? .right : nil
-        }
-    }
-
-    private func reanchorCurrentPosition(animated: Bool) {
-        guard let panel, panel.isVisible else { return }
-        let oldSide = viewModel.dockedSide
-        let oldCenter = SpriteOrbPhysicsGeometry.orbCoreFrame(fromPanelFrame: panel.frame, dockedSide: oldSide)
-        let screen = targetScreenForOrigin(panel.frame.origin)
-
-        // 先根据当前真实球心所在屏幕侧计算新目标停靠位
-        let candidateOrigin = SpriteOrbPhysicsGeometry.panelOrigin(
-            forOrbCenter: NSPoint(x: oldCenter.midX, y: oldCenter.midY),
-            dockedSide: nil
-        )
-        let resolved = SpriteOrbPhysicsGeometry.resolvedRestingOrigin(
-            currentOrigin: candidateOrigin,
-            panelSize: panel.frame.size,
-            visibleFrame: screen.visibleFrame,
-            dockMode: viewModel.dockMode
-        )
-
-        if oldSide != resolved.dockedSide {
-            // 先平移窗口原点使新 dockedSide 锚下的球体画面保持原地零跳变，再执行吸附补间
-            let compensated = SpriteOrbPhysicsGeometry.panelOrigin(
-                forOrbCenter: NSPoint(x: oldCenter.midX, y: oldCenter.midY),
-                dockedSide: resolved.dockedSide
-            )
-            viewModel.dockedSide = resolved.dockedSide
-            panel.setFrameOrigin(compensated)
-        } else {
-            viewModel.dockedSide = resolved.dockedSide
-        }
-
-        saveNormalizedOrigin(resolved.origin, panelSize: panel.frame.size, visibleFrame: screen.visibleFrame)
-        movePanel(panel, to: resolved.origin, animated: animated)
-        bumpInteractionWakefulness()
-    }
-
-    private func movePanel(_ panel: NSPanel, to origin: NSPoint, animated: Bool) {
-        guard animated else {
-            panel.setFrameOrigin(origin)
-            return
-        }
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.26
-            ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
-            panel.animator().setFrameOrigin(origin)
-        }
-    }
-
-    private func targetScreenForOrigin(_ origin: NSPoint) -> NSScreen {
-        let screens = NSScreen.screens
-        let side = SpriteOrbPhysicsGeometry.panelDimension
-        let center = NSPoint(x: origin.x + side * 0.5, y: origin.y + side * 0.5)
-        if let matched = screens.first(where: { $0.frame.contains(center) }) {
-            return matched
-        }
-        let mouse = NSEvent.mouseLocation
-        if let mouseScreen = screens.first(where: { $0.frame.contains(mouse) }) {
-            return mouseScreen
-        }
-        return NSScreen.main ?? screens[0]
-    }
-
-    private func saveNormalizedOrigin(_ origin: NSPoint, panelSize: NSSize, visibleFrame: NSRect) {
-        let ratios = SpriteOrbPhysicsGeometry.normalizedRatios(
-            forOrigin: origin,
-            panelSize: panelSize,
-            visibleFrame: visibleFrame
-        )
-        UserDefaults.standard.set(Double(ratios.x), forKey: Self.posXDefaultsKey)
-        UserDefaults.standard.set(Double(ratios.y), forKey: Self.posYDefaultsKey)
-    }
-
-    // MARK: - 交互事件协调
-
-    private func handleCoreHoverChanged(_ hovering: Bool) {
-        simulation.input.isHoveredOnCore = hovering
-        if hovering {
-            viewModel.isHighFrequencyActive = true
-            wakeFromIdle()
-        } else if !simulation.input.isDragging {
-            scheduleIdleRestIfEligible()
-        }
-    }
-
-    private func handlePressChanged(_ pressed: Bool) {
-        simulation.input.isPressed = pressed
-        if pressed {
-            activateHighFrequencyWindow(duration: 0.5)
-            wakeFromIdle()
-        }
-    }
-
-    private func handleDragMoved(to newOrigin: NSPoint, velocity: CGVector) {
-        guard let panel else { return }
-        simulation.input.isDragging = true
-        // AppKit velocity.dy 向上 -> 转为 Canvas 向下速度
-        simulation.input.dragStepVelocity = CGVector(dx: velocity.dx, dy: -velocity.dy)
-        panel.setFrameOrigin(newOrigin)
-        viewModel.isHighFrequencyActive = true
-        wakeFromIdle()
-    }
-
-    private func handlePointerReleased(didDrag: Bool, finalOrigin: NSPoint) {
-        guard let panel else { return }
-        simulation.input.isPressed = false
-        simulation.input.isDragging = false
-        simulation.input.dragStepVelocity = .zero
-
-        if !didDrag {
-            TactileFeedbackEngine.shared.perform(.tabSwitch)
-            let willOpen = !viewModel.isClipboardPanelOpen
-            simulation.state.triggerClick(
-                panelOpening: willOpen,
-                accent: simulation.state.activeAccent(smartSuggestionActive: viewModel.smartSuggestionActive)
-            )
-            if let orbCore = visibleOrbCoreScreenFrame {
-                onToggleClipboardPanel?(orbCore)
-            }
-            activateHighFrequencyWindow(duration: 0.9)
-            bumpInteractionWakefulness()
-            return
-        }
-
-        let oldSide = viewModel.dockedSide
-        let oldCenter = SpriteOrbPhysicsGeometry.orbCoreFrame(fromPanelFrame: NSRect(origin: finalOrigin, size: panel.frame.size), dockedSide: oldSide)
-        let screen = targetScreenForOrigin(finalOrigin)
-
-        let pseudoCenterOrigin = SpriteOrbPhysicsGeometry.panelOrigin(
-            forOrbCenter: NSPoint(x: oldCenter.midX, y: oldCenter.midY),
-            dockedSide: nil
-        )
-        let resolved = SpriteOrbPhysicsGeometry.resolvedRestingOrigin(
-            currentOrigin: pseudoCenterOrigin,
-            panelSize: panel.frame.size,
-            visibleFrame: screen.visibleFrame,
-            dockMode: viewModel.dockMode
-        )
-
-        if oldSide != resolved.dockedSide {
-            let compensated = SpriteOrbPhysicsGeometry.panelOrigin(
-                forOrbCenter: NSPoint(x: oldCenter.midX, y: oldCenter.midY),
-                dockedSide: resolved.dockedSide
-            )
-            viewModel.dockedSide = resolved.dockedSide
-            panel.setFrameOrigin(compensated)
-        } else {
-            viewModel.dockedSide = resolved.dockedSide
-        }
-
-        saveNormalizedOrigin(resolved.origin, panelSize: panel.frame.size, visibleFrame: screen.visibleFrame)
-        TactileFeedbackEngine.shared.performNavigationStepHaptic()
-        simulation.state.triggerDockBounce()
-        movePanel(panel, to: resolved.origin, animated: true)
-        activateHighFrequencyWindow(duration: 1.0)
-        bumpInteractionWakefulness()
-    }
-
-    private func handleExternalDragTargeted(_ targeted: Bool) {
-        if targeted && !viewModel.isDragTargeted {
-            TactileFeedbackEngine.shared.performNavigationStepHaptic()
-        }
-        viewModel.isDragTargeted = targeted
-        simulation.input.isDragTargeted = targeted
-        if targeted {
-            viewModel.isHighFrequencyActive = true
-            wakeFromIdle()
-        } else {
-            scheduleIdleRestIfEligible()
-        }
-    }
-
-    private func handleExternalDrop(pasteboard: NSPasteboard) -> Bool {
-        viewModel.isDragTargeted = false
-        simulation.input.isDragTargeted = false
-        let ok = ClipboardStore.shared.importAndCopy(from: pasteboard, sourceLabel: "悬浮精灵")
-        if ok {
-            TactileFeedbackEngine.shared.perform(.magicTransform)
-            simulation.state.triggerAcceptedCelebration()
-            activateHighFrequencyWindow(duration: 1.25)
-            bumpInteractionWakefulness()
-        }
-        return ok
-    }
-
-    // MARK: - 右键快捷菜单
-
-    private func buildContextMenu() -> NSMenu {
-        let menu = NSMenu()
-        let titleItem = NSMenuItem(title: "iClip 悬浮精灵", action: nil, keyEquivalent: "")
-        titleItem.isEnabled = false
-        menu.addItem(titleItem)
-
-        let toggleTitle = viewModel.isClipboardPanelOpen ? "收起剪贴板面板" : "打开 iClip 剪贴板"
-        let toggleItem = NSMenuItem(title: toggleTitle, action: #selector(contextTogglePanel), keyEquivalent: "")
-        toggleItem.target = self
-        menu.addItem(toggleItem)
-
-        let todoItem = NSMenuItem(title: "打开待办清单", action: #selector(contextOpenTodos), keyEquivalent: "")
-        todoItem.target = self
-        menu.addItem(todoItem)
-
-        menu.addItem(.separator())
-
-        let currentStyle = boundStore?.spriteOrbStyle ?? viewModel.style
-        for (idx, style) in SpriteOrbStyle.allCases.enumerated() {
-            let item = NSMenuItem(
-                title: "\(idx + 1) · \(style.title)",
-                action: #selector(contextSelectStyle(_:)),
-                keyEquivalent: ""
-            )
-            item.representedObject = style.rawValue
-            item.state = (style == currentStyle) ? .on : .off
-            item.target = self
-            menu.addItem(item)
-        }
-
-        menu.addItem(.separator())
-
-        let currentDock = boundStore?.spriteOrbDockMode ?? viewModel.dockMode
-        for mode in SpriteOrbDockMode.allCases {
-            let item = NSMenuItem(
-                title: mode.title,
-                action: #selector(contextSelectDockMode(_:)),
-                keyEquivalent: ""
-            )
-            item.representedObject = mode.rawValue
-            item.state = (mode == currentDock) ? .on : .off
-            item.target = self
-            menu.addItem(item)
-        }
-
-        menu.addItem(.separator())
-
-        let settingsItem = NSMenuItem(title: "偏好设置...", action: #selector(contextOpenSettings), keyEquivalent: "")
-        settingsItem.target = self
-        menu.addItem(settingsItem)
-
-        let hideItem = NSMenuItem(title: "隐藏悬浮精灵", action: #selector(contextHideOrb), keyEquivalent: "")
-        hideItem.target = self
-        menu.addItem(hideItem)
-
-        return menu
-    }
-
-    @objc private func contextTogglePanel() {
-        if let orbCore = visibleOrbCoreScreenFrame {
-            onToggleClipboardPanel?(orbCore)
-        }
-    }
-
-    @objc private func contextOpenTodos() {
-        onOpenTodoList?()
-    }
-
-    @objc private func contextSelectStyle(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? String,
-              let style = SpriteOrbStyle(rawValue: raw),
-              let store = boundStore else { return }
-        store.spriteOrbStyle = style
-        TactileFeedbackEngine.shared.performNavigationStepHaptic()
-    }
-
-    @objc private func contextSelectDockMode(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? String,
-              let mode = SpriteOrbDockMode(rawValue: raw),
-              let store = boundStore else { return }
-        store.spriteOrbDockMode = mode
-        TactileFeedbackEngine.shared.performNavigationStepHaptic()
-    }
-
-    @objc private func contextOpenSettings() {
-        onOpenSettings?()
-    }
-
-    @objc private func contextHideOrb() {
-        boundStore?.spriteOrbEnabled = false
-    }
-
-    // MARK: - 空闲柔隐与 60Hz/120Hz 窗口控制
-
-    private func wakeFromIdle() {
-        idleRestWorkItem?.cancel()
-        idleRestWorkItem = nil
-        if viewModel.isIdleResting {
-            withAnimation(.easeOut(duration: 0.18)) {
-                viewModel.isIdleResting = false
-            }
-        }
-    }
-
-    private func bumpInteractionWakefulness() {
-        wakeFromIdle()
-        scheduleIdleRestIfEligible()
-    }
-
-    private func scheduleIdleRestIfEligible() {
-        idleRestWorkItem?.cancel()
-        idleRestWorkItem = nil
-        guard viewModel.dockMode == .edgeSnap,
-              !simulation.input.isHoveredOnCore,
-              !simulation.input.isPressed,
-              !simulation.input.isDragging,
-              !viewModel.isDragTargeted,
-              !viewModel.isClipboardPanelOpen,
-              !viewModel.smartSuggestionActive else {
-            return
-        }
-        let work = DispatchWorkItem { [weak self] in
-            Task { @MainActor [weak self] in
-                guard let self,
-                      self.viewModel.dockMode == .edgeSnap,
-                      !self.simulation.input.isHoveredOnCore,
-                      !self.simulation.input.isPressed,
-                      !self.simulation.input.isDragging,
-                      !self.viewModel.isDragTargeted,
-                      !self.viewModel.isClipboardPanelOpen,
-                      !self.viewModel.smartSuggestionActive else {
-                    return
-                }
-                withAnimation(.easeInOut(duration: 0.45)) {
-                    self.viewModel.isIdleResting = true
-                }
-            }
-        }
-        idleRestWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.8, execute: work)
-    }
-
-    private func activateHighFrequencyWindow(duration: TimeInterval) {
-        highFreqCooldownWorkItem?.cancel()
-        viewModel.isHighFrequencyActive = true
-        let work = DispatchWorkItem { [weak self] in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                if !self.simulation.state.hasActiveEffects
-                    && self.simulation.input.pointerOffsetFromAnchor == nil
-                    && !self.viewModel.smartSuggestionActive {
-                    self.viewModel.isHighFrequencyActive = false
-                }
-            }
-        }
-        highFreqCooldownWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: work)
-    }
-}
-
-// MARK: - 交互层：动态球心命中与透明周边穿透
-
-private final class SpriteOrbInteractiveView: NSView {
+private final class SpriteOrbMetalView: NSView {
     var liveOrbCenterProvider: (() -> CGPoint)?
-    var onHoverStateChanged: ((Bool) -> Void)?
-    var onPressChanged: ((Bool) -> Void)?
-    var onDragMoved: ((NSPoint, CGVector) -> Void)?
-    var onPointerReleased: ((Bool, NSPoint) -> Void)?
+    var onDisplayLinkTick: ((_ deltaSeconds: Double, _ displayLink: CADisplayLink) -> Void)?
+    var onPointerDown: ((NSPoint) -> Void)?
+    var onPointerMovedOrDragged: ((NSPoint, CGVector) -> Void)?
+    var onPointerUp: ((NSPoint) -> Void)?
+    var onCoreHoverChanged: ((Bool) -> Void)?
     var onDragTargetedChanged: ((Bool) -> Void)?
     var onPerformExternalDrop: ((NSPasteboard) -> Bool)?
     var onBuildContextMenu: (() -> NSMenu)?
 
+    private var device: MTLDevice?
+    private var commandQueue: MTLCommandQueue?
+    private var pipelineState: MTLRenderPipelineState?
+    private var displayLink: CADisplayLink?
+    private var lastTickUptime: TimeInterval = ProcessInfo.processInfo.systemUptime
+    private var particleStaging = [SIMD4<Float>](repeating: .zero, count: SpriteOrbMetalShader.particleCapacity)
+
     private var trackingAreaRef: NSTrackingArea?
-    private var mouseDownScreenPoint: NSPoint = .zero
-    private var panelOriginOnMouseDown: NSPoint = .zero
     private var lastDragScreenPoint: NSPoint = .zero
     private var lastDragTime: TimeInterval = 0
-    private var didExceedDragThreshold: Bool = false
+    private var isCoreHoveredLocal: Bool = false
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
+        wantsLayer = true
         registerForDraggedTypes(ClipboardStore.supportedDragTypes)
+        configureMetalPipeline()
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    override func makeBackingLayer() -> CALayer {
+        CAMetalLayer()
     }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
@@ -1477,8 +980,22 @@ private final class SpriteOrbInteractiveView: NSView {
         guard dist <= SpriteOrbPhysicsGeometry.hitTestRadius else {
             return nil
         }
-        // 纯视觉画布子视图无需截获事件，统一由宿主视图处理按压、拖拽、右键与外部拖入
         return self
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        updateDrawableGeometry()
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        updateDrawableGeometry()
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        updateDrawableGeometry()
     }
 
     override func updateTrackingAreas() {
@@ -1496,68 +1013,164 @@ private final class SpriteOrbInteractiveView: NSView {
         trackingAreaRef = area
     }
 
+    func startDisplayLink() {
+        if displayLink == nil {
+            let dl = displayLink(target: self, selector: #selector(handleDisplayLink(_:)))
+            dl.add(to: .main, forMode: .common)
+            displayLink = dl
+        }
+        lastTickUptime = ProcessInfo.processInfo.systemUptime
+        displayLink?.isPaused = false
+    }
+
+    func pauseDisplayLink() {
+        displayLink?.isPaused = true
+    }
+
+    func stopDisplayLink() {
+        displayLink?.invalidate()
+        displayLink = nil
+    }
+
+    func setProMotionHighRate(_ highRate: Bool) {
+        guard let dl = displayLink else { return }
+        if highRate {
+            dl.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
+        } else {
+            dl.preferredFrameRateRange = CAFrameRateRange(minimum: 24, maximum: 60, preferred: 45)
+        }
+    }
+
+    @objc private func handleDisplayLink(_ link: CADisplayLink) {
+        let now = ProcessInfo.processInfo.systemUptime
+        let dt = now - lastTickUptime
+        lastTickUptime = now
+        onDisplayLinkTick?(dt, link)
+    }
+
+    func renderFrame(uniforms: SpriteOrbMetalUniforms, particles: [SIMD4<Float>]) {
+        guard let metalLayer = layer as? CAMetalLayer,
+              let pipelineState,
+              let commandQueue else { return }
+
+        if metalLayer.drawableSize.width < 1 || metalLayer.drawableSize.height < 1 {
+            updateDrawableGeometry()
+        }
+        guard let drawable = metalLayer.nextDrawable() else { return }
+        guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
+
+        let passDesc = MTLRenderPassDescriptor()
+        passDesc.colorAttachments[0].texture = drawable.texture
+        passDesc.colorAttachments[0].loadAction = .clear
+        passDesc.colorAttachments[0].storeAction = .store
+        passDesc.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+
+        guard let encoder = cmdBuf.makeRenderCommandEncoder(descriptor: passDesc) else { return }
+        encoder.setRenderPipelineState(pipelineState)
+
+        var u = uniforms
+        encoder.setFragmentBytes(&u, length: MemoryLayout<SpriteOrbMetalUniforms>.stride, index: 0)
+
+        let count = min(particles.count, SpriteOrbMetalShader.particleCapacity)
+        for i in 0..<SpriteOrbMetalShader.particleCapacity {
+            particleStaging[i] = (i < count) ? particles[i] : .zero
+        }
+        particleStaging.withUnsafeBytes { rawBuf in
+            if let base = rawBuf.baseAddress {
+                encoder.setFragmentBytes(base, length: SpriteOrbMetalShader.particleCapacity * MemoryLayout<SIMD4<Float>>.stride, index: 1)
+            }
+        }
+
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        encoder.endEncoding()
+        cmdBuf.present(drawable)
+        cmdBuf.commit()
+    }
+
+    private func configureMetalPipeline() {
+        guard let metalLayer = layer as? CAMetalLayer,
+              let dev = MTLCreateSystemDefaultDevice(),
+              let queue = dev.makeCommandQueue() else {
+            return
+        }
+        device = dev
+        commandQueue = queue
+
+        metalLayer.device = dev
+        metalLayer.pixelFormat = .bgra8Unorm
+        metalLayer.isOpaque = false
+        metalLayer.backgroundColor = NSColor.clear.cgColor
+        metalLayer.framebufferOnly = true
+        metalLayer.presentsWithTransaction = false
+        metalLayer.displaySyncEnabled = true
+
+        do {
+            let lib = try dev.makeLibrary(source: SpriteOrbMetalShader.source, options: nil)
+            guard let vFunc = lib.makeFunction(name: "spriteOrbVertex"),
+                  let fFunc = lib.makeFunction(name: "spriteOrbFragment") else {
+                return
+            }
+            let desc = MTLRenderPipelineDescriptor()
+            desc.vertexFunction = vFunc
+            desc.fragmentFunction = fFunc
+            desc.colorAttachments[0].pixelFormat = .bgra8Unorm
+            desc.colorAttachments[0].isBlendingEnabled = false
+            pipelineState = try dev.makeRenderPipelineState(descriptor: desc)
+        } catch {
+            pipelineState = nil
+        }
+
+        updateDrawableGeometry()
+    }
+
+    private func updateDrawableGeometry() {
+        guard let metalLayer = layer as? CAMetalLayer else { return }
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
+        metalLayer.contentsScale = scale
+        let side = max(1, bounds.width)
+        metalLayer.drawableSize = CGSize(width: side * scale, height: max(1, bounds.height) * scale)
+    }
+
+    // MARK: - 指针、拖拽、右键与外部拖放
+
     override func mouseEntered(with event: NSEvent) {
-        let pt = convert(event.locationInWindow, from: nil)
-        let center = liveOrbCenterProvider?() ?? CGPoint(x: bounds.midX, y: bounds.midY)
-        let inside = hypot(pt.x - center.x, pt.y - center.y) <= SpriteOrbPhysicsGeometry.hitTestRadius
-        onHoverStateChanged?(inside)
+        updateHover(with: event)
     }
 
     override func mouseMoved(with event: NSEvent) {
-        let pt = convert(event.locationInWindow, from: nil)
-        let center = liveOrbCenterProvider?() ?? CGPoint(x: bounds.midX, y: bounds.midY)
-        let inside = hypot(pt.x - center.x, pt.y - center.y) <= SpriteOrbPhysicsGeometry.hitTestRadius
-        onHoverStateChanged?(inside)
+        updateHover(with: event)
     }
 
     override func mouseExited(with event: NSEvent) {
-        onHoverStateChanged?(false)
+        if isCoreHoveredLocal {
+            isCoreHoveredLocal = false
+            onCoreHoverChanged?(false)
+        }
     }
 
     override func mouseDown(with event: NSEvent) {
-        guard let window else { return }
-        mouseDownScreenPoint = NSEvent.mouseLocation
-        lastDragScreenPoint = mouseDownScreenPoint
+        let pt = NSEvent.mouseLocation
+        lastDragScreenPoint = pt
         lastDragTime = ProcessInfo.processInfo.systemUptime
-        panelOriginOnMouseDown = window.frame.origin
-        didExceedDragThreshold = false
-        onPressChanged?(true)
+        onPointerDown?(pt)
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard window != nil else { return }
-        let currentScreen = NSEvent.mouseLocation
-        let totalDx = currentScreen.x - mouseDownScreenPoint.x
-        let totalDy = currentScreen.y - mouseDownScreenPoint.y
-        let totalDist = hypot(totalDx, totalDy)
-
-        if !SpriteOrbPhysicsGeometry.isClickGesture(dragDistance: totalDist) {
-            didExceedDragThreshold = true
-        }
-        guard didExceedDragThreshold else { return }
-
         let now = ProcessInfo.processInfo.systemUptime
+        let pt = NSEvent.mouseLocation
         let stepDt = max(0.008, now - lastDragTime)
-        let stepDx = currentScreen.x - lastDragScreenPoint.x
-        let stepDy = currentScreen.y - lastDragScreenPoint.y
-        lastDragScreenPoint = currentScreen
+        let stepDx = pt.x - lastDragScreenPoint.x
+        let stepDy = pt.y - lastDragScreenPoint.y
+        lastDragScreenPoint = pt
         lastDragTime = now
 
-        let nextOrigin = NSPoint(
-            x: panelOriginOnMouseDown.x + totalDx,
-            y: panelOriginOnMouseDown.y + totalDy
-        )
-        // 计算 pt/s 速度矢量，上限 900pt/s 对应适度的弹性拉长
         let vx = min(max(stepDx / stepDt, -900), 900)
         let vy = min(max(stepDy / stepDt, -900), 900)
-        onDragMoved?(nextOrigin, CGVector(dx: vx, dy: vy))
+        onPointerMovedOrDragged?(pt, CGVector(dx: vx, dy: vy))
     }
 
     override func mouseUp(with event: NSEvent) {
-        let finalOrigin = window?.frame.origin ?? panelOriginOnMouseDown
-        let movedBeyondClick = didExceedDragThreshold
-        didExceedDragThreshold = false
-        onPointerReleased?(movedBeyondClick, finalOrigin)
+        onPointerUp?(NSEvent.mouseLocation)
     }
 
     override func rightMouseDown(with event: NSEvent) {
@@ -1594,579 +1207,1190 @@ private final class SpriteOrbInteractiveView: NSView {
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
         onPerformExternalDrop?(sender.draggingPasteboard) ?? false
     }
-}
 
-// MARK: - 60Hz / 120Hz 原生矢量画布与 4 套风格像素级复刻
-
-private struct SpriteOrbRootView: View {
-    @ObservedObject var model: SpriteOrbViewModel
-    let simulation: SpriteOrbSimulationEngine
-    @Environment(\.colorScheme) private var colorScheme
-
-    var body: some View {
-        let interval = (model.isHighFrequencyActive || model.isDragTargeted || model.smartSuggestionActive)
-            ? (1.0 / 120.0)
-            : (1.0 / 60.0)
-        TimelineView(.animation(minimumInterval: interval)) { _ in
-            SpriteOrbCanvasView(model: model, simulation: simulation, colorScheme: colorScheme)
+    private func updateHover(with event: NSEvent) {
+        let pt = convert(event.locationInWindow, from: nil)
+        let center = liveOrbCenterProvider?() ?? CGPoint(x: bounds.midX, y: bounds.midY)
+        let inside = hypot(pt.x - center.x, pt.y - center.y) <= SpriteOrbPhysicsGeometry.hitTestRadius
+        if inside != isCoreHoveredLocal {
+            isCoreHoveredLocal = inside
+            onCoreHoverChanged?(inside)
         }
-        .frame(
-            width: SpriteOrbPhysicsGeometry.panelDimension,
-            height: SpriteOrbPhysicsGeometry.panelDimension
-        )
-        .opacity(model.isIdleResting ? 0.86 : 1.0)
     }
 }
 
-private struct SpriteOrbCanvasView: View {
-    @ObservedObject var model: SpriteOrbViewModel
-    let simulation: SpriteOrbSimulationEngine
-    let colorScheme: ColorScheme
+// MARK: - 悬浮精灵总控制器（Metal 120Hz DisplayLink + 语音待办 + 主动拟态推进）
 
-    var body: some View {
-        Canvas { ctx, _ in
-            let now = ProcessInfo.processInfo.systemUptime
-            simulation.advance(to: now)
-            let state = simulation.state
-            let isDark = (colorScheme == .dark)
+@MainActor
+final class FloatingSpriteOrbController {
+    static let shared = FloatingSpriteOrbController()
 
-            let baseAnchor = SpriteOrbPhysicsGeometry.anchorInPanel(for: model.dockedSide)
-            let idleShiftX: CGFloat = {
-                guard model.isIdleResting, model.dockMode == .edgeSnap, let side = model.dockedSide else {
-                    return 0
+    private static let posXDefaultsKey = "spriteOrbPosXRatio"
+    private static let posYDefaultsKey = "spriteOrbPosYRatio"
+
+    var onToggleClipboardPanel: ((NSRect) -> Void)?
+    var onOpenTodoList: (() -> Void)?
+    var onOpenSettings: (() -> Void)?
+
+    private var panel: UnifiedActiveFloatingPanel?
+    private var metalView: SpriteOrbMetalView?
+    private weak var boundStore: ClipboardStore?
+    private var cancellables = Set<AnyCancellable>()
+    private var screenObserver: NSObjectProtocol?
+    private var isStarted: Bool = false
+
+    // 实时状态（全部驻留纯内存，DisplayLink 直读零 SwiftUI Diff）
+    private var currentStyle: SpriteOrbStyle = .prismDew
+    private var currentDockMode: SpriteOrbDockMode = .edgeSnap
+    private var dockedSide: SpriteOrbEdgeSide? = .right
+    private var physicsState = SpriteOrbPhysicsState()
+    private var physicsInput = SpriteOrbPhysicsInput()
+    private var arbiter = SpriteOrbGestureArbiter()
+
+    private var dragPanelStartOrigin: NSPoint = .zero
+    private var dragPointerStartScreen: NSPoint = .zero
+    private var dragTotalDx: CGFloat = 0
+    private var dragTotalDy: CGFloat = 0
+    private var lastDragMoveUptime: TimeInterval = 0
+
+    // 可打断的 120Hz 窗口临界阻尼吸边弹簧
+    private var windowSnapTarget: NSPoint?
+    private var windowSnapPos: NSPoint = .zero
+    private var windowSnapVel: CGVector = .zero
+
+    // 状态与表情控制
+    private var activeGlyph: SpriteOrbMatrixGlyph = .none
+    private var glyphResetWorkItem: DispatchWorkItem?
+    private var isIdleResting: Bool = false
+    private var lastActivityUptime: TimeInterval = ProcessInfo.processInfo.systemUptime
+
+    // 主动智能拟态推进调度
+    private var nudgeCheckTimer: Timer?
+    private var lastGlobalNudgeAt: Date?
+    private var snoozedTodosUntil: [UUID: Date] = [:]
+    private var activeProactiveNudge: ProactiveTodoNudgeCandidate?
+
+    // 语音监听控制
+    private var voiceSessionID: UUID = UUID()
+    private var latestPartialTranscript: String = ""
+    private var particleStagingBuffer: [SIMD4<Float>] = Array(repeating: .zero, count: SpriteOrbMetalShader.particleCapacity)
+
+    private init() {}
+
+    /// 返回当前真实物理球体屏幕坐标（供主面板与伴生卡片贴旁）
+    var visibleOrbCoreScreenFrame: NSRect? {
+        guard let panel, panel.isVisible else { return nil }
+        let base = SpriteOrbPhysicsGeometry.orbCoreFrame(fromPanelFrame: panel.frame, dockedSide: dockedSide)
+        return NSRect(
+            x: base.minX + physicsState.offsetX,
+            y: base.minY - physicsState.offsetY,
+            width: base.width,
+            height: base.height
+        )
+    }
+
+    var visibleHitScreenFrame: NSRect? {
+        guard let core = visibleOrbCoreScreenFrame else { return nil }
+        return core.insetBy(dx: -6, dy: -6)
+    }
+
+    func start(store: ClipboardStore) {
+        boundStore = store
+        guard !isStarted else {
+            syncPreferences(from: store)
+            updatePanelVisibility()
+            return
+        }
+        isStarted = true
+        syncPreferences(from: store)
+
+        store.$spriteOrbEnabled
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.updatePanelVisibility()
+            }
+            .store(in: &cancellables)
+
+        store.$spriteOrbStyle
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] style in
+                guard let self else { return }
+                self.currentStyle = style
+                self.physicsState.triggerStyleSwitch()
+                self.markInteractionActive()
+            }
+            .store(in: &cancellables)
+
+        store.$spriteOrbDockMode
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] mode in
+                guard let self else { return }
+                self.currentDockMode = mode
+                self.reanchorCurrentPosition(animated: true)
+            }
+            .store(in: &cancellables)
+
+        store.$spriteOrbProactiveNudgeEnabled
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] enabled in
+                if !enabled, self?.activeProactiveNudge != nil {
+                    self?.clearActiveProactiveNudge(shrink: true)
                 }
-                return side == .right ? 2.5 : -2.5
-            }()
-            let anchorX = baseAnchor.x + idleShiftX
-            let anchorY = baseAnchor.y
-            let orbCenter = CGPoint(x: anchorX + state.offsetX, y: anchorY + state.offsetY)
+            }
+            .store(in: &cancellables)
 
-            let accent = state.activeAccent(smartSuggestionActive: model.smartSuggestionActive)
-            let accentColor = accent.swiftUIColor
+        store.$screenSharePrivacyEnabled
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] enabled in
+                self?.panel?.sharingType = enabled ? .none : .readOnly
+            }
+            .store(in: &cancellables)
 
-            // 1. 二阶贝塞尔弧线流光粒子流入（从屏内侧飞向当前动态球心）
-            for p in state.inflowParticles where p.progress >= 0 && p.progress < 1 {
+        screenObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.reanchorCurrentPosition(animated: false)
+            }
+        }
+
+        // 绑定语音服务实时回调与伴生卡片动作回调
+        bindVoiceAndSparkCallbacks(store: store)
+        startProactiveNudgeTimer()
+        updatePanelVisibility()
+    }
+
+    func stop() {
+        nudgeCheckTimer?.invalidate()
+        nudgeCheckTimer = nil
+        glyphResetWorkItem?.cancel()
+        glyphResetWorkItem = nil
+        cancellables.removeAll()
+        if let screenObserver {
+            NotificationCenter.default.removeObserver(screenObserver)
+            self.screenObserver = nil
+        }
+        VoiceTodoCaptureService.shared.cancelListening()
+        metalView?.stopDisplayLink()
+        panel?.orderOut(nil)
+        isStarted = false
+    }
+
+    func setClipboardPanelVisible(_ visible: Bool) {
+        physicsInput.isClipboardPanelOpen = visible
+        if visible, activeProactiveNudge != nil {
+            activeProactiveNudge = nil
+            physicsInput.proactiveNudgeActive = false
+        }
+        refreshActiveMatrixGlyph()
+        if visible {
+            markInteractionActive()
+        }
+    }
+
+    /// 新剪贴板捕获时向球心发射 12 颗贝塞尔流光粒子
+    func notifyClipboardCaptured(itemType: ClipContentType, previewText: String?) {
+        guard isStarted, boundStore?.spriteOrbEnabled == true else { return }
+        let accent: SpriteOrbMoodAccent
+        let tempGlyph: SpriteOrbMatrixGlyph
+        if let text = previewText, TodoChecklistExtractor.hasActionableSingleTodoIntent(text) {
+            accent = .amber
+            tempGlyph = .todo
+        } else {
+            switch itemType {
+            case .text:
+                accent = .cobalt
+                tempGlyph = .clean
+            case .link:
+                accent = .emerald
+                tempGlyph = .link
+            case .image, .file:
+                accent = .cobalt
+                tempGlyph = .image
+            }
+        }
+
+        let incomingAngle: Double = {
+            switch dockedSide {
+            case .left: return 0.0
+            case .right: return .pi
+            case nil: return -.pi * 0.72
+            }
+        }()
+        physicsState.triggerCopyInflow(incomingAngle: incomingAngle, accent: accent)
+        if !physicsInput.smartSuggestionActive && !physicsInput.isClipboardPanelOpen && !physicsInput.voiceActive {
+            scheduleTemporaryGlyph(tempGlyph, duration: 1.35)
+        }
+        markInteractionActive()
+    }
+
+    /// 同步 ActionSpark 智能提醒卡片状态（传递 categoryKey 与 actionID）
+    func setSmartSuggestionState(active: Bool, categoryKey: String?, actionID: String? = nil) {
+        guard isStarted else { return }
+        if active && categoryKey == "proactive_nudge" {
+            physicsInput.proactiveNudgeActive = true
+            physicsInput.smartSuggestionActive = false
+            activeGlyph = .biomimeticBlink
+            markInteractionActive()
+            return
+        }
+
+        if !active {
+            activeProactiveNudge = nil
+            physicsInput.proactiveNudgeActive = false
+        }
+        physicsInput.smartSuggestionActive = active
+        if active {
+            switch categoryKey {
+            case "todo_capture":
+                physicsState.smartSuggestionAccent = .amber
+                activeGlyph = .todo
+            case "frequent_reuse", "security":
+                physicsState.smartSuggestionAccent = .emerald
+                activeGlyph = .clean
+            default:
+                physicsState.smartSuggestionAccent = .cobalt
+                if actionID?.contains("url") == true || actionID?.contains("link") == true || actionID?.contains("qr") == true {
+                    activeGlyph = .link
+                } else if categoryKey == "image" {
+                    activeGlyph = .image
+                } else {
+                    activeGlyph = .clean
+                }
+            }
+            markInteractionActive()
+        } else {
+            refreshActiveMatrixGlyph()
+        }
+    }
+
+    func triggerSuggestionAcceptedPulse() {
+        guard isStarted else { return }
+        activeProactiveNudge = nil
+        physicsInput.proactiveNudgeActive = false
+        physicsInput.smartSuggestionActive = false
+        physicsState.triggerAcceptedCelebration()
+        scheduleTemporaryGlyph(.done, duration: 1.0)
+        markInteractionActive()
+    }
+
+    func triggerSuggestionDismissedPulse() {
+        guard isStarted else { return }
+        activeProactiveNudge = nil
+        physicsInput.proactiveNudgeActive = false
+        physicsInput.smartSuggestionActive = false
+        physicsState.triggerDismissShrink()
+        refreshActiveMatrixGlyph()
+    }
+
+    /// 支持主动拟态待办推进：自动巡检或右键菜单「测试拟态待办推进提醒」
+    func evaluateAndTriggerProactiveNudgeIfNeeded(forceImmediate: Bool) {
+        guard isStarted,
+              let store = boundStore,
+              store.spriteOrbEnabled,
+              !store.minimalModeEnabled,
+              !ProcessInfo.processInfo.arguments.contains("--demo"),
+              let panel, panel.isVisible else {
+            return
+        }
+        if !forceImmediate {
+            guard store.spriteOrbProactiveNudgeEnabled else { return }
+            guard !physicsInput.isClipboardPanelOpen,
+                  !physicsInput.smartSuggestionActive,
+                  !physicsInput.voiceActive,
+                  activeProactiveNudge == nil,
+                  !ActionSparkController.shared.isOfferingInteractiveCard else {
+                return
+            }
+        }
+
+        let now = Date()
+        guard let candidate = ProactiveTodoNudgePlanner.selectNudgeCandidate(
+            from: store.items,
+            now: now,
+            lastGlobalNudgeAt: lastGlobalNudgeAt,
+            snoozedUntil: snoozedTodosUntil,
+            forceImmediate: forceImmediate
+        ) else {
+            if forceImmediate {
+                ActionSparkController.shared.presentTransientNotice(
+                    symbolName: "mic.fill",
+                    message: "暂无待推进待办 · 长按精灵说话记一条",
+                    duration: 2.2,
+                    in: store
+                )
+            }
+            return
+        }
+
+        presentProactiveNudge(candidate, now: now, in: store)
+    }
+
+    // MARK: - 绑定与调度
+
+    private func bindVoiceAndSparkCallbacks(store: ClipboardStore) {
+        let voice = VoiceTodoCaptureService.shared
+        voice.onAudioLevelChanged = { [weak self] level in
+            guard let self, self.physicsInput.voiceActive else { return }
+            self.physicsInput.audioLevel = level
+            let transcript = self.latestPartialTranscript.isEmpty ? "正在聆听，请说待办事项…" : self.latestPartialTranscript
+            ActionSparkController.shared.updateVoiceListeningState(
+                transcript: transcript,
+                isCancelling: self.physicsInput.voiceCancelSlide,
+                audioLevel: level
+            )
+        }
+        voice.onPartialTranscriptChanged = { [weak self] text in
+            guard let self, self.physicsInput.voiceActive else { return }
+            self.latestPartialTranscript = text
+            ActionSparkController.shared.updateVoiceListeningState(
+                transcript: text,
+                isCancelling: self.physicsInput.voiceCancelSlide,
+                audioLevel: self.physicsInput.audioLevel
+            )
+        }
+        voice.onPermissionDenied = { [weak self] message in
+            guard let self else { return }
+            self.arbiter.reset()
+            self.physicsInput.voiceActive = false
+            self.physicsInput.voiceCancelSlide = false
+            self.physicsInput.audioLevel = 0
+            self.physicsInput.chargeProgress = 0
+            self.refreshActiveMatrixGlyph()
+            ActionSparkController.shared.presentVoicePermissionNeeded(message: message, in: store)
+        }
+
+        ActionSparkController.shared.onOpenTodoListRequested = { [weak self] in
+            self?.onOpenTodoList?()
+        }
+        ActionSparkController.shared.onProactiveTodoCompleted = { [weak self, weak store] itemID in
+            guard let self, let store else { return }
+            if let item = store.items.first(where: { $0.id == itemID && $0.isPendingTodo }) {
+                store.toggleTodoCompletion(item)
+            }
+            self.activeProactiveNudge = nil
+            self.physicsInput.proactiveNudgeActive = false
+            self.physicsState.triggerAcceptedCelebration()
+            self.scheduleTemporaryGlyph(.done, duration: 1.0)
+            self.markInteractionActive()
+        }
+        ActionSparkController.shared.onProactiveTodoSnoozed = { [weak self] itemID in
+            guard let self else { return }
+            self.snoozedTodosUntil[itemID] = Date().addingTimeInterval(30 * 60)
+            self.clearActiveProactiveNudge(shrink: true)
+        }
+    }
+
+    private func startProactiveNudgeTimer() {
+        nudgeCheckTimer?.invalidate()
+        let timer = Timer(timeInterval: 90.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.evaluateAndTriggerProactiveNudgeIfNeeded(forceImmediate: false)
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        nudgeCheckTimer = timer
+    }
+
+    private func presentProactiveNudge(_ candidate: ProactiveTodoNudgeCandidate, now: Date, in store: ClipboardStore) {
+        lastGlobalNudgeAt = now
+        activeProactiveNudge = candidate
+        physicsInput.proactiveNudgeActive = true
+        physicsInput.nudgePeekOffsetX = {
+            switch dockedSide {
+            case .left: return 9.0
+            case .right: return -9.0
+            case nil: return 0.0
+            }
+        }()
+        activeGlyph = .biomimeticBlink
+        physicsState.triggerProactiveNudgePeek(accent: candidate.isUrgent ? .amber : .emerald)
+        markInteractionActive()
+        ActionSparkController.shared.presentProactiveTodoNudge(candidate: candidate, in: store)
+    }
+
+    private func clearActiveProactiveNudge(shrink: Bool) {
+        activeProactiveNudge = nil
+        physicsInput.proactiveNudgeActive = false
+        if shrink {
+            physicsState.triggerDismissShrink()
+        }
+        refreshActiveMatrixGlyph()
+    }
+
+    // MARK: - VSync 120Hz DisplayLink 主循环
+
+    private func stepAndRenderFrame(dt: Double) {
+        guard let panel, panel.isVisible, let metalView else { return }
+        let nowUptime = ProcessInfo.processInfo.systemUptime
+
+        // 1. 轮询检查长按蓄力与 0.36s 语音激活门槛（无需单独定时器，VSync 帧级精确唤醒）
+        if case .pressing = arbiter.phase {
+            let (activated, charge) = arbiter.checkLongPressActivation(atUptime: nowUptime)
+            physicsInput.chargeProgress = charge
+            if activated {
+                physicsInput.chargeProgress = 0
+                beginLongPressVoiceCapture()
+            }
+        } else {
+            physicsInput.chargeProgress = 0
+        }
+
+        // 2. 推进可打断的 120Hz 临界阻尼窗口吸边弹簧（k = 320, d = 32）
+        if let snapTarget = windowSnapTarget {
+            let safeDt = min(max(dt, 0.0005), 0.03)
+            let k = 320.0
+            let d = 32.0
+            let dx = Double(snapTarget.x - windowSnapPos.x)
+            let dy = Double(snapTarget.y - windowSnapPos.y)
+            let ax = dx * k - Double(windowSnapVel.dx) * d
+            let ay = dy * k - Double(windowSnapVel.dy) * d
+            windowSnapVel.dx += CGFloat(ax * safeDt)
+            windowSnapVel.dy += CGFloat(ay * safeDt)
+            windowSnapPos.x += windowSnapVel.dx * CGFloat(safeDt)
+            windowSnapPos.y += windowSnapVel.dy * CGFloat(safeDt)
+            panel.setFrameOrigin(windowSnapPos)
+
+            if hypot(dx, dy) < 0.3 && hypot(Double(windowSnapVel.dx), Double(windowSnapVel.dy)) < 5.0 {
+                panel.setFrameOrigin(snapTarget)
+                windowSnapPos = snapTarget
+                windowSnapVel = .zero
+                windowSnapTarget = nil
+            }
+        }
+
+        // 3. 在 VSync 回调中直接 O(1) 读取鼠标坐标计算近场偏移，零全局监听器与 Task 分配
+        let panelFrame = panel.frame
+        let baseAnchor = SpriteOrbPhysicsGeometry.anchorInPanel(for: dockedSide)
+        let mouseScreen = NSEvent.mouseLocation
+        let canvasX = mouseScreen.x - panelFrame.minX
+        let canvasY = panelFrame.height - (mouseScreen.y - panelFrame.minY)
+        let pdx = canvasX - baseAnchor.x
+        let pdy = canvasY - baseAnchor.y
+        let pointerDist = hypot(pdx, pdy)
+        let nearField = pointerDist < 170.0
+        physicsInput.pointerOffsetFromAnchor = (pointerDist < 260.0) ? CGPoint(x: pdx, y: pdy) : nil
+
+        // 4. 空闲柔隐与自适应 ProMotion 帧率判定
+        let busy = arbiter.isPressingOrRecording
+            || physicsInput.isDragging
+            || physicsInput.isHoveredOnCore
+            || physicsInput.isDragTargeted
+            || physicsInput.isClipboardPanelOpen
+            || physicsInput.smartSuggestionActive
+            || physicsInput.proactiveNudgeActive
+            || physicsInput.voiceActive
+            || pointerDist < 110.0
+            || windowSnapTarget != nil
+
+        if busy {
+            lastActivityUptime = nowUptime
+            isIdleResting = false
+        } else if currentDockMode == .edgeSnap && (nowUptime - lastActivityUptime) > 2.8 {
+            isIdleResting = true
+        } else {
+            isIdleResting = false
+        }
+
+        let highFreq = nearField
+            || busy
+            || physicsState.hasActiveEffects
+            || physicsInput.chargeProgress > 0.001
+        metalView.setProMotionHighRate(highFreq)
+
+        // 5. 推进物理弹簧与粒子状态
+        physicsState.step(dt: dt, input: physicsInput, idleRestingTarget: isIdleResting)
+
+        // 拖拽松手后瞬时速度仅采样一帧防残留
+        if !physicsInput.isDragging {
+            physicsInput.dragStepVelocity = .zero
+        }
+
+        // 6. 组装 16 字节对齐 GPU Uniform 并单 Pass 绘制
+        let idleShiftX: CGFloat = {
+            guard currentDockMode == .edgeSnap, let side = dockedSide else { return 0 }
+            return (side == .right ? 2.5 : -2.5) * CGFloat(physicsState.idleRestBlend)
+        }()
+        let anchorX = Float(baseAnchor.x + idleShiftX)
+        let anchorY = Float(baseAnchor.y)
+        let orbCenterX = anchorX + Float(physicsState.offsetX)
+        let orbCenterY = anchorY + Float(physicsState.offsetY)
+
+        let speed = hypot(physicsState.vx, physicsState.vy)
+        let stretchAmt = Float(min(0.22, speed / 1500.0))
+        let velAngle = Float(atan2(physicsState.vy, physicsState.vx))
+        let overallOpacity = Float(1.0 - physicsState.idleRestBlend * 0.14)
+
+        let activeAccent = physicsState.activeAccent(
+            smartSuggestionActive: physicsInput.smartSuggestionActive,
+            proactiveNudgeActive: physicsInput.proactiveNudgeActive
+        )
+        let rgb = activeAccent.rgbTuple
+
+        let styleIdx: UInt32 = {
+            switch currentStyle {
+            case .prismDew: return 0
+            case .matrixCrown: return 1
+            case .organicJade: return 2
+            case .auroraRibbon: return 3
+            }
+        }()
+        let isDark: UInt32 = (metalView.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua) ? 1 : 0
+
+        var stateBits: UInt32 = 0
+        if physicsInput.isClipboardPanelOpen { stateBits |= 1 << 0 }
+        if physicsInput.isDragTargeted { stateBits |= 1 << 1 }
+        if physicsInput.smartSuggestionActive { stateBits |= 1 << 2 }
+        if physicsInput.proactiveNudgeActive { stateBits |= 1 << 3 }
+
+        // 填充最多 3 条波纹 + 24 颗粒子（0..<12 inflow, 12..<24 sparks）
+        var r0 = SIMD4<Float>.zero
+        var r1 = SIMD4<Float>.zero
+        var r2 = SIMD4<Float>.zero
+        for (i, rp) in physicsState.ripples.prefix(3).enumerated() {
+            let packedA = (rp.accent == .emerald) ? -Float(rp.alpha) : Float(rp.alpha)
+            let v = SIMD4<Float>(anchorX + Float(rp.offsetX), anchorY + Float(rp.offsetY), Float(rp.radius), packedA)
+            if i == 0 { r0 = v }
+            else if i == 1 { r1 = v }
+            else { r2 = v }
+        }
+
+        for i in 0..<SpriteOrbMetalShader.particleCapacity {
+            particleStagingBuffer[i] = .zero
+        }
+        for (idx, p) in physicsState.inflowParticles.prefix(12).enumerated() {
+            if p.progress >= 0 && p.progress < 1 {
                 let t = p.progress
                 let u = 1.0 - t
-                let sx = anchorX + p.startOffsetX
-                let sy = anchorY + p.startOffsetY
-                let cx = anchorX + p.ctrlOffsetX
-                let cy = anchorY + p.ctrlOffsetY
-                let px = u * u * sx + 2.0 * u * t * cx + t * t * orbCenter.x
-                let py = u * u * sy + 2.0 * u * t * cy + t * t * orbCenter.y
+                let sx = Double(anchorX) + p.startOffsetX
+                let sy = Double(anchorY) + p.startOffsetY
+                let cx = Double(anchorX) + p.ctrlOffsetX
+                let cy = Double(anchorY) + p.ctrlOffsetY
+                let px = u * u * sx + 2.0 * u * t * cx + t * t * Double(orbCenterX)
+                let py = u * u * sy + 2.0 * u * t * cy + t * t * Double(orbCenterY)
                 let r = p.size * (0.6 + 0.5 * u)
-                let alpha = min(1.0, t * 4.0) * (0.35 + 0.65 * u)
-                let pColor = p.isWhite ? Color.white : p.accent.swiftUIColor
-                ctx.fill(
-                    Path(ellipseIn: CGRect(x: px - r, y: py - r, width: r * 2, height: r * 2)),
-                    with: .color(pColor.opacity(alpha))
-                )
+                let a = min(1.0, t * 4.0) * (0.35 + 0.65 * u)
+                let wVal = p.isWhite ? -Float(a) : Float(a)
+                particleStagingBuffer[idx] = SIMD4<Float>(Float(px), Float(py), Float(r), wVal)
             }
+        }
+        for (idx, sp) in physicsState.sparks.prefix(12).enumerated() {
+            let px = anchorX + Float(sp.offsetX)
+            let py = anchorY + Float(sp.offsetY)
+            let r = Float(2.2 * sp.life)
+            let wVal = sp.isWhite ? -Float(sp.life) : Float(sp.life)
+            particleStagingBuffer[12 + idx] = SIMD4<Float>(px, py, r, wVal)
+        }
 
-            // 2. 采纳成功火花
-            for sp in state.sparks {
-                let sx = anchorX + sp.offsetX
-                let sy = anchorY + sp.offsetY
-                let r = 2.2 * sp.life
-                let sColor = sp.isWhite ? Color.white : SpriteOrbMoodAccent.emerald.swiftUIColor
-                ctx.fill(
-                    Path(ellipseIn: CGRect(x: sx - r, y: sy - r, width: r * 2, height: r * 2)),
-                    with: .color(sColor.opacity(sp.life))
-                )
+        let uniforms = SpriteOrbMetalUniforms(
+            dims: SIMD4<Float>(Float(SpriteOrbPhysicsGeometry.panelDimension), orbCenterX, orbCenterY, Float(physicsState.breathScale)),
+            motion: SIMD4<Float>(Float(physicsState.time), Float(physicsState.tensionPull), Float(physicsState.tensionAngle), Float(physicsState.capillaryAmp)),
+            states: SIMD4<Float>(Float(physicsState.hoverBlend), Float(physicsState.pressBlend), Float(physicsState.vortexBlend), Float(physicsState.crownAngle)),
+            stretch: SIMD4<Float>(velAngle, stretchAmt, overallOpacity, 0),
+            accentRGB: SIMD4<Float>(rgb.0, rgb.1, rgb.2, 1.0),
+            voiceAndNudge: SIMD4<Float>(Float(physicsState.smoothedAudioLevel), Float(physicsState.voiceActiveBlend), Float(physicsState.cancelSlideBlend), Float(physicsInput.chargeProgress)),
+            flags: SIMD4<UInt32>(styleIdx, isDark, activeGlyph.packedShaderMask, stateBits),
+            extra: SIMD4<Float>(Float(physicsState.breathWave), physicsInput.proactiveNudgeActive ? 1.0 : 0.0, 0, 0),
+            ripple0: r0,
+            ripple1: r1,
+            ripple2: r2
+        )
+
+        metalView.renderFrame(uniforms: uniforms, particles: particleStagingBuffer)
+    }
+
+    // MARK: - 长按语音键入待办闭环
+
+    private func beginLongPressVoiceCapture() {
+        guard let store = boundStore else { return }
+        if physicsInput.isClipboardPanelOpen {
+            // 如果主面板正开着，先触发收起防止遮挡语音卡片
+            if let orbCore = visibleOrbCoreScreenFrame {
+                onToggleClipboardPanel?(orbCore)
             }
+        }
+        activeProactiveNudge = nil
+        physicsInput.proactiveNudgeActive = false
+        physicsInput.smartSuggestionActive = false
+        physicsInput.voiceActive = true
+        physicsInput.voiceCancelSlide = false
+        physicsInput.audioLevel = 0.05
+        latestPartialTranscript = ""
+        activeGlyph = .voiceEqualizer
+        physicsState.triggerVoiceWakePulse()
+        TactileFeedbackEngine.shared.perform(.forceTouchPop)
+        markInteractionActive()
 
-            // 3. 扩散波纹
-            for rp in state.ripples {
-                let rx = anchorX + rp.offsetX
-                let ry = anchorY + rp.offsetY
-                let rect = CGRect(x: rx - rp.radius, y: ry - rp.radius, width: rp.radius * 2, height: rp.radius * 2)
-                ctx.stroke(
-                    Path(ellipseIn: rect),
-                    with: .color(rp.accent.swiftUIColor.opacity(max(0, rp.alpha * 0.55))),
-                    lineWidth: 1.5
-                )
-            }
+        ActionSparkController.shared.presentVoiceListening(
+            transcript: "正在准备麦克风…",
+            isCancelling: false,
+            audioLevel: 0.05,
+            in: store
+        )
 
-            // 4. 外部拖入磁吸热点虚线环
-            if model.isDragTargeted {
-                let hotR: CGFloat = 41
-                let hotRect = CGRect(x: orbCenter.x - hotR, y: orbCenter.y - hotR, width: hotR * 2, height: hotR * 2)
-                ctx.stroke(
-                    Path(ellipseIn: hotRect),
-                    with: .color(SpriteOrbMoodAccent.emerald.swiftUIColor.opacity(0.92)),
-                    style: StrokeStyle(lineWidth: 1.6, dash: [4, 4], dashPhase: -CGFloat(state.time * 24))
-                )
-            }
-
-            // 5. 剪贴板展开态 / 智能建议待命呼应弧环
-            let breathWave = state.breathWave
-            let dragScaleBoost: Double = model.isDragTargeted ? 0.14 : 0.0
-            var scaleDouble = 1.0 + breathWave * 0.08 + state.scaleImpulse
-            scaleDouble += dragScaleBoost + state.hoverBlend * 0.05 - state.pressBlend * 0.09
-            let breathScale = CGFloat(scaleDouble)
-            if model.isClipboardPanelOpen {
-                let openR = 29.0 * breathScale
-                let openRect = CGRect(x: orbCenter.x - openR, y: orbCenter.y - openR, width: openR * 2, height: openR * 2)
-                ctx.stroke(
-                    Path(ellipseIn: openRect),
-                    with: .color(SpriteOrbMoodAccent.cobalt.swiftUIColor.opacity(isDark ? 0.72 : 0.56)),
-                    lineWidth: 1.4
-                )
-            } else if model.smartSuggestionActive {
-                let ringPulse = 0.45 + 0.45 * sin(state.time * 4.2)
-                let ringR = 28.5 * breathScale + CGFloat(ringPulse) * 2.0
-                let ringRect = CGRect(x: orbCenter.x - ringR, y: orbCenter.y - ringR, width: ringR * 2, height: ringR * 2)
-                ctx.stroke(
-                    Path(ellipseIn: ringRect),
-                    with: .color(accentColor.opacity(0.30 + 0.28 * ringPulse)),
-                    lineWidth: 1.4
-                )
-            }
-
-            // 6. 球体主变换：速度矢量果冻拉伸（风格 2 保持工业刚性） + 呼吸缩放
-            let speed = hypot(state.vx, state.vy)
-            let stretchAmt = CGFloat(min(0.22, speed / 1500.0))
-            let velAngle = atan2(state.vy, state.vx)
-
-            ctx.drawLayer { orbCtx in
-                orbCtx.translateBy(x: orbCenter.x, y: orbCenter.y)
-                if stretchAmt > 0.008 && model.style != .matrixCrown {
-                    orbCtx.rotate(by: .radians(velAngle))
-                    orbCtx.scaleBy(x: 1.0 + stretchAmt, y: 1.0 - stretchAmt * 0.55)
-                    orbCtx.rotate(by: .radians(-velAngle))
+        let session = UUID()
+        voiceSessionID = session
+        Task { @MainActor [weak self] in
+            let ok = await VoiceTodoCaptureService.shared.beginListening()
+            guard let self, self.voiceSessionID == session else {
+                if ok {
+                    VoiceTodoCaptureService.shared.cancelListening()
                 }
-                orbCtx.scaleBy(x: breathScale, y: breathScale)
-
-                switch model.style {
-                case .prismDew:
-                    drawPrismDew(ctx: &orbCtx, state: state, breathWave: breathWave, isDark: isDark, accent: accentColor)
-                case .matrixCrown:
-                    drawMatrixCrown(ctx: &orbCtx, state: state, breathWave: breathWave, isDark: isDark, accent: accentColor, glyph: model.activeMatrixGlyph)
-                case .organicJade:
-                    drawOrganicJade(ctx: &orbCtx, state: state, breathWave: breathWave, isDark: isDark, accent: accentColor, panelOrSmart: model.isClipboardPanelOpen || model.smartSuggestionActive)
-                case .auroraRibbon:
-                    drawAuroraRibbon(ctx: &orbCtx, state: state, breathWave: breathWave, isDark: isDark, accent: accent)
-                }
+                return
+            }
+            if ok {
+                let text = self.latestPartialTranscript.isEmpty ? "请说出待办事项（松手保存）" : self.latestPartialTranscript
+                ActionSparkController.shared.updateVoiceListeningState(
+                    transcript: text,
+                    isCancelling: self.physicsInput.voiceCancelSlide,
+                    audioLevel: self.physicsInput.audioLevel
+                )
             }
         }
     }
 
-    // MARK: - 闭合二次中点样条（复刻原型 drawClosedSpline）
+    private func finishAndCommitVoiceCapture() {
+        guard let store = boundStore else { return }
+        voiceSessionID = UUID()
+        physicsInput.voiceActive = false
+        physicsInput.voiceCancelSlide = false
+        physicsInput.audioLevel = 0
+        refreshActiveMatrixGlyph()
+        markInteractionActive()
 
-    private func closedSplinePath(through pts: [CGPoint]) -> Path {
-        var path = Path()
-        let n = pts.count
-        guard n >= 3 else { return path }
-        let firstMid = CGPoint(x: (pts[n - 1].x + pts[0].x) * 0.5, y: (pts[n - 1].y + pts[0].y) * 0.5)
-        path.move(to: firstMid)
-        for i in 0..<n {
-            let next = pts[(i + 1) % n]
-            let mid = CGPoint(x: (pts[i].x + next.x) * 0.5, y: (pts[i].y + next.y) * 0.5)
-            path.addQuadCurve(to: mid, control: pts[i])
-        }
-        path.closeSubpath()
-        return path
-    }
-
-    // MARK: - 风格 1：光学色散露珠 (28 点张力凸起 + 毛细波纹 + Leica 3 层 RGB 色散)
-
-    private func drawPrismDew(
-        ctx: inout GraphicsContext,
-        state: SpriteOrbPhysicsState,
-        breathWave: Double,
-        isDark: Bool,
-        accent: Color
-    ) {
-        let baseR = 25.0
-        let count = 28
-        var pts: [CGPoint] = []
-        pts.reserveCapacity(count)
-
-        for i in 0..<count {
-            let a = (Double(i) / Double(count)) * .pi * 2.0
-            var da = a - state.tensionAngle
-            while da > .pi { da -= .pi * 2.0 }
-            while da < -.pi { da += .pi * 2.0 }
-            let pull = max(0.0, cos(da))
-            let bulge = pow(pull, 3.0) * state.tensionPull * 5.2
-            let capRipple = sin(a * 5.0 + state.time * 14.0) * state.capillaryAmp * 1.8
-            let r = baseR + bulge + capRipple
-            pts.append(CGPoint(x: cos(a) * r, y: sin(a) * r))
-        }
-
-        let spline = closedSplinePath(through: pts)
-
-        // 透镜聚焦底影
-        ctx.drawLayer { shadowCtx in
-            shadowCtx.addFilter(
-                .shadow(
-                    color: isDark ? Color.black.opacity(0.55) : Color(red: 0.059, green: 0.090, blue: 0.165).opacity(0.18),
-                    radius: 8 + breathWave * 1.8,
-                    x: 0,
-                    y: 5 + breathWave * 1.2
-                )
-            )
-            shadowCtx.fill(
-                spline,
-                with: .color(isDark ? Color.white.opacity(0.06) : Color.white.opacity(0.42))
-            )
-        }
-
-        // 折射主体、流动焦散水光纹、弯月镜面高光与底部反光弧
-        ctx.drawLayer { bodyCtx in
-            bodyCtx.clip(to: spline)
-
-            let lensGrad = isDark
-                ? Gradient(stops: [
-                    .init(color: Color.white.opacity(0.22), location: 0.0),
-                    .init(color: Color(red: 0.58, green: 0.77, blue: 1.0).opacity(0.08), location: 0.55),
-                    .init(color: Color(red: 0.06, green: 0.09, blue: 0.16).opacity(0.35), location: 1.0)
-                ])
-                : Gradient(stops: [
-                    .init(color: Color.white.opacity(0.92), location: 0.0),
-                    .init(color: Color(red: 0.88, green: 0.95, blue: 1.0).opacity(0.38), location: 0.65),
-                    .init(color: Color(red: 0.73, green: 0.90, blue: 0.99).opacity(0.56), location: 1.0)
-                ])
-            bodyCtx.fill(
-                Path(CGRect(x: -36, y: -36, width: 72, height: 72)),
-                with: .radialGradient(lensGrad, center: CGPoint(x: -8, y: -9), startRadius: 2, endRadius: 30)
-            )
-
-            // 内部流动双层焦散水光纹
-            let c1x = cos(state.time * 1.2) * 8.0
-            let c1y = sin(state.time * 1.5) * 6.0
-            bodyCtx.fill(
-                Path(CGRect(x: -34, y: -34, width: 68, height: 68)),
-                with: .radialGradient(
-                    Gradient(stops: [
-                        .init(color: accent.opacity(0.40), location: 0.0),
-                        .init(color: Color(red: 0.22, green: 0.74, blue: 0.97).opacity(0.18), location: 0.6),
-                        .init(color: Color.white.opacity(0.0), location: 1.0)
-                    ]),
-                    center: CGPoint(x: c1x, y: c1y),
-                    startRadius: 1,
-                    endRadius: 17
-                )
-            )
-
-            // 顶部斜置弯月高光（-0.38 rad）
-            let specCenter = CGPoint(x: -6, y: -11)
-            let rawSpec = Path(ellipseIn: CGRect(x: -13, y: -5.5, width: 26, height: 11))
-            let specTransform = CGAffineTransform(translationX: specCenter.x, y: specCenter.y).rotated(by: -0.38)
-            bodyCtx.fill(
-                rawSpec.applying(specTransform),
-                with: .color(isDark ? Color.white.opacity(0.34) : Color.white.opacity(0.92))
-            )
-
-            // 底部柔和反光弧
-            var bottomArc = Path()
-            bottomArc.addArc(center: .zero, radius: 21, startAngle: .radians(0.45), endAngle: .radians(2.2), clockwise: false)
-            bodyCtx.stroke(
-                bottomArc,
-                with: .color(accent.opacity(0.33)),
-                style: StrokeStyle(lineWidth: 2.2, lineCap: .round)
-            )
-        }
-
-        // Leica 棱镜 RGB 错位极细色散边界
-        let rims: [(dx: CGFloat, dy: CGFloat, color: Color)] = [
-            (-0.9, -0.6, Color(red: 0.024, green: 0.714, blue: 0.831).opacity(0.52)),
-            (0.9, 0.6, Color(red: 0.957, green: 0.247, blue: 0.369).opacity(0.40)),
-            (0.0, 0.0, isDark ? Color.white.opacity(0.55) : Color.white.opacity(0.96))
-        ]
-        for rim in rims {
-            ctx.drawLayer { rimCtx in
-                rimCtx.translateBy(x: rim.dx, y: rim.dy)
-                rimCtx.stroke(spline, with: .color(rim.color), lineWidth: 1.0)
-            }
-        }
-    }
-
-    // MARK: - 风格 2：精密点阵表冠 (24 齿旋转刻度 + 追光信号指标点 + 5×5 OLED 像素窗)
-
-    private func drawMatrixCrown(
-        ctx: inout GraphicsContext,
-        state: SpriteOrbPhysicsState,
-        breathWave: Double,
-        isDark: Bool,
-        accent: Color,
-        glyph: SpriteOrbMatrixGlyph
-    ) {
-        let rDial: CGFloat = 25.0
-        let dialCircle = Path(ellipseIn: CGRect(x: -rDial, y: -rDial, width: rDial * 2, height: rDial * 2))
-
-        // 金属表壳落影
-        ctx.drawLayer { shadowCtx in
-            shadowCtx.addFilter(
-                .shadow(
-                    color: isDark ? Color.black.opacity(0.62) : Color(red: 0.059, green: 0.090, blue: 0.165).opacity(0.22),
-                    radius: 8 + breathWave * 1.6,
-                    x: 0,
-                    y: 5 + breathWave * 1.0
-                )
-            )
-            shadowCtx.fill(
-                dialCircle,
-                with: .color(isDark ? Color(red: 0.090, green: 0.102, blue: 0.129) : Color(red: 0.957, green: 0.965, blue: 0.976))
-            )
-        }
-
-        // 外盘金属线性渐变与细框
-        let metalGrad = isDark
-            ? Gradient(colors: [Color(red: 0.165, green: 0.188, blue: 0.235), Color(red: 0.078, green: 0.090, blue: 0.114)])
-            : Gradient(colors: [.white, Color(red: 0.863, green: 0.886, blue: 0.925)])
-        ctx.fill(
-            dialCircle,
-            with: .linearGradient(metalGrad, startPoint: CGPoint(x: -rDial, y: -rDial), endPoint: CGPoint(x: rDial, y: rDial))
-        )
-        ctx.stroke(
-            dialCircle,
-            with: .color(isDark ? Color.white.opacity(0.16) : Color(red: 0.773, green: 0.808, blue: 0.859)),
-            lineWidth: 1.1
-        )
-
-        // 旋转 24 齿精密刻度 + 追光指标圆点
-        ctx.drawLayer { crownCtx in
-            crownCtx.rotate(by: .radians(state.crownAngle))
-            for i in 0..<24 {
-                let ang = (Double(i) / 24.0) * .pi * 2.0
-                let isMajor = (i % 6 == 0)
-                let r1 = isMajor ? 20.5 : 21.8
-                let r2 = 23.6
-                var tick = Path()
-                tick.move(to: CGPoint(x: cos(ang) * r1, y: sin(ang) * r1))
-                tick.addLine(to: CGPoint(x: cos(ang) * r2, y: sin(ang) * r2))
-                crownCtx.stroke(
-                    tick,
-                    with: .color(isDark ? Color.white.opacity(0.22) : Color(red: 0.059, green: 0.090, blue: 0.165).opacity(0.24)),
-                    lineWidth: isMajor ? 1.2 : 0.8
-                )
-            }
-            // 正对 0° 方向追随鼠标的高对比指示圆点
-            crownCtx.fill(
-                Path(ellipseIn: CGRect(x: 21.2 - 2.3, y: -2.3, width: 4.6, height: 4.6)),
-                with: .color(accent)
-            )
-        }
-
-        // 中心深墨微凹 OLED 视窗
-        let oledCircle = Path(ellipseIn: CGRect(x: -15.5, y: -15.5, width: 31, height: 31))
-        ctx.fill(oledCircle, with: .color(isDark ? Color(red: 0.039, green: 0.047, blue: 0.063) : Color(red: 0.067, green: 0.094, blue: 0.153)))
-        ctx.stroke(
-            oledCircle,
-            with: .color(isDark ? Color.white.opacity(0.10) : Color(red: 0.059, green: 0.090, blue: 0.165).opacity(0.18)),
-            lineWidth: 0.8
-        )
-
-        // 5×5 LED 精密像素点阵
-        let pat = glyph.bitmask25
-        let step = 4.0
-        for row in 0..<5 {
-            for col in 0..<5 {
-                let dx = Double(col - 2) * step
-                let dy = Double(row - 2) * step
-                let distFromCenter = hypot(Double(col - 2), Double(row - 2))
-                let idx = row * 5 + col
-                if let pat {
-                    let lit = (pat[idx] == 1)
-                    let r = lit ? (1.28 + sin(state.time * 4.0 - distFromCenter) * 0.16) : 0.75
-                    let dotColor = lit ? accent : Color.white.opacity(0.12)
-                    ctx.fill(
-                        Path(ellipseIn: CGRect(x: dx - r, y: dy - r, width: r * 2, height: r * 2)),
-                        with: .color(dotColor)
-                    )
-                } else {
-                    let wave = sin(state.time * 2.5 - distFromCenter * 1.1)
-                    let lum = max(0.14, 0.42 + wave * 0.42)
-                    let r = 1.0 + max(0.0, wave) * 0.45
-                    let dotColor = (col == 2 && row == 2) ? accent : Color(red: 0.973, green: 0.980, blue: 0.988).opacity(lum)
-                    ctx.fill(
-                        Path(ellipseIn: CGRect(x: dx - r, y: dy - r, width: r * 2, height: r * 2)),
-                        with: .color(dotColor)
-                    )
-                }
-            }
-        }
-    }
-
-    // MARK: - 风格 3：活体有机软玉 (22 点卵石慢蠕自呼吸 + 羊脂白玉/墨青玉 + 内蕴柔雾)
-
-    private func drawOrganicJade(
-        ctx: inout GraphicsContext,
-        state: SpriteOrbPhysicsState,
-        breathWave: Double,
-        isDark: Bool,
-        accent: Color,
-        panelOrSmart: Bool
-    ) {
-        let count = 22
-        let baseR = 24.5
-        var pts: [CGPoint] = []
-        pts.reserveCapacity(count)
-
-        for i in 0..<count {
-            let a = (Double(i) / Double(count)) * .pi * 2.0
-            let organic =
-                sin(2.0 * a + state.time * 1.25) * 1.7 +
-                cos(3.0 * a - state.time * 0.95) * 1.25 +
-                sin(4.0 * a + state.time * 0.7) * 0.6
-            var da = a - state.tensionAngle
-            while da > .pi { da -= .pi * 2.0 }
-            while da < -.pi { da += .pi * 2.0 }
-            let lean = max(0.0, cos(da)) * state.tensionPull * 4.2
-            let cap = sin(a * 3.0 + state.time * 10.0) * state.capillaryAmp * 1.5
-            let r = baseR + organic + lean + cap
-            pts.append(CGPoint(x: cos(a) * r, y: sin(a) * r))
-        }
-
-        let jadePath = closedSplinePath(through: pts)
-
-        // 温润陶瓷柔影
-        ctx.drawLayer { shadowCtx in
-            shadowCtx.addFilter(
-                .shadow(
-                    color: isDark ? Color.black.opacity(0.56) : Color(red: 0.059, green: 0.090, blue: 0.165).opacity(0.16),
-                    radius: 9 + breathWave * 2.0,
-                    x: 0,
-                    y: 4.5 + breathWave * 1.2
-                )
-            )
-            shadowCtx.fill(
-                jadePath,
-                with: .color(isDark ? Color(red: 0.090, green: 0.125, blue: 0.133) : Color(red: 0.973, green: 0.976, blue: 0.961))
-            )
-        }
-
-        // 羊脂玉 / 墨青玉主体 + 内蕴呼吸柔雾 + 哑光月牙
-        ctx.drawLayer { jadeCtx in
-            jadeCtx.clip(to: jadePath)
-
-            let bgColors: [Color] = isDark
-                ? [Color(red: 0.165, green: 0.212, blue: 0.224), Color(red: 0.067, green: 0.090, blue: 0.098)]
-                : [.white, Color(red: 0.902, green: 0.929, blue: 0.910)]
-            jadeCtx.fill(
-                Path(CGRect(x: -38, y: -38, width: 76, height: 76)),
-                with: .radialGradient(Gradient(colors: bgColors), center: CGPoint(x: -8, y: -8), startRadius: 2, endRadius: 30)
-            )
-
-            let jx = cos(state.time * 0.9) * 6.0
-            let jy = sin(state.time * 1.1) * 5.0
-            let mistColor: Color = panelOrSmart
-                ? accent
-                : (isDark ? Color(red: 0.204, green: 0.827, blue: 0.600) : SpriteOrbMoodAccent.emerald.swiftUIColor)
-            jadeCtx.fill(
-                Path(CGRect(x: -38, y: -38, width: 76, height: 76)),
-                with: .radialGradient(
-                    Gradient(colors: [mistColor.opacity(isDark ? 0.44 : 0.28), mistColor.opacity(0.0)]),
-                    center: CGPoint(x: jx, y: jy),
-                    startRadius: 1,
-                    endRadius: 20
-                )
-            )
-
-            // 柔哑陶瓷月牙光斑（-0.35 rad）
-            let specPath = Path(ellipseIn: CGRect(x: -11, y: -4.2, width: 22, height: 8.4))
-                .applying(CGAffineTransform(translationX: -6, y: -12).rotated(by: -0.35))
-            jadeCtx.fill(
-                specPath,
-                with: .color(isDark ? Color.white.opacity(0.16) : Color.white.opacity(0.88))
-            )
-        }
-
-        ctx.stroke(
-            jadePath,
-            with: .color(isDark ? Color.white.opacity(0.18) : Color.white.opacity(0.92)),
-            lineWidth: 1.05
-        )
-    }
-
-    // MARK: - 风格 4：无框极光丝灵 (去边界 4 层 3D 李萨如光绸 + 半透光纱 + 6 颗星核微粒簇)
-
-    private func drawAuroraRibbon(
-        ctx: inout GraphicsContext,
-        state: SpriteOrbPhysicsState,
-        breathWave: Double,
-        isDark: Bool,
-        accent: SpriteOrbMoodAccent
-    ) {
-        let accentColor = accent.swiftUIColor
-        let pal: [Color] = isDark
-            ? [
-                accentColor,
-                Color(red: 0.220, green: 0.741, blue: 0.973),
-                Color(red: 0.506, green: 0.549, blue: 0.973),
-                Color(red: 0.204, green: 0.827, blue: 0.600)
-            ]
-            : [
-                accentColor,
-                Color(red: 0.008, green: 0.518, blue: 0.780),
-                Color(red: 0.310, green: 0.275, blue: 0.898),
-                Color(red: 0.055, green: 0.647, blue: 0.914)
-            ]
-
-        // 极微底层柔晕，彻底无外框
-        let auraR = 32.0 + breathWave * 4.0
-        ctx.fill(
-            Path(ellipseIn: CGRect(x: -34, y: -34, width: 68, height: 68)),
-            with: .radialGradient(
-                Gradient(colors: [accentColor.opacity(isDark ? 0.20 : 0.13), accentColor.opacity(0.0)]),
-                center: .zero,
-                startRadius: 2,
-                endRadius: auraR
-            )
-        )
-
-        let amp = (19.0 + breathWave * 3.8 + state.hoverBlend * 3.5) * (1.0 - state.vortexBlend * 0.25)
-        let speedBoost = 1.0 + state.hoverBlend * 0.7 + state.vortexBlend * 1.4
-        let speedT = state.time * 1.35 * speedBoost
-
-        for rIdx in 0..<4 {
-            let dir = (rIdx % 2 == 0) ? 0.42 : -0.34
-            let rot = Double(rIdx) * 0.78 + speedT * dir
-            let tiltY = 0.46 + 0.16 * sin(speedT * 0.9 + Double(rIdx))
-
-            ctx.drawLayer { rCtx in
-                rCtx.rotate(by: .radians(rot))
-                var rPath = Path()
-                let steps = 42
-                for s in 0...steps {
-                    let th = (Double(s) / Double(steps)) * .pi * 2.0
-                    let wave = sin(th * 2.0 + speedT * 1.8 + Double(rIdx)) * 3.2
-                    let x = cos(th) * (amp + wave)
-                    let y = sin(th) * (amp * tiltY + wave * 0.5)
-                    let pt = CGPoint(x: x, y: y)
-                    if s == 0 {
-                        rPath.move(to: pt)
-                    } else {
-                        rPath.addLine(to: pt)
+        Task { @MainActor [weak self] in
+            let result = await VoiceTodoCaptureService.shared.finishListeningAndCommit()
+            guard let self else { return }
+            switch result {
+            case .committed(let todoItems, _):
+                var insertedCount = 0
+                for body in todoItems {
+                    if store.captureQuickTodo(body: body, alias: nil, copyToClipboard: false) {
+                        insertedCount += 1
                     }
                 }
-                rPath.closeSubpath()
+                if insertedCount > 0 {
+                    TactileFeedbackEngine.shared.perform(.magicTransform)
+                    self.physicsState.triggerAcceptedCelebration()
+                    self.scheduleTemporaryGlyph(.done, duration: 1.2)
+                    ActionSparkController.shared.presentVoiceCommitted(
+                        count: insertedCount,
+                        summary: todoItems[0],
+                        in: store
+                    )
+                } else {
+                    ActionSparkController.shared.dismiss()
+                }
 
-                let strokeOpacity = (isDark ? 0.68 : 0.72) + Double(rIdx) * 0.06
-                rCtx.stroke(
-                    rPath,
-                    with: .color(pal[rIdx].opacity(strokeOpacity)),
-                    lineWidth: rIdx == 0 ? 2.4 : 1.75
+            case .empty:
+                self.physicsState.triggerDismissShrink()
+                ActionSparkController.shared.presentTransientNotice(
+                    symbolName: "waveform",
+                    message: "未识别到清晰语音待办",
+                    duration: 1.4,
+                    in: store
                 )
-                rCtx.fill(
-                    rPath,
-                    with: .color(pal[rIdx].opacity(isDark ? 0.08 : 0.06))
+
+            case .failed(let msg):
+                self.physicsState.triggerDismissShrink()
+                ActionSparkController.shared.presentTransientNotice(
+                    symbolName: "exclamationmark.triangle",
+                    message: msg,
+                    duration: 1.8,
+                    in: store
                 )
             }
         }
+    }
 
-        // 中央 6 颗错速星核微粒簇
-        for d in 0..<6 {
-            let ang = state.time * (1.2 + Double(d) * 0.25) + Double(d) * 1.05
-            let dist = 5.0 + sin(state.time * 2.2 + Double(d)) * 3.5
-            let px = cos(ang) * dist
-            let py = sin(ang) * dist
-            let color = (d % 2 == 0) ? Color.white : accentColor
-            ctx.fill(
-                Path(ellipseIn: CGRect(x: px - 1.35, y: py - 1.35, width: 2.7, height: 2.7)),
-                with: .color(color.opacity(0.85))
+    private func cancelVoiceCapture() {
+        voiceSessionID = UUID()
+        VoiceTodoCaptureService.shared.cancelListening()
+        physicsInput.voiceActive = false
+        physicsInput.voiceCancelSlide = false
+        physicsInput.audioLevel = 0
+        physicsState.triggerDismissShrink()
+        refreshActiveMatrixGlyph()
+        TactileFeedbackEngine.shared.performNavigationStepHaptic()
+        ActionSparkController.shared.dismiss()
+    }
+
+    // MARK: - 指针手势交互响应
+
+    private func handlePointerDown(at screenPt: NSPoint) {
+        guard let panel else { return }
+        windowSnapTarget = nil
+        windowSnapVel = .zero
+        dragPanelStartOrigin = panel.frame.origin
+        dragPointerStartScreen = screenPt
+        dragTotalDx = 0
+        dragTotalDy = 0
+
+        physicsInput.isPressed = true
+        arbiter.pointerDown(atScreenPoint: screenPt, uptime: ProcessInfo.processInfo.systemUptime)
+        markInteractionActive()
+    }
+
+    private func handlePointerMovedOrDragged(at screenPt: NSPoint, stepVelocity: CGVector) {
+        guard let panel else { return }
+        let action = arbiter.pointerMoved(toScreenPoint: screenPt)
+
+        switch action {
+        case .enteredDragging:
+            physicsInput.chargeProgress = 0
+            physicsInput.isDragging = true
+            dragTotalDx = screenPt.x - dragPointerStartScreen.x
+            dragTotalDy = screenPt.y - dragPointerStartScreen.y
+            let nextOrigin = NSPoint(x: dragPanelStartOrigin.x + dragTotalDx, y: dragPanelStartOrigin.y + dragTotalDy)
+            panel.setFrameOrigin(nextOrigin)
+            windowSnapPos = nextOrigin
+            physicsInput.dragStepVelocity = CGVector(dx: stepVelocity.dx, dy: -stepVelocity.dy)
+
+        case .voiceCancelStateChanged(let cancelling):
+            physicsInput.voiceCancelSlide = cancelling
+            TactileFeedbackEngine.shared.performNavigationStepHaptic()
+            let text = latestPartialTranscript.isEmpty ? "正在聆听，请说待办事项…" : latestPartialTranscript
+            ActionSparkController.shared.updateVoiceListeningState(
+                transcript: text,
+                isCancelling: cancelling,
+                audioLevel: physicsInput.audioLevel
             )
+
+        case .none, .triggerClick, .endDragging, .startedVoice, .commitVoice, .cancelVoice:
+            if case .dragging = arbiter.phase {
+                dragTotalDx = screenPt.x - dragPointerStartScreen.x
+                dragTotalDy = screenPt.y - dragPointerStartScreen.y
+                let nextOrigin = NSPoint(x: dragPanelStartOrigin.x + dragTotalDx, y: dragPanelStartOrigin.y + dragTotalDy)
+                panel.setFrameOrigin(nextOrigin)
+                windowSnapPos = nextOrigin
+                lastDragMoveUptime = ProcessInfo.processInfo.systemUptime
+                physicsInput.dragStepVelocity = CGVector(dx: stepVelocity.dx, dy: -stepVelocity.dy)
+                windowSnapVel = CGVector(dx: stepVelocity.dx * 0.45, dy: stepVelocity.dy * 0.45)
+            }
+        }
+        markInteractionActive()
+    }
+
+    private func handlePointerUp(at screenPt: NSPoint) {
+        guard let panel else { return }
+        physicsInput.isPressed = false
+        physicsInput.chargeProgress = 0
+        physicsInput.isDragging = false
+        let action = arbiter.pointerUp(atScreenPoint: screenPt, uptime: ProcessInfo.processInfo.systemUptime)
+
+        switch action {
+        case .triggerClick:
+            TactileFeedbackEngine.shared.perform(.tabSwitch)
+            let willOpen = !physicsInput.isClipboardPanelOpen
+            physicsState.triggerClick(
+                panelOpening: willOpen,
+                accent: physicsState.activeAccent(
+                    smartSuggestionActive: physicsInput.smartSuggestionActive,
+                    proactiveNudgeActive: physicsInput.proactiveNudgeActive
+                )
+            )
+            if let orbCore = visibleOrbCoreScreenFrame {
+                onToggleClipboardPanel?(orbCore)
+            }
+            markInteractionActive()
+
+        case .endDragging:
+            let finalOrigin = panel.frame.origin
+            let oldSide = dockedSide
+            let oldCenter = SpriteOrbPhysicsGeometry.orbCoreFrame(
+                fromPanelFrame: NSRect(origin: finalOrigin, size: panel.frame.size),
+                dockedSide: oldSide
+            )
+            let screen = targetScreenForOrigin(finalOrigin)
+            let pseudoOrigin = SpriteOrbPhysicsGeometry.panelOrigin(
+                forOrbCenter: NSPoint(x: oldCenter.midX, y: oldCenter.midY),
+                dockedSide: nil
+            )
+            let resolved = SpriteOrbPhysicsGeometry.resolvedRestingOrigin(
+                currentOrigin: pseudoOrigin,
+                panelSize: panel.frame.size,
+                visibleFrame: screen.visibleFrame,
+                dockMode: currentDockMode
+            )
+
+            if oldSide != resolved.dockedSide {
+                let compensated = SpriteOrbPhysicsGeometry.panelOrigin(
+                    forOrbCenter: NSPoint(x: oldCenter.midX, y: oldCenter.midY),
+                    dockedSide: resolved.dockedSide
+                )
+                dockedSide = resolved.dockedSide
+                panel.setFrameOrigin(compensated)
+                windowSnapPos = compensated
+            } else {
+                dockedSide = resolved.dockedSide
+                windowSnapPos = finalOrigin
+            }
+
+            saveNormalizedOrigin(resolved.origin, panelSize: panel.frame.size, visibleFrame: screen.visibleFrame)
+            TactileFeedbackEngine.shared.performNavigationStepHaptic()
+            physicsState.triggerDockBounce()
+            if ProcessInfo.processInfo.systemUptime - lastDragMoveUptime > 0.08 {
+                windowSnapVel = .zero
+            }
+            windowSnapTarget = resolved.origin
+            markInteractionActive()
+
+        case .commitVoice:
+            finishAndCommitVoiceCapture()
+
+        case .cancelVoice:
+            cancelVoiceCapture()
+
+        case .none, .enteredDragging, .startedVoice, .voiceCancelStateChanged:
+            break
+        }
+        physicsInput.dragStepVelocity = .zero
+    }
+
+    // MARK: - 窗口装配与显隐管理
+
+    private func syncPreferences(from store: ClipboardStore) {
+        currentStyle = store.spriteOrbStyle
+        currentDockMode = store.spriteOrbDockMode
+        panel?.sharingType = store.screenSharePrivacyEnabled ? .none : .readOnly
+    }
+
+    private func updatePanelVisibility() {
+        guard let store = boundStore else { return }
+        if !store.spriteOrbEnabled || ProcessInfo.processInfo.arguments.contains("--demo") {
+            metalView?.pauseDisplayLink()
+            panel?.orderOut(nil)
+            return
+        }
+        ensurePanel()
+        guard let panel else { return }
+        if !panel.isVisible {
+            restoreSavedOriginOnLaunch()
+            panel.alphaValue = 1.0
+            panel.orderFrontRegardless()
+            panel.enforceUnifiedActiveAppearance()
+        } else {
+            panel.enforceUnifiedActiveAppearance()
+        }
+        metalView?.startDisplayLink()
+        markInteractionActive()
+    }
+
+    private func ensurePanel() {
+        guard panel == nil else { return }
+        let side = SpriteOrbPhysicsGeometry.panelDimension
+        let rect = NSRect(origin: .zero, size: NSSize(width: side, height: side))
+
+        let p = UnifiedActiveFloatingPanel(
+            contentRect: rect,
+            styleMask: [.nonactivatingPanel, .borderless],
+            backing: .buffered,
+            defer: false
+        )
+        p.isFloatingPanel = true
+        p.level = .statusBar
+        p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        p.isOpaque = false
+        p.backgroundColor = .clear
+        p.hasShadow = false
+        p.hidesOnDeactivate = false
+        p.isMovable = false
+        p.sharingType = (boundStore?.screenSharePrivacyEnabled ?? true) ? .none : .readOnly
+
+        let mView = SpriteOrbMetalView(frame: rect)
+        mView.autoresizingMask = [.width, .height]
+
+        mView.liveOrbCenterProvider = { [weak self] in
+            guard let self else {
+                return CGPoint(x: side * 0.5, y: side * 0.5)
+            }
+            let anchor = SpriteOrbPhysicsGeometry.anchorInPanel(for: self.dockedSide)
+            let cx = anchor.x + self.physicsState.offsetX
+            let cy = side - (anchor.y + self.physicsState.offsetY)
+            return CGPoint(x: cx, y: cy)
+        }
+        mView.onDisplayLinkTick = { [weak self] dt, _ in
+            self?.stepAndRenderFrame(dt: dt)
+        }
+        mView.onCoreHoverChanged = { [weak self] hovering in
+            self?.physicsInput.isHoveredOnCore = hovering
+            if hovering {
+                self?.markInteractionActive()
+            }
+        }
+        mView.onPointerDown = { [weak self] screenPt in
+            self?.handlePointerDown(at: screenPt)
+        }
+        mView.onPointerMovedOrDragged = { [weak self] screenPt, stepVel in
+            self?.handlePointerMovedOrDragged(at: screenPt, stepVelocity: stepVel)
+        }
+        mView.onPointerUp = { [weak self] screenPt in
+            self?.handlePointerUp(at: screenPt)
+        }
+        mView.onDragTargetedChanged = { [weak self] targeted in
+            if targeted && self?.physicsInput.isDragTargeted != true {
+                TactileFeedbackEngine.shared.performNavigationStepHaptic()
+            }
+            self?.physicsInput.isDragTargeted = targeted
+            if targeted {
+                self?.markInteractionActive()
+            }
+        }
+        mView.onPerformExternalDrop = { [weak self] pb in
+            guard let self else { return false }
+            self.physicsInput.isDragTargeted = false
+            let ok = ClipboardStore.shared.importAndCopy(from: pb, sourceLabel: "悬浮精灵")
+            if ok {
+                TactileFeedbackEngine.shared.perform(.magicTransform)
+                self.physicsState.triggerAcceptedCelebration()
+                self.scheduleTemporaryGlyph(.done, duration: 1.0)
+                self.markInteractionActive()
+            }
+            return ok
+        }
+        mView.onBuildContextMenu = { [weak self] in
+            self?.buildContextMenu() ?? NSMenu()
+        }
+
+        p.contentView = mView
+        self.metalView = mView
+        self.panel = p
+    }
+
+    private func restoreSavedOriginOnLaunch() {
+        guard let panel else { return }
+        let size = panel.frame.size
+        let screens = NSScreen.screens
+        guard !screens.isEmpty else { return }
+
+        let defaults = UserDefaults.standard
+        if let ratioX = defaults.object(forKey: Self.posXDefaultsKey) as? Double,
+           let ratioY = defaults.object(forKey: Self.posYDefaultsKey) as? Double {
+            let screen = targetScreenForOrigin(panel.frame.origin)
+            let resolved = SpriteOrbPhysicsGeometry.origin(
+                fromRatios: CGFloat(ratioX),
+                ratioY: CGFloat(ratioY),
+                panelSize: size,
+                visibleFrame: screen.visibleFrame,
+                dockMode: currentDockMode
+            )
+            panel.setFrameOrigin(resolved.origin)
+            windowSnapPos = resolved.origin
+            dockedSide = resolved.dockedSide
+        } else {
+            let screen = NSScreen.main ?? screens[0]
+            let initial = SpriteOrbPhysicsGeometry.defaultInitialOrigin(
+                panelSize: size,
+                visibleFrame: screen.visibleFrame
+            )
+            panel.setFrameOrigin(initial)
+            windowSnapPos = initial
+            dockedSide = (currentDockMode == .edgeSnap) ? .right : nil
+        }
+    }
+
+    private func reanchorCurrentPosition(animated: Bool) {
+        guard let panel, panel.isVisible else { return }
+        let oldSide = dockedSide
+        let oldCenter = SpriteOrbPhysicsGeometry.orbCoreFrame(fromPanelFrame: panel.frame, dockedSide: oldSide)
+        let screen = targetScreenForOrigin(panel.frame.origin)
+
+        let candidateOrigin = SpriteOrbPhysicsGeometry.panelOrigin(
+            forOrbCenter: NSPoint(x: oldCenter.midX, y: oldCenter.midY),
+            dockedSide: nil
+        )
+        let resolved = SpriteOrbPhysicsGeometry.resolvedRestingOrigin(
+            currentOrigin: candidateOrigin,
+            panelSize: panel.frame.size,
+            visibleFrame: screen.visibleFrame,
+            dockMode: currentDockMode
+        )
+
+        if oldSide != resolved.dockedSide {
+            let compensated = SpriteOrbPhysicsGeometry.panelOrigin(
+                forOrbCenter: NSPoint(x: oldCenter.midX, y: oldCenter.midY),
+                dockedSide: resolved.dockedSide
+            )
+            dockedSide = resolved.dockedSide
+            panel.setFrameOrigin(compensated)
+            windowSnapPos = compensated
+        } else {
+            dockedSide = resolved.dockedSide
+            windowSnapPos = panel.frame.origin
+        }
+
+        saveNormalizedOrigin(resolved.origin, panelSize: panel.frame.size, visibleFrame: screen.visibleFrame)
+        if animated {
+            windowSnapTarget = resolved.origin
+        } else {
+            windowSnapTarget = nil
+            panel.setFrameOrigin(resolved.origin)
+            windowSnapPos = resolved.origin
+        }
+        markInteractionActive()
+    }
+
+    private func targetScreenForOrigin(_ origin: NSPoint) -> NSScreen {
+        let screens = NSScreen.screens
+        let side = SpriteOrbPhysicsGeometry.panelDimension
+        let center = NSPoint(x: origin.x + side * 0.5, y: origin.y + side * 0.5)
+        if let matched = screens.first(where: { $0.frame.contains(center) }) {
+            return matched
+        }
+        let mouse = NSEvent.mouseLocation
+        if let mouseScreen = screens.first(where: { $0.frame.contains(mouse) }) {
+            return mouseScreen
+        }
+        return NSScreen.main ?? screens[0]
+    }
+
+    private func saveNormalizedOrigin(_ origin: NSPoint, panelSize: NSSize, visibleFrame: NSRect) {
+        let ratios = SpriteOrbPhysicsGeometry.normalizedRatios(
+            forOrigin: origin,
+            panelSize: panelSize,
+            visibleFrame: visibleFrame
+        )
+        UserDefaults.standard.set(Double(ratios.x), forKey: Self.posXDefaultsKey)
+        UserDefaults.standard.set(Double(ratios.y), forKey: Self.posYDefaultsKey)
+    }
+
+    // MARK: - 右键快捷菜单与体验动作
+
+    private func buildContextMenu() -> NSMenu {
+        let menu = NSMenu()
+        let titleItem = NSMenuItem(title: "iClip 悬浮精灵 · 长按语音记待办", action: nil, keyEquivalent: "")
+        titleItem.isEnabled = false
+        menu.addItem(titleItem)
+
+        let toggleTitle = physicsInput.isClipboardPanelOpen ? "收起剪贴板面板" : "打开 iClip 剪贴板"
+        let toggleItem = NSMenuItem(title: toggleTitle, action: #selector(contextTogglePanel), keyEquivalent: "")
+        toggleItem.target = self
+        menu.addItem(toggleItem)
+
+        let todoItem = NSMenuItem(title: "打开待办清单", action: #selector(contextOpenTodos), keyEquivalent: "")
+        todoItem.target = self
+        menu.addItem(todoItem)
+
+        let testNudgeItem = NSMenuItem(title: "测试拟态待办推进提醒", action: #selector(contextTestProactiveNudge), keyEquivalent: "")
+        testNudgeItem.target = self
+        menu.addItem(testNudgeItem)
+
+        menu.addItem(.separator())
+
+        let currentStyle = boundStore?.spriteOrbStyle ?? self.currentStyle
+        for (idx, style) in SpriteOrbStyle.allCases.enumerated() {
+            let item = NSMenuItem(
+                title: "\(idx + 1) · \(style.title)",
+                action: #selector(contextSelectStyle(_:)),
+                keyEquivalent: ""
+            )
+            item.representedObject = style.rawValue
+            item.state = (style == currentStyle) ? .on : .off
+            item.target = self
+            menu.addItem(item)
+        }
+
+        menu.addItem(.separator())
+
+        let currentDock = boundStore?.spriteOrbDockMode ?? self.currentDockMode
+        for mode in SpriteOrbDockMode.allCases {
+            let item = NSMenuItem(
+                title: mode.title,
+                action: #selector(contextSelectDockMode(_:)),
+                keyEquivalent: ""
+            )
+            item.representedObject = mode.rawValue
+            item.state = (mode == currentDock) ? .on : .off
+            item.target = self
+            menu.addItem(item)
+        }
+
+        menu.addItem(.separator())
+
+        let settingsItem = NSMenuItem(title: "偏好设置...", action: #selector(contextOpenSettings), keyEquivalent: "")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
+
+        let hideItem = NSMenuItem(title: "隐藏悬浮精灵", action: #selector(contextHideOrb), keyEquivalent: "")
+        hideItem.target = self
+        menu.addItem(hideItem)
+
+        return menu
+    }
+
+    @objc private func contextTogglePanel() {
+        if let orbCore = visibleOrbCoreScreenFrame {
+            onToggleClipboardPanel?(orbCore)
+        }
+    }
+
+    @objc private func contextOpenTodos() {
+        onOpenTodoList?()
+    }
+
+    @objc private func contextTestProactiveNudge() {
+        evaluateAndTriggerProactiveNudgeIfNeeded(forceImmediate: true)
+    }
+
+    @objc private func contextSelectStyle(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let style = SpriteOrbStyle(rawValue: raw),
+              let store = boundStore else { return }
+        store.spriteOrbStyle = style
+        TactileFeedbackEngine.shared.performNavigationStepHaptic()
+    }
+
+    @objc private func contextSelectDockMode(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let mode = SpriteOrbDockMode(rawValue: raw),
+              let store = boundStore else { return }
+        store.spriteOrbDockMode = mode
+        TactileFeedbackEngine.shared.performNavigationStepHaptic()
+    }
+
+    @objc private func contextOpenSettings() {
+        onOpenSettings?()
+    }
+
+    @objc private func contextHideOrb() {
+        boundStore?.spriteOrbEnabled = false
+    }
+
+    // MARK: - 活跃标记与矩阵表情复位
+
+    private func markInteractionActive() {
+        lastActivityUptime = ProcessInfo.processInfo.systemUptime
+        isIdleResting = false
+    }
+
+    private func scheduleTemporaryGlyph(_ glyph: SpriteOrbMatrixGlyph, duration: TimeInterval) {
+        glyphResetWorkItem?.cancel()
+        activeGlyph = glyph
+        let work = DispatchWorkItem { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.refreshActiveMatrixGlyph()
+            }
+        }
+        glyphResetWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: work)
+    }
+
+    private func refreshActiveMatrixGlyph() {
+        if physicsInput.voiceActive {
+            activeGlyph = .voiceEqualizer
+        } else if physicsInput.proactiveNudgeActive {
+            activeGlyph = .biomimeticBlink
+        } else if physicsInput.isClipboardPanelOpen {
+            activeGlyph = .panelOpen
+        } else if !physicsInput.smartSuggestionActive {
+            activeGlyph = .none
         }
     }
 }

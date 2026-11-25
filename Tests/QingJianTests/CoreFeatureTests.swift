@@ -2,6 +2,7 @@ import XCTest
 import AppKit
 import QuartzCore
 import CoreImage
+import Metal
 import Carbon
 import CryptoKit
 @testable import QingJian
@@ -5239,6 +5240,156 @@ final class CoreFeatureTests: XCTestCase {
             TodoChecklistExtractor.compactTodoPromptTitle(for: "   \n  "),
             "设为待办"
         )
+    }
+
+    func testSpriteOrbMetalShaderCompilesSuccessfully() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            return
+        }
+        let lib = try device.makeLibrary(source: SpriteOrbMetalShader.source, options: nil)
+        XCTAssertNotNil(lib.makeFunction(name: "spriteOrbVertex"))
+        XCTAssertNotNil(lib.makeFunction(name: "spriteOrbFragment"))
+    }
+
+    func testSpriteOrbGestureArbiterClickDragAndLongPressVoice() {
+        var arbiter = SpriteOrbGestureArbiter()
+
+        // 1. 短按原地松手 -> 单击呼出剪贴板
+        arbiter.pointerDown(atScreenPoint: CGPoint(x: 100, y: 100), uptime: 10.0)
+        XCTAssertEqual(arbiter.pointerMoved(toScreenPoint: CGPoint(x: 103, y: 102)), .none)
+        let beforeThreshold = arbiter.checkLongPressActivation(atUptime: 10.10)
+        XCTAssertFalse(beforeThreshold.activated)
+        XCTAssertEqual(beforeThreshold.chargeProgress, 0.0, accuracy: 0.001)
+        XCTAssertEqual(arbiter.pointerUp(atScreenPoint: CGPoint(x: 103, y: 102), uptime: 10.20), .triggerClick)
+
+        // 2. 快速拖离 > 5pt -> 取消长按立即转拖拽
+        arbiter.pointerDown(atScreenPoint: CGPoint(x: 200, y: 200), uptime: 20.0)
+        XCTAssertEqual(arbiter.pointerMoved(toScreenPoint: CGPoint(x: 215, y: 200)), .enteredDragging)
+        XCTAssertFalse(arbiter.checkLongPressActivation(atUptime: 21.0).activated)
+        XCTAssertEqual(arbiter.pointerUp(atScreenPoint: CGPoint(x: 250, y: 220), uptime: 21.1), .endDragging)
+
+        // 3. 原地长按过 0.12s 蓄力、满 0.36s 激活语音并在原地松手提交
+        arbiter.pointerDown(atScreenPoint: CGPoint(x: 300, y: 300), uptime: 30.0)
+        let midCharge = arbiter.checkLongPressActivation(atUptime: 30.24)
+        XCTAssertFalse(midCharge.activated)
+        XCTAssertEqual(midCharge.chargeProgress, 0.5, accuracy: 0.02)
+
+        let triggered = arbiter.checkLongPressActivation(atUptime: 30.37)
+        XCTAssertTrue(triggered.activated)
+        XCTAssertEqual(arbiter.pointerUp(atScreenPoint: CGPoint(x: 305, y: 302), uptime: 31.2), .commitVoice)
+
+        // 4. 语音激活后滑出 > 52pt -> 切换取消警示并在松手时丢弃
+        arbiter.pointerDown(atScreenPoint: CGPoint(x: 400, y: 400), uptime: 40.0)
+        XCTAssertTrue(arbiter.checkLongPressActivation(atUptime: 40.37).activated)
+        XCTAssertEqual(
+            arbiter.pointerMoved(toScreenPoint: CGPoint(x: 340, y: 400)),
+            .voiceCancelStateChanged(true)
+        )
+        XCTAssertEqual(arbiter.pointerUp(atScreenPoint: CGPoint(x: 340, y: 400), uptime: 41.0), .cancelVoice)
+    }
+
+    func testVoiceTodoParserCleaningSplittingAndAudioLevel() {
+        XCTAssertEqual(
+            VoiceTodoParser.extractTodoItems(from: "帮我记一下下班前发周报，还有明天上午订机票。"),
+            ["下班前发周报", "明天上午订机票"]
+        )
+        XCTAssertEqual(
+            VoiceTodoParser.extractTodoItems(from: "提醒我：给客户回个电话！"),
+            ["给客户回个电话"]
+        )
+        XCTAssertTrue(VoiceTodoParser.extractTodoItems(from: "  ， 。 ！ ").isEmpty)
+
+        XCTAssertEqual(VoiceTodoParser.computeNormalizedAudioLevel(rms: 0.0), 0.0, accuracy: 0.001)
+        XCTAssertGreaterThan(VoiceTodoParser.computeNormalizedAudioLevel(rms: 0.4), 0.95)
+        let mid = VoiceTodoParser.computeNormalizedAudioLevel(rms: 0.02)
+        XCTAssertGreaterThan(mid, 0.2)
+        XCTAssertLessThan(mid, 0.65)
+    }
+
+    func testProactiveTodoNudgePlannerUrgencyCooldownAndSnooze() {
+        let cal = Calendar.current
+        let morningNow = cal.date(from: DateComponents(year: 2026, month: 11, day: 26, hour: 10, minute: 30))!
+        XCTAssertNil(
+            ProactiveTodoNudgePlanner.selectNudgeCandidate(
+                from: [],
+                now: morningNow,
+                lastGlobalNudgeAt: nil,
+                snoozedUntil: [:]
+            )
+        )
+
+        let freshNormal = ClipItem(
+            type: .text,
+            text: "整理读书笔记",
+            contentHash: "text:n1",
+            createdAt: morningNow.addingTimeInterval(-10 * 60),
+            isTodoItem: true
+        )
+        XCTAssertNil(
+            ProactiveTodoNudgePlanner.selectNudgeCandidate(
+                from: [freshNormal],
+                now: morningNow,
+                lastGlobalNudgeAt: nil,
+                snoozedUntil: [:],
+                forceImmediate: false
+            )
+        )
+
+        let oldNormal = ClipItem(
+            type: .text,
+            text: "归档项目文档",
+            contentHash: "text:n2",
+            createdAt: morningNow.addingTimeInterval(-120 * 60),
+            isTodoItem: true
+        )
+        let urgentShort = ClipItem(
+            type: .text,
+            text: "下班前交财报汇总",
+            contentHash: "text:n3",
+            createdAt: morningNow.addingTimeInterval(-10 * 60),
+            isTodoItem: true
+        )
+
+        let picked = ProactiveTodoNudgePlanner.selectNudgeCandidate(
+            from: [oldNormal, urgentShort],
+            now: morningNow,
+            lastGlobalNudgeAt: nil,
+            snoozedUntil: [:]
+        )
+        XCTAssertEqual(picked?.itemID, urgentShort.id)
+        XCTAssertEqual(picked?.isUrgent, true)
+        XCTAssertEqual(picked?.headline, "临近时间节点")
+
+        // 全局冷却（5 分钟前刚推过一次）拦截非手动触发，但手动测试 forceImmediate 放行
+        XCTAssertNil(
+            ProactiveTodoNudgePlanner.selectNudgeCandidate(
+                from: [oldNormal, urgentShort],
+                now: morningNow,
+                lastGlobalNudgeAt: morningNow.addingTimeInterval(-5 * 60),
+                snoozedUntil: [:],
+                forceImmediate: false
+            )
+        )
+        XCTAssertNotNil(
+            ProactiveTodoNudgePlanner.selectNudgeCandidate(
+                from: [oldNormal, urgentShort],
+                now: morningNow,
+                lastGlobalNudgeAt: morningNow.addingTimeInterval(-5 * 60),
+                snoozedUntil: [:],
+                forceImmediate: true
+            )
+        )
+
+        // 推迟 30 分钟后自动避让并落选给次优未完成待办（傍晚时段呈现收尾提示语）
+        let eveningNow = cal.date(from: DateComponents(year: 2026, month: 11, day: 26, hour: 18, minute: 15))!
+        let eveningPick = ProactiveTodoNudgePlanner.selectNudgeCandidate(
+            from: [oldNormal, urgentShort],
+            now: eveningNow,
+            lastGlobalNudgeAt: nil,
+            snoozedUntil: [urgentShort.id: eveningNow.addingTimeInterval(25 * 60)]
+        )
+        XCTAssertEqual(eveningPick?.itemID, oldNormal.id)
+        XCTAssertEqual(eveningPick?.headline, "今日待办收个尾")
     }
 
     @MainActor

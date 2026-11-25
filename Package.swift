@@ -18,7 +18,11 @@ let package = Package(
                 .linkedFramework("AppKit"),
                 .linkedFramework("SwiftUI"),
                 .linkedFramework("ServiceManagement"),
-                .linkedFramework("Vision")
+                .linkedFramework("Vision"),
+                .linkedFramework("Metal"),
+                .linkedFramework("QuartzCore"),
+                .linkedFramework("Speech"),
+                .linkedFramework("AVFoundation")
             ]
         ),
         .testTarget(

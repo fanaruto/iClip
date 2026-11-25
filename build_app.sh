@@ -91,6 +91,10 @@ cat > "$STAGED_APP/Contents/Info.plist" << EOF
     <true/>
     <key>NSAppDataUsageDescription</key>
     <string>需要读取您从微信、飞书等应用复制或拖拽到 iClip 的高清图片，以便为您直接展示原图并存入剪贴板。</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>长按悬浮精灵时录制您的语音，以便即时转写为 iClip 待办事项。</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>用于将您长按悬浮精灵说出的语音实时转写为文字并加入待办清单。</string>
     <key>UTExportedTypeDeclarations</key>
     <array>
         <dict>

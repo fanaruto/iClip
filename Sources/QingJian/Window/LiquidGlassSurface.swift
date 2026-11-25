@@ -1250,6 +1250,7 @@ struct SpriteOrbSettingsCard: View {
     @Binding var enabled: Bool
     @Binding var style: SpriteOrbStyle
     @Binding var dockMode: SpriteOrbDockMode
+    @Binding var proactiveNudgeEnabled: Bool
     @Environment(\.colorScheme) private var colorScheme
     @State private var hoveredStyle: SpriteOrbStyle? = nil
 
@@ -1264,7 +1265,7 @@ struct SpriteOrbSettingsCard: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("悬浮精灵小球（实验）")
                         .font(.system(size: 13.5, weight: .medium))
-                    Text("单击启动/收起剪贴板 · 复制内容就近弹出待办等智能提醒")
+                    Text("单击剪贴板 · 拖动换位 · 长按语音记待办")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1308,6 +1309,19 @@ struct SpriteOrbSettingsCard: View {
                     Text(dockMode.subtitle)
                         .font(.system(size: 10.5))
                         .foregroundStyle(.secondary)
+                }
+
+                Divider().opacity(0.3)
+
+                Toggle(isOn: $proactiveNudgeEnabled) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("主动拟态待办推进提醒")
+                            .font(.system(size: 12.5, weight: .medium))
+                        Text("识别截止词与长期搁置待办，适时轻碰气泡邀你推进")
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
         }

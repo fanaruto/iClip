@@ -131,6 +131,10 @@ final class ActionSparkController {
         case completed(message: String)
         case restored(message: String)
         case notice(symbolName: String, message: String)
+        case voiceListening(transcript: String, isCancelling: Bool, audioLevel: Double)
+        case voicePermissionNeeded(message: String)
+        case voiceCommitted(count: Int, summary: String)
+        case proactiveTodoNudge(candidate: ProactiveTodoNudgeCandidate)
     }
 
     @MainActor
@@ -148,6 +152,7 @@ final class ActionSparkController {
     private var dismissWorkItem: DispatchWorkItem?
     private var fadeCompletionWorkItem: DispatchWorkItem?
     private var activeCandidate: AdaptiveSparkCandidate?
+    private var activeProactiveCandidate: ProactiveTodoNudgeCandidate?
     private var didInteractInCurrentSession: Bool = false
     private var doubleCopyMachine = DoubleCopySparkStateMachine()
     private var fadeCoordinator = ActionSparkFadeCoordinator()
@@ -163,6 +168,20 @@ final class ActionSparkController {
     var onSuggestionAccepted: ((String) -> Void)?
     /// 用户主动关闭建议卡片的收拢反馈回调
     var onSuggestionDismissed: (() -> Void)?
+    /// 主动待办或语音记录完成后请求跳转待办页的回调
+    var onOpenTodoListRequested: (() -> Void)?
+    /// 主动拟态待办卡片点击「已完成」回调
+    var onProactiveTodoCompleted: ((UUID) -> Void)?
+    /// 主动拟态待办卡片点击「稍后 30 分」回调
+    var onProactiveTodoSnoozed: ((UUID) -> Void)?
+
+    var isOfferingInteractiveCard: Bool {
+        guard panel?.isVisible == true, !fadeCoordinator.isFadingOut else { return false }
+        if activeCandidate != nil || activeProactiveCandidate != nil { return true }
+        if case .voiceListening = viewModel.phase { return true }
+        if case .voicePermissionNeeded = viewModel.phase { return true }
+        return false
+    }
 
     private let compactSize = NSSize(width: 274, height: 38)
     private let contextualSize = NSSize(width: 318, height: 40)
@@ -170,6 +189,10 @@ final class ActionSparkController {
     private let orbCardSize = NSSize(width: 292, height: 82)
     private let orbPromotableCardSize = NSSize(width: 306, height: 88)
     private let orbFeedbackSize = NSSize(width: 256, height: 42)
+    private let orbVoiceCardSize = NSSize(width: 298, height: 92)
+    private let orbVoicePermissionSize = NSSize(width: 306, height: 86)
+    private let orbVoiceCommittedSize = NSSize(width: 292, height: 76)
+    private let orbProactiveNudgeSize = NSSize(width: 312, height: 108)
 
     private init() {
         Publishers.Merge(
@@ -231,6 +254,7 @@ final class ActionSparkController {
         fadeCompletionWorkItem?.cancel()
         fadeCompletionWorkItem = nil
         activeCandidate = nil
+        activeProactiveCandidate = nil
         doubleCopyMachine.clearActiveOffer()
         panel?.orderOut(nil)
         onSuggestionVisibilityChanged?(false, nil, nil)
@@ -351,9 +375,133 @@ final class ActionSparkController {
         fadeCompletionWorkItem?.cancel()
         fadeCompletionWorkItem = nil
         activeCandidate = nil
+        activeProactiveCandidate = nil
         doubleCopyMachine.clearAll()
         panel?.orderOut(nil)
         onSuggestionVisibilityChanged?(false, nil, nil)
+    }
+
+    // MARK: - 语音记待办 & 主动拟态待办推进伴生卡片通道
+
+    func presentVoiceListening(transcript: String, isCancelling: Bool, audioLevel: Double, in store: ClipboardStore) {
+        if ProcessInfo.processInfo.arguments.contains("--demo") { return }
+        fadeCoordinator.beginPresentation()
+        activeCandidate = nil
+        activeProactiveCandidate = nil
+        didInteractInCurrentSession = true
+        doubleCopyMachine.clearActiveOffer()
+
+        viewModel.isOrbCompanion = true
+        ensurePanel(size: orbVoiceCardSize, cornerRadius: 16.0, store: store)
+        guard let panel else { return }
+        resizePanelIfNeeded(to: orbVoiceCardSize, cornerRadius: 16.0)
+        cancelFadeTimersAndRestoreOpacity(of: panel)
+
+        viewModel.isHovered = false
+        viewModel.phase = .voiceListening(transcript: transcript, isCancelling: isCancelling, audioLevel: audioLevel)
+
+        let anchor = computeAnchorOrigin(for: orbVoiceCardSize)
+        let targetOrigin = anchor.origin
+        let startOrigin = NSPoint(x: targetOrigin.x + (anchor.placedOnLeftOfOrb ? 10 : -10), y: targetOrigin.y)
+        if !panel.isVisible {
+            panel.setFrameOrigin(startOrigin)
+            panel.alphaValue = 0
+            panel.orderFrontRegardless()
+            (panel as? UnifiedActiveFloatingPanel)?.enforceUnifiedActiveAppearance()
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.20
+                ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
+                panel.animator().alphaValue = 1
+                panel.animator().setFrameOrigin(targetOrigin)
+            }
+        } else {
+            panel.setFrameOrigin(targetOrigin)
+            panel.alphaValue = 1
+            (panel as? UnifiedActiveFloatingPanel)?.enforceUnifiedActiveAppearance()
+        }
+    }
+
+    func updateVoiceListeningState(transcript: String, isCancelling: Bool, audioLevel: Double) {
+        guard case .voiceListening = viewModel.phase else { return }
+        viewModel.phase = .voiceListening(transcript: transcript, isCancelling: isCancelling, audioLevel: audioLevel)
+    }
+
+    func presentVoicePermissionNeeded(message: String, in store: ClipboardStore) {
+        if ProcessInfo.processInfo.arguments.contains("--demo") { return }
+        fadeCoordinator.beginPresentation()
+        activeCandidate = nil
+        activeProactiveCandidate = nil
+        didInteractInCurrentSession = true
+        viewModel.isOrbCompanion = true
+
+        ensurePanel(size: orbVoicePermissionSize, cornerRadius: 16.0, store: store)
+        guard let panel else { return }
+        resizePanelIfNeeded(to: orbVoicePermissionSize, cornerRadius: 16.0)
+        cancelFadeTimersAndRestoreOpacity(of: panel)
+
+        viewModel.phase = .voicePermissionNeeded(message: message)
+        let anchor = computeAnchorOrigin(for: orbVoicePermissionSize)
+        panel.setFrameOrigin(anchor.origin)
+        panel.alphaValue = 1
+        panel.orderFrontRegardless()
+        (panel as? UnifiedActiveFloatingPanel)?.enforceUnifiedActiveAppearance()
+        scheduleAutoDismiss(after: 5.5)
+    }
+
+    func presentVoiceCommitted(count: Int, summary: String, in store: ClipboardStore) {
+        if ProcessInfo.processInfo.arguments.contains("--demo") { return }
+        fadeCoordinator.beginPresentation()
+        activeCandidate = nil
+        activeProactiveCandidate = nil
+        didInteractInCurrentSession = true
+        viewModel.isOrbCompanion = true
+
+        ensurePanel(size: orbVoiceCommittedSize, cornerRadius: 16.0, store: store)
+        guard let panel else { return }
+        resizePanelIfNeeded(to: orbVoiceCommittedSize, cornerRadius: 16.0)
+        cancelFadeTimersAndRestoreOpacity(of: panel)
+
+        viewModel.phase = .voiceCommitted(count: count, summary: summary)
+        let anchor = computeAnchorOrigin(for: orbVoiceCommittedSize)
+        panel.setFrameOrigin(anchor.origin)
+        panel.alphaValue = 1
+        panel.orderFrontRegardless()
+        (panel as? UnifiedActiveFloatingPanel)?.enforceUnifiedActiveAppearance()
+        scheduleFadeOut(after: 2.8, recordPassiveTimeout: false)
+    }
+
+    func presentProactiveTodoNudge(candidate: ProactiveTodoNudgeCandidate, in store: ClipboardStore) {
+        if ProcessInfo.processInfo.arguments.contains("--demo") { return }
+        fadeCoordinator.beginPresentation()
+        activeCandidate = nil
+        activeProactiveCandidate = candidate
+        didInteractInCurrentSession = false
+        doubleCopyMachine.clearActiveOffer()
+        viewModel.isOrbCompanion = true
+
+        ensurePanel(size: orbProactiveNudgeSize, cornerRadius: 16.0, store: store)
+        guard let panel else { return }
+        resizePanelIfNeeded(to: orbProactiveNudgeSize, cornerRadius: 16.0)
+        cancelFadeTimersAndRestoreOpacity(of: panel)
+
+        viewModel.isHovered = false
+        viewModel.phase = .proactiveTodoNudge(candidate: candidate)
+
+        let anchor = computeAnchorOrigin(for: orbProactiveNudgeSize)
+        let targetOrigin = anchor.origin
+        let startOrigin = NSPoint(x: targetOrigin.x + (anchor.placedOnLeftOfOrb ? 12 : -12), y: targetOrigin.y)
+        panel.setFrameOrigin(startOrigin)
+        panel.alphaValue = 0
+        panel.orderFrontRegardless()
+        (panel as? UnifiedActiveFloatingPanel)?.enforceUnifiedActiveAppearance()
+
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.24
+            ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
+            panel.animator().alphaValue = 1
+            panel.animator().setFrameOrigin(targetOrigin)
+        }
+        scheduleFadeOut(after: 7.5, recordPassiveTimeout: false)
     }
 
     private func present(candidate: AdaptiveSparkCandidate, contentHash: String, in store: ClipboardStore) {
@@ -370,6 +518,7 @@ final class ActionSparkController {
         }
         let targetCornerRadius: CGFloat = isOrb ? 16.0 : (targetSize.height / 2)
         viewModel.isOrbCompanion = isOrb
+        activeProactiveCandidate = nil
 
         ensurePanel(size: targetSize, cornerRadius: targetCornerRadius, store: store)
         guard let panel else { return }
@@ -468,6 +617,22 @@ final class ActionSparkController {
             },
             onHoverChanged: { [weak self] hovering in
                 self?.handleHoverChanged(hovering)
+            },
+            onOpenVoicePrivacySettings: { [weak self] in
+                self?.scheduleFadeOut(after: 0.02, recordPassiveTimeout: false)
+                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
+                    NSWorkspace.shared.open(url)
+                }
+            },
+            onOpenTodoList: { [weak self] in
+                self?.dismiss()
+                self?.onOpenTodoListRequested?()
+            },
+            onCompleteProactiveTodo: { [weak self] itemID in
+                self?.handleProactiveComplete(itemID: itemID)
+            },
+            onSnoozeProactiveTodo: { [weak self] itemID in
+                self?.handleProactiveSnooze(itemID: itemID)
             }
         )
         let hosting = NSHostingView(rootView: root)
@@ -511,13 +676,20 @@ final class ActionSparkController {
     }
 
     private func handleHoverChanged(_ hovering: Bool) {
+        if case .voiceListening = viewModel.phase {
+            viewModel.isHovered = hovering
+            return
+        }
         let isOfferingPhase: Bool = {
             if case .offering = viewModel.phase { return true }
             return false
         }()
+        let isNudgePhase: Bool = {
+            if case .proactiveTodoNudge = viewModel.phase { return true }
+            return false
+        }()
         if hovering {
-            // 正在最后的 alpha 淡出期间（或候选已被注销但视图仍停留在 .offering），绝不复活已失效按键的胶囊
-            if fadeCoordinator.isFadingOut || (activeCandidate == nil && isOfferingPhase) {
+            if fadeCoordinator.isFadingOut || (activeCandidate == nil && isOfferingPhase) || (activeProactiveCandidate == nil && isNudgePhase) {
                 viewModel.isHovered = false
                 return
             }
@@ -537,6 +709,8 @@ final class ActionSparkController {
             viewModel.isHovered = false
             if activeCandidate != nil && !didInteractInCurrentSession {
                 scheduleAutoDismiss(after: 0.95)
+            } else if activeProactiveCandidate != nil && !didInteractInCurrentSession {
+                scheduleFadeOut(after: 1.8, recordPassiveTimeout: false)
             } else if panel?.isVisible == true && !fadeCoordinator.isFadingOut && dismissWorkItem == nil {
                 scheduleFadeOut(after: 0.6, recordPassiveTimeout: false)
             }
@@ -584,8 +758,40 @@ final class ActionSparkController {
         scheduleFadeOut(after: triggeredByDoubleCopy ? 1.25 : 0.72, recordPassiveTimeout: false)
     }
 
+    private func handleProactiveComplete(itemID: UUID) {
+        didInteractInCurrentSession = true
+        activeProactiveCandidate = nil
+        dismissWorkItem?.cancel()
+        onProactiveTodoCompleted?(itemID)
+        withAnimation(.easeOut(duration: 0.14)) {
+            viewModel.phase = .completed(message: "✓ 已勾销该待办，继续保持节奏！")
+        }
+        scheduleFadeOut(after: 1.2, recordPassiveTimeout: false)
+    }
+
+    private func handleProactiveSnooze(itemID: UUID) {
+        didInteractInCurrentSession = true
+        activeProactiveCandidate = nil
+        dismissWorkItem?.cancel()
+        TactileFeedbackEngine.shared.performNavigationStepHaptic()
+        onProactiveTodoSnoozed?(itemID)
+        scheduleFadeOut(after: 0.02, recordPassiveTimeout: false)
+    }
+
     private func handleExplicitDismiss() {
-        guard let candidate = activeCandidate else { return }
+        if activeProactiveCandidate != nil {
+            didInteractInCurrentSession = true
+            activeProactiveCandidate = nil
+            dismissWorkItem?.cancel()
+            TactileFeedbackEngine.shared.performNavigationStepHaptic()
+            onSuggestionDismissed?()
+            scheduleFadeOut(after: 0.02, recordPassiveTimeout: false)
+            return
+        }
+        guard let candidate = activeCandidate else {
+            scheduleFadeOut(after: 0.02, recordPassiveTimeout: false)
+            return
+        }
         didInteractInCurrentSession = true
         activeCandidate = nil
         doubleCopyMachine.clearActiveOffer()
@@ -625,6 +831,7 @@ final class ActionSparkController {
                     AdaptiveIntelligenceEngine.shared.recordSparkPassiveTimeout(categoryKey: candidate.categoryKey)
                 }
                 self.activeCandidate = nil
+                self.activeProactiveCandidate = nil
                 self.doubleCopyMachine.clearActiveOffer()
                 NSAnimationContext.runAnimationGroup { ctx in
                     ctx.duration = 0.16
@@ -659,14 +866,20 @@ private struct ActionSparkPillView: View {
     let onPromoteAndAccept: () -> Void
     let onExplicitDismiss: () -> Void
     let onHoverChanged: (Bool) -> Void
+    let onOpenVoicePrivacySettings: () -> Void
+    let onOpenTodoList: () -> Void
+    let onCompleteProactiveTodo: (UUID) -> Void
+    let onSnoozeProactiveTodo: (UUID) -> Void
 
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         let isCard = viewModel.isOrbCompanion && {
             switch viewModel.phase {
-            case .offering, .completed: return true
-            case .restored, .notice, .none: return false
+            case .offering, .completed, .voiceListening, .voicePermissionNeeded, .voiceCommitted, .proactiveTodoNudge:
+                return true
+            case .restored, .notice, .none:
+                return false
             }
         }()
         let cornerRadius: CGFloat = isCard ? 16 : 19
@@ -688,6 +901,18 @@ private struct ActionSparkPillView: View {
                 } else {
                     compactOfferingRow(candidate: candidate, showDoubleCopyHint: showDoubleCopyHint)
                 }
+
+            case .voiceListening(let transcript, let isCancelling, let audioLevel):
+                orbVoiceListeningCard(transcript: transcript, isCancelling: isCancelling, audioLevel: audioLevel)
+
+            case .voicePermissionNeeded(let message):
+                orbVoicePermissionCard(message: message)
+
+            case .voiceCommitted(let count, let summary):
+                orbVoiceCommittedCard(count: count, summary: summary)
+
+            case .proactiveTodoNudge(let candidate):
+                orbProactiveNudgeCard(candidate: candidate)
 
             case .completed(let message):
                 if viewModel.isOrbCompanion {
@@ -750,6 +975,194 @@ private struct ActionSparkPillView: View {
         .onHover { hovering in
             onHoverChanged(hovering)
         }
+    }
+
+    private func orbVoiceListeningCard(transcript: String, isCancelling: Bool, audioLevel: Double) -> some View {
+        let dotColor = isCancelling
+            ? Color(red: 0.957, green: 0.247, blue: 0.369)
+            : Color(red: 0.063, green: 0.725, blue: 0.506)
+
+        return VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(dotColor)
+                    .frame(width: 7, height: 7)
+                Text(isCancelling ? "松开手指取消语音录入" : "正在语音录入待办…")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(isCancelling ? dotColor : .secondary)
+                Spacer(minLength: 0)
+
+                HStack(spacing: 2.5) {
+                    ForEach(0..<5, id: \.self) { idx in
+                        let weight = 0.45 + 0.55 * sin(Double(idx) * 1.15 + audioLevel * 6.0) * 0.5 + 0.3
+                        let h = max(4.0, min(14.0, 4.0 + CGFloat(audioLevel * weight) * 14.0))
+                        Capsule()
+                            .fill(dotColor.opacity(isCancelling ? 0.55 : 0.9))
+                            .frame(width: 2.5, height: h)
+                    }
+                }
+                .frame(height: 15)
+            }
+
+            Text(transcript)
+                .font(.system(size: 12.2, weight: .medium))
+                .foregroundStyle(isCancelling ? .secondary : .primary)
+                .lineLimit(2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            Text(isCancelling ? "已进入取消区域" : "松开自动拆解存入待办 · 拖离 52pt 取消")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+    }
+
+    private func orbVoicePermissionCard(message: String) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 6) {
+                Image(systemName: "mic.slash.fill")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.orange)
+                Text("需要开启语音权限")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                Button(action: onExplicitDismiss) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 20, height: 20)
+                        .background(Circle().fill(Color.primary.opacity(0.08)))
+                }
+                .buttonStyle(.plain)
+            }
+
+            HStack(spacing: 8) {
+                Text(message)
+                    .font(.system(size: 11.2, weight: .medium))
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                Button(action: onOpenVoicePrivacySettings) {
+                    Text("前往开启")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(Capsule().fill(Color.accentColor))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+    }
+
+    private func orbVoiceCommittedCard(count: Int, summary: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 7) {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Color(red: 0.063, green: 0.725, blue: 0.506))
+                Text("已语音记入 \(count) 条待办")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.primary)
+                Spacer(minLength: 0)
+                Button(action: onOpenTodoList) {
+                    Text("看清单")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(Color.accentColor)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3.5)
+                        .background(Capsule().fill(Color.accentColor.opacity(0.14)))
+                }
+                .buttonStyle(.plain)
+            }
+
+            Text(summary)
+                .font(.system(size: 11.2))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+    }
+
+    private func orbProactiveNudgeCard(candidate: ProactiveTodoNudgeCandidate) -> some View {
+        let tone = candidate.isUrgent
+            ? Color(red: 0.961, green: 0.620, blue: 0.043)
+            : Color(red: 0.063, green: 0.725, blue: 0.506)
+
+        return VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(tone)
+                    .frame(width: 7, height: 7)
+                Text("\(candidate.headline) · \(candidate.personaLine)")
+                    .font(.system(size: 10.8, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                Button(action: onExplicitDismiss) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 20, height: 20)
+                        .background(Circle().fill(Color.primary.opacity(0.08)))
+                }
+                .buttonStyle(.plain)
+            }
+
+            Text(candidate.todoText)
+                .font(.system(size: 12.2, weight: .semibold))
+                .foregroundStyle(.primary)
+                .lineLimit(2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            HStack(spacing: 6) {
+                Button {
+                    onCompleteProactiveTodo(candidate.itemID)
+                } label: {
+                    Text("已完成")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4.5)
+                        .background(Capsule().fill(tone))
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    onSnoozeProactiveTodo(candidate.itemID)
+                } label: {
+                    Text("稍后 30 分")
+                        .font(.system(size: 10.8, weight: .medium))
+                        .foregroundStyle(.primary)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 4.5)
+                        .background(Capsule().fill(Color.primary.opacity(0.08)))
+                }
+                .buttonStyle(.plain)
+
+                Spacer(minLength: 0)
+
+                Button(action: onOpenTodoList) {
+                    Text("看清单")
+                        .font(.system(size: 10.8, weight: .semibold))
+                        .foregroundStyle(Color.accentColor)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 4.5)
+                        .background(Capsule().fill(Color.accentColor.opacity(0.13)))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
     }
 
     private func orbCompanionOfferingCard(candidate: AdaptiveSparkCandidate, showDoubleCopyHint: Bool) -> some View {
