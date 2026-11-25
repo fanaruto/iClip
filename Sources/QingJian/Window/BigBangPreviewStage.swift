@@ -35,6 +35,11 @@ final class TokenFrameRegistry {
         frames[id] = rect
     }
 
+    func replaceFrames(_ nextFrames: [Int: CGRect], session: String) {
+        activeSession = session
+        frames = nextFrames
+    }
+
     func frames(for session: String) -> [Int: CGRect] {
         guard session == activeSession else { return [:] }
         return frames
@@ -87,6 +92,9 @@ struct BigBangFlowLayout: Layout {
     var spacing: CGFloat = 7
     var lineSpacing: CGFloat = 8
     var fullWidthRows: Bool = false
+    var tokenIDs: [Int] = []
+    var sessionKey: String = ""
+    var frameRegistry: TokenFrameRegistry? = nil
 
     static func computeLayout(
         items: [(size: CGSize, isBreak: Bool)],
@@ -187,19 +195,30 @@ struct BigBangFlowLayout: Layout {
             lineSpacing: lineSpacing,
             fullWidthRows: fullWidthRows
         )
+        var registered: [Int: CGRect] = [:]
+        if frameRegistry != nil && !sessionKey.isEmpty && tokenIDs.count == subviews.count {
+            registered.reserveCapacity(subviews.count)
+        }
         for (idx, sub) in subviews.enumerated() where idx < result.frames.count {
             let rect = result.frames[idx]
             let isBreak = items[idx].isBreak
+            let placedOrigin = CGPoint(x: bounds.minX + rect.minX, y: bounds.minY + rect.minY)
             sub.place(
-                at: CGPoint(x: bounds.minX + rect.minX, y: bounds.minY + rect.minY),
+                at: placedOrigin,
                 anchor: .topLeading,
                 proposal: isBreak ? ProposedViewSize(.zero) : ProposedViewSize(width: rect.width, height: rect.height)
             )
+            if !isBreak, idx < tokenIDs.count {
+                registered[tokenIDs[idx]] = CGRect(origin: placedOrigin, size: rect.size)
+            }
+        }
+        if let frameRegistry, !sessionKey.isEmpty, tokenIDs.count == subviews.count {
+            frameRegistry.replaceFrames(registered, session: sessionKey)
         }
     }
 }
 
-/// 锤子大爆炸（Big Bang）原位图片选字 + 文本炸词与丝滑独立大屏预览控制器
+/// 锤子大爆炸（Big Bang）零重叠流式词阵 + 原位二次爆炸拆分与丝滑独立大屏预览控制器
 @MainActor
 final class BigBangStageController: ObservableObject {
     static let shared = BigBangStageController()
@@ -211,14 +230,9 @@ final class BigBangStageController: ObservableObject {
     private(set) var zoomExternalEpoch: Int = 0
     @Published private(set) var presentationEpoch: Int = 0
     @Published private(set) var isAnalyzingOCR: Bool = false
-    @Published var granularity: BigBangGranularity = .word {
+    @Published var granularity: BigBangGranularity = .smart {
         didSet {
             guard oldValue != granularity else { return }
-            if activeModeIsImage,
-               Self.resolveEffectiveGranularity(oldValue, isImageMode: true)
-                == Self.resolveEffectiveGranularity(granularity, isImageMode: true) {
-                return
-            }
             rebuildActiveTokensForGranularity()
         }
     }
@@ -237,6 +251,9 @@ final class BigBangStageController: ObservableObject {
     @Published private(set) var textTokens: [BigBangTextToken] = []
     @Published private(set) var isTextTokensTruncated: Bool = false
     @Published var textSelectedTokenIDs: Set<Int> = []
+    @Published private(set) var explosionUndoStack: [([BigBangTextToken], Set<Int>)] = []
+    private var nextDynamicTokenID: Int = 10_000
+    private var burstEpoch: Int = 0
     @Published var isEditingText: Bool = false {
         didSet {
             panel?.allowBecomeKeyForEditing = isEditingText
@@ -321,14 +338,18 @@ final class BigBangStageController: ObservableObject {
         Self.resolveEffectiveGranularity(granularity, isImageMode: activeModeIsImage)
     }
 
+    var canUndoExplosion: Bool {
+        !explosionUndoStack.isEmpty
+    }
+
     static func resolveEffectiveGranularity(_ granularity: BigBangGranularity, isImageMode: Bool) -> BigBangGranularity {
-        (isImageMode && granularity == .line) ? .word : granularity
+        granularity
     }
 
     static func nextCycledGranularity(from granularity: BigBangGranularity, isImageMode: Bool) -> BigBangGranularity {
-        let options: [BigBangGranularity] = isImageMode ? [.word, .character] : BigBangGranularity.allCases
+        let options = BigBangGranularity.allCases
         let normalized = resolveEffectiveGranularity(granularity, isImageMode: isImageMode)
-        guard let idx = options.firstIndex(of: normalized) else { return .word }
+        guard let idx = options.firstIndex(of: normalized) else { return .smart }
         return options[(idx + 1) % options.count]
     }
 
@@ -396,11 +417,16 @@ final class BigBangStageController: ObservableObject {
             self.hostWindow = hostWindow
         }
         self.storeRef = store
+        if !wasActivelyVisible && self.granularity == .character {
+            self.granularity = .smart
+        }
         self.currentItem = item
         self.isEditingText = false
         self.draftText = ""
         self.imageSelectedBoxIDs = []
         self.textSelectedTokenIDs = []
+        self.explosionUndoStack = []
+        self.burstEpoch = 0
         self.imageOCRMessage = nil
         self.imageOCRCanRetry = false
 
@@ -531,6 +557,12 @@ final class BigBangStageController: ObservableObject {
         self.imageWordBoxes = []
         self.recognizedImageFullText = item.ocrText ?? ""
         self.isAnalyzingOCR = false
+        if !self.recognizedImageFullText.isEmpty {
+            applyBoundedTextTokens(from: self.recognizedImageFullText)
+        } else {
+            self.textTokens = []
+            self.isTextTokensTruncated = false
+        }
 
         let targetItem = item
         if cachedPreview == nil {
@@ -543,15 +575,14 @@ final class BigBangStageController: ObservableObject {
             }
         }
 
-        // 后台预热原位 OCR 词框 + 相邻两张图片高清图，切换时 0 延迟
+        // 后台预热视觉排序 OCR 全文 + 相邻两张图片高清图，切换时 0 延迟
         if let url = store.imageURL(for: targetItem) {
-            let activeGranularity = self.granularity == .line ? .word : self.granularity
-            if let cached = VisionOCRService.cachedWordBoxResult(at: url, granularity: activeGranularity) {
+            if let cached = VisionOCRService.cachedWordBoxResult(at: url, granularity: .smart) {
                 applyWordBoxResult(cached)
             } else {
-                self.isAnalyzingOCR = true
+                self.isAnalyzingOCR = self.recognizedImageFullText.isEmpty
                 ocrTask = Task { [weak self] in
-                    let res = await VisionOCRService.recognizeWordBoxesDetailed(at: url, granularity: activeGranularity)
+                    let res = await VisionOCRService.recognizeWordBoxesDetailed(at: url, granularity: .smart)
                     guard !Task.isCancelled, let self, self.currentItem?.id == targetItem.id else { return }
                     self.isAnalyzingOCR = false
                     self.applyWordBoxResult(res)
@@ -566,7 +597,7 @@ final class BigBangStageController: ObservableObject {
                     if Task.isCancelled { break }
                     _ = await store.loadPreviewImage(for: n)
                     if let url = store.imageURL(for: n) {
-                        _ = await VisionOCRService.recognizeWordBoxesDetailed(at: url, granularity: .word)
+                        _ = await VisionOCRService.recognizeWordBoxesDetailed(at: url, granularity: .smart)
                     }
                 }
             }
@@ -630,6 +661,7 @@ final class BigBangStageController: ObservableObject {
             kept.append(tok)
         }
         self.textTokens = kept
+        self.nextDynamicTokenID = max(10_000, (kept.map(\.id).max() ?? 0) + 1)
         self.isTextTokensTruncated = wasInputClipped || hitCap
     }
 
@@ -642,44 +674,59 @@ final class BigBangStageController: ObservableObject {
 
     private func applyWordBoxResult(_ result: VisionOCRService.WordBoxRecognitionResult) {
         let fallbackOCRText = currentItem?.ocrText ?? ""
+        let prevText = self.recognizedImageFullText
+        let userHasInteracted = !self.explosionUndoStack.isEmpty || !self.textSelectedTokenIDs.isEmpty
         switch result {
         case .recognized(let fullText, let boxes):
             self.imageWordBoxes = boxes
-            self.recognizedImageFullText = fullText.isEmpty ? fallbackOCRText : fullText
-            self.imageOCRMessage = boxes.isEmpty ? "未在图片中检测到可选文字" : nil
+            let resolved = fullText.isEmpty ? fallbackOCRText : fullText
+            if self.textTokens.isEmpty || (!userHasInteracted && resolved != prevText) {
+                self.recognizedImageFullText = resolved
+                self.explosionUndoStack = []
+                self.applyBoundedTextTokens(from: resolved)
+            }
+            self.imageOCRMessage = self.textTokens.isEmpty ? "未在图片中检测到可选文字" : nil
             self.imageOCRCanRetry = false
         case .emptyImage:
             self.imageWordBoxes = []
-            self.recognizedImageFullText = fallbackOCRText
-            self.imageOCRMessage = "未在图片中检测到可选文字"
+            if self.textTokens.isEmpty {
+                self.recognizedImageFullText = fallbackOCRText
+                self.applyBoundedTextTokens(from: fallbackOCRText)
+            }
+            self.imageOCRMessage = self.textTokens.isEmpty ? "未在图片中检测到可选文字" : nil
             self.imageOCRCanRetry = false
         case .unsupportedDimensions:
             self.imageWordBoxes = []
-            self.recognizedImageFullText = fallbackOCRText
-            self.imageOCRMessage = "图片分辨率过高，已跳过离线识字"
+            if self.textTokens.isEmpty {
+                self.recognizedImageFullText = fallbackOCRText
+                self.applyBoundedTextTokens(from: fallbackOCRText)
+            }
+            self.imageOCRMessage = self.textTokens.isEmpty ? "图片分辨率过高，已跳过离线识字" : nil
             self.imageOCRCanRetry = false
         case .failed:
             self.imageWordBoxes = []
-            self.recognizedImageFullText = fallbackOCRText
-            self.imageOCRMessage = "离线识字暂时不可用，请点击重试"
-            self.imageOCRCanRetry = true
+            if self.textTokens.isEmpty {
+                self.recognizedImageFullText = fallbackOCRText
+                self.applyBoundedTextTokens(from: fallbackOCRText)
+            }
+            self.imageOCRMessage = self.textTokens.isEmpty ? "离线识字暂时不可用，请点击重试" : nil
+            self.imageOCRCanRetry = self.textTokens.isEmpty
         }
     }
 
-    private func startImageWordBoxRecognition(for item: ClipItem, url: URL, granularity: BigBangGranularity) {
+    private func startImageWordBoxRecognition(for item: ClipItem, url: URL) {
         ocrTask?.cancel()
         ocrTask = nil
-        if let cached = VisionOCRService.cachedWordBoxResult(at: url, granularity: granularity) {
+        if let cached = VisionOCRService.cachedWordBoxResult(at: url, granularity: .smart) {
             isAnalyzingOCR = false
             applyWordBoxResult(cached)
             return
         }
-        imageWordBoxes = []
         imageOCRMessage = nil
         imageOCRCanRetry = false
-        isAnalyzingOCR = true
+        isAnalyzingOCR = textTokens.isEmpty
         ocrTask = Task { [weak self] in
-            let res = await VisionOCRService.recognizeWordBoxesDetailed(at: url, granularity: granularity)
+            let res = await VisionOCRService.recognizeWordBoxesDetailed(at: url, granularity: .smart)
             guard !Task.isCancelled, let self, self.currentItem?.id == item.id else { return }
             self.isAnalyzingOCR = false
             self.applyWordBoxResult(res)
@@ -687,25 +734,32 @@ final class BigBangStageController: ObservableObject {
     }
 
     private func rebuildActiveTokensForGranularity() {
-        if activeModeIsImage {
-            imageSelectedBoxIDs = []
-            guard let item = currentItem, let url = storeRef?.imageURL(for: item) else { return }
-            let effGranularity: BigBangGranularity = (granularity == .line) ? .word : granularity
-            startImageWordBoxRecognition(for: item, url: url, granularity: effGranularity)
-        } else {
-            textSelectedTokenIDs = []
-            let source = activeSourceTextForTextBigBang()
-            applyBoundedTextTokens(from: source)
+        explosionUndoStack = []
+        textSelectedTokenIDs = []
+        imageSelectedBoxIDs = []
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let anim: Animation = reduceMotion
+            ? .easeOut(duration: 0.14)
+            : .spring(response: 0.28, dampingFraction: 0.84)
+        withAnimation(anim) {
+            if activeModeIsImage {
+                applyBoundedTextTokens(from: recognizedImageFullText)
+            } else {
+                let source = activeSourceTextForTextBigBang()
+                applyBoundedTextTokens(from: source)
+            }
         }
     }
 
     private func enterImageBigBangOCR(for item: ClipItem) {
         imageZoomScale = 1.0
         isImageBigBangActive = true
-        if (imageWordBoxes.isEmpty || imageOCRCanRetry) && !isAnalyzingOCR,
+        if textTokens.isEmpty && !recognizedImageFullText.isEmpty {
+            applyBoundedTextTokens(from: recognizedImageFullText)
+        }
+        if (textTokens.isEmpty || imageOCRCanRetry) && !isAnalyzingOCR,
            let url = storeRef?.imageURL(for: item) {
-            let eff: BigBangGranularity = (granularity == .line) ? .word : granularity
-            startImageWordBoxRecognition(for: item, url: url, granularity: eff)
+            startImageWordBoxRecognition(for: item, url: url)
         }
         TactileFeedbackEngine.shared.perform(.tabSwitch)
     }
@@ -714,19 +768,147 @@ final class BigBangStageController: ObservableObject {
         guard activeModeIsImage, let item = currentItem, let url = storeRef?.imageURL(for: item), !isAnalyzingOCR else {
             return
         }
-        let eff: BigBangGranularity = (granularity == .line) ? .word : granularity
-        startImageWordBoxRecognition(for: item, url: url, granularity: eff)
+        startImageWordBoxRecognition(for: item, url: url)
         TactileFeedbackEngine.shared.performNavigationStepHaptic()
+    }
+
+    // MARK: - 原位二次爆炸拆分与回退栈
+
+    /// 将指定复合词块原位二次爆炸拆分为下一级子词块，保持周围兄弟词块 ID 恒定以实现 120Hz 顺滑弹簧让位
+    @discardableResult
+    func explodeTokenInPlace(id: Int) -> Bool {
+        guard let idx = textTokens.firstIndex(where: { $0.id == id && !$0.isLineBreak }) else {
+            return false
+        }
+        let nextBurst = burstEpoch &+ 1
+        var candidateNextID = nextDynamicTokenID
+        guard let children = BigBangTokenizer.subdivideToken(
+            textTokens[idx],
+            nextID: &candidateNextID,
+            burstGeneration: nextBurst
+        ) else {
+            return false
+        }
+
+        pushExplosionSnapshot()
+        burstEpoch = nextBurst
+        nextDynamicTokenID = candidateNextID
+
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let anim: Animation = reduceMotion
+            ? .easeOut(duration: 0.14)
+            : .spring(response: 0.30, dampingFraction: 0.78)
+        withAnimation(anim) {
+            textSelectedTokenIDs.remove(id)
+            textTokens.replaceSubrange(idx...idx, with: children)
+        }
+        TactileFeedbackEngine.shared.perform(.tabSwitch)
+        return true
+    }
+
+    /// 优先将当前选中的可拆词块全部原位二次炸开；若未选中，则炸开悬停词块或将全局粒度向下一级细分
+    @discardableResult
+    func explodeSelectedOrHoveredOrStepFiner(hoveredTokenID: Int? = nil) -> Bool {
+        let splittableSelected = textTokens.filter {
+            !$0.isLineBreak && textSelectedTokenIDs.contains($0.id) && BigBangTokenizer.canSubdivide($0.text)
+        }
+        if !splittableSelected.isEmpty {
+            pushExplosionSnapshot()
+            let nextBurst = burstEpoch &+ 1
+            var candidateNextID = nextDynamicTokenID
+            var rebuilt: [BigBangTextToken] = []
+            rebuilt.reserveCapacity(textTokens.count + splittableSelected.count * 2)
+            var nextSel = textSelectedTokenIDs
+
+            for tok in textTokens {
+                if !tok.isLineBreak,
+                   textSelectedTokenIDs.contains(tok.id),
+                   let children = BigBangTokenizer.subdivideToken(
+                       tok,
+                       nextID: &candidateNextID,
+                       burstGeneration: nextBurst
+                   ) {
+                    nextSel.remove(tok.id)
+                    rebuilt.append(contentsOf: children)
+                } else {
+                    rebuilt.append(tok)
+                }
+            }
+
+            burstEpoch = nextBurst
+            nextDynamicTokenID = candidateNextID
+            let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            let anim: Animation = reduceMotion
+                ? .easeOut(duration: 0.14)
+                : .spring(response: 0.30, dampingFraction: 0.78)
+            withAnimation(anim) {
+                textSelectedTokenIDs = nextSel
+                textTokens = rebuilt
+            }
+            TactileFeedbackEngine.shared.perform(.tabSwitch)
+            return true
+        }
+
+        if let hid = hoveredTokenID, explodeTokenInPlace(id: hid) {
+            return true
+        }
+
+        let finerTarget: BigBangGranularity? = {
+            switch granularity {
+            case .line: return .smart
+            case .smart: return .word
+            case .word: return .character
+            case .character: return nil
+            }
+        }()
+        if let finerTarget {
+            granularity = finerTarget
+            TactileFeedbackEngine.shared.perform(.tabSwitch)
+            return true
+        }
+        return false
+    }
+
+    @discardableResult
+    func undoLastExplosion() -> Bool {
+        guard let (prevTokens, prevSelected) = explosionUndoStack.popLast() else {
+            return false
+        }
+        let settledTokens = prevTokens.map { tok -> BigBangTextToken in
+            var copy = tok
+            copy.burstGeneration = 0
+            copy.burstSpreadIndex = 0
+            return copy
+        }
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let anim: Animation = reduceMotion
+            ? .easeOut(duration: 0.14)
+            : .spring(response: 0.26, dampingFraction: 0.86)
+        withAnimation(anim) {
+            textTokens = settledTokens
+            textSelectedTokenIDs = prevSelected
+        }
+        TactileFeedbackEngine.shared.performNavigationStepHaptic()
+        return true
+    }
+
+    private func pushExplosionSnapshot() {
+        if explosionUndoStack.count >= 24 {
+            explosionUndoStack.removeFirst()
+        }
+        explosionUndoStack.append((textTokens, textSelectedTokenIDs))
     }
 
     // MARK: - 实时组装与交互指令
 
     var currentSelectedAssembledText: String {
-        if activeModeIsImage {
-            return BigBangTokenizer.assembleSelectedImageBoxes(imageWordBoxes, selectedIDs: imageSelectedBoxIDs)
-        } else {
+        if !textSelectedTokenIDs.isEmpty {
             return BigBangTokenizer.assembleSelected(textTokens, selectedIDs: textSelectedTokenIDs)
         }
+        if activeModeIsImage && !imageSelectedBoxIDs.isEmpty {
+            return BigBangTokenizer.assembleSelectedImageBoxes(imageWordBoxes, selectedIDs: imageSelectedBoxIDs)
+        }
+        return ""
     }
 
     func zoomInImage() {
@@ -766,14 +948,19 @@ final class BigBangStageController: ObservableObject {
 
     func toggleImageBigBangMode() {
         guard activeModeIsImage, let item = currentItem else { return }
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let anim: Animation = reduceMotion
+            ? .easeOut(duration: 0.16)
+            : .spring(response: 0.28, dampingFraction: 0.85)
         if isImageBigBangActive {
-            withAnimation(.spring(response: 0.22, dampingFraction: 0.88)) {
+            withAnimation(anim) {
                 isImageBigBangActive = false
                 imageSelectedBoxIDs = []
+                textSelectedTokenIDs = []
             }
             TactileFeedbackEngine.shared.performNavigationStepHaptic()
         } else {
-            withAnimation(.spring(response: 0.22, dampingFraction: 0.88)) {
+            withAnimation(anim) {
                 enterImageBigBangOCR(for: item)
             }
         }
@@ -787,20 +974,16 @@ final class BigBangStageController: ObservableObject {
     func selectAllTokens() {
         if activeModeIsImage {
             guard isImageBigBangActive else { return }
-            imageSelectedBoxIDs = Set(imageWordBoxes.map(\.id))
         } else {
             guard isTextBigBangActive else { return }
-            textSelectedTokenIDs = Set(textTokens.filter { !$0.isLineBreak }.map(\.id))
         }
+        textSelectedTokenIDs = Set(textTokens.filter { !$0.isLineBreak }.map(\.id))
         TactileFeedbackEngine.shared.performNavigationStepHaptic()
     }
 
     func clearTokenSelection() {
-        if activeModeIsImage {
-            imageSelectedBoxIDs = []
-        } else {
-            textSelectedTokenIDs = []
-        }
+        imageSelectedBoxIDs = []
+        textSelectedTokenIDs = []
     }
 
     func stepTab(delta: Int) {
@@ -1136,6 +1319,8 @@ final class BigBangStageController: ObservableObject {
         textTokens = []
         isTextTokensTruncated = false
         textSelectedTokenIDs = []
+        explosionUndoStack = []
+        burstEpoch = 0
         textTabs = []
         stickyDiffSelected = false
         isImageBigBangActive = false
@@ -1145,7 +1330,7 @@ final class BigBangStageController: ObservableObject {
     }
 }
 
-// MARK: - 独立大屏预览 + 大爆炸（Big Bang）SwiftUI 视图
+// MARK: - 独立大屏预览 + 零重叠大爆炸（Big Bang）SwiftUI 视图
 
 struct BigBangStageRootView: View {
     @ObservedObject var controller: BigBangStageController
@@ -1154,15 +1339,11 @@ struct BigBangStageRootView: View {
     @Environment(\.colorScheme) private var colorScheme
     @FocusState private var isEditorFocused: Bool
 
-    @State private var hoveredBoxID: Int? = nil
-    @State private var boxDragTargetSelect: Bool? = nil
-    @State private var boxSweepVisited: Set<Int> = []
-    @State private var lastBoxSweepPoint: CGPoint? = nil
-
     @State private var tokenDragTargetSelect: Bool? = nil
     @State private var tokenSweepVisited: Set<Int> = []
     @State private var lastTextSweepPoint: CGPoint? = nil
     @State private var hoveredTextTokenID: Int? = nil
+    @State private var lastTappedToken: (id: Int, uptime: TimeInterval)? = nil
     @State private var tokenFrameStore = TokenFrameRegistry()
     @State private var imagePanOffset: CGSize = .zero
     @State private var lastImagePanTranslation: CGSize? = nil
@@ -1179,6 +1360,10 @@ struct BigBangStageRootView: View {
                 .padding(.horizontal, 16)
                 .padding(.top, 13)
                 .padding(.bottom, 10)
+                .background(
+                    Color(nsColor: .windowBackgroundColor)
+                        .opacity(colorScheme == .dark ? 0.56 : 0.82)
+                )
 
             Divider().opacity(0.24)
 
@@ -1193,6 +1378,10 @@ struct BigBangStageRootView: View {
             bottomActionIsland
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)
+                .background(
+                    Color(nsColor: .windowBackgroundColor)
+                        .opacity(colorScheme == .dark ? 0.56 : 0.82)
+                )
         }
         .overlay(
             RoundedRectangle(cornerRadius: 20, style: .continuous)
@@ -1204,10 +1393,6 @@ struct BigBangStageRootView: View {
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .environment(\.stageHoverResetEpoch, controller.presentationEpoch)
         .onChange(of: controller.currentItem?.id) { _, _ in
-            hoveredBoxID = nil
-            boxDragTargetSelect = nil
-            boxSweepVisited = []
-            lastBoxSweepPoint = nil
             imagePanOffset = .zero
             lastImagePanTranslation = nil
             suppressNextProportionalPan = false
@@ -1217,8 +1402,14 @@ struct BigBangStageRootView: View {
             tokenSweepVisited = []
             lastTextSweepPoint = nil
             hoveredTextTokenID = nil
+            lastTappedToken = nil
         }
         .onChange(of: controller.isImageBigBangActive) { _, active in
+            hoveredTextTokenID = nil
+            tokenDragTargetSelect = nil
+            tokenSweepVisited = []
+            lastTextSweepPoint = nil
+            lastTappedToken = nil
             if active {
                 imagePanOffset = .zero
                 lastImagePanTranslation = nil
@@ -1317,7 +1508,7 @@ struct BigBangStageRootView: View {
                 }
                 .frame(maxWidth: 360)
             } else if controller.activeModeIsImage && controller.isImageBigBangActive {
-                granularityBar(options: [.word, .character])
+                granularityBar(options: BigBangGranularity.allCases)
             }
 
             Button {
@@ -1346,17 +1537,22 @@ struct BigBangStageRootView: View {
                 return "高清原图"
             }()
             if controller.isImageBigBangActive {
-                if controller.isAnalyzingOCR {
-                    return "\(dim) · 正在识别原位文字框..."
+                if controller.isAnalyzingOCR && controller.textTokens.isEmpty {
+                    return "\(dim) · 正在识别并智能组合图中文字..."
                 }
-                return "\(dim) · 单击或按住横扫原位词块精准取词"
+                return "\(dim) · 单击/横扫选词 · 双击或 ⌥单击词块原位再拆分"
             }
             let zoomSuffix = controller.imageZoomScale > 1.01 ? " · \(Int(round(controller.imageZoomScale * 100)))%（双击还原）" : ""
             return "\(dim) · Space 关闭 · 双击/双指/⌘+/- 缩放 · O 大爆炸选字\(zoomSuffix)"
         }
 
-        let txt = controller.isEditingText ? controller.draftText : controller.activeSourceTextForTextBigBang()
-        return QuickLookTextHelper.textMetricsSummary(for: txt)
+        let base = QuickLookTextHelper.textMetricsSummary(
+            for: controller.isEditingText ? controller.draftText : controller.activeSourceTextForTextBigBang()
+        )
+        if controller.isTextBigBangActive && !controller.isEditingText {
+            return "\(base) · 双击或 ⌥单击词块可原位再拆分"
+        }
+        return base
     }
 
     private func tabPill(title: String, active: Bool, action: @escaping () -> Void) -> some View {
@@ -1398,7 +1594,7 @@ struct BigBangStageRootView: View {
         }
     }
 
-    // MARK: - 图片高清画布 + 原位 OCR 大爆炸选字层
+    // MARK: - 图片高清画布 + 毛玻璃景深零重叠大爆炸词阵
 
     private var imagePreviewCanvas: some View {
         GeometryReader { geo in
@@ -1433,39 +1629,56 @@ struct BigBangStageRootView: View {
                         .scaledToFit()
                         .frame(width: absImageRect.width, height: absImageRect.height)
                         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        .overlay {
-                            if controller.isImageBigBangActive {
-                                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                    .fill(Color.black.opacity(0.28))
-                            }
-                        }
-                        .scaleEffect(controller.isImageBigBangActive ? 1.0 : controller.imageZoomScale)
-                        .animation(isPinchingImage ? nil : .interactiveSpring(response: 0.24, dampingFraction: 0.86), value: controller.imageZoomScale)
+                        .opacity(controller.isImageBigBangActive ? 0.0 : 1.0)
+                        .scaleEffect(controller.isImageBigBangActive ? 0.96 : controller.imageZoomScale)
+                        .animation(
+                            isPinchingImage ? nil : .interactiveSpring(response: 0.26, dampingFraction: 0.86),
+                            value: controller.imageZoomScale
+                        )
+                        .animation(.spring(response: 0.28, dampingFraction: 0.86), value: controller.isImageBigBangActive)
                         .offset(clampedPan)
-                        .animation((isPinchingImage || lastImagePanTranslation != nil) ? nil : .interactiveSpring(response: 0.24, dampingFraction: 0.86), value: clampedPan)
+                        .animation(
+                            (isPinchingImage || lastImagePanTranslation != nil) ? nil : .interactiveSpring(response: 0.24, dampingFraction: 0.86),
+                            value: clampedPan
+                        )
                         .position(x: absImageRect.midX, y: absImageRect.midY)
-                } else {
+                        .allowsHitTesting(!controller.isImageBigBangActive)
+                } else if !controller.isImageBigBangActive {
                     ProgressView()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
 
                 if controller.isImageBigBangActive {
-                    if controller.isAnalyzingOCR && controller.imageWordBoxes.isEmpty {
+                    // 纯净漫射玻璃画布：原图随 0.28s 弹簧缩隐退场，彻底杜绝底字重影、边缘接缝与实时大图模糊掉帧
+                    Rectangle()
+                        .fill(
+                            colorScheme == .dark
+                                ? Color(red: 0.09, green: 0.10, blue: 0.14).opacity(0.92)
+                                : Color(red: 0.945, green: 0.955, blue: 0.975).opacity(0.96)
+                        )
+                        .allowsHitTesting(false)
+                        .transition(.opacity)
+
+                    if controller.isAnalyzingOCR && controller.textTokens.isEmpty {
                         HStack(spacing: 8) {
                             ProgressView().controlSize(.small)
-                            Text("正在定位图中全部文字坐标...")
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(.white)
+                            Text("正在提取并智能聚合图中文字...")
+                                .font(.system(size: 12.5, weight: .medium))
+                                .foregroundStyle(.primary)
                         }
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 8)
-                        .background(Capsule().fill(Color.black.opacity(0.68)))
+                        .padding(.horizontal, 15)
+                        .padding(.vertical, 8.5)
+                        .background(
+                            Capsule()
+                                .fill(Color.primary.opacity(colorScheme == .dark ? 0.14 : 0.08))
+                        )
                         .position(x: geo.size.width * 0.5, y: geo.size.height * 0.5)
-                    } else if controller.imageWordBoxes.isEmpty {
+                        .transition(.opacity.combined(with: .scale(scale: 0.95)))
+                    } else if controller.textTokens.isEmpty {
                         HStack(spacing: 10) {
                             Text(controller.imageOCRMessage ?? "未在图片中检测到可选文字")
                                 .font(.system(size: 12.5, weight: .medium))
-                                .foregroundStyle(.white)
+                                .foregroundStyle(.primary)
 
                             if controller.imageOCRCanRetry {
                                 Button("重试") {
@@ -1479,46 +1692,23 @@ struct BigBangStageRootView: View {
                                 .background(Capsule().fill(brandCobalt))
                             }
                         }
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 8)
-                        .background(Capsule().fill(Color.black.opacity(0.68)))
+                        .padding(.horizontal, 15)
+                        .padding(.vertical, 8.5)
+                        .background(
+                            Capsule()
+                                .fill(Color.primary.opacity(colorScheme == .dark ? 0.14 : 0.08))
+                        )
                         .position(x: geo.size.width * 0.5, y: geo.size.height * 0.5)
+                        .transition(.opacity.combined(with: .scale(scale: 0.95)))
                     } else {
-                        ForEach(controller.imageWordBoxes) { box in
-                            let chipRect = BigBangTokenizer.displayImageBoxRect(for: box, in: absImageRect)
-                            let selected = controller.imageSelectedBoxIDs.contains(box.id)
-                            let hovered = (hoveredBoxID == box.id)
-                            let fontPt = min(13.5, max(9.5, (chipRect.height - 4) * 0.66))
-
-                            Text(box.text)
-                                .font(.system(size: fontPt, weight: selected ? .bold : .medium))
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.65)
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 3)
-                                .frame(width: chipRect.width, height: chipRect.height)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                        .fill(
-                                            selected
-                                                ? brandCobalt.opacity(0.94)
-                                                : Color(red: 0.08, green: 0.11, blue: 0.16).opacity(hovered ? 0.86 : 0.72)
-                                        )
+                        bigBangTokenStageCanvas(showInlineGranularityHeader: false, isOverFrostedImage: true)
+                            .transition(
+                                .opacity.combined(
+                                    with: .scale(
+                                        scale: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 1.0 : 0.96
+                                    )
                                 )
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                        .strokeBorder(
-                                            selected
-                                                ? Color.white.opacity(0.92)
-                                                : (hovered ? brandCobalt.opacity(0.9) : Color.white.opacity(0.45)),
-                                            lineWidth: selected ? 1.2 : 0.75
-                                        )
-                                )
-                                .scaleEffect(selected ? 1.04 : (hovered ? 1.03 : 1.0))
-                                .zIndex(selected ? 15 : (hovered ? 20 : 1))
-                                .position(x: chipRect.midX, y: chipRect.midY)
-                                .allowsHitTesting(false)
-                        }
+                            )
                     }
                 }
             }
@@ -1554,26 +1744,6 @@ struct BigBangStageRootView: View {
                     )
                 }
             }
-            .onContinuousHover(coordinateSpace: .local) { phase in
-                guard controller.isImageBigBangActive, !controller.imageWordBoxes.isEmpty else {
-                    if hoveredBoxID != nil { hoveredBoxID = nil }
-                    return
-                }
-                switch phase {
-                case .active(let loc):
-                    let hit = controller.imageWordBoxes.first { box in
-                        BigBangTokenizer.displayImageBoxHitRect(for: box, in: absImageRect)
-                            .contains(loc)
-                    }?.id
-                    if hoveredBoxID != hit {
-                        hoveredBoxID = hit
-                    }
-                case .ended:
-                    if hoveredBoxID != nil {
-                        hoveredBoxID = nil
-                    }
-                }
-            }
             .simultaneousGesture(
                 SpatialTapGesture(count: 2)
                     .onEnded { value in
@@ -1605,46 +1775,24 @@ struct BigBangStageRootView: View {
                     }
             )
             .gesture(
-                DragGesture(minimumDistance: controller.isImageBigBangActive ? 0 : 6)
+                DragGesture(minimumDistance: 6)
                     .onChanged { value in
-                        if controller.isImageBigBangActive {
-                            guard !controller.imageWordBoxes.isEmpty else { return }
-                            let isFirst = (lastBoxSweepPoint == nil)
-                            let fromPt = lastBoxSweepPoint ?? value.startLocation
-                            lastBoxSweepPoint = value.location
-                            for pt in sampleSweepPoints(from: fromPt, to: value.location, includeStart: isFirst) {
-                                handleImageBoxDragChanged(location: pt, imageRect: absImageRect)
-                            }
-                        } else if controller.imageZoomScale > 1.01 {
-                            let prev = lastImagePanTranslation ?? .zero
-                            let delta = CGSize(
-                                width: value.translation.width - prev.width,
-                                height: value.translation.height - prev.height
-                            )
-                            lastImagePanTranslation = value.translation
-                            imagePanOffset = BigBangTokenizer.clampedImagePanOffset(
-                                offset: CGSize(width: clampedPan.width + delta.width, height: clampedPan.height + delta.height),
-                                imageSize: absImageRect.size,
-                                zoomScale: controller.imageZoomScale,
-                                viewportSize: containerSize
-                            )
-                        }
+                        guard !controller.isImageBigBangActive, controller.imageZoomScale > 1.01 else { return }
+                        let prev = lastImagePanTranslation ?? .zero
+                        let delta = CGSize(
+                            width: value.translation.width - prev.width,
+                            height: value.translation.height - prev.height
+                        )
+                        lastImagePanTranslation = value.translation
+                        imagePanOffset = BigBangTokenizer.clampedImagePanOffset(
+                            offset: CGSize(width: clampedPan.width + delta.width, height: clampedPan.height + delta.height),
+                            imageSize: absImageRect.size,
+                            zoomScale: controller.imageZoomScale,
+                            viewportSize: containerSize
+                        )
                     }
-                    .onEnded { value in
-                        if controller.isImageBigBangActive {
-                            let dragDist = hypot(value.translation.width, value.translation.height)
-                            if boxSweepVisited.isEmpty,
-                               dragDist < 5.0,
-                               !controller.imageSelectedBoxIDs.isEmpty {
-                                controller.clearTokenSelection()
-                                TactileFeedbackEngine.shared.performNavigationStepHaptic()
-                            }
-                            boxDragTargetSelect = nil
-                            boxSweepVisited = []
-                            lastBoxSweepPoint = nil
-                        } else {
-                            lastImagePanTranslation = nil
-                        }
+                    .onEnded { _ in
+                        lastImagePanTranslation = nil
                     }
             )
             .simultaneousGesture(
@@ -1686,29 +1834,6 @@ struct BigBangStageRootView: View {
         }
     }
 
-    private func handleImageBoxDragChanged(location: CGPoint, imageRect: CGRect) {
-        for box in controller.imageWordBoxes {
-            let hitRect = BigBangTokenizer.displayImageBoxHitRect(for: box, in: imageRect)
-            guard hitRect.contains(location) else { continue }
-            guard !boxSweepVisited.contains(box.id) else { return }
-            boxSweepVisited.insert(box.id)
-            let targetState: Bool
-            if let existing = boxDragTargetSelect {
-                targetState = existing
-            } else {
-                targetState = !controller.imageSelectedBoxIDs.contains(box.id)
-                boxDragTargetSelect = targetState
-            }
-            if targetState {
-                controller.imageSelectedBoxIDs.insert(box.id)
-            } else {
-                controller.imageSelectedBoxIDs.remove(box.id)
-            }
-            TactileFeedbackEngine.shared.performNavigationStepHaptic()
-            return
-        }
-    }
-
     // MARK: - 文本大爆炸 + 语义页签 + 原位编辑画布
 
     private var textPreviewCanvas: some View {
@@ -1722,187 +1847,7 @@ struct BigBangStageRootView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(Color.primary.opacity(0.04))
             } else if controller.isTextBigBangActive {
-                VStack(spacing: 8) {
-                    HStack(spacing: 8) {
-                        granularityBar(options: BigBangGranularity.allCases)
-                        Spacer()
-                        Button {
-                            controller.selectAllTokens()
-                        } label: {
-                            Text("全选 (⌘A)")
-                                .font(.system(size: 11, weight: .medium))
-                                .foregroundStyle(brandCobalt)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 3.5)
-                                .background(Capsule().fill(brandCobalt.opacity(0.10)))
-                        }
-                        .buttonStyle(StageInteractiveCapsuleButtonStyle())
-
-                        if !controller.textSelectedTokenIDs.isEmpty {
-                            Button {
-                                controller.clearTokenSelection()
-                            } label: {
-                                Text("清空")
-                                    .font(.system(size: 11, weight: .medium))
-                                    .foregroundStyle(.secondary)
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 3.5)
-                                    .background(Capsule().fill(Color.primary.opacity(0.06)))
-                            }
-                            .buttonStyle(StageInteractiveCapsuleButtonStyle())
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.top, 10)
-
-                    let sessionKey = textCanvasSessionKey
-                    GeometryReader { scrollGeo in
-                        ScrollView(.vertical, showsIndicators: true) {
-                            VStack(alignment: .leading, spacing: 0) {
-                                GeometryReader { g in
-                                    let minY = g.frame(in: .named("bigBangTextScrollViewport")).minY
-                                    Color.clear
-                                        .onChange(of: minY) { _, _ in
-                                            if hoveredTextTokenID != nil {
-                                                hoveredTextTokenID = nil
-                                            }
-                                        }
-                                }
-                                .frame(height: 0)
-
-                                BigBangFlowLayout(
-                                    spacing: 7,
-                                    lineSpacing: 8,
-                                    fullWidthRows: controller.granularity == .line
-                                ) {
-                                    ForEach(controller.textTokens) { tok in
-                                        if tok.isLineBreak {
-                                            Color.clear.frame(width: 0, height: 0)
-                                        } else {
-                                            let isSel = controller.textSelectedTokenIDs.contains(tok.id)
-                                            let isHovered = (hoveredTextTokenID == tok.id)
-                                            let hoverScale: CGFloat = (tok.granularity == .line) ? 1.006 : 1.025
-                                            let selScale: CGFloat = (tok.granularity == .line) ? 1.004 : 1.015
-                                            Text(tok.text)
-                                                .font(.system(size: 13, weight: isSel ? .semibold : .medium))
-                                                .foregroundStyle(isSel ? .white : .primary)
-                                                .padding(.horizontal, 9.5)
-                                                .padding(.vertical, 5.5)
-                                                .frame(
-                                                    maxWidth: tok.granularity == .line ? .infinity : nil,
-                                                    alignment: .leading
-                                                )
-                                                .background(
-                                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                                        .fill(
-                                                            isSel
-                                                                ? brandCobalt
-                                                                : (isHovered
-                                                                    ? brandCobalt.opacity(colorScheme == .dark ? 0.24 : 0.14)
-                                                                    : Color.primary.opacity(colorScheme == .dark ? 0.11 : 0.065))
-                                                        )
-                                                )
-                                                .overlay(
-                                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                                        .strokeBorder(
-                                                            isSel
-                                                                ? Color.white.opacity(isHovered ? 0.65 : 0.32)
-                                                                : (isHovered
-                                                                    ? brandCobalt.opacity(colorScheme == .dark ? 0.72 : 0.56)
-                                                                    : Color.primary.opacity(colorScheme == .dark ? 0.12 : 0.08)),
-                                                            lineWidth: isHovered ? 1.0 : 0.75
-                                                        )
-                                                )
-                                                .scaleEffect(isSel ? selScale : (isHovered ? hoverScale : 1.0))
-                                                .zIndex(isHovered ? 10 : (isSel ? 5 : 0))
-                                                .animation(.interactiveSpring(response: 0.16, dampingFraction: 0.84), value: isHovered)
-                                                .background(
-                                                    GeometryReader { g in
-                                                        let rect = g.frame(in: .named("bigBangTextCanvas"))
-                                                        Color.clear
-                                                            .onAppear {
-                                                                tokenFrameStore.setFrame(rect, for: tok.id, session: sessionKey)
-                                                            }
-                                                            .onChange(of: rect) { _, newRect in
-                                                                tokenFrameStore.setFrame(newRect, for: tok.id, session: sessionKey)
-                                                            }
-                                                    }
-                                                )
-                                                .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                                                .onTapGesture {
-                                                    if controller.textSelectedTokenIDs.contains(tok.id) {
-                                                        controller.textSelectedTokenIDs.remove(tok.id)
-                                                    } else {
-                                                        controller.textSelectedTokenIDs.insert(tok.id)
-                                                    }
-                                                    TactileFeedbackEngine.shared.performNavigationStepHaptic()
-                                                }
-                                        }
-                                    }
-                                }
-                                .id(sessionKey)
-                                .padding(.horizontal, 16)
-                                .padding(.vertical, 10)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-
-                                if controller.isTextTokensTruncated {
-                                    Text("已展开前 600 个词块以保障流畅体验 · 可切换「按行」或上方「原始文本」查看完整内容")
-                                        .font(.system(size: 10.5))
-                                        .foregroundStyle(.secondary)
-                                        .padding(.horizontal, 16)
-                                        .padding(.bottom, 10)
-                                }
-
-                                Spacer(minLength: 0)
-                            }
-                            .frame(maxWidth: .infinity, minHeight: scrollGeo.size.height, alignment: .topLeading)
-                            .coordinateSpace(name: "bigBangTextCanvas")
-                            .contentShape(Rectangle())
-                            .onContinuousHover(coordinateSpace: .named("bigBangTextCanvas")) { phase in
-                                switch phase {
-                                case .active(let loc):
-                                    let hit = tokenFrameStore.hitTestTokenID(
-                                        at: loc,
-                                        session: sessionKey,
-                                        insetX: 0,
-                                        insetY: 0
-                                    )
-                                    if hoveredTextTokenID != hit {
-                                        hoveredTextTokenID = hit
-                                    }
-                                case .ended:
-                                    if hoveredTextTokenID != nil {
-                                        hoveredTextTokenID = nil
-                                    }
-                                }
-                            }
-                            .onTapGesture {
-                                if !controller.textSelectedTokenIDs.isEmpty {
-                                    controller.clearTokenSelection()
-                                    TactileFeedbackEngine.shared.performNavigationStepHaptic()
-                                }
-                            }
-                            .simultaneousGesture(
-                                DragGesture(minimumDistance: 6, coordinateSpace: .named("bigBangTextCanvas"))
-                                    .onChanged { value in
-                                        let isFirst = (lastTextSweepPoint == nil)
-                                        let fromPt = lastTextSweepPoint ?? value.startLocation
-                                        lastTextSweepPoint = value.location
-                                        for pt in sampleSweepPoints(from: fromPt, to: value.location, includeStart: isFirst) {
-                                            handleTextSweepChanged(location: pt)
-                                        }
-                                    }
-                                    .onEnded { _ in
-                                        tokenDragTargetSelect = nil
-                                        tokenSweepVisited = []
-                                        lastTextSweepPoint = nil
-                                    }
-                            )
-                        }
-                    }
-                    .coordinateSpace(name: "bigBangTextScrollViewport")
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
+                bigBangTokenStageCanvas(showInlineGranularityHeader: true, isOverFrostedImage: false)
             } else {
                 let idx = min(max(controller.selectedTabIndex, 0), max(0, controller.textTabs.count - 1))
                 let tab = controller.textTabs.indices.contains(idx) ? controller.textTabs[idx] : nil
@@ -1924,8 +1869,253 @@ struct BigBangStageRootView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    /// 统一零重叠流式词块舞台（图片 OCR 与纯文本共享：支持智能组合、双击/⌥单击单块再炸开、选中批量再拆与 ⌘Z 还原）
+    private func bigBangTokenStageCanvas(
+        showInlineGranularityHeader: Bool,
+        isOverFrostedImage: Bool
+    ) -> some View {
+        let splittableSelectedCount = controller.textTokens.reduce(into: 0) { acc, tok in
+            if !tok.isLineBreak,
+               controller.textSelectedTokenIDs.contains(tok.id),
+               BigBangTokenizer.canSubdivide(tok.text) {
+                acc += 1
+            }
+        }
+        let canStepOrSplit = splittableSelectedCount > 0 || controller.granularity != .character
+        let sessionKey = textCanvasSessionKey
+        let orderedIDs = controller.textTokens.map(\.id)
+
+        return VStack(spacing: 6) {
+            HStack(spacing: 6) {
+                if showInlineGranularityHeader {
+                    granularityBar(options: BigBangGranularity.allCases)
+                } else {
+                    HStack(spacing: 4) {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 10.5, weight: .semibold))
+                            .foregroundStyle(brandCobalt)
+                        Text("双击或 ⌥单击复合词块可原位再次炸开")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+
+                Spacer(minLength: 4)
+
+                if canStepOrSplit {
+                    Button {
+                        _ = controller.explodeSelectedOrHoveredOrStepFiner(hoveredTokenID: hoveredTextTokenID)
+                    } label: {
+                        HStack(spacing: 3.5) {
+                            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                .font(.system(size: 9.5, weight: .bold))
+                            Text(splittableSelectedCount > 0 ? "再拆分 · \(splittableSelectedCount) (X)" : "再拆分 (X)")
+                                .font(.system(size: 11, weight: .semibold))
+                        }
+                        .foregroundStyle(splittableSelectedCount > 0 ? .white : brandCobalt)
+                        .padding(.horizontal, 8.5)
+                        .padding(.vertical, 3.5)
+                        .background(
+                            Capsule().fill(
+                                splittableSelectedCount > 0
+                                    ? brandCobalt
+                                    : brandCobalt.opacity(colorScheme == .dark ? 0.18 : 0.11)
+                            )
+                        )
+                    }
+                    .buttonStyle(StageInteractiveCapsuleButtonStyle(prominent: splittableSelectedCount > 0))
+                    .help("将所选词块原位再次爆炸拆细（快捷键 X，双击单个词块亦可原位拆开）")
+                }
+
+                if controller.canUndoExplosion {
+                    Button {
+                        _ = controller.undoLastExplosion()
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "arrow.uturn.backward")
+                                .font(.system(size: 9.5, weight: .semibold))
+                            Text("还原")
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        .foregroundStyle(.primary.opacity(0.86))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3.5)
+                        .background(Capsule().fill(Color.primary.opacity(0.08)))
+                    }
+                    .buttonStyle(StageInteractiveCapsuleButtonStyle())
+                    .transition(.opacity.combined(with: .scale(scale: 0.92)))
+                    .help("还原上一次原位拆分（⌘Z）")
+                }
+
+                Button {
+                    controller.selectAllTokens()
+                } label: {
+                    Text("全选 (⌘A)")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(brandCobalt)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3.5)
+                        .background(Capsule().fill(brandCobalt.opacity(0.10)))
+                }
+                .buttonStyle(StageInteractiveCapsuleButtonStyle())
+
+                if !controller.textSelectedTokenIDs.isEmpty {
+                    Button {
+                        controller.clearTokenSelection()
+                    } label: {
+                        Text("清空")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3.5)
+                            .background(Capsule().fill(Color.primary.opacity(0.06)))
+                    }
+                    .buttonStyle(StageInteractiveCapsuleButtonStyle())
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 10)
+
+            GeometryReader { scrollGeo in
+                ScrollView(.vertical, showsIndicators: true) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        GeometryReader { g in
+                            let minY = g.frame(in: .named("bigBangTextScrollViewport")).minY
+                            Color.clear
+                                .onChange(of: minY) { _, _ in
+                                    if hoveredTextTokenID != nil {
+                                        hoveredTextTokenID = nil
+                                    }
+                                }
+                        }
+                        .frame(height: 0)
+
+                        BigBangFlowLayout(
+                            spacing: 7,
+                            lineSpacing: 8,
+                            fullWidthRows: controller.granularity == .line,
+                            tokenIDs: orderedIDs,
+                            sessionKey: sessionKey,
+                            frameRegistry: tokenFrameStore
+                        ) {
+                            ForEach(controller.textTokens) { tok in
+                                if tok.isLineBreak {
+                                    Color.clear.frame(width: 0, height: 0)
+                                } else {
+                                    let isSel = controller.textSelectedTokenIDs.contains(tok.id)
+                                    let isHovered = (hoveredTextTokenID == tok.id)
+                                    let canSplit = BigBangTokenizer.canSubdivide(tok.text)
+                                    BigBangTokenChipView(
+                                        token: tok,
+                                        isSelected: isSel,
+                                        isHovered: isHovered,
+                                        canSubdivide: canSplit,
+                                        isOverFrostedImage: isOverFrostedImage,
+                                        brandCobalt: brandCobalt,
+                                        onTap: {
+                                            handleChipTap(token: tok, canSplit: canSplit)
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.top, 10)
+                        .padding(.bottom, 22)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                        if controller.isTextTokensTruncated {
+                            Text("已展开前 600 个词块以保障 120Hz 丝滑体验 · 可切换「按行」查看完整段落")
+                                .font(.system(size: 10.5))
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 16)
+                                .padding(.bottom, 10)
+                        }
+
+                        Spacer(minLength: 0)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: scrollGeo.size.height, alignment: .topLeading)
+                    .coordinateSpace(name: "bigBangTextCanvas")
+                    .contentShape(Rectangle())
+                    .onContinuousHover(coordinateSpace: .named("bigBangTextCanvas")) { phase in
+                        switch phase {
+                        case .active(let loc):
+                            let hit = tokenFrameStore.hitTestTokenID(
+                                at: loc,
+                                session: sessionKey,
+                                insetX: 0,
+                                insetY: 0
+                            )
+                            if hoveredTextTokenID != hit {
+                                hoveredTextTokenID = hit
+                            }
+                        case .ended:
+                            if hoveredTextTokenID != nil {
+                                hoveredTextTokenID = nil
+                            }
+                        }
+                    }
+                    .onTapGesture {
+                        if !controller.textSelectedTokenIDs.isEmpty {
+                            controller.clearTokenSelection()
+                            TactileFeedbackEngine.shared.performNavigationStepHaptic()
+                        }
+                    }
+                    .simultaneousGesture(
+                        DragGesture(minimumDistance: 6, coordinateSpace: .named("bigBangTextCanvas"))
+                            .onChanged { value in
+                                let isFirst = (lastTextSweepPoint == nil)
+                                let fromPt = lastTextSweepPoint ?? value.startLocation
+                                lastTextSweepPoint = value.location
+                                for pt in sampleSweepPoints(from: fromPt, to: value.location, includeStart: isFirst) {
+                                    handleTextSweepChanged(location: pt)
+                                }
+                            }
+                            .onEnded { _ in
+                                tokenDragTargetSelect = nil
+                                tokenSweepVisited = []
+                                lastTextSweepPoint = nil
+                            }
+                    )
+                }
+            }
+            .coordinateSpace(name: "bigBangTextScrollViewport")
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private func handleChipTap(token: BigBangTextToken, canSplit: Bool) {
+        let flags = NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if flags.contains(.option), canSplit {
+            lastTappedToken = nil
+            _ = controller.explodeTokenInPlace(id: token.id)
+            return
+        }
+
+        let now = ProcessInfo.processInfo.systemUptime
+        if canSplit,
+           let prev = lastTappedToken,
+           prev.id == token.id,
+           (now - prev.uptime) <= 0.34 {
+            lastTappedToken = nil
+            _ = controller.explodeTokenInPlace(id: token.id)
+            return
+        }
+
+        lastTappedToken = (token.id, now)
+        if controller.textSelectedTokenIDs.contains(token.id) {
+            controller.textSelectedTokenIDs.remove(token.id)
+        } else {
+            controller.textSelectedTokenIDs.insert(token.id)
+        }
+        TactileFeedbackEngine.shared.performNavigationStepHaptic()
+    }
+
     private var textCanvasSessionKey: String {
-        "\(controller.currentItem?.id.uuidString ?? "none")-\(controller.granularity.rawValue)-\(controller.textTokens.count)"
+        let headID = controller.textTokens.first?.id ?? -1
+        let tailID = controller.textTokens.last?.id ?? -1
+        return "\(controller.currentItem?.id.uuidString ?? "none")-\(controller.activeModeIsImage ? "img" : "txt")-\(controller.granularity.rawValue)-\(controller.textTokens.count)-\(headID)-\(tailID)"
     }
 
     private func handleTextSweepChanged(location: CGPoint) {
@@ -2017,24 +2207,14 @@ struct BigBangStageRootView: View {
                 if controller.isImageBigBangActive {
                     let selected = controller.currentSelectedAssembledText
                     Text(selected.isEmpty
-                         ? (controller.recognizedImageFullText.isEmpty ? "点选或横扫图中高亮文字块" : "未点选将使用全文 · 按 O 返回纯图")
-                         : "已选 \(controller.imageSelectedBoxIDs.count) 处：\(selected)")
+                         ? (controller.recognizedImageFullText.isEmpty ? "单击或横扫选取词块" : "未点选将使用全文 · 按 X 再拆分 · 按 O 返回纯图")
+                         : "已选 \(controller.textSelectedTokenIDs.count) 处（\(selected.count)字）：\(selected.replacingOccurrences(of: "\n", with: " "))")
                         .font(.system(size: 11.5))
                         .foregroundStyle(selected.isEmpty ? .secondary : .primary)
                         .lineLimit(1)
                         .truncationMode(.tail)
-
-                    Spacer(minLength: 6)
-
-                    if !controller.imageSelectedBoxIDs.isEmpty {
-                        islandSecondaryButton("清空") {
-                            controller.clearTokenSelection()
-                        }
-                    } else if !controller.imageWordBoxes.isEmpty {
-                        islandSecondaryButton("全选") {
-                            controller.selectAllTokens()
-                        }
-                    }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .layoutPriority(1)
 
                     islandSecondaryButton("返回纯图 (O)") {
                         controller.toggleImageBigBangMode()
@@ -2046,6 +2226,7 @@ struct BigBangStageRootView: View {
                         controller.commitPrimaryPaste()
                     }
                 } else {
+                    let nonBreakCount = controller.textTokens.filter { !$0.isLineBreak }.count
                     Button {
                         controller.toggleImageBigBangMode()
                     } label: {
@@ -2056,9 +2237,9 @@ struct BigBangStageRootView: View {
                                 Image(systemName: "text.viewfinder")
                                     .font(.system(size: 11, weight: .semibold))
                             }
-                            Text(controller.imageWordBoxes.isEmpty
+                            Text(nonBreakCount == 0
                                  ? "大爆炸选字 (O)"
-                                 : "大爆炸选字 · \(controller.imageWordBoxes.count) 词 (O)")
+                                 : "大爆炸选字 · \(nonBreakCount) 组 (O)")
                                 .font(.system(size: 11.5, weight: .semibold))
                         }
                         .foregroundStyle(brandCobalt)
@@ -2098,13 +2279,13 @@ struct BigBangStageRootView: View {
                 let selected = controller.currentSelectedAssembledText
                 Text(selected.isEmpty
                      ? "点击或按住鼠标横扫划选词块"
-                     : "已选 \(controller.textSelectedTokenIDs.count) 词（\(selected.count)字）：\(selected)")
+                     : "已选 \(controller.textSelectedTokenIDs.count) 词（\(selected.count)字）：\(selected.replacingOccurrences(of: "\n", with: " "))")
                     .font(.system(size: 11.5))
                     .foregroundStyle(selected.isEmpty ? .secondary : .primary)
                     .lineLimit(1)
                     .truncationMode(.tail)
-
-                Spacer(minLength: 6)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .layoutPriority(1)
 
                 islandSecondaryButton("微调 (⌘E)") {
                     _ = controller.enterTextEditMode()
@@ -2238,5 +2419,132 @@ private struct StageInteractiveCapsuleButtonBody: View {
         if destructive { return Color.red.opacity(0.55) }
         if prominent { return Color.white.opacity(0.32) }
         return Color.primary.opacity(0.16)
+    }
+}
+
+/// 零抖动词块胶囊组件（恒定字重杜绝点击/悬停宽度跳变 + 原位二次爆炸离心弹簧动效与电光钴蓝冲击波光环）
+private struct BigBangTokenChipView: View {
+    let token: BigBangTextToken
+    let isSelected: Bool
+    let isHovered: Bool
+    let canSubdivide: Bool
+    let isOverFrostedImage: Bool
+    let brandCobalt: Color
+    let onTap: () -> Void
+
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var burstSettled: Bool = true
+    @State private var burstGlowOpacity: Double = 0.0
+    @State private var lastAnimatedBurstGeneration: Int = 0
+
+    var body: some View {
+        let isLine = (token.granularity == .line)
+        let hoverScale: CGFloat = isLine ? 1.005 : 1.028
+        let selScale: CGFloat = isLine ? 1.003 : 1.015
+        let baseFill: Color = {
+            if isSelected {
+                return brandCobalt
+            }
+            if isHovered {
+                return brandCobalt.opacity(colorScheme == .dark ? 0.25 : 0.14)
+            }
+            if isOverFrostedImage {
+                return colorScheme == .dark
+                    ? Color.white.opacity(0.12)
+                    : Color.white.opacity(0.82)
+            }
+            return Color.primary.opacity(colorScheme == .dark ? 0.11 : 0.065)
+        }()
+        let baseStroke: Color = {
+            if isSelected {
+                return Color.white.opacity(isHovered ? 0.68 : 0.34)
+            }
+            if isHovered {
+                return brandCobalt.opacity(colorScheme == .dark ? 0.78 : 0.62)
+            }
+            if isOverFrostedImage {
+                return colorScheme == .dark
+                    ? Color.white.opacity(0.18)
+                    : Color.black.opacity(0.09)
+            }
+            return Color.primary.opacity(colorScheme == .dark ? 0.13 : 0.085)
+        }()
+
+        let spreadOffset: CGFloat = burstSettled ? 0 : CGFloat(-token.burstSpreadIndex * 15.0)
+        let burstScale: CGFloat = burstSettled ? 1.0 : 0.84
+        let burstAlpha: Double = burstSettled ? 1.0 : 0.90
+
+        Text(token.text)
+            .font(.system(size: 13, weight: .medium))
+            .lineLimit(isLine ? 3 : 1)
+            .truncationMode(.middle)
+            .foregroundStyle(isSelected ? .white : .primary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5.5)
+            .frame(maxWidth: isLine ? .infinity : nil, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 8.5, style: .continuous)
+                    .fill(baseFill)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8.5, style: .continuous)
+                            .fill(brandCobalt.opacity(burstGlowOpacity * 0.18))
+                    )
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8.5, style: .continuous)
+                    .strokeBorder(
+                        burstGlowOpacity > 0.02
+                            ? brandCobalt.opacity(max(burstGlowOpacity, isHovered ? 0.75 : 0.25))
+                            : baseStroke,
+                        lineWidth: (isHovered || burstGlowOpacity > 0.1) ? 1.1 : 0.75
+                    )
+            )
+            .overlay(alignment: .topTrailing) {
+                if canSubdivide && isHovered && !isSelected && !isLine {
+                    Circle()
+                        .fill(brandCobalt.opacity(0.85))
+                        .frame(width: 4, height: 4)
+                        .padding(.top, 3.5)
+                        .padding(.trailing, 3.5)
+                        .transition(.opacity)
+                }
+            }
+            .offset(x: spreadOffset, y: 0)
+            .scaleEffect((isSelected ? selScale : (isHovered ? hoverScale : 1.0)) * burstScale)
+            .opacity(burstAlpha)
+            .zIndex(burstGlowOpacity > 0.05 ? 12 : (isHovered ? 10 : (isSelected ? 5 : 0)))
+            .animation(.interactiveSpring(response: 0.16, dampingFraction: 0.84), value: isHovered)
+            .animation(.interactiveSpring(response: 0.18, dampingFraction: 0.86), value: isSelected)
+            .contentShape(RoundedRectangle(cornerRadius: 8.5, style: .continuous))
+            .onTapGesture(perform: onTap)
+            .onAppear {
+                triggerBurstIfNeeded()
+            }
+            .onChange(of: token.burstGeneration) { _, _ in
+                triggerBurstIfNeeded()
+            }
+    }
+
+    private func triggerBurstIfNeeded() {
+        guard token.burstGeneration > 0, token.burstGeneration != lastAnimatedBurstGeneration else { return }
+        lastAnimatedBurstGeneration = token.burstGeneration
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            burstSettled = true
+            burstGlowOpacity = 0.72
+            withAnimation(.easeOut(duration: 0.36)) {
+                burstGlowOpacity = 0.0
+            }
+            return
+        }
+        burstSettled = false
+        burstGlowOpacity = 0.92
+        DispatchQueue.main.async {
+            withAnimation(.spring(response: 0.28, dampingFraction: 0.76)) {
+                burstSettled = true
+            }
+            withAnimation(.easeOut(duration: 0.46)) {
+                burstGlowOpacity = 0.0
+            }
+        }
     }
 }

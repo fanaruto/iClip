@@ -22,10 +22,10 @@ use iclip_core::hotkey::{
     MOD_WIN_BITS,
 };
 use iclip_core::intelligence::{
-    assemble_big_bang_selection, compute_clipboard_diff, evaluate_instant_math,
-    extract_clean_share_url, extract_suggestion_payload, format_relative_time,
-    is_code_editor_or_terminal_app, parse_quick_capture, tokenize_big_bang, BigBangGranularity,
-    DiffLineKind,
+    assemble_big_bang_selection, can_subdivide_big_bang_token, compute_clipboard_diff,
+    evaluate_instant_math, extract_clean_share_url, extract_suggestion_payload,
+    format_relative_time, is_code_editor_or_terminal_app, parse_quick_capture,
+    subdivide_big_bang_token, tokenize_big_bang, BigBangGranularity, BigBangToken, DiffLineKind,
 };
 use iclip_core::model::{
     now_unix_secs, ClipContentType, ClipFilterTab, ClipItem, PinCategory, QuickAction,
@@ -254,6 +254,8 @@ enum HitAction {
     ToggleBigBangToken(usize),
     SetBigBangGranularity(BigBangGranularity),
     CycleBigBangGranularity,
+    ExplodeBigBang,
+    UndoBigBangExplosion,
     SelectAllBigBang,
     ClearBigBangSelection,
     PasteBigBangSelection,
@@ -311,6 +313,9 @@ enum HoveredCardButton {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum QlStageHoverTarget {
     Granularity,
+    GranularityPill(BigBangGranularity),
+    Explode,
+    Undo,
     ToggleBigBang,
     Close,
     Token(usize),
@@ -324,6 +329,8 @@ enum QuickLookHoverTarget {
     Tab(u8),
     Close,
     Granularity(BigBangGranularity),
+    Explode,
+    Undo,
     SelectAll,
     Clear,
     Token(usize),
@@ -358,6 +365,9 @@ fn map_onboarding_hover_target(action: &HitAction) -> Option<OnboardingHoverTarg
 fn map_ql_stage_hover_target(action: &HitAction) -> Option<QlStageHoverTarget> {
     match action {
         HitAction::CycleBigBangGranularity => Some(QlStageHoverTarget::Granularity),
+        HitAction::SetBigBangGranularity(g) => Some(QlStageHoverTarget::GranularityPill(*g)),
+        HitAction::ExplodeBigBang => Some(QlStageHoverTarget::Explode),
+        HitAction::UndoBigBangExplosion => Some(QlStageHoverTarget::Undo),
         HitAction::ToggleQlStageBigBang => Some(QlStageHoverTarget::ToggleBigBang),
         HitAction::CloseOverlay => Some(QlStageHoverTarget::Close),
         HitAction::ToggleBigBangToken(id) => Some(QlStageHoverTarget::Token(*id)),
@@ -375,6 +385,8 @@ fn map_quick_look_hover_target(action: &HitAction) -> Option<QuickLookHoverTarge
         HitAction::SetQuickLookTab(tab) => Some(QuickLookHoverTarget::Tab(*tab)),
         HitAction::CloseOverlay => Some(QuickLookHoverTarget::Close),
         HitAction::SetBigBangGranularity(g) => Some(QuickLookHoverTarget::Granularity(*g)),
+        HitAction::ExplodeBigBang => Some(QuickLookHoverTarget::Explode),
+        HitAction::UndoBigBangExplosion => Some(QuickLookHoverTarget::Undo),
         HitAction::SelectAllBigBang => Some(QuickLookHoverTarget::SelectAll),
         HitAction::ClearBigBangSelection => Some(QuickLookHoverTarget::Clear),
         HitAction::ToggleBigBangToken(id) => Some(QuickLookHoverTarget::Token(*id)),
@@ -435,6 +447,13 @@ struct WinAppState {
     ql_stage_big_bang: bool,
     ql_stage_ocr_text: Option<String>,
     ql_stage_ocr_selected: HashSet<usize>,
+    ql_stage_tokens: Vec<BigBangToken>,
+    ql_stage_tokens_key: String,
+    ql_stage_undo_stack: Vec<(Vec<BigBangToken>, HashSet<usize>)>,
+    ql_stage_next_id: usize,
+    ql_stage_scroll: usize,
+    ql_stage_max_scroll: usize,
+    ql_stage_prev_click_sel: Option<(usize, bool)>,
     ql_stage_rendered_big_bang_ids: Vec<usize>,
     ql_stage_sweep_target: Option<bool>,
     ql_stage_sweep_last_pt: Option<(i32, i32)>,
@@ -464,6 +483,14 @@ struct WinAppState {
     quick_look_max_scroll: usize,
     big_bang_granularity: BigBangGranularity,
     big_bang_selected_ids: HashSet<usize>,
+    big_bang_tokens: Vec<BigBangToken>,
+    big_bang_tokens_key: String,
+    big_bang_undo_stack: Vec<(Vec<BigBangToken>, HashSet<usize>)>,
+    big_bang_next_id: usize,
+    big_bang_prev_click_sel: Option<(usize, bool)>,
+    big_bang_burst_ids: HashSet<usize>,
+    big_bang_burst_glow: f32,
+    big_bang_burst_last_tick: Option<Instant>,
     big_bang_sweep_target: Option<bool>,
     big_bang_sweep_last_pt: Option<(i32, i32)>,
     editing_alias_item_id: Option<String>,
@@ -790,6 +817,13 @@ pub fn run_windows_app() -> i32 {
                 ql_stage_big_bang: false,
                 ql_stage_ocr_text: None,
                 ql_stage_ocr_selected: HashSet::new(),
+                ql_stage_tokens: Vec::new(),
+                ql_stage_tokens_key: String::new(),
+                ql_stage_undo_stack: Vec::new(),
+                ql_stage_next_id: 10_000,
+                ql_stage_scroll: 0,
+                ql_stage_max_scroll: 0,
+                ql_stage_prev_click_sel: None,
                 ql_stage_rendered_big_bang_ids: Vec::new(),
                 ql_stage_sweep_target: None,
                 ql_stage_sweep_last_pt: None,
@@ -817,8 +851,16 @@ pub fn run_windows_app() -> i32 {
                 quick_look_tab: 0,
                 quick_look_scroll: 0,
                 quick_look_max_scroll: 0,
-                big_bang_granularity: BigBangGranularity::Word,
+                big_bang_granularity: BigBangGranularity::Smart,
                 big_bang_selected_ids: HashSet::new(),
+                big_bang_tokens: Vec::new(),
+                big_bang_tokens_key: String::new(),
+                big_bang_undo_stack: Vec::new(),
+                big_bang_next_id: 10_000,
+                big_bang_prev_click_sel: None,
+                big_bang_burst_ids: HashSet::new(),
+                big_bang_burst_glow: 0.0,
+                big_bang_burst_last_tick: None,
                 big_bang_sweep_target: None,
                 big_bang_sweep_last_pt: None,
                 editing_alias_item_id: None,
@@ -1002,6 +1044,13 @@ pub fn run_windows_self_test() -> Result<(), String> {
             ql_stage_big_bang: false,
             ql_stage_ocr_text: None,
             ql_stage_ocr_selected: HashSet::new(),
+            ql_stage_tokens: Vec::new(),
+            ql_stage_tokens_key: String::new(),
+            ql_stage_undo_stack: Vec::new(),
+            ql_stage_next_id: 10_000,
+            ql_stage_scroll: 0,
+            ql_stage_max_scroll: 0,
+            ql_stage_prev_click_sel: None,
             ql_stage_rendered_big_bang_ids: Vec::new(),
             ql_stage_sweep_target: None,
             ql_stage_sweep_last_pt: None,
@@ -1029,8 +1078,16 @@ pub fn run_windows_self_test() -> Result<(), String> {
             quick_look_tab: 0,
             quick_look_scroll: 0,
             quick_look_max_scroll: 0,
-            big_bang_granularity: BigBangGranularity::Word,
+            big_bang_granularity: BigBangGranularity::Smart,
             big_bang_selected_ids: HashSet::new(),
+            big_bang_tokens: Vec::new(),
+            big_bang_tokens_key: String::new(),
+            big_bang_undo_stack: Vec::new(),
+            big_bang_next_id: 10_000,
+            big_bang_prev_click_sel: None,
+            big_bang_burst_ids: HashSet::new(),
+            big_bang_burst_glow: 0.0,
+            big_bang_burst_last_tick: None,
             big_bang_sweep_target: None,
             big_bang_sweep_last_pt: None,
             editing_alias_item_id: None,
@@ -2096,6 +2153,12 @@ unsafe fn hide_panel(hwnd: HWND, restore_focus: bool) {
             st.ql_stage_big_bang = false;
             st.ql_stage_ocr_text = None;
             st.ql_stage_ocr_selected.clear();
+            st.ql_stage_tokens.clear();
+            st.ql_stage_tokens_key.clear();
+            st.ql_stage_undo_stack.clear();
+            st.ql_stage_scroll = 0;
+            st.ql_stage_max_scroll = 0;
+            st.ql_stage_prev_click_sel = None;
             st.ql_stage_rendered_big_bang_ids.clear();
             st.ql_stage_sweep_target = None;
             st.ql_stage_sweep_last_pt = None;
@@ -2103,6 +2166,11 @@ unsafe fn hide_panel(hwnd: HWND, restore_focus: bool) {
             st.ql_stage_hit_regions.clear();
             reset_ql_stage_zoom_and_pan(st);
             st.big_bang_selected_ids.clear();
+            st.big_bang_tokens.clear();
+            st.big_bang_tokens_key.clear();
+            st.big_bang_undo_stack.clear();
+            st.big_bang_prev_click_sel = None;
+            clear_big_bang_burst(st);
             st.big_bang_sweep_target = None;
             st.big_bang_sweep_last_pt = None;
             st.editing_alias_item_id = None;
@@ -2462,12 +2530,33 @@ unsafe extern "system" fn wnd_proc(
                                 stop = false;
                             }
                         }
+                        if let Some(prev_burst) = st.big_bang_burst_last_tick {
+                            let dt = now.saturating_duration_since(prev_burst).as_secs_f32();
+                            let (next_glow, settled) = compute_spring_lerp_step(
+                                st.big_bang_burst_glow,
+                                0.0,
+                                dt,
+                                10.5,
+                                0.015,
+                            );
+                            st.big_bang_burst_glow = next_glow;
+                            if settled {
+                                clear_big_bang_burst(st);
+                            } else {
+                                st.big_bang_burst_last_tick = Some(now);
+                                stop = false;
+                            }
+                        }
                     }
                 });
                 if stop {
                     KillTimer(hwnd, TIMER_ID_SPRING_ANIM);
                 }
                 let _ = InvalidateRect(hwnd, null(), FALSE);
+                let ql_h = QL_STAGE_HWND_RAW.load(Ordering::SeqCst) as HWND;
+                if !ql_h.is_null() && IsWindowVisible(ql_h) != FALSE {
+                    let _ = InvalidateRect(ql_h, null(), FALSE);
+                }
             } else if wparam == TIMER_ID_OTP_SWEEP {
                 let changed = APP_STATE.with(|c| {
                     c.borrow_mut()
@@ -10939,16 +11028,35 @@ fn layout_and_draw_quick_look_overlay(
             max_scroll,
         );
     } else if st.quick_look_tab == 0 && item.kind != ClipContentType::Image {
-        // 大爆炸默认展开：粒度胶囊 + 流式可点扫选词块 + 底部实时组装动作条
+        let source = item
+            .text
+            .clone()
+            .or_else(|| item.file_paths.as_ref().map(|p| p.join("\n")))
+            .unwrap_or_default();
+        let bounded: String = source.chars().take(2400).collect();
+        let _ = sync_inline_big_bang_tokens(st, &bounded);
+        let tokens = st.big_bang_tokens.clone();
+        let can_explode_more = st.big_bang_granularity != BigBangGranularity::Char
+            || tokens
+                .iter()
+                .any(|t| !t.is_line_break && can_subdivide_big_bang_token(&t.text));
+        let has_undo = !st.big_bang_undo_stack.is_empty();
+
+        // 大爆炸默认展开：四档粒度胶囊 + 再拆/还原/全选 + 零重叠流式词块
         let mut gx = mx + s(14);
         let gy = body_top;
         let gh = s(22);
         for g in [
+            BigBangGranularity::Smart,
             BigBangGranularity::Word,
             BigBangGranularity::Char,
             BigBangGranularity::Line,
         ] {
-            let gw = s(44);
+            let gw = if g == BigBangGranularity::Smart {
+                s(54)
+            } else {
+                s(36)
+            };
             let active = st.big_bang_granularity == g;
             let g_hov = st.quick_look_hovered_target == Some(QuickLookHoverTarget::Granularity(g));
             canvas.fill_round_rect(
@@ -11015,91 +11123,94 @@ fn layout_and_draw_quick_look_overlay(
                 interactive_cursor: true,
                 action: HitAction::SetBigBangGranularity(g),
             });
-            gx += gw + s(6);
+            gx += gw + s(4);
         }
 
-        let clear_w = s(42);
-        let all_w = s(44);
-        let all_x = mx + mw - s(14) - all_w
-            - if st.big_bang_selected_ids.is_empty() { 0 } else { clear_w + s(6) };
-        let all_hov = st.quick_look_hovered_target == Some(QuickLookHoverTarget::SelectAll);
-        canvas.fill_round_rect(all_x, gy, all_w, gh, sf(11.0), palette.chip_bg);
-        if all_hov {
+        let mut right_edge = mx + mw - s(14);
+        let toggle_sel_w = s(38);
+        let has_sel = !st.big_bang_selected_ids.is_empty();
+        let toggle_sel_x = right_edge - toggle_sel_w;
+        right_edge = toggle_sel_x - s(4);
+        let toggle_sel_hov = st.quick_look_hovered_target
+            == Some(if has_sel {
+                QuickLookHoverTarget::Clear
+            } else {
+                QuickLookHoverTarget::SelectAll
+            });
+        canvas.fill_round_rect(toggle_sel_x, gy, toggle_sel_w, gh, sf(11.0), palette.chip_bg);
+        if toggle_sel_hov {
             canvas.fill_round_rect(
-                all_x,
+                toggle_sel_x,
                 gy,
-                all_w,
+                toggle_sel_w,
                 gh,
                 sf(11.0),
                 palette.cobalt.with_alpha(if st.is_dark_mode { 56 } else { 34 }),
             );
             canvas.stroke_round_rect(
-                all_x,
+                toggle_sel_x,
                 gy,
-                all_w,
+                toggle_sel_w,
                 gh,
                 sf(11.0),
                 sf(0.9),
                 palette.cobalt.with_alpha(175),
             );
         }
-        let all_rc = RECT {
-            left: all_x,
+        let toggle_sel_rc = RECT {
+            left: toggle_sel_x,
             top: gy,
-            right: all_x + all_w,
+            right: toggle_sel_x + toggle_sel_w,
             bottom: gy + gh,
         };
         texts.push(TextDrawCmd {
-            text: "全选".to_string(),
-            rect: all_rc,
-            color: palette.cobalt_text,
+            text: if has_sel { "清空" } else { "全选" }.to_string(),
+            rect: toggle_sel_rc,
+            color: if has_sel {
+                palette.text_secondary
+            } else {
+                palette.cobalt_text
+            },
             font_kind: FontKind::BadgeBold,
             flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
         });
         st.hit_regions.push(HitRegion {
-            rect: all_rc,
+            rect: toggle_sel_rc,
             interactive_cursor: true,
-            action: HitAction::SelectAllBigBang,
+            action: if has_sel {
+                HitAction::ClearBigBangSelection
+            } else {
+                HitAction::SelectAllBigBang
+            },
         });
 
-        if !st.big_bang_selected_ids.is_empty() {
-            let cx_btn = all_x + all_w + s(6);
-            let clear_hov = st.quick_look_hovered_target == Some(QuickLookHoverTarget::Clear);
-            canvas.fill_round_rect(cx_btn, gy, clear_w, gh, sf(11.0), palette.chip_bg);
-            if clear_hov {
+        if has_undo {
+            let undo_w = s(38);
+            let undo_x = right_edge - undo_w;
+            right_edge = undo_x - s(4);
+            let undo_hov = st.quick_look_hovered_target == Some(QuickLookHoverTarget::Undo);
+            canvas.fill_round_rect(undo_x, gy, undo_w, gh, sf(11.0), palette.chip_bg);
+            if undo_hov {
                 canvas.fill_round_rect(
-                    cx_btn,
+                    undo_x,
                     gy,
-                    clear_w,
+                    undo_w,
                     gh,
                     sf(11.0),
-                    if st.is_dark_mode {
-                        Color4::rgba(255, 255, 255, 42)
-                    } else {
-                        Color4::rgba(15, 23, 42, 24)
-                    },
-                );
-                canvas.stroke_round_rect(
-                    cx_btn,
-                    gy,
-                    clear_w,
-                    gh,
-                    sf(11.0),
-                    sf(0.9),
-                    palette.text_secondary.with_alpha(145),
+                    palette.cobalt.with_alpha(if st.is_dark_mode { 52 } else { 32 }),
                 );
             }
-            let cl_rc = RECT {
-                left: cx_btn,
+            let undo_rc = RECT {
+                left: undo_x,
                 top: gy,
-                right: cx_btn + clear_w,
+                right: undo_x + undo_w,
                 bottom: gy + gh,
             };
             texts.push(TextDrawCmd {
-                text: "清空".to_string(),
-                rect: cl_rc,
-                color: if clear_hov {
-                    palette.text_primary
+                text: "还原".to_string(),
+                rect: undo_rc,
+                color: if undo_hov {
+                    palette.cobalt_text
                 } else {
                     palette.text_secondary
                 },
@@ -11107,19 +11218,52 @@ fn layout_and_draw_quick_look_overlay(
                 flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
             });
             st.hit_regions.push(HitRegion {
-                rect: cl_rc,
+                rect: undo_rc,
                 interactive_cursor: true,
-                action: HitAction::ClearBigBangSelection,
+                action: HitAction::UndoBigBangExplosion,
             });
         }
 
-        let source = item
-            .text
-            .clone()
-            .or_else(|| item.file_paths.as_ref().map(|p| p.join("\n")))
-            .unwrap_or_default();
-        let bounded: String = source.chars().take(2400).collect();
-        let tokens = tokenize_big_bang(&bounded, st.big_bang_granularity);
+        if can_explode_more && right_edge - s(44) > gx + s(4) {
+            let exp_w = s(44);
+            let exp_x = right_edge - exp_w;
+            let exp_hov = st.quick_look_hovered_target == Some(QuickLookHoverTarget::Explode);
+            canvas.fill_round_rect(
+                exp_x,
+                gy,
+                exp_w,
+                gh,
+                sf(11.0),
+                palette.cobalt.with_alpha(if exp_hov { 64 } else { 28 }),
+            );
+            canvas.stroke_round_rect(
+                exp_x,
+                gy,
+                exp_w,
+                gh,
+                sf(11.0),
+                sf(0.85),
+                palette.cobalt.with_alpha(if exp_hov { 195 } else { 110 }),
+            );
+            let exp_rc = RECT {
+                left: exp_x,
+                top: gy,
+                right: exp_x + exp_w,
+                bottom: gy + gh,
+            };
+            texts.push(TextDrawCmd {
+                text: "再拆".to_string(),
+                rect: exp_rc,
+                color: palette.cobalt_text,
+                font_kind: FontKind::BadgeBold,
+                flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            });
+            st.hit_regions.push(HitRegion {
+                rect: exp_rc,
+                interactive_cursor: true,
+                action: HitAction::ExplodeBigBang,
+            });
+        }
 
         let chips_left = mx + s(14);
         let chips_right = mx + mw - s(14);
@@ -11167,6 +11311,23 @@ fn layout_and_draw_quick_look_overlay(
                 let cw = cell.width;
                 let is_sel = st.big_bang_selected_ids.contains(&tok.id);
                 let is_hov = st.quick_look_hovered_target == Some(QuickLookHoverTarget::Token(tok.id));
+                let burst_glow = if st.big_bang_burst_ids.contains(&tok.id) {
+                    st.big_bang_burst_glow
+                } else {
+                    0.0
+                };
+                if burst_glow > 0.02 {
+                    let halo = ((burst_glow * 2.5) * scale).round() as i32;
+                    canvas.stroke_round_rect(
+                        tx - halo,
+                        ty - halo,
+                        cw + halo * 2,
+                        chip_h + halo * 2,
+                        sf(8.5),
+                        sf(1.35),
+                        palette.cobalt.with_alpha(((burst_glow * 215.0) as u8).max(24)),
+                    );
+                }
                 canvas.fill_round_rect(
                     tx,
                     ty,
@@ -11269,9 +11430,9 @@ fn layout_and_draw_quick_look_overlay(
         let assembled = assemble_big_bang_selection(&tokens, &st.big_bang_selected_ids);
         let preview_line = if assembled.is_empty() {
             if total_non_break_tokens > max_interactive_chips {
-                "已展开前 600 词块 · 点按/横扫取词，或切「全文速览」".to_string()
+                "前 600 词块 · 单击/横扫选词，双击词块原位再拆分".to_string()
             } else {
-                "点击或按住鼠标横扫词块精确取词".to_string()
+                "单击/横扫选词 · 双击或 Alt+单击词块原位再拆分".to_string()
             }
         } else {
             format!("已选：{}", assembled.replace('\n', " "))
@@ -13289,9 +13450,33 @@ unsafe fn handle_left_click(hwnd: HWND, x: i32, y: i32, is_double: bool) {
             let _ = InvalidateRect(hwnd, null(), FALSE);
         }
         HitAction::ToggleBigBangToken(id) => {
+            let alt_down = (GetKeyState(VK_MENU as i32) as u16 & 0x8000) != 0;
+            let mut exploded = false;
             APP_STATE.with(|c| {
                 if let Some(st) = c.borrow_mut().as_mut() {
-                    let next = if st.big_bang_selected_ids.contains(&id) {
+                    if alt_down || is_double {
+                        if is_double && !alt_down {
+                            if let Some((prev_id, was_sel)) = st.big_bang_prev_click_sel.take() {
+                                if prev_id == id {
+                                    if was_sel {
+                                        st.big_bang_selected_ids.insert(id);
+                                    } else {
+                                        st.big_bang_selected_ids.remove(&id);
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(burst_ids) = explode_inline_big_bang_token(st, id) {
+                            st.big_bang_sweep_target = None;
+                            st.big_bang_sweep_last_pt = None;
+                            trigger_big_bang_burst_anim(hwnd, st, burst_ids);
+                            exploded = true;
+                            return;
+                        }
+                    }
+                    let was_sel = st.big_bang_selected_ids.contains(&id);
+                    st.big_bang_prev_click_sel = Some((id, was_sel));
+                    let next = if was_sel {
                         st.big_bang_selected_ids.remove(&id);
                         false
                     } else {
@@ -13302,7 +13487,29 @@ unsafe fn handle_left_click(hwnd: HWND, x: i32, y: i32, is_double: bool) {
                     st.big_bang_sweep_last_pt = Some((x, y));
                 }
             });
-            let _ = SetCapture(hwnd);
+            if !exploded {
+                let _ = SetCapture(hwnd);
+            }
+            let _ = InvalidateRect(hwnd, null(), FALSE);
+        }
+        HitAction::ExplodeBigBang => {
+            APP_STATE.with(|c| {
+                if let Some(st) = c.borrow_mut().as_mut() {
+                    if let Some(burst_ids) = explode_active_big_bang_selection_or_step(st, false) {
+                        if !burst_ids.is_empty() {
+                            trigger_big_bang_burst_anim(hwnd, st, burst_ids);
+                        }
+                    }
+                }
+            });
+            let _ = InvalidateRect(hwnd, null(), FALSE);
+        }
+        HitAction::UndoBigBangExplosion => {
+            APP_STATE.with(|c| {
+                if let Some(st) = c.borrow_mut().as_mut() {
+                    let _ = undo_active_big_bang_explosion(st, false);
+                }
+            });
             let _ = InvalidateRect(hwnd, null(), FALSE);
         }
         HitAction::SetBigBangGranularity(g) => {
@@ -13346,9 +13553,9 @@ unsafe fn handle_left_click(hwnd: HWND, x: i32, y: i32, is_double: bool) {
                             .or_else(|| st.store.items[s_idx].file_paths.as_ref().map(|p| p.join("\n")))
                             .unwrap_or_default();
                         let bounded: String = source.chars().take(2400).collect();
-                        let tokens = tokenize_big_bang(&bounded, st.big_bang_granularity);
+                        let tokens = sync_inline_big_bang_tokens(st, &bounded);
                         st.big_bang_selected_ids = tokens
-                            .into_iter()
+                            .iter()
                             .filter(|t| !t.is_line_break)
                             .take(600)
                             .map(|t| t.id)
@@ -13385,8 +13592,8 @@ unsafe fn handle_left_click(hwnd: HWND, x: i32, y: i32, is_double: bool) {
                     .or_else(|| item.file_paths.as_ref().map(|p| p.join("\n")))
                     .unwrap_or_default();
                 let bounded: String = full_src.chars().take(2400).collect();
-                let tokens = tokenize_big_bang(&bounded, st.big_bang_granularity);
-                let assembled = assemble_big_bang_selection(&tokens, &st.big_bang_selected_ids);
+                let tokens = sync_inline_big_bang_tokens(st, &bounded);
+                let assembled = assemble_big_bang_selection(tokens, &st.big_bang_selected_ids);
                 let had_selection = !assembled.is_empty();
                 let text = if had_selection { assembled } else { full_src };
                 st.show_quick_look = false;
@@ -13420,10 +13627,19 @@ unsafe fn handle_left_click(hwnd: HWND, x: i32, y: i32, is_double: bool) {
             APP_STATE.with(|c| {
                 if let Some(st) = c.borrow_mut().as_mut() {
                     st.ql_stage_big_bang = !st.ql_stage_big_bang;
+                    if st.ql_stage_big_bang && st.big_bang_granularity == BigBangGranularity::Char {
+                        st.big_bang_granularity = BigBangGranularity::Smart;
+                    }
                     st.ql_stage_ocr_selected.clear();
+                    st.ql_stage_tokens_key.clear();
+                    st.ql_stage_undo_stack.clear();
+                    st.ql_stage_scroll = 0;
+                    st.ql_stage_max_scroll = 0;
+                    st.ql_stage_prev_click_sel = None;
                     st.ql_stage_sweep_target = None;
                     st.ql_stage_sweep_last_pt = None;
                     st.ql_stage_hovered_target = None;
+                    clear_big_bang_burst(st);
                     reset_ql_stage_zoom_and_pan(st);
                 }
             });
@@ -14186,6 +14402,28 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
     }
 
     if ctrl_down && !alt_down && !shift_down && vk == 0x5A {
+        let undone_stage = APP_STATE.with(|c| {
+            let mut b = c.borrow_mut();
+            let Some(st) = b.as_mut() else { return 0u8 };
+            if st.ql_stage_visible && st.ql_stage_big_bang && undo_active_big_bang_explosion(st, true) {
+                return 2;
+            }
+            if st.show_quick_look && st.quick_look_tab == 0 && undo_active_big_bang_explosion(st, false) {
+                return 1;
+            }
+            0
+        });
+        if undone_stage == 2 {
+            let ql_h = QL_STAGE_HWND_RAW.load(Ordering::SeqCst) as HWND;
+            if !ql_h.is_null() {
+                let _ = InvalidateRect(ql_h, null(), FALSE);
+            }
+            return;
+        }
+        if undone_stage == 1 {
+            let _ = InvalidateRect(hwnd, null(), FALSE);
+            return;
+        }
         let restored = APP_STATE.with(|c| {
             c.borrow_mut()
                 .as_mut()
@@ -14472,12 +14710,19 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
                         }
                     }
                     st.show_quick_look = true;
+                    if st.big_bang_granularity == BigBangGranularity::Char {
+                        st.big_bang_granularity = BigBangGranularity::Smart;
+                    }
                     st.quick_look_hovered_target = None;
                     st.quick_look_diff_mode = false;
                     st.quick_look_tab = 0;
                     st.quick_look_scroll = 0;
                     st.quick_look_max_scroll = 0;
                     st.big_bang_selected_ids.clear();
+                    st.big_bang_tokens_key.clear();
+                    st.big_bang_undo_stack.clear();
+                    st.big_bang_prev_click_sel = None;
+                    clear_big_bang_burst(st);
                     st.big_bang_sweep_target = None;
                     st.big_bang_sweep_last_pt = None;
                     return SpaceKeyAction::RedrawInline;
@@ -14515,11 +14760,20 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
             let Some(st) = b.as_mut() else { return false };
             if st.ql_stage_visible {
                 st.ql_stage_big_bang = !st.ql_stage_big_bang;
+                if st.ql_stage_big_bang && st.big_bang_granularity == BigBangGranularity::Char {
+                    st.big_bang_granularity = BigBangGranularity::Smart;
+                }
                 st.ql_stage_ocr_selected.clear();
+                st.ql_stage_tokens_key.clear();
+                st.ql_stage_undo_stack.clear();
+                st.ql_stage_scroll = 0;
+                st.ql_stage_max_scroll = 0;
+                st.ql_stage_prev_click_sel = None;
                 st.ql_stage_rendered_big_bang_ids.clear();
                 st.ql_stage_sweep_target = None;
                 st.ql_stage_sweep_last_pt = None;
                 st.ql_stage_hovered_target = None;
+                clear_big_bang_burst(st);
                 reset_ql_stage_zoom_and_pan(st);
                 return true;
             }
@@ -14530,6 +14784,58 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
             if !ql_h.is_null() {
                 let _ = InvalidateRect(ql_h, null(), FALSE);
             }
+            return;
+        }
+    }
+
+    if !ctrl_down && !alt_down && !shift_down && vk == 0x58 {
+        let exploded_target = APP_STATE.with(|c| {
+            let mut b = c.borrow_mut();
+            let Some(st) = b.as_mut() else { return 0u8 };
+            if st.ql_stage_visible && st.ql_stage_big_bang {
+                let _ = sync_ql_stage_big_bang_tokens(st);
+                if let Some(burst_ids) = explode_active_big_bang_selection_or_step(st, true) {
+                    if !burst_ids.is_empty() {
+                        trigger_big_bang_burst_anim(hwnd, st, burst_ids);
+                    }
+                    return 2;
+                }
+                return 0;
+            }
+            if st.show_quick_look && st.quick_look_tab == 0 {
+                let filtered = st.store.filtered_indices_ext(
+                    st.selected_tab,
+                    st.selected_pin_category,
+                    &st.search_query,
+                    st.active_target_app_name.as_deref(),
+                );
+                if let Some(&s_idx) = filtered.get(st.selected_visible_pos) {
+                    let src = st.store.items[s_idx]
+                        .text
+                        .clone()
+                        .or_else(|| st.store.items[s_idx].file_paths.as_ref().map(|p| p.join("\n")))
+                        .unwrap_or_default();
+                    let bounded: String = src.chars().take(2400).collect();
+                    let _ = sync_inline_big_bang_tokens(st, &bounded);
+                }
+                if let Some(burst_ids) = explode_active_big_bang_selection_or_step(st, false) {
+                    if !burst_ids.is_empty() {
+                        trigger_big_bang_burst_anim(hwnd, st, burst_ids);
+                    }
+                    return 1;
+                }
+            }
+            0
+        });
+        if exploded_target == 2 {
+            let ql_h = QL_STAGE_HWND_RAW.load(Ordering::SeqCst) as HWND;
+            if !ql_h.is_null() {
+                let _ = InvalidateRect(ql_h, null(), FALSE);
+            }
+            return;
+        }
+        if exploded_target == 1 {
+            let _ = InvalidateRect(hwnd, null(), FALSE);
             return;
         }
     }
@@ -14595,9 +14901,9 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
                         .or_else(|| item.file_paths.as_ref().map(|p| p.join("\n")))
                         .unwrap_or_default();
                     let bounded: String = full_src.chars().take(2400).collect();
-                    let tokens = tokenize_big_bang(&bounded, st.big_bang_granularity);
+                    let tokens = sync_inline_big_bang_tokens(st, &bounded);
                     st.big_bang_selected_ids = tokens
-                        .into_iter()
+                        .iter()
                         .filter(|t| !t.is_line_break)
                         .take(600)
                         .map(|t| t.id)
@@ -14627,17 +14933,17 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
             Skip,
         }
         let outcome = APP_STATE.with(|c| {
-            let b = c.borrow();
-            let Some(st) = b.as_ref() else {
+            let mut b = c.borrow_mut();
+            let Some(st) = b.as_mut() else {
                 return CtrlCCopyOutcome::Skip;
             };
             if st.ql_stage_visible {
                 if st.ql_stage_big_bang {
-                    if let Some(ocr) = st.ql_stage_ocr_text.as_ref().filter(|s| !s.is_empty()) {
-                        let tokens = tokenize_big_bang(ocr, st.big_bang_granularity);
-                        let sel = assemble_big_bang_selection(&tokens, &st.ql_stage_ocr_selected);
+                    if let Some(ocr) = st.ql_stage_ocr_text.clone().filter(|s| !s.is_empty()) {
+                        let tokens = sync_ql_stage_big_bang_tokens(st);
+                        let sel = assemble_big_bang_selection(tokens, &st.ql_stage_ocr_selected);
                         let had_sel = !sel.is_empty();
-                        let payload = if had_sel { sel } else { ocr.clone() };
+                        let payload = if had_sel { sel } else { ocr };
                         let toast = if had_sel {
                             format!("已复制图中大爆炸文字（{}字）", payload.chars().count())
                         } else {
@@ -14680,9 +14986,9 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
                             .unwrap_or_default();
                         if !full_src.is_empty() {
                             let bounded: String = full_src.chars().take(2400).collect();
-                            let tokens = tokenize_big_bang(&bounded, st.big_bang_granularity);
+                            let tokens = sync_inline_big_bang_tokens(st, &bounded);
                             let assembled =
-                                assemble_big_bang_selection(&tokens, &st.big_bang_selected_ids);
+                                assemble_big_bang_selection(tokens, &st.big_bang_selected_ids);
                             let had_sel = !assembled.is_empty();
                             let payload = if had_sel { assembled } else { full_src };
                             let toast = if had_sel {
@@ -14945,8 +15251,8 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
                     .or_else(|| item.file_paths.as_ref().map(|p| p.join("\n")))
                     .unwrap_or_default();
                 let bounded: String = full_src.chars().take(2400).collect();
-                let tokens = tokenize_big_bang(&bounded, st.big_bang_granularity);
-                let assembled = assemble_big_bang_selection(&tokens, &st.big_bang_selected_ids);
+                let tokens = sync_inline_big_bang_tokens(st, &bounded);
+                let assembled = assemble_big_bang_selection(tokens, &st.big_bang_selected_ids);
                 let had_sel = !assembled.is_empty();
                 let txt = if had_sel { assembled } else { full_src };
                 st.show_quick_look = false;
@@ -14979,11 +15285,11 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
             if let Some(st) = c.borrow_mut().as_mut() {
                 if st.ql_stage_visible {
                     if st.ql_stage_big_bang {
-                        if let Some(ref ocr) = st.ql_stage_ocr_text {
-                            let tokens = tokenize_big_bang(ocr, st.big_bang_granularity);
-                            let sel = assemble_big_bang_selection(&tokens, &st.ql_stage_ocr_selected);
+                        if let Some(ocr) = st.ql_stage_ocr_text.clone() {
+                            let tokens = sync_ql_stage_big_bang_tokens(st);
+                            let sel = assemble_big_bang_selection(tokens, &st.ql_stage_ocr_selected);
                             let had_sel = !sel.is_empty();
-                            let payload = if had_sel { sel } else { ocr.clone() };
+                            let payload = if had_sel { sel } else { ocr };
                             if !payload.is_empty() {
                                 ql_stage_big_bang_text = Some((payload, had_sel));
                             }
@@ -16155,19 +16461,234 @@ unsafe fn cancel_ota_download(hwnd: HWND) {
     set_toast(hwnd, "已取消更新下载".to_string());
 }
 
+fn clear_big_bang_burst(st: &mut WinAppState) {
+    st.big_bang_burst_ids.clear();
+    st.big_bang_burst_glow = 0.0;
+    st.big_bang_burst_last_tick = None;
+}
+
+unsafe fn trigger_big_bang_burst_anim(
+    main_hwnd: HWND,
+    st: &mut WinAppState,
+    ids: HashSet<usize>,
+) {
+    if ids.is_empty() {
+        return;
+    }
+    st.big_bang_burst_ids = ids;
+    st.big_bang_burst_glow = 1.0;
+    st.big_bang_burst_last_tick = Some(Instant::now());
+    if !main_hwnd.is_null() {
+        SetTimer(main_hwnd, TIMER_ID_SPRING_ANIM, 16, None);
+    }
+}
+
+fn sync_inline_big_bang_tokens<'a>(
+    st: &'a mut WinAppState,
+    bounded_src: &str,
+) -> &'a [BigBangToken] {
+    let key = format!("{:?}\x1f{}", st.big_bang_granularity, bounded_src);
+    if st.big_bang_tokens_key != key {
+        st.big_bang_tokens = tokenize_big_bang(bounded_src, st.big_bang_granularity);
+        let max_id = st.big_bang_tokens.iter().map(|t| t.id).max().unwrap_or(0);
+        st.big_bang_next_id = max_id + 10_000;
+        st.big_bang_tokens_key = key;
+        st.big_bang_undo_stack.clear();
+        st.big_bang_prev_click_sel = None;
+        clear_big_bang_burst(st);
+    }
+    &st.big_bang_tokens
+}
+
+fn sync_ql_stage_big_bang_tokens(st: &mut WinAppState) -> &[BigBangToken] {
+    let ocr = st.ql_stage_ocr_text.as_deref().unwrap_or("");
+    let key = format!("{:?}\x1f{}", st.big_bang_granularity, ocr);
+    if st.ql_stage_tokens_key != key {
+        st.ql_stage_tokens = tokenize_big_bang(ocr, st.big_bang_granularity);
+        let max_id = st.ql_stage_tokens.iter().map(|t| t.id).max().unwrap_or(0);
+        st.ql_stage_next_id = max_id + 10_000;
+        st.ql_stage_tokens_key = key;
+        st.ql_stage_undo_stack.clear();
+        st.ql_stage_prev_click_sel = None;
+        clear_big_bang_burst(st);
+    }
+    &st.ql_stage_tokens
+}
+
+fn explode_token_vec_in_place(
+    tokens: &mut Vec<BigBangToken>,
+    selected: &mut HashSet<usize>,
+    undo_stack: &mut Vec<(Vec<BigBangToken>, HashSet<usize>)>,
+    next_id: &mut usize,
+    token_id: usize,
+) -> Option<HashSet<usize>> {
+    let idx = tokens
+        .iter()
+        .position(|t| t.id == token_id && !t.is_line_break)?;
+    if !can_subdivide_big_bang_token(&tokens[idx].text) {
+        return None;
+    }
+    let children = subdivide_big_bang_token(&tokens[idx], next_id)?;
+    if children.len() <= 1 {
+        return None;
+    }
+    if undo_stack.len() >= 24 {
+        undo_stack.remove(0);
+    }
+    undo_stack.push((tokens.clone(), selected.clone()));
+
+    selected.remove(&token_id);
+    let mut burst = HashSet::new();
+    for ch in &children {
+        if !ch.is_line_break {
+            burst.insert(ch.id);
+        }
+    }
+    tokens.splice(idx..=idx, children);
+    Some(burst)
+}
+
+fn explode_inline_big_bang_token(st: &mut WinAppState, token_id: usize) -> Option<HashSet<usize>> {
+    explode_token_vec_in_place(
+        &mut st.big_bang_tokens,
+        &mut st.big_bang_selected_ids,
+        &mut st.big_bang_undo_stack,
+        &mut st.big_bang_next_id,
+        token_id,
+    )
+}
+
+fn explode_ql_stage_big_bang_token(st: &mut WinAppState, token_id: usize) -> Option<HashSet<usize>> {
+    explode_token_vec_in_place(
+        &mut st.ql_stage_tokens,
+        &mut st.ql_stage_ocr_selected,
+        &mut st.ql_stage_undo_stack,
+        &mut st.ql_stage_next_id,
+        token_id,
+    )
+}
+
+fn explode_active_big_bang_selection_or_step(
+    st: &mut WinAppState,
+    is_ql_stage: bool,
+) -> Option<HashSet<usize>> {
+    let (tokens, selected, undo_stack, next_id, hovered_tok) = if is_ql_stage {
+        let hov = match st.ql_stage_hovered_target {
+            Some(QlStageHoverTarget::Token(id)) => Some(id),
+            _ => None,
+        };
+        (
+            &mut st.ql_stage_tokens,
+            &mut st.ql_stage_ocr_selected,
+            &mut st.ql_stage_undo_stack,
+            &mut st.ql_stage_next_id,
+            hov,
+        )
+    } else {
+        let hov = match st.quick_look_hovered_target {
+            Some(QuickLookHoverTarget::Token(id)) => Some(id),
+            _ => None,
+        };
+        (
+            &mut st.big_bang_tokens,
+            &mut st.big_bang_selected_ids,
+            &mut st.big_bang_undo_stack,
+            &mut st.big_bang_next_id,
+            hov,
+        )
+    };
+
+    let selected_splittable: Vec<usize> = tokens
+        .iter()
+        .filter(|t| !t.is_line_break && selected.contains(&t.id) && can_subdivide_big_bang_token(&t.text))
+        .map(|t| t.id)
+        .collect();
+    if !selected_splittable.is_empty() {
+        let snap_tokens = tokens.clone();
+        let snap_sel = selected.clone();
+        let mut all_burst = HashSet::new();
+        for tid in selected_splittable {
+            if let Some(pos) = tokens.iter().position(|t| t.id == tid && !t.is_line_break) {
+                if let Some(children) = subdivide_big_bang_token(&tokens[pos], next_id) {
+                    if children.len() > 1 {
+                        selected.remove(&tid);
+                        for ch in &children {
+                            if !ch.is_line_break {
+                                all_burst.insert(ch.id);
+                            }
+                        }
+                        tokens.splice(pos..=pos, children);
+                    }
+                }
+            }
+        }
+        if !all_burst.is_empty() {
+            if undo_stack.len() >= 24 {
+                undo_stack.remove(0);
+            }
+            undo_stack.push((snap_tokens, snap_sel));
+            return Some(all_burst);
+        }
+    }
+
+    if let Some(hid) = hovered_tok {
+        if let Some(burst) = explode_token_vec_in_place(tokens, selected, undo_stack, next_id, hid) {
+            return Some(burst);
+        }
+    }
+
+    let finer = match st.big_bang_granularity {
+        BigBangGranularity::Line => Some(BigBangGranularity::Smart),
+        BigBangGranularity::Smart => Some(BigBangGranularity::Word),
+        BigBangGranularity::Word => Some(BigBangGranularity::Char),
+        BigBangGranularity::Char => None,
+    };
+    if let Some(next_g) = finer {
+        set_shared_big_bang_granularity(st, next_g);
+        return Some(HashSet::new());
+    }
+    None
+}
+
+fn undo_active_big_bang_explosion(st: &mut WinAppState, is_ql_stage: bool) -> bool {
+    if is_ql_stage {
+        if let Some((prev_tokens, prev_sel)) = st.ql_stage_undo_stack.pop() {
+            st.ql_stage_tokens = prev_tokens;
+            st.ql_stage_ocr_selected = prev_sel;
+            clear_big_bang_burst(st);
+            return true;
+        }
+    } else if let Some((prev_tokens, prev_sel)) = st.big_bang_undo_stack.pop() {
+        st.big_bang_tokens = prev_tokens;
+        st.big_bang_selected_ids = prev_sel;
+        clear_big_bang_burst(st);
+        return true;
+    }
+    false
+}
+
 fn set_shared_big_bang_granularity(st: &mut WinAppState, granularity: BigBangGranularity) {
     st.big_bang_granularity = granularity;
     st.quick_look_scroll = 0;
     st.quick_look_max_scroll = 0;
     st.quick_look_hovered_target = None;
     st.big_bang_selected_ids.clear();
+    st.big_bang_tokens_key.clear();
+    st.big_bang_undo_stack.clear();
+    st.big_bang_prev_click_sel = None;
     st.big_bang_sweep_target = None;
     st.big_bang_sweep_last_pt = None;
+    st.ql_stage_scroll = 0;
+    st.ql_stage_max_scroll = 0;
     st.ql_stage_hovered_target = None;
     st.ql_stage_ocr_selected.clear();
+    st.ql_stage_tokens_key.clear();
+    st.ql_stage_undo_stack.clear();
+    st.ql_stage_prev_click_sel = None;
     st.ql_stage_rendered_big_bang_ids.clear();
     st.ql_stage_sweep_target = None;
     st.ql_stage_sweep_last_pt = None;
+    clear_big_bang_burst(st);
 }
 
 fn select_all_ql_stage_big_bang_tokens(st: &mut WinAppState) -> bool {
@@ -16175,10 +16696,10 @@ fn select_all_ql_stage_big_bang_tokens(st: &mut WinAppState) -> bool {
         st.ql_stage_ocr_selected = st.ql_stage_rendered_big_bang_ids.iter().copied().collect();
         return true;
     }
-    if let Some(ocr) = st.ql_stage_ocr_text.as_ref() {
-        let tokens = tokenize_big_bang(ocr, st.big_bang_granularity);
+    if st.ql_stage_ocr_text.as_ref().is_some_and(|s| !s.trim().is_empty()) {
+        let tokens = sync_ql_stage_big_bang_tokens(st);
         st.ql_stage_ocr_selected = tokens
-            .into_iter()
+            .iter()
             .filter(|t| !t.is_line_break)
             .take(600)
             .map(|t| t.id)
@@ -16440,11 +16961,18 @@ unsafe fn present_or_update_large_ql_stage(
     let (item_w, item_h) = (item.image_width, item.image_height);
     st.ql_stage_ocr_text = item.ocr_text.clone();
     st.ql_stage_ocr_selected.clear();
+    st.ql_stage_tokens.clear();
+    st.ql_stage_tokens_key.clear();
+    st.ql_stage_undo_stack.clear();
+    st.ql_stage_scroll = 0;
+    st.ql_stage_max_scroll = 0;
+    st.ql_stage_prev_click_sel = None;
     st.ql_stage_rendered_big_bang_ids.clear();
     st.ql_stage_sweep_target = None;
     st.ql_stage_sweep_last_pt = None;
     st.ql_stage_hovered_target = None;
     st.ql_stage_big_bang = false;
+    clear_big_bang_burst(st);
     reset_ql_stage_zoom_and_pan(st);
 
     let mut main_rc: RECT = zeroed();
@@ -16595,12 +17123,43 @@ unsafe fn handle_ql_stage_wnd_proc(
                     APP_STATE.with(|c| {
                         if let Some(st) = c.borrow_mut().as_mut() {
                             st.ql_stage_big_bang = !st.ql_stage_big_bang;
+                            if st.ql_stage_big_bang && st.big_bang_granularity == BigBangGranularity::Char {
+                                st.big_bang_granularity = BigBangGranularity::Smart;
+                            }
                             st.ql_stage_ocr_selected.clear();
+                            st.ql_stage_tokens_key.clear();
+                            st.ql_stage_undo_stack.clear();
+                            st.ql_stage_scroll = 0;
+                            st.ql_stage_max_scroll = 0;
+                            st.ql_stage_prev_click_sel = None;
                             st.ql_stage_rendered_big_bang_ids.clear();
                             st.ql_stage_sweep_target = None;
                             st.ql_stage_sweep_last_pt = None;
                             st.ql_stage_hovered_target = None;
+                            clear_big_bang_burst(st);
                             reset_ql_stage_zoom_and_pan(st);
+                        }
+                    });
+                    let _ = InvalidateRect(hwnd, null(), FALSE);
+                }
+                Some(HitAction::ExplodeBigBang) => {
+                    let main_h = MAIN_HWND_RAW.load(Ordering::SeqCst) as HWND;
+                    APP_STATE.with(|c| {
+                        if let Some(st) = c.borrow_mut().as_mut() {
+                            let _ = sync_ql_stage_big_bang_tokens(st);
+                            if let Some(burst_ids) = explode_active_big_bang_selection_or_step(st, true) {
+                                if !burst_ids.is_empty() {
+                                    trigger_big_bang_burst_anim(main_h, st, burst_ids);
+                                }
+                            }
+                        }
+                    });
+                    let _ = InvalidateRect(hwnd, null(), FALSE);
+                }
+                Some(HitAction::UndoBigBangExplosion) => {
+                    APP_STATE.with(|c| {
+                        if let Some(st) = c.borrow_mut().as_mut() {
+                            let _ = undo_active_big_bang_explosion(st, true);
                         }
                     });
                     let _ = InvalidateRect(hwnd, null(), FALSE);
@@ -16640,9 +17199,23 @@ unsafe fn handle_ql_stage_wnd_proc(
                     let _ = InvalidateRect(hwnd, null(), FALSE);
                 }
                 Some(HitAction::ToggleBigBangToken(id)) => {
+                    let alt_down = (GetKeyState(VK_MENU as i32) as u16 & 0x8000) != 0;
+                    let main_h = MAIN_HWND_RAW.load(Ordering::SeqCst) as HWND;
+                    let mut exploded = false;
                     APP_STATE.with(|c| {
                         if let Some(st) = c.borrow_mut().as_mut() {
-                            let target = !st.ql_stage_ocr_selected.contains(&id);
+                            if alt_down {
+                                if let Some(burst_ids) = explode_ql_stage_big_bang_token(st, id) {
+                                    st.ql_stage_sweep_target = None;
+                                    st.ql_stage_sweep_last_pt = None;
+                                    trigger_big_bang_burst_anim(main_h, st, burst_ids);
+                                    exploded = true;
+                                    return;
+                                }
+                            }
+                            let was_sel = st.ql_stage_ocr_selected.contains(&id);
+                            st.ql_stage_prev_click_sel = Some((id, was_sel));
+                            let target = !was_sel;
                             st.ql_stage_sweep_target = Some(target);
                             st.ql_stage_sweep_last_pt = Some((x, y));
                             if target {
@@ -16652,7 +17225,9 @@ unsafe fn handle_ql_stage_wnd_proc(
                             }
                         }
                     });
-                    let _ = SetCapture(hwnd);
+                    if !exploded {
+                        let _ = SetCapture(hwnd);
+                    }
                     let _ = InvalidateRect(hwnd, null(), FALSE);
                 }
                 Some(HitAction::PasteBigBangSelection) | Some(HitAction::CopyBigBangSelection) => {
@@ -16661,8 +17236,8 @@ unsafe fn handle_ql_stage_wnd_proc(
                         let mut b = c.borrow_mut();
                         let st = b.as_mut()?;
                         let ocr = st.ql_stage_ocr_text.clone()?;
-                        let tokens = tokenize_big_bang(&ocr, st.big_bang_granularity);
-                        let sel = assemble_big_bang_selection(&tokens, &st.ql_stage_ocr_selected);
+                        let tokens = sync_ql_stage_big_bang_tokens(st);
+                        let sel = assemble_big_bang_selection(tokens, &st.ql_stage_ocr_selected);
                         let payload = if sel.is_empty() { ocr } else { sel };
                         st.ql_stage_visible = false;
                         st.ql_stage_big_bang = false;
@@ -16749,14 +17324,36 @@ unsafe fn handle_ql_stage_wnd_proc(
             let avail_h = (ch - sv(82)).max(1);
             let vp_cx = sv(18) as f32 + avail_w as f32 * 0.5;
             let vp_cy = sv(42) as f32 + avail_h as f32 * 0.5;
+            let main_h = MAIN_HWND_RAW.load(Ordering::SeqCst) as HWND;
             let toggled = APP_STATE.with(|c| {
                 let mut b = c.borrow_mut();
                 let Some(st) = b.as_mut() else { return false };
-                let hit_any = st
+                let hit_act = st
                     .ql_stage_hit_regions
                     .iter()
-                    .any(|r| point_in_rect(x, y, &r.rect));
-                if !hit_any
+                    .find(|r| point_in_rect(x, y, &r.rect))
+                    .map(|r| r.action.clone());
+                if st.ql_stage_big_bang {
+                    if let Some(HitAction::ToggleBigBangToken(id)) = hit_act {
+                        if let Some((prev_id, was_sel)) = st.ql_stage_prev_click_sel.take() {
+                            if prev_id == id {
+                                if was_sel {
+                                    st.ql_stage_ocr_selected.insert(id);
+                                } else {
+                                    st.ql_stage_ocr_selected.remove(&id);
+                                }
+                            }
+                        }
+                        if let Some(burst_ids) = explode_ql_stage_big_bang_token(st, id) {
+                            st.ql_stage_sweep_target = None;
+                            st.ql_stage_sweep_last_pt = None;
+                            trigger_big_bang_burst_anim(main_h, st, burst_ids);
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+                if hit_act.is_none()
                     && !st.ql_stage_big_bang
                     && point_in_ql_stage_image(x, y, cw, ch, sc, st)
                 {
@@ -16795,6 +17392,22 @@ unsafe fn handle_ql_stage_wnd_proc(
             let updated = APP_STATE.with(|c| {
                 let mut b = c.borrow_mut();
                 let Some(st) = b.as_mut() else { return false };
+                if st.ql_stage_big_bang {
+                    let prev = st.ql_stage_scroll;
+                    if delta < 0 {
+                        st.ql_stage_scroll = st
+                            .ql_stage_scroll
+                            .saturating_add(2)
+                            .min(st.ql_stage_max_scroll);
+                    } else if delta > 0 {
+                        st.ql_stage_scroll = st.ql_stage_scroll.saturating_sub(2);
+                    }
+                    if st.ql_stage_scroll != prev {
+                        st.ql_stage_hovered_target = None;
+                        return true;
+                    }
+                    return false;
+                }
                 if !st.ql_stage_big_bang && st.ql_stage_rgba.is_some() {
                     let step = (delta as f32 / 120.0) * 0.25;
                     let next = if st.ql_stage_zoom <= 1.001 && step > 0.0 {
@@ -17139,7 +17752,7 @@ unsafe fn handle_ql_stage_wnd_proc(
                                     left: s(18),
                                     top: s(10),
                                     right: if st.ql_stage_big_bang {
-                                        w - s(242)
+                                        w - s(256)
                                     } else {
                                         w - s(164)
                                     },
@@ -17157,7 +17770,7 @@ unsafe fn handle_ql_stage_wnd_proc(
                             let cy = s(11);
                             let bb_x = cx - s(8) - bb_w;
                             if st.ql_stage_big_bang {
-                                let gr_w = s(72);
+                                let gr_w = s(86);
                                 let gr_x = bb_x - s(6) - gr_w;
                                 let gr_rc = RECT {
                                     left: gr_x,
@@ -17355,80 +17968,258 @@ unsafe fn handle_ql_stage_wnd_proc(
                                     stage_w,
                                     stage_h,
                                     sf(12.0),
-                                    Color4::rgba(10, 14, 24, 184),
+                                    Color4::rgba(10, 15, 28, 224),
                                 );
                                 st.ql_stage_rendered_big_bang_ids.clear();
-                                if let Some(ref ocr) =
-                                    st.ql_stage_ocr_text.as_ref().filter(|t| !t.trim().is_empty())
+                                if st
+                                    .ql_stage_ocr_text
+                                    .as_ref()
+                                    .is_some_and(|t| !t.trim().is_empty())
                                 {
-                                    let tokens = tokenize_big_bang(ocr, st.big_bang_granularity);
-                                    let total_non_break =
-                                        tokens.iter().filter(|t| !t.is_line_break).count();
-                                    let mut tx = stage_x + s(14);
-                                    let mut ty = stage_y + s(14);
-                                    let ch = s(24);
-                                    let max_cx = stage_x + stage_w - s(14);
-                                    let max_cy = stage_y + stage_h - s(44);
-                                    let is_line_mode =
-                                        st.big_bang_granularity == BigBangGranularity::Line;
-                                    let full_line_w = (stage_w - s(28)).max(s(24));
-                                    let mut rendered_chips = 0usize;
-                                    for tok in tokens.iter() {
-                                        if tok.is_line_break {
-                                            if tx > stage_x + s(14) {
-                                                tx = stage_x + s(14);
-                                                ty += ch + s(6);
-                                            }
-                                            if ty + ch > max_cy {
-                                                break;
-                                            }
-                                            continue;
-                                        }
-                                        if rendered_chips >= 600 {
-                                            break;
-                                        }
-                                        let cw = if is_line_mode {
-                                            full_line_w
+                                    let _ = sync_ql_stage_big_bang_tokens(st);
+                                    let tokens = st.ql_stage_tokens.clone();
+                                    let can_explode_more = st.big_bang_granularity != BigBangGranularity::Char
+                                        || tokens
+                                            .iter()
+                                            .any(|t| !t.is_line_break && can_subdivide_big_bang_token(&t.text));
+                                    let has_undo = !st.ql_stage_undo_stack.is_empty();
+
+                                    // 舞台顶部四档粒度直选条 + 再拆(X) + 还原
+                                    let bar_y = stage_y + s(10);
+                                    let bar_h = s(22);
+                                    let mut gx = stage_x + s(14);
+                                    for g in [
+                                        BigBangGranularity::Smart,
+                                        BigBangGranularity::Word,
+                                        BigBangGranularity::Char,
+                                        BigBangGranularity::Line,
+                                    ] {
+                                        let gw = if g == BigBangGranularity::Smart {
+                                            s(56)
                                         } else {
-                                            (estimate_text_px(&tok.text, sf(12.0)) + s(16))
-                                                .clamp(s(24), full_line_w)
+                                            s(38)
                                         };
-                                        if !is_line_mode && tx > stage_x + s(14) && tx + cw > max_cx
-                                        {
-                                            tx = stage_x + s(14);
-                                            ty += ch + s(6);
-                                        }
-                                        if ty + ch > max_cy {
-                                            break;
-                                        }
-                                        let is_sel = st.ql_stage_ocr_selected.contains(&tok.id);
-                                        let is_hov = st.ql_stage_hovered_target
-                                            == Some(QlStageHoverTarget::Token(tok.id));
+                                        let active = st.big_bang_granularity == g;
+                                        let g_hov = st.ql_stage_hovered_target
+                                            == Some(QlStageHoverTarget::GranularityPill(g));
                                         canvas.fill_round_rect(
-                                            tx,
-                                            ty,
-                                            cw,
-                                            ch,
-                                            sf(7.0),
-                                            if is_sel {
+                                            gx,
+                                            bar_y,
+                                            gw,
+                                            bar_h,
+                                            sf(11.0),
+                                            if active {
                                                 palette.cobalt
-                                            } else if is_hov {
-                                                Color4::rgba(255, 255, 255, 78)
+                                            } else if g_hov {
+                                                Color4::rgba(255, 255, 255, 68)
+                                            } else {
+                                                Color4::rgba(255, 255, 255, 32)
+                                            },
+                                        );
+                                        let grc = RECT {
+                                            left: gx,
+                                            top: bar_y,
+                                            right: gx + gw,
+                                            bottom: bar_y + bar_h,
+                                        };
+                                        texts.push(TextDrawCmd {
+                                            text: g.title().to_string(),
+                                            rect: grc,
+                                            color: Color4::rgb(255, 255, 255),
+                                            font_kind: FontKind::BadgeBold,
+                                            flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                                        });
+                                        st.ql_stage_hit_regions.push(HitRegion {
+                                            rect: grc,
+                                            interactive_cursor: true,
+                                            action: HitAction::SetBigBangGranularity(g),
+                                        });
+                                        gx += gw + s(5);
+                                    }
+
+                                    let mut bar_right = stage_x + stage_w - s(14);
+                                    if has_undo {
+                                        let uw = s(44);
+                                        let ux = bar_right - uw;
+                                        bar_right = ux - s(6);
+                                        let u_hov = st.ql_stage_hovered_target
+                                            == Some(QlStageHoverTarget::Undo);
+                                        canvas.fill_round_rect(
+                                            ux,
+                                            bar_y,
+                                            uw,
+                                            bar_h,
+                                            sf(11.0),
+                                            if u_hov {
+                                                Color4::rgba(255, 255, 255, 76)
                                             } else {
                                                 Color4::rgba(255, 255, 255, 36)
                                             },
                                         );
-                                        if is_sel && is_hov {
+                                        let urc = RECT {
+                                            left: ux,
+                                            top: bar_y,
+                                            right: ux + uw,
+                                            bottom: bar_y + bar_h,
+                                        };
+                                        texts.push(TextDrawCmd {
+                                            text: "还原".to_string(),
+                                            rect: urc,
+                                            color: Color4::rgb(255, 255, 255),
+                                            font_kind: FontKind::BadgeBold,
+                                            flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                                        });
+                                        st.ql_stage_hit_regions.push(HitRegion {
+                                            rect: urc,
+                                            interactive_cursor: true,
+                                            action: HitAction::UndoBigBangExplosion,
+                                        });
+                                    }
+                                    if can_explode_more && bar_right - s(64) > gx + s(4) {
+                                        let ew = s(64);
+                                        let ex = bar_right - ew;
+                                        let e_hov = st.ql_stage_hovered_target
+                                            == Some(QlStageHoverTarget::Explode);
+                                        canvas.fill_round_rect(
+                                            ex,
+                                            bar_y,
+                                            ew,
+                                            bar_h,
+                                            sf(11.0),
+                                            palette.cobalt.with_alpha(if e_hov { 148 } else { 78 }),
+                                        );
+                                        canvas.stroke_round_rect(
+                                            ex,
+                                            bar_y,
+                                            ew,
+                                            bar_h,
+                                            sf(11.0),
+                                            sf(0.9),
+                                            Color4::rgba(255, 255, 255, if e_hov { 188 } else { 112 }),
+                                        );
+                                        let erc = RECT {
+                                            left: ex,
+                                            top: bar_y,
+                                            right: ex + ew,
+                                            bottom: bar_y + bar_h,
+                                        };
+                                        texts.push(TextDrawCmd {
+                                            text: "再拆 (X)".to_string(),
+                                            rect: erc,
+                                            color: Color4::rgb(255, 255, 255),
+                                            font_kind: FontKind::BadgeBold,
+                                            flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                                        });
+                                        st.ql_stage_hit_regions.push(HitRegion {
+                                            rect: erc,
+                                            interactive_cursor: true,
+                                            action: HitAction::ExplodeBigBang,
+                                        });
+                                    }
+
+                                    // 零重叠可滚轮流式词块区
+                                    let chips_left = stage_x + s(14);
+                                    let chips_right = stage_x + stage_w - s(16);
+                                    let chips_top = stage_y + s(40);
+                                    let chips_bottom = stage_y + stage_h - s(42);
+                                    let ch = s(24);
+                                    let gap_x = s(6);
+                                    let gap_y = s(6);
+                                    let is_line_mode =
+                                        st.big_bang_granularity == BigBangGranularity::Line;
+                                    let max_row_w = (chips_right - chips_left).max(s(24));
+                                    let token_specs: Vec<(usize, i32, bool)> = tokens
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(i, tok)| {
+                                            let nat_w = (estimate_text_px(&tok.text, sf(12.2)) + s(16))
+                                                .clamp(s(24), max_row_w);
+                                            (i, nat_w, tok.is_line_break)
+                                        })
+                                        .collect();
+                                    let packed_rows = pack_big_bang_chip_rows(
+                                        &token_specs,
+                                        max_row_w,
+                                        gap_x,
+                                        is_line_mode,
+                                        600,
+                                    );
+                                    for row in &packed_rows {
+                                        for cell in row {
+                                            st.ql_stage_rendered_big_bang_ids
+                                                .push(tokens[cell.token_idx].id);
+                                        }
+                                    }
+                                    let row_pitch = ch + gap_y;
+                                    let visible_rows = (((chips_bottom - chips_top + gap_y)
+                                        / row_pitch.max(1))
+                                    .max(1)) as usize;
+                                    let (clamped_scroll, max_scroll) = clamp_quick_look_scroll(
+                                        st.ql_stage_scroll,
+                                        packed_rows.len(),
+                                        visible_rows,
+                                    );
+                                    st.ql_stage_scroll = clamped_scroll;
+                                    st.ql_stage_max_scroll = max_scroll;
+
+                                    for (vis_idx, row_items) in packed_rows
+                                        .iter()
+                                        .skip(clamped_scroll)
+                                        .take(visible_rows)
+                                        .enumerate()
+                                    {
+                                        let ty = chips_top + (vis_idx as i32) * row_pitch;
+                                        for cell in row_items {
+                                            let tok = &tokens[cell.token_idx];
+                                            let tx = chips_left + cell.x_offset;
+                                            let cw = cell.width;
+                                            let is_sel = st.ql_stage_ocr_selected.contains(&tok.id);
+                                            let is_hov = st.ql_stage_hovered_target
+                                                == Some(QlStageHoverTarget::Token(tok.id));
+                                            let burst_glow =
+                                                if st.big_bang_burst_ids.contains(&tok.id) {
+                                                    st.big_bang_burst_glow
+                                                } else {
+                                                    0.0
+                                                };
+                                            if burst_glow > 0.02 {
+                                                let halo = ((burst_glow * 2.5) * scale).round() as i32;
+                                                canvas.stroke_round_rect(
+                                                    tx - halo,
+                                                    ty - halo,
+                                                    cw + halo * 2,
+                                                    ch + halo * 2,
+                                                    sf(8.5),
+                                                    sf(1.35),
+                                                    palette
+                                                        .cobalt
+                                                        .with_alpha(((burst_glow * 225.0) as u8).max(32)),
+                                                );
+                                            }
                                             canvas.fill_round_rect(
                                                 tx,
                                                 ty,
                                                 cw,
                                                 ch,
                                                 sf(7.0),
-                                                Color4::rgba(255, 255, 255, 28),
+                                                if is_sel {
+                                                    palette.cobalt
+                                                } else if is_hov {
+                                                    Color4::rgba(255, 255, 255, 78)
+                                                } else {
+                                                    Color4::rgba(255, 255, 255, 38)
+                                                },
                                             );
-                                        }
-                                        if is_sel || is_hov {
+                                            if is_sel && is_hov {
+                                                canvas.fill_round_rect(
+                                                    tx,
+                                                    ty,
+                                                    cw,
+                                                    ch,
+                                                    sf(7.0),
+                                                    Color4::rgba(255, 255, 255, 28),
+                                                );
+                                            }
                                             canvas.stroke_round_rect(
                                                 tx,
                                                 ty,
@@ -17441,65 +18232,72 @@ unsafe fn handle_ql_stage_wnd_proc(
                                                         255,
                                                         255,
                                                         255,
-                                                        if is_hov { 195 } else { 110 },
+                                                        if is_hov { 195 } else { 116 },
                                                     )
-                                                } else {
+                                                } else if is_hov {
                                                     palette.cobalt.with_alpha(220)
+                                                } else {
+                                                    Color4::rgba(255, 255, 255, 42)
                                                 },
                                             );
-                                        }
-                                        let trc = RECT {
-                                            left: tx,
-                                            top: ty,
-                                            right: tx + cw,
-                                            bottom: ty + ch,
-                                        };
-                                        let text_rc = if is_line_mode {
-                                            RECT {
-                                                left: tx + s(10),
+                                            let trc = RECT {
+                                                left: tx,
                                                 top: ty,
-                                                right: (tx + cw - s(10)).max(tx + s(14)),
+                                                right: tx + cw,
                                                 bottom: ty + ch,
-                                            }
-                                        } else {
-                                            RECT {
-                                                left: tx + s(4),
-                                                top: ty,
-                                                right: (tx + cw - s(4)).max(tx + s(8)),
-                                                bottom: ty + ch,
-                                            }
-                                        };
-                                        texts.push(TextDrawCmd {
-                                            text: tok.text.clone(),
-                                            rect: text_rc,
-                                            color: Color4::rgb(255, 255, 255),
-                                            font_kind: FontKind::Body,
-                                            flags: if is_line_mode {
-                                                DT_LEFT
-                                                    | DT_VCENTER
-                                                    | DT_SINGLELINE
-                                                    | DT_END_ELLIPSIS
+                                            };
+                                            let text_rc = if is_line_mode {
+                                                RECT {
+                                                    left: tx + s(10),
+                                                    top: ty,
+                                                    right: (tx + cw - s(10)).max(tx + s(14)),
+                                                    bottom: ty + ch,
+                                                }
                                             } else {
-                                                DT_CENTER
-                                                    | DT_VCENTER
-                                                    | DT_SINGLELINE
-                                                    | DT_END_ELLIPSIS
-                                            },
-                                        });
-                                        st.ql_stage_hit_regions.push(HitRegion {
-                                            rect: trc,
-                                            interactive_cursor: true,
-                                            action: HitAction::ToggleBigBangToken(tok.id),
-                                        });
-                                        st.ql_stage_rendered_big_bang_ids.push(tok.id);
-                                        rendered_chips += 1;
-                                        if is_line_mode {
-                                            tx = stage_x + s(14);
-                                            ty += ch + s(6);
-                                        } else {
-                                            tx += cw + s(6);
+                                                RECT {
+                                                    left: tx + s(4),
+                                                    top: ty,
+                                                    right: (tx + cw - s(4)).max(tx + s(8)),
+                                                    bottom: ty + ch,
+                                                }
+                                            };
+                                            texts.push(TextDrawCmd {
+                                                text: tok.text.clone(),
+                                                rect: text_rc,
+                                                color: Color4::rgb(255, 255, 255),
+                                                font_kind: FontKind::Body,
+                                                flags: if is_line_mode {
+                                                    DT_LEFT
+                                                        | DT_VCENTER
+                                                        | DT_SINGLELINE
+                                                        | DT_END_ELLIPSIS
+                                                } else {
+                                                    DT_CENTER
+                                                        | DT_VCENTER
+                                                        | DT_SINGLELINE
+                                                        | DT_END_ELLIPSIS
+                                                },
+                                            });
+                                            st.ql_stage_hit_regions.push(HitRegion {
+                                                rect: trc,
+                                                interactive_cursor: true,
+                                                action: HitAction::ToggleBigBangToken(tok.id),
+                                            });
                                         }
                                     }
+                                    draw_quick_look_scrollbar(
+                                        &mut canvas,
+                                        stage_x + stage_w - s(9),
+                                        chips_top,
+                                        chips_bottom,
+                                        scale,
+                                        true,
+                                        &palette,
+                                        clamped_scroll,
+                                        packed_rows.len(),
+                                        visible_rows,
+                                        max_scroll,
+                                    );
 
                                     let sel_cnt = st.ql_stage_ocr_selected.len();
                                     let paste_label = if sel_cnt > 0 {
@@ -17528,17 +18326,15 @@ unsafe fn handle_ql_stage_wnd_proc(
                                     let cx_ocr = px - s(6) - cb_w;
                                     let tx_all = cx_ocr - s(6) - tb_w;
 
-                                    if total_non_break > rendered_chips
-                                        && tx_all - s(10) > stage_x + s(80)
-                                    {
-                                        let notice = if is_line_mode {
-                                            format!(
-                                                "已显示 {rendered_chips}/{total_non_break} 行（超出画幅已截断）"
-                                            )
+                                    if tx_all - s(10) > stage_x + s(80) {
+                                        let assembled = assemble_big_bang_selection(
+                                            &tokens,
+                                            &st.ql_stage_ocr_selected,
+                                        );
+                                        let notice = if !assembled.is_empty() {
+                                            format!("已选：{}", assembled.replace('\n', " "))
                                         } else {
-                                            format!(
-                                                "已显示 {rendered_chips}/{total_non_break} 词块 · 切「按行」可看更多"
-                                            )
+                                            "单击/横扫选词 · 双击词块原位再拆分 · 滚轮翻页".to_string()
                                         };
                                         texts.push(TextDrawCmd {
                                             text: notice,

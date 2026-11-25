@@ -4365,12 +4365,15 @@ final class CoreFeatureTests: XCTestCase {
 
     @MainActor
     func testBigBangImageGranularitySyncAndSmoothTransitionRect() {
-        // 1. 文本“按行”态切入图片大爆炸时应等效归约为“按词”，首次按 G 直接步进到“按字”不空转
-        XCTAssertEqual(BigBangStageController.resolveEffectiveGranularity(.line, isImageMode: true), .word)
+        // 1. 图片与文本大爆炸统一支持四档粒度（智能组合 -> 按词 -> 按字 -> 按行 -> 智能组合）循环步进
+        XCTAssertEqual(BigBangStageController.resolveEffectiveGranularity(.smart, isImageMode: true), .smart)
+        XCTAssertEqual(BigBangStageController.resolveEffectiveGranularity(.line, isImageMode: true), .line)
         XCTAssertEqual(BigBangStageController.resolveEffectiveGranularity(.line, isImageMode: false), .line)
-        XCTAssertEqual(BigBangStageController.nextCycledGranularity(from: .line, isImageMode: true), .character)
-        XCTAssertEqual(BigBangStageController.nextCycledGranularity(from: .character, isImageMode: true), .word)
-        XCTAssertEqual(BigBangStageController.nextCycledGranularity(from: .line, isImageMode: false), .word)
+        XCTAssertEqual(BigBangStageController.nextCycledGranularity(from: .smart, isImageMode: true), .word)
+        XCTAssertEqual(BigBangStageController.nextCycledGranularity(from: .word, isImageMode: true), .character)
+        XCTAssertEqual(BigBangStageController.nextCycledGranularity(from: .character, isImageMode: true), .line)
+        XCTAssertEqual(BigBangStageController.nextCycledGranularity(from: .line, isImageMode: true), .smart)
+        XCTAssertEqual(BigBangStageController.nextCycledGranularity(from: .line, isImageMode: false), .smart)
 
         // 2. 即使源卡片是极窄网格图块，进出场过渡矩形仍保持 >= 85% 画幅并柔和偏向源中心，杜绝顶底栏坍缩溢出
         let target = NSRect(x: 400, y: 200, width: 640, height: 500)
@@ -5236,5 +5239,96 @@ final class CoreFeatureTests: XCTestCase {
             TodoChecklistExtractor.compactTodoPromptTitle(for: "   \n  "),
             "设为待办"
         )
+    }
+
+    @MainActor
+    func testBigBangSmartGroupingAndInPlaceSecondaryExplosion() {
+        // 1. 智能组合（.smart）自动聚合成自然短语与 UI 复合实体，杜绝满屏碎单字
+        let denseSample = "前两天发完上一版，评论区好多朋友吐槽两个真实痛点：984×1,264 · 3034 字 · 22 小时前 SSH/Tailscale /Applications/iClip.app implicit_key_capture_armed"
+        let smartTokens = BigBangTokenizer.tokenize(denseSample, granularity: .smart).filter { !$0.isLineBreak }
+        let charTokens = BigBangTokenizer.tokenize(denseSample, granularity: .character).filter { !$0.isLineBreak }
+        let smartTexts = smartTokens.map(\.text)
+
+        XCTAssertLessThan(smartTokens.count, charTokens.count / 2)
+        XCTAssertTrue(smartTexts.contains("984×1,264"))
+        XCTAssertTrue(smartTexts.contains("3034 字"))
+        XCTAssertTrue(smartTexts.contains("22 小时前"))
+        XCTAssertTrue(smartTexts.contains("SSH/Tailscale"))
+        XCTAssertTrue(smartTexts.contains("/Applications/iClip.app"))
+        XCTAssertTrue(smartTexts.contains("implicit_key_capture_armed"))
+        // 中文自然短语至少包含多字语义块而非拆成单字
+        XCTAssertTrue(smartTexts.contains(where: { $0.contains("评论") && $0.count >= 2 }))
+        XCTAssertTrue(smartTexts.contains(where: { $0.contains("朋友") && $0.count >= 2 }))
+
+        // 2. 多级原位再爆炸拆分（结构层 -> 点分层 -> 驼峰/蛇形层 -> 词组层 -> 单字层）与无损拼接
+        var nextID = 100
+        let urlRoot = BigBangTokenizer.tokenize("https://app.webfooo.com/iClip", granularity: .smart).first!
+        XCTAssertTrue(BigBangTokenizer.canSubdivide(urlRoot.text))
+        let urlTier1 = BigBangTokenizer.subdivideToken(urlRoot, nextID: &nextID, burstGeneration: 1)!
+        XCTAssertEqual(urlTier1.map(\.text), ["https", "app.webfooo.com", "iClip"])
+        XCTAssertEqual(urlTier1.first?.burstGeneration, 1)
+        XCTAssertLessThan(urlTier1.first?.burstSpreadIndex ?? 0, 0)
+        XCTAssertGreaterThan(urlTier1.last?.burstSpreadIndex ?? 0, 0)
+
+        let hostTier2 = BigBangTokenizer.subdivideToken(urlTier1[1], nextID: &nextID, burstGeneration: 2)!
+        XCTAssertEqual(hostTier2.map(\.text), ["app", "webfooo", "com"])
+        let appTier3 = BigBangTokenizer.subdivideToken(hostTier2[0], nextID: &nextID, burstGeneration: 3)!
+        XCTAssertEqual(appTier3.map(\.text), ["a", "p", "p"])
+        XCTAssertFalse(BigBangTokenizer.canSubdivide(appTier3[0].text))
+
+        let camelRoot = BigBangTokenizer.tokenize("WindowServer", granularity: .smart).first!
+        let camelParts = BigBangTokenizer.subdivideToken(camelRoot, nextID: &nextID, burstGeneration: 1)!
+        XCTAssertEqual(camelParts.map(\.text), ["Window", "Server"])
+        XCTAssertEqual(
+            BigBangTokenizer.assembleSelected(camelParts, selectedIDs: Set(camelParts.map(\.id))),
+            "WindowServer"
+        )
+
+        let phraseRoot = BigBangTextToken(
+            id: 3,
+            text: "好多朋友",
+            isLineBreak: false,
+            lineIndex: 0,
+            utf16Location: 0,
+            utf16Length: 4,
+            granularity: .smart
+        )
+        let phraseSub = BigBangTokenizer.subdivideToken(phraseRoot, nextID: &nextID, burstGeneration: 1)!
+        XCTAssertEqual(phraseSub.map(\.text), ["好多", "朋友"])
+        XCTAssertEqual(
+            BigBangTokenizer.assembleSelected(phraseSub, selectedIDs: Set(phraseSub.map(\.id))),
+            "好多朋友"
+        )
+
+        // 3. 控制器原位二次爆炸：保持未触碰兄弟词块稳定 ID、继承父选中态，并支持 ⌘Z 完整还原
+        let store = ClipboardStore.shared
+        let clipItem = ClipItem(
+            type: .text,
+            text: "访问 https://app.webfooo.com/iClip 立即体验",
+            contentHash: "text:bb-explode-test"
+        )
+        let stage = BigBangStageController.shared
+        defer { stage.dismiss() }
+        stage.granularity = .smart
+        XCTAssertTrue(stage.presentOrUpdate(for: clipItem, in: store))
+
+        let untouchedFirstID = stage.textTokens.first!.id
+        let untouchedLastID = stage.textTokens.last!.id
+        let targetURLToken = stage.textTokens.first(where: { $0.text == "https://app.webfooo.com/iClip" })!
+        stage.textSelectedTokenIDs = [untouchedFirstID, targetURLToken.id]
+
+        let didExplode = stage.explodeTokenInPlace(id: targetURLToken.id)
+        XCTAssertTrue(didExplode)
+        XCTAssertTrue(stage.canUndoExplosion)
+        XCTAssertEqual(stage.textTokens.first?.id, untouchedFirstID)
+        XCTAssertEqual(stage.textTokens.last?.id, untouchedLastID)
+        XCTAssertTrue(stage.textTokens.map(\.text).contains("app.webfooo.com"))
+        // 炸开的目标词块清选以便精准挑取子段，未触碰兄弟词块的选中态完整保留
+        XCTAssertEqual(stage.textSelectedTokenIDs, [untouchedFirstID])
+
+        XCTAssertTrue(stage.undoLastExplosion())
+        XCTAssertFalse(stage.canUndoExplosion)
+        XCTAssertTrue(stage.textTokens.contains(where: { $0.id == targetURLToken.id && $0.text == "https://app.webfooo.com/iClip" }))
+        XCTAssertEqual(stage.textSelectedTokenIDs, [untouchedFirstID, targetURLToken.id])
     }
 }

@@ -1163,6 +1163,14 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
                 bb.cycleGranularity()
                 return nil
             }
+            if flags.isEmpty, event.keyCode == 7 {
+                _ = bb.explodeSelectedOrHoveredOrStepFiner()
+                return nil
+            }
+            if flags == .command, event.keyCode == 6, bb.canUndoExplosion {
+                _ = bb.undoLastExplosion()
+                return nil
+            }
             if flags == .command, event.keyCode == 0 {
                 bb.selectAllTokens()
                 return nil
