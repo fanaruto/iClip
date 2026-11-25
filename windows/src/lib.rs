@@ -3459,4 +3459,46 @@ mod tests {
         // 面板隐藏时始终放行
         assert!(!should_intercept_non_active_panel_key(false, true, true, true));
     }
+
+    #[test]
+    fn test_quick_look_space_trigger_during_search_and_command_guards() {
+        use crate::intelligence::should_trigger_quick_look_on_space;
+
+        // 普通检索词有匹配项时按 Space 直接触发全图缩放 / 大爆炸预览
+        assert!(should_trigger_quick_look_on_space("", None, true));
+        assert!(should_trigger_quick_look_on_space("检", None, true));
+        assert!(should_trigger_quick_look_on_space("Executed", None, true));
+        assert!(should_trigger_quick_look_on_space("984", None, true));
+        assert!(should_trigger_quick_look_on_space("@图片", None, true));
+        assert!(should_trigger_quick_look_on_space("wechat 科技园", None, true));
+
+        // 0 条匹配时放行原生空格输入
+        assert!(!should_trigger_quick_look_on_space("未命中的新建备忘", None, false));
+
+        // 带空格参数的密码生成、加密口令、偏好调教、闪念速记与四则算式放行原生空格
+        for cmd in [
+            "@密码",
+            "@pw 24",
+            "@锁",
+            "@解锁 8866",
+            "@建议",
+            ">",
+            "> 备注 :: 正文",
+            "[]",
+            "[] 下午核对报表",
+            "-",
+            "+待办",
+            "todo:",
+            "=",
+            "= 12 + 34",
+            "12 +",
+            "12 + 34",
+            "camel",
+        ] {
+            assert!(
+                !should_trigger_quick_look_on_space(cmd, Some("¥12,800"), true),
+                "指令或算式 `{cmd}` 应放行原生空格输入"
+            );
+        }
+    }
 }

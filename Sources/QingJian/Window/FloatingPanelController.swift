@@ -84,6 +84,10 @@ enum PanelFocusPreservationPolicy {
         if clean.contains(.command) || clean.contains(.control) || clean.contains(.option) {
             return false
         }
+        // 允许 ⇧Space 在非激活盲搜态直接键入字面空格，普通 Space 保留给 QuickLook 放大预览
+        if keyCode == 49 && clean == .shift {
+            return true
+        }
         let reservedCodes: Set<UInt16> = [36, 48, 49, 51, 53, 76, 123, 124, 125, 126]
         if reservedCodes.contains(keyCode) {
             return false
@@ -95,6 +99,56 @@ enum PanelFocusPreservationPolicy {
             }
         }
         return true
+    }
+
+    /// 判断主列表按下普通空格（Space）时是否应直接呼出 QuickLook 全图缩放 / 大爆炸预览：
+    /// - 只要当前检索结果非空，且输入不是显式带参指令、闪念速记或数学算式，普通 Space 一律放大/收起当前选中项（支持中文拼音选词后无缝接 Space 放大，需要输入字面空格时按 ⇧Space）；
+    /// - 当检索无匹配项（可回车新建待办/备忘）或正在输入 `@密码`、`@锁`、`@建议`、`> 速记`、`[] 待办`、`= 算式` 等带空格参数指令时，放行原生空格输入。
+    static func shouldTriggerQuickLookOnSpace(
+        searchText: String,
+        hasMatchingResults: Bool,
+        latestClipboardText: String? = nil
+    ) -> Bool {
+        guard hasMatchingResults else { return false }
+        let trimmed = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            return true
+        }
+        if QuickSuggestionCommandBanner.extractPayload(from: searchText) != nil
+            || QuickCaptureParser.parse(from: searchText) != nil
+            || SecurePasswordGenerator.evaluate(searchText) != nil
+            || SecretCapsuleMessenger.isCapsuleCommandPrefix(searchText)
+            || InstantMathEvaluator.evaluate(searchText, latestClipboardText: latestClipboardText) != nil {
+            return false
+        }
+        if trimmed.hasPrefix("=") || trimmed.hasPrefix("＝") {
+            return false
+        }
+        let lower = trimmed.lowercased()
+        let spaceStarterTokens: Set<String> = [
+            "-", "－", "[", "【", "*", "+", "/", "+收藏",
+            "camel", "snake", "kebab", "pascal", "const", "ts"
+        ]
+        if spaceStarterTokens.contains(lower) {
+            return false
+        }
+        if isIncompleteArithmeticExpression(trimmed) {
+            return false
+        }
+        return true
+    }
+
+    private static func isIncompleteArithmeticExpression(_ trimmed: String) -> Bool {
+        guard let first = trimmed.first, let last = trimmed.last else { return false }
+        let validStarts: Set<Character> = ["(", "（", "¥", "￥", "$"]
+        guard first.isNumber || validStarts.contains(first) else { return false }
+        let trailingOps: Set<Character> = ["+", "-", "*", "/", "×", "÷"]
+        guard trailingOps.contains(last) else { return false }
+        let allowedSymbols: Set<Character> = [
+            ".", "(", ")", "（", "）", "+", "-", "*", "/", "×", "÷", "%", "％",
+            ",", "，", " ", "\t", "¥", "￥", "$", "万", "亿", "元"
+        ]
+        return trimmed.allSatisfy { $0.isNumber || allowedSymbols.contains($0) }
     }
 
     /// 若宿主应用已处于 Active 状态（零失焦唤醒常态），不重复调用 activate()，避免重置微信等应用的搜索弹层焦点
@@ -1251,6 +1305,10 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
                 rootView.pasteSelected()
                 return nil
             }
+            if flags.contains(.command) || flags.contains(.control) {
+                return event
+            }
+            return nil
         }
 
         if event.keyCode == 53 {
@@ -1286,9 +1344,13 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             return nil
         }
 
-        // ⌘Y (keyCode 16) 或搜索框为空时按 Space (keyCode 49)：图片丝滑全图+大爆炸选字、文本默认大爆炸、本地文件走系统 QLPreviewPanel
+        // ⌘Y (keyCode 16) 或普通 Space (keyCode 49)：即使搜索框已有检索词，只要匹配列表非空且非带参指令，直接打开全图缩放 / 大爆炸预览
         if (flags == .command && event.keyCode == 16) ||
-           (flags.isEmpty && event.keyCode == 49 && nav.searchText.isEmpty) {
+           (flags.isEmpty && event.keyCode == 49 && PanelFocusPreservationPolicy.shouldTriggerQuickLookOnSpace(
+               searchText: nav.searchText,
+               hasMatchingResults: !nav.cachedFilteredItems.isEmpty,
+               latestClipboardText: store.items.first?.text
+           )) {
             if let fieldEditor = panel.firstResponder as? NSTextView, fieldEditor.hasMarkedText() {
                 return event
             }
@@ -1302,6 +1364,18 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             }
             rootView.triggerQuickLookForSelected(initialMode: .autoDefault)
             return nil
+        }
+
+        // ⇧Space (keyCode 49)：当搜索框尚未成为 FirstResponder 时，自动聚焦并插入字面空格，支持多词组合检索
+        if flags == .shift, event.keyCode == 49 {
+            if let fieldEditor = panel.firstResponder as? NSTextView, fieldEditor.hasMarkedText() {
+                return event
+            }
+            if !(panel.firstResponder is NSTextView) {
+                beginSearchTypingFromNonKeyPanel(event)
+                return nil
+            }
+            return event
         }
 
         // ⌘R (keyCode 15)：对当前选中条目设置/修改记忆备注标题
@@ -1436,18 +1510,27 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             return nil
         }
 
-        // ← / → 左右方向键：搜索框为空且处于图片格（或图片类目）时直接左右操控图片选中焦点
-        if !nav.showQuickLook, (event.keyCode == 123 || event.keyCode == 124), nav.searchText.isEmpty, rootView.canMoveHorizontallyInGrid {
+        // ← / → 左右方向键：未在文本输入框内移动光标（或搜索框为空）且处于图片格时，直接左右操控图片选中焦点
+        if !nav.showQuickLook,
+           (event.keyCode == 123 || event.keyCode == 124),
+           (nav.searchText.isEmpty || !(panel.firstResponder is NSTextView)),
+           rootView.canMoveHorizontallyInGrid {
             rootView.moveSelection(direction: event.keyCode == 123 ? .left : .right)
             return nil
         }
 
         if event.keyCode == 126 {
+            if let fieldEditor = panel.firstResponder as? NSTextView, fieldEditor.hasMarkedText() {
+                return event
+            }
             rootView.moveSelection(direction: .up)
             return nil
         }
 
         if event.keyCode == 125 {
+            if let fieldEditor = panel.firstResponder as? NSTextView, fieldEditor.hasMarkedText() {
+                return event
+            }
             rootView.moveSelection(direction: .down)
             return nil
         }

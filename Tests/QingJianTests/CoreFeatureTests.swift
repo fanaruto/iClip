@@ -4968,4 +4968,70 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertNotNil(burnMeta.detectedSensitiveKind)
         XCTAssertNotEqual(burnMeta.plainDisplayTitle, burnMeta.veiledDisplayTitle)
     }
+
+    func testQuickLookSpaceTriggerDuringSearchAndCommandInputGuards() {
+        // 1. 普通检索词（中文、英文、数字尺寸、语义标签）在有匹配项时按 Space 一律直接触发放大预览，不再误敲空格
+        XCTAssertTrue(PanelFocusPreservationPolicy.shouldTriggerQuickLookOnSpace(
+            searchText: "",
+            hasMatchingResults: true
+        ))
+        XCTAssertTrue(PanelFocusPreservationPolicy.shouldTriggerQuickLookOnSpace(
+            searchText: "检",
+            hasMatchingResults: true
+        ))
+        XCTAssertTrue(PanelFocusPreservationPolicy.shouldTriggerQuickLookOnSpace(
+            searchText: "Executed",
+            hasMatchingResults: true
+        ))
+        XCTAssertTrue(PanelFocusPreservationPolicy.shouldTriggerQuickLookOnSpace(
+            searchText: "984",
+            hasMatchingResults: true
+        ))
+        XCTAssertTrue(PanelFocusPreservationPolicy.shouldTriggerQuickLookOnSpace(
+            searchText: "@图片",
+            hasMatchingResults: true
+        ))
+        XCTAssertTrue(PanelFocusPreservationPolicy.shouldTriggerQuickLookOnSpace(
+            searchText: "wechat 科技园",
+            hasMatchingResults: true
+        ))
+
+        // 2. 无匹配项时放行原生空格（便于连续输入新建待办/备忘）
+        XCTAssertFalse(PanelFocusPreservationPolicy.shouldTriggerQuickLookOnSpace(
+            searchText: "不存在的条目草稿",
+            hasMatchingResults: false
+        ))
+
+        // 3. 显式带空格参数的快捷指令、闪念捕获与四则算式放行原生空格输入
+        for cmd in [
+            "@密码", "@pw 24", "@锁", "@解锁 8866", "@建议", "@反馈 优化圆角",
+            ">", "> 备注 :: 正文", "[]", "[] 下午核对报表", "-", "+待办", "todo:",
+            "=", "= 12 + 34", "12 +", "12 + 34", "camel"
+        ] {
+            XCTAssertFalse(
+                PanelFocusPreservationPolicy.shouldTriggerQuickLookOnSpace(
+                    searchText: cmd,
+                    hasMatchingResults: true,
+                    latestClipboardText: "¥12,800"
+                ),
+                "指令或算式 `\(cmd)` 应放行原生空格输入"
+            )
+        }
+
+        // 4. 非激活盲搜态允许 ⇧Space 直接激活并键入字面空格，而普通 Space 保留给预览
+        XCTAssertTrue(PanelFocusPreservationPolicy.shouldBeginSearchTyping(
+            keyCode: 49,
+            flags: .shift,
+            charactersIgnoringModifiers: " ",
+            showSettings: false,
+            showQuickLook: false
+        ))
+        XCTAssertFalse(PanelFocusPreservationPolicy.shouldBeginSearchTyping(
+            keyCode: 49,
+            flags: [],
+            charactersIgnoringModifiers: " ",
+            showSettings: false,
+            showQuickLook: false
+        ))
+    }
 }

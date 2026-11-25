@@ -2078,7 +2078,7 @@ struct ClipboardPopoverView: View {
                         Divider().opacity(0.35)
                         shortcutRow("忽略守护强制贴原始明文", "⌥ ↵")
                         Divider().opacity(0.35)
-                        shortcutRow("QuickLook 原文与变换对照速览", "Space / ⌘ Y")
+                        shortcutRow("QuickLook 全图缩放 / 大爆炸速览（⇧Space 输空格）", "Space / ⌘ Y")
                         Divider().opacity(0.35)
                         shortcutRow("按语义类型速筛", "@json / @secret / @color")
                         Divider().opacity(0.35)

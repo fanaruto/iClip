@@ -3152,3 +3152,112 @@ pub fn assemble_big_bang_selection(
     }
     out
 }
+
+/// 判断主列表按下普通空格（Space）时是否应直接呼出 QuickLook 全图缩放 / 大爆炸预览：
+/// - 只要当前检索结果非空，且输入不是显式带参指令、闪念速记或数学算式，普通 Space 一律放大/收起当前选中项（Shift+Space 可输入字面空格）；
+/// - 当检索无匹配项，或正在输入 `@密码`、`@锁`、`@建议`、`> 速记`、`[] 待办`、`= 算式` 等指令时，放行原生空格输入。
+pub fn should_trigger_quick_look_on_space(
+    query: &str,
+    latest_clip_text: Option<&str>,
+    has_matching_results: bool,
+) -> bool {
+    if !has_matching_results {
+        return false;
+    }
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    if extract_suggestion_payload(query).is_some()
+        || parse_quick_capture(query).is_some()
+        || crate::security::evaluate_secure_password_query(query).is_some()
+        || is_capsule_command_prefix(trimmed)
+        || evaluate_instant_math(query, latest_clip_text).is_some()
+    {
+        return false;
+    }
+    if trimmed.starts_with('=') || trimmed.starts_with('＝') {
+        return false;
+    }
+    let lower = trimmed.to_lowercase();
+    if matches!(
+        lower.as_str(),
+        "-" | "－"
+            | "["
+            | "【"
+            | "*"
+            | "+"
+            | "/"
+            | "+收藏"
+            | "camel"
+            | "snake"
+            | "kebab"
+            | "pascal"
+            | "const"
+            | "ts"
+    ) {
+        return false;
+    }
+    if is_incomplete_arithmetic_expr(trimmed) {
+        return false;
+    }
+    true
+}
+
+fn is_capsule_command_prefix(trimmed: &str) -> bool {
+    if !trimmed.starts_with('@') {
+        return false;
+    }
+    let lower = trimmed.to_lowercase();
+    for p in ["@锁", "@加密", "@lock", "@解锁", "@解密", "@unlock"] {
+        if lower == p || lower.starts_with(&format!("{p} ")) || lower.starts_with(&format!("{p}\t"))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_incomplete_arithmetic_expr(trimmed: &str) -> bool {
+    let mut chars = trimmed.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    let Some(last) = trimmed.chars().last() else {
+        return false;
+    };
+    if !(first.is_ascii_digit() || matches!(first, '(' | '（' | '¥' | '￥' | '$')) {
+        return false;
+    }
+    if !matches!(last, '+' | '-' | '*' | '/' | '×' | '÷') {
+        return false;
+    }
+    trimmed.chars().all(|c| {
+        c.is_ascii_digit()
+            || matches!(
+                c,
+                '.' | '('
+                    | ')'
+                    | '（'
+                    | '）'
+                    | '+'
+                    | '-'
+                    | '*'
+                    | '/'
+                    | '×'
+                    | '÷'
+                    | '%'
+                    | '％'
+                    | ','
+                    | '，'
+                    | ' '
+                    | '\t'
+                    | '¥'
+                    | '￥'
+                    | '$'
+                    | '万'
+                    | '亿'
+                    | '元'
+            )
+    })
+}

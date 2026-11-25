@@ -479,6 +479,7 @@ struct WinAppState {
     cf_can_upload_cloud: u32,
     suppress_deactivate_hide: bool,
     implicit_key_capture_armed: bool,
+    suppress_next_space_char: bool,
     autostart_cached: bool,
     kbd_hook: HHOOK,
     mouse_hook: HHOOK,
@@ -833,6 +834,7 @@ pub fn run_windows_app() -> i32 {
                 cf_can_upload_cloud: cf_can_cloud,
                 suppress_deactivate_hide: false,
                 implicit_key_capture_armed: false,
+                suppress_next_space_char: false,
                 autostart_cached: autostart,
                 kbd_hook: null_mut(),
                 mouse_hook: null_mut(),
@@ -1044,6 +1046,7 @@ pub fn run_windows_self_test() -> Result<(), String> {
             cf_can_upload_cloud: 0,
             suppress_deactivate_hide: true,
             implicit_key_capture_armed: false,
+            suppress_next_space_char: false,
             autostart_cached: true,
             kbd_hook: null_mut(),
             mouse_hook: null_mut(),
@@ -10046,7 +10049,7 @@ fn layout_and_draw_settings_view(
         ("标记 / 完成待办事项", "Ctrl + T".to_string()),
         ("设为粘贴一次后无痕自毁", "Ctrl + B".to_string()),
         ("设置备注标题（自动收藏）", "Ctrl + R".to_string()),
-        ("原位速览 / 行级差异比对", "Space / Alt+Space".to_string()),
+        ("全图缩放与速览（Shift+Space 输空格）", "Space / Alt+Space".to_string()),
         ("快速键入前 9 条", "Ctrl + 1 ~ 9".to_string()),
     ];
     let g5_h = if st.show_shortcut_ref {
@@ -13932,6 +13935,14 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
         )
     };
 
+    if mod_override.is_none() {
+        APP_STATE.with(|c| {
+            if let Some(st) = c.borrow_mut().as_mut() {
+                st.suppress_next_space_char = false;
+            }
+        });
+    }
+
     let active_rec_slot = APP_STATE.with(|c| c.borrow().as_ref().and_then(|s| s.recording_slot));
     if let Some(slot) = active_rec_slot {
         if vk == VK_ESCAPE as u32 {
@@ -13961,6 +13972,13 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
         }
         if win_down {
             mods |= MOD_WIN_BITS;
+        }
+        if mod_override.is_none() && vk == VK_SPACE as u32 {
+            APP_STATE.with(|c| {
+                if let Some(st) = c.borrow_mut().as_mut() {
+                    st.suppress_next_space_char = true;
+                }
+            });
         }
         let candidate = WinHotKeyShortcut::combo(vk, mods);
         apply_recorded_hotkey_candidate(hwnd, slot, candidate);
@@ -14007,6 +14025,9 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
                     st.store.config.has_seen_highlights_v27 = true;
                     st.store.save_config();
                 }
+            }
+            if mod_override.is_none() && vk == VK_SPACE as u32 {
+                st.suppress_next_space_char = true;
             }
             return (true, can_dismiss);
         }
@@ -14357,15 +14378,26 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
         return;
     }
 
-    if vk == VK_SPACE as u32 {
-        let mut need_dismiss_ql_stage = false;
-        let toggled = APP_STATE.with(|c| {
+    if vk == VK_SPACE as u32 && !ctrl_down {
+        enum SpaceKeyAction {
+            DismissLargeStage,
+            RedrawInline,
+            ConsumedStageOpen,
+            TypeLiteralSpaceFromHook,
+            LetCharFlow,
+        }
+        let action = APP_STATE.with(|c| {
             let mut b = c.borrow_mut();
-            let Some(st) = b.as_mut() else { return false };
+            let Some(st) = b.as_mut() else {
+                return SpaceKeyAction::LetCharFlow;
+            };
             if st.view_mode == ActiveViewMode::Settings {
-                return false;
+                return SpaceKeyAction::LetCharFlow;
             }
-            if alt_down {
+            if alt_down && !shift_down {
+                if mod_override.is_none() {
+                    st.suppress_next_space_char = true;
+                }
                 if st.show_quick_look && st.quick_look_diff_mode {
                     st.show_quick_look = false;
                     st.quick_look_hovered_target = None;
@@ -14385,10 +14417,13 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
                     st.big_bang_sweep_target = None;
                     st.big_bang_sweep_last_pt = None;
                 }
-                return true;
+                return SpaceKeyAction::RedrawInline;
             }
-            if st.search_query.is_empty() || st.show_quick_look || st.ql_stage_visible {
+            if !alt_down && !shift_down {
                 if st.ql_stage_visible {
+                    if mod_override.is_none() {
+                        st.suppress_next_space_char = true;
+                    }
                     st.ql_stage_visible = false;
                     st.ql_stage_big_bang = false;
                     st.ql_stage_ocr_selected.clear();
@@ -14397,44 +14432,80 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
                     st.ql_stage_sweep_last_pt = None;
                     st.ql_stage_hovered_target = None;
                     st.ql_stage_hit_regions.clear();
-                    need_dismiss_ql_stage = true;
-                    return false;
+                    return SpaceKeyAction::DismissLargeStage;
                 }
-                if !st.show_quick_look {
-                    let filtered = st.store.filtered_indices_ext(
-                        st.selected_tab,
-                        st.selected_pin_category,
-                        &st.search_query,
-                        st.active_target_app_name.as_deref(),
-                    );
+                if st.show_quick_look {
+                    if mod_override.is_none() {
+                        st.suppress_next_space_char = true;
+                    }
+                    st.show_quick_look = false;
+                    st.quick_look_hovered_target = None;
+                    st.quick_look_diff_mode = false;
+                    st.quick_look_tab = 0;
+                    st.quick_look_scroll = 0;
+                    st.quick_look_max_scroll = 0;
+                    st.big_bang_selected_ids.clear();
+                    st.big_bang_sweep_target = None;
+                    st.big_bang_sweep_last_pt = None;
+                    return SpaceKeyAction::RedrawInline;
+                }
+                let filtered = st.store.filtered_indices_ext(
+                    st.selected_tab,
+                    st.selected_pin_category,
+                    &st.search_query,
+                    st.active_target_app_name.as_deref(),
+                );
+                let latest_text = st.store.items.first().and_then(|i| i.text.as_deref());
+                if iclip_core::intelligence::should_trigger_quick_look_on_space(
+                    &st.search_query,
+                    latest_text,
+                    !filtered.is_empty(),
+                ) {
+                    if mod_override.is_none() {
+                        st.suppress_next_space_char = true;
+                    }
                     if let Some(&s_idx) = filtered.get(st.selected_visible_pos) {
-                        if st.store.items[s_idx].kind == ClipContentType::Image {
-                            if present_or_update_large_ql_stage(hwnd, st, s_idx) {
-                                return false;
-                            }
+                        if st.store.items[s_idx].kind == ClipContentType::Image
+                            && present_or_update_large_ql_stage(hwnd, st, s_idx)
+                        {
+                            return SpaceKeyAction::ConsumedStageOpen;
                         }
                     }
+                    st.show_quick_look = true;
+                    st.quick_look_hovered_target = None;
+                    st.quick_look_diff_mode = false;
+                    st.quick_look_tab = 0;
+                    st.quick_look_scroll = 0;
+                    st.quick_look_max_scroll = 0;
+                    st.big_bang_selected_ids.clear();
+                    st.big_bang_sweep_target = None;
+                    st.big_bang_sweep_last_pt = None;
+                    return SpaceKeyAction::RedrawInline;
                 }
-                st.show_quick_look = !st.show_quick_look;
-                st.quick_look_hovered_target = None;
-                st.quick_look_diff_mode = false;
-                st.quick_look_tab = 0;
-                st.quick_look_scroll = 0;
-                st.quick_look_max_scroll = 0;
-                st.big_bang_selected_ids.clear();
-                st.big_bang_sweep_target = None;
-                st.big_bang_sweep_last_pt = None;
-                return true;
             }
-            false
+            if mod_override.is_some() && !alt_down && !st.search_query.is_empty() {
+                return SpaceKeyAction::TypeLiteralSpaceFromHook;
+            }
+            SpaceKeyAction::LetCharFlow
         });
-        if need_dismiss_ql_stage {
-            dismiss_large_ql_stage();
-            return;
-        }
-        if toggled {
-            let _ = InvalidateRect(hwnd, null(), FALSE);
-            return;
+        match action {
+            SpaceKeyAction::DismissLargeStage => {
+                dismiss_large_ql_stage();
+                return;
+            }
+            SpaceKeyAction::RedrawInline => {
+                let _ = InvalidateRect(hwnd, null(), FALSE);
+                return;
+            }
+            SpaceKeyAction::ConsumedStageOpen => {
+                return;
+            }
+            SpaceKeyAction::TypeLiteralSpaceFromHook => {
+                activate_panel_for_input(hwnd);
+                handle_char_input(hwnd, 0x20);
+                return;
+            }
+            SpaceKeyAction::LetCharFlow => {}
         }
     }
 
@@ -15185,11 +15256,17 @@ unsafe fn handle_char_input(hwnd: HWND, ch_code: u32) {
 
     if ch_code >= 0x20 {
         if let Some(ch) = char::from_u32(ch_code) {
+            let mut changed = false;
             APP_STATE.with(|c| {
                 if let Some(st) = c.borrow_mut().as_mut() {
+                    if ch == ' ' && st.suppress_next_space_char {
+                        st.suppress_next_space_char = false;
+                        return;
+                    }
                     if st.editing_alias_item_id.is_some() {
                         if ch != '\r' && ch != '\n' {
                             st.alias_draft.push(ch);
+                            changed = true;
                         }
                     } else if st.view_mode == ActiveViewMode::MainList && !st.show_quick_look && !st.ql_stage_visible {
                         if ch == ' ' && st.search_query.is_empty() {
@@ -15198,10 +15275,13 @@ unsafe fn handle_char_input(hwnd: HWND, ch_code: u32) {
                         st.search_query.push(ch);
                         st.selected_visible_pos = 0;
                         st.scroll_row_offset = 0;
+                        changed = true;
                     }
                 }
             });
-            let _ = InvalidateRect(hwnd, null(), FALSE);
+            if changed {
+                let _ = InvalidateRect(hwnd, null(), FALSE);
+            }
         }
     }
 }
