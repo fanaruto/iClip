@@ -366,11 +366,20 @@ enum VisionOCRService {
             max(0.0, min(1.0, v))
         }
 
-        var lineTexts: [String] = []
-        var boxes: [BigBangImageWordBox] = []
-        var nextBoxID = 0
+        // 按视觉阅读顺序归并同行横排文本块（先按顶部 Y 从上到下，同行元素按 X 从左到右排列，彻底消除多栏/分段标签乱序）
+        struct RawLineItem {
+            let observation: VNRecognizedTextObservation
+            let candidate: VNRecognizedText
+            let rawLine: String
+            let cleanLine: String
+            let topY: CGFloat
+            let midY: CGFloat
+            let height: CGFloat
+            let minX: CGFloat
+        }
 
-        for (lineIdx, observation) in observations.enumerated() {
+        var rawItems: [RawLineItem] = []
+        for observation in observations {
             guard let candidate = observation.topCandidates(1).first else { continue }
             let rawLine = candidate.string.replacingOccurrences(of: "\0", with: "")
             let trimmedLine = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -383,51 +392,101 @@ enum VisionOCRService {
             } else {
                 cleanLine = trimmedLine
             }
-            lineTexts.append(cleanLine)
 
-            let tokenRanges = BigBangTokenizer.tokenizeWithRanges(rawLine, granularity: granularity)
-            let totalUTF16 = max(1, (rawLine as NSString).length)
-            let obsBox = observation.boundingBox
-
-            for (rawPiece, range) in tokenRanges {
-                let pieceClean: String
-                if case .pastejackingOrBidi = ClipboardPoisonGuard.inspect(rawPiece) {
-                    let c = ClipboardPoisonGuard.sanitize(rawPiece)
-                    pieceClean = c.trimmingCharacters(in: .whitespacesAndNewlines)
-                } else {
-                    pieceClean = rawPiece.trimmingCharacters(in: .whitespacesAndNewlines)
-                }
-                guard !pieceClean.isEmpty else { continue }
-
-                let normRect: CGRect
-                if let rectObs = try? candidate.boundingBox(for: range)?.boundingBox,
-                   rectObs.width > 0.001, rectObs.height > 0.001 {
-                    let nx = clamp01(rectObs.minX)
-                    let ny = clamp01(1.0 - rectObs.maxY)
-                    let nw = min(1.0 - nx, max(0.006, rectObs.width))
-                    let nh = min(1.0 - ny, max(0.006, rectObs.height))
-                    normRect = CGRect(x: nx, y: ny, width: nw, height: nh)
-                } else {
-                    let ns = NSRange(range, in: rawLine)
-                    let startRatio = CGFloat(ns.location) / CGFloat(totalUTF16)
-                    let endRatio = CGFloat(ns.location + ns.length) / CGFloat(totalUTF16)
-                    let nx = clamp01(obsBox.minX + startRatio * obsBox.width)
-                    let ny = clamp01(1.0 - obsBox.maxY)
-                    let nw = min(1.0 - nx, max(0.006, (endRatio - startRatio) * obsBox.width))
-                    let nh = min(1.0 - ny, max(0.006, obsBox.height))
-                    normRect = CGRect(x: nx, y: ny, width: nw, height: nh)
-                }
-
-                boxes.append(
-                    BigBangImageWordBox(
-                        id: nextBoxID,
-                        text: pieceClean,
-                        normalizedRect: normRect,
-                        lineIndex: lineIdx,
-                        granularity: granularity
-                    )
+            let box = observation.boundingBox
+            let topY = 1.0 - box.maxY
+            let midY = 1.0 - box.midY
+            rawItems.append(
+                RawLineItem(
+                    observation: observation,
+                    candidate: candidate,
+                    rawLine: rawLine,
+                    cleanLine: cleanLine,
+                    topY: topY,
+                    midY: midY,
+                    height: max(0.008, box.height),
+                    minX: box.minX
                 )
-                nextBoxID += 1
+            )
+        }
+
+        rawItems.sort { a, b in
+            if abs(a.midY - b.midY) <= min(a.height, b.height) * 0.55 {
+                return a.minX < b.minX
+            }
+            return a.midY < b.midY
+        }
+
+        var visualRows: [[RawLineItem]] = []
+        for item in rawItems {
+            if let lastRow = visualRows.last,
+               let anchor = lastRow.first,
+               abs(item.midY - anchor.midY) <= min(item.height, anchor.height) * 0.55 {
+                visualRows[visualRows.count - 1].append(item)
+            } else {
+                visualRows.append([item])
+            }
+        }
+        for rIdx in visualRows.indices {
+            visualRows[rIdx].sort { $0.minX < $1.minX }
+        }
+
+        var lineTexts: [String] = []
+        var boxes: [BigBangImageWordBox] = []
+        var nextBoxID = 0
+
+        for (lineIdx, rowItems) in visualRows.enumerated() {
+            let rowJoined = rowItems.map(\.cleanLine).joined(separator: "  ")
+            if !rowJoined.isEmpty {
+                lineTexts.append(rowJoined)
+            }
+
+            for entry in rowItems {
+                let rawLine = entry.rawLine
+                let tokenRanges = BigBangTokenizer.tokenizeWithRanges(rawLine, granularity: granularity)
+                let totalUTF16 = max(1, (rawLine as NSString).length)
+                let obsBox = entry.observation.boundingBox
+
+                for (rawPiece, range) in tokenRanges {
+                    let pieceClean: String
+                    if case .pastejackingOrBidi = ClipboardPoisonGuard.inspect(rawPiece) {
+                        let c = ClipboardPoisonGuard.sanitize(rawPiece)
+                        pieceClean = c.trimmingCharacters(in: .whitespacesAndNewlines)
+                    } else {
+                        pieceClean = rawPiece.trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
+                    guard !pieceClean.isEmpty else { continue }
+
+                    let normRect: CGRect
+                    if let rectObs = try? entry.candidate.boundingBox(for: range)?.boundingBox,
+                       rectObs.width > 0.001, rectObs.height > 0.001 {
+                        let nx = clamp01(rectObs.minX)
+                        let ny = clamp01(1.0 - rectObs.maxY)
+                        let nw = min(1.0 - nx, max(0.006, rectObs.width))
+                        let nh = min(1.0 - ny, max(0.006, rectObs.height))
+                        normRect = CGRect(x: nx, y: ny, width: nw, height: nh)
+                    } else {
+                        let ns = NSRange(range, in: rawLine)
+                        let startRatio = CGFloat(ns.location) / CGFloat(totalUTF16)
+                        let endRatio = CGFloat(ns.location + ns.length) / CGFloat(totalUTF16)
+                        let nx = clamp01(obsBox.minX + startRatio * obsBox.width)
+                        let ny = clamp01(1.0 - obsBox.maxY)
+                        let nw = min(1.0 - nx, max(0.006, (endRatio - startRatio) * obsBox.width))
+                        let nh = min(1.0 - ny, max(0.006, obsBox.height))
+                        normRect = CGRect(x: nx, y: ny, width: nw, height: nh)
+                    }
+
+                    boxes.append(
+                        BigBangImageWordBox(
+                            id: nextBoxID,
+                            text: pieceClean,
+                            normalizedRect: normRect,
+                            lineIndex: lineIdx,
+                            granularity: granularity
+                        )
+                    )
+                    nextBoxID += 1
+                }
             }
         }
 

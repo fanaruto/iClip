@@ -2851,6 +2851,7 @@ pub fn parse_shipping_contact(raw: &str) -> Option<ShippingContact> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BigBangGranularity {
+    Smart,
     Word,
     Char,
     Line,
@@ -2859,6 +2860,7 @@ pub enum BigBangGranularity {
 impl BigBangGranularity {
     pub fn title(self) -> &'static str {
         match self {
+            BigBangGranularity::Smart => "智能组合",
             BigBangGranularity::Word => "按词",
             BigBangGranularity::Char => "按字",
             BigBangGranularity::Line => "按行",
@@ -2867,9 +2869,10 @@ impl BigBangGranularity {
 
     pub fn next(self) -> Self {
         match self {
+            BigBangGranularity::Smart => BigBangGranularity::Word,
             BigBangGranularity::Word => BigBangGranularity::Char,
             BigBangGranularity::Char => BigBangGranularity::Line,
-            BigBangGranularity::Line => BigBangGranularity::Word,
+            BigBangGranularity::Line => BigBangGranularity::Smart,
         }
     }
 }
@@ -2899,14 +2902,568 @@ fn is_cjk_char(c: char) -> bool {
         || ('\u{3040}'..='\u{30FF}').contains(&c)
 }
 
-fn big_bang_protected_spans(line: &str) -> Vec<(usize, usize)> {
-    static ENTITY_RE: std::sync::OnceLock<regex_lite::Regex> = std::sync::OnceLock::new();
-    let re = ENTITY_RE.get_or_init(|| {
-        regex_lite::Regex::new(
-            r#"https?://[^\s\x{4E00}-\x{9FFF}\x{3000}-\x{303F}\x{FF00}-\x{FFEF}<>"'`()\[\]{}（）【】]+|[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}|\b[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\b|\b(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?\b|1[3-9]\d(?:[- ]?\d{4}){2}|\b[A-Za-z0-9]+(?:[_\-.][A-Za-z0-9]+)+\b"#,
+fn is_pure_cjk(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(is_cjk_char)
+}
+
+fn is_cjk_stop_particle_char(c: char) -> bool {
+    matches!(
+        c,
+        '的' | '了'
+            | '着'
+            | '过'
+            | '吗'
+            | '呢'
+            | '吧'
+            | '啊'
+            | '呀'
+            | '和'
+            | '与'
+            | '或'
+            | '及'
+            | '而'
+            | '但'
+            | '却'
+            | '把'
+            | '被'
+            | '让'
+            | '给'
+            | '向'
+            | '从'
+            | '在'
+            | '对'
+            | '于'
+            | '是'
+            | '有'
+            | '为'
+            | '供'
+            | '并'
+            | '且'
+    )
+}
+
+fn is_cjk_demonstrative_or_num_char(c: char) -> bool {
+    matches!(
+        c,
+        '这' | '那'
+            | '哪'
+            | '每'
+            | '某'
+            | '上'
+            | '下'
+            | '前'
+            | '后'
+            | '第'
+            | '近'
+            | '约'
+            | '共'
+            | '头'
+            | '末'
+            | '一'
+            | '二'
+            | '三'
+            | '四'
+            | '五'
+            | '六'
+            | '七'
+            | '八'
+            | '九'
+            | '十'
+            | '百'
+            | '千'
+            | '万'
+            | '亿'
+            | '两'
+            | '零'
+            | '半'
+            | '几'
+            | '多'
+            | '各'
+            | '全'
+            | '单'
+            | '双'
+    )
+}
+
+fn is_cjk_prefix_char(c: char) -> bool {
+    matches!(
+        c,
+        '不' | '没'
+            | '未'
+            | '已'
+            | '非'
+            | '无'
+            | '超'
+            | '总'
+            | '再'
+            | '可'
+            | '免'
+            | '零'
+            | '防'
+            | '抗'
+            | '纯'
+            | '原'
+            | '新'
+            | '旧'
+            | '老'
+            | '小'
+            | '大'
+            | '高'
+            | '低'
+            | '微'
+            | '轻'
+            | '重'
+            | '快'
+            | '慢'
+            | '真'
+            | '假'
+            | '好'
+            | '易'
+            | '难'
+    )
+}
+
+fn is_cjk_suffix_char(c: char) -> bool {
+    matches!(
+        c,
+        '区' | '框'
+            | '栏'
+            | '板'
+            | '页'
+            | '窗'
+            | '端'
+            | '器'
+            | '机'
+            | '库'
+            | '表'
+            | '单'
+            | '卡'
+            | '包'
+            | '码'
+            | '号'
+            | '键'
+            | '钮'
+            | '标'
+            | '签'
+            | '项'
+            | '态'
+            | '度'
+            | '率'
+            | '量'
+            | '感'
+            | '性'
+            | '化'
+            | '式'
+            | '型'
+            | '法'
+            | '流'
+            | '源'
+            | '池'
+            | '层'
+            | '级'
+            | '者'
+            | '员'
+            | '师'
+            | '家'
+            | '们'
+            | '中'
+            | '内'
+            | '外'
+            | '前'
+            | '后'
+            | '上'
+            | '下'
+            | '里'
+            | '间'
+            | '时'
+            | '完'
+            | '好'
+            | '掉'
+            | '出'
+            | '入'
+            | '起'
+            | '开'
+            | '住'
+            | '到'
+            | '成'
+            | '个'
+            | '条'
+            | '次'
+            | '版'
+            | '轮'
+            | '天'
+            | '日'
+            | '周'
+            | '月'
+            | '年'
+            | '处'
+            | '套'
+            | '款'
+            | '种'
+            | '类'
+            | '位'
+            | '名'
+            | '人'
+            | '步'
+            | '方'
+            | '面'
+            | '边'
+            | '侧'
+            | '体'
+            | '字'
+            | '词'
+            | '行'
+            | '图'
+            | '片'
+            | '文'
+            | '件'
+            | '点'
+            | '线'
+            | '角'
+    )
+}
+
+/// 判断词块是否支持原位二次爆炸拆解（超过 1 个字符即可继续拆）
+pub fn can_subdivide_big_bang_token(text: &str) -> bool {
+    text.trim().chars().count() > 1
+}
+
+/// 将单个词块按语义层级向下原位爆炸拆分为下一级子词块（结构分隔 -> 点号分段 -> 驼峰/语种边界 -> 词组拆词 -> 单字）
+pub fn subdivide_big_bang_token(
+    token: &BigBangToken,
+    next_id: &mut usize,
+) -> Option<Vec<BigBangToken>> {
+    if token.is_line_break {
+        return None;
+    }
+    let raw = token.text.as_str();
+    if raw.chars().count() <= 1 {
+        return None;
+    }
+
+    let slices = compute_big_bang_sub_slices(raw);
+    if slices.len() < 2 {
+        return None;
+    }
+
+    let mut out = Vec::with_capacity(slices.len());
+    for (s, e, gran) in slices {
+        out.push(BigBangToken {
+            id: *next_id,
+            text: raw[s..e].to_string(),
+            line_index: token.line_index,
+            is_line_break: false,
+            byte_start: token.byte_start + s,
+            byte_end: token.byte_start + e,
+            granularity: gran,
+        });
+        *next_id += 1;
+    }
+    Some(out)
+}
+
+fn compute_big_bang_sub_slices(raw: &str) -> Vec<(usize, usize, BigBangGranularity)> {
+    let mk_gran = |sub: &str, force_char: bool| -> BigBangGranularity {
+        if force_char || sub.chars().count() == 1 {
+            BigBangGranularity::Char
+        } else {
+            BigBangGranularity::Word
+        }
+    };
+
+    let is_primary_delim = |c: char| {
+        matches!(
+            c,
+            '/' | '\\' | '_' | '-' | ':' | '@' | '?' | '&' | '=' | '×' | '·' | ',' | '，' | ' ' | '\t'
         )
-        .unwrap()
-    });
+    };
+    if raw.chars().any(is_primary_delim) {
+        let spans = split_byte_spans_by(raw, is_primary_delim);
+        if spans.len() >= 2 {
+            return spans
+                .into_iter()
+                .map(|(s, e)| (s, e, mk_gran(&raw[s..e], false)))
+                .collect();
+        }
+    }
+
+    if raw.contains('.') {
+        let spans = split_byte_spans_by(raw, |c| c == '.');
+        if spans.len() >= 2 {
+            return spans
+                .into_iter()
+                .map(|(s, e)| (s, e, mk_gran(&raw[s..e], false)))
+                .collect();
+        }
+    }
+
+    let camel_spans = split_script_and_camel_byte_spans(raw);
+    if camel_spans.len() >= 2 {
+        return camel_spans
+            .into_iter()
+            .map(|(s, e)| (s, e, mk_gran(&raw[s..e], false)))
+            .collect();
+    }
+
+    if is_pure_cjk(raw) {
+        let chars: Vec<(usize, char)> = raw.char_indices().collect();
+        let n = chars.len();
+        if n >= 3 {
+            let word_spans = segment_cjk_run_words(raw);
+            if word_spans.len() >= 2 {
+                return word_spans
+                    .into_iter()
+                    .map(|(s, e)| (s, e, mk_gran(&raw[s..e], false)))
+                    .collect();
+            }
+            let mid_byte = chars[2].0;
+            return vec![
+                (0, mid_byte, mk_gran(&raw[..mid_byte], false)),
+                (mid_byte, raw.len(), mk_gran(&raw[mid_byte..], false)),
+            ];
+        }
+    }
+
+    raw.char_indices()
+        .filter(|(_, ch)| !ch.is_whitespace())
+        .map(|(idx, ch)| (idx, idx + ch.len_utf8(), BigBangGranularity::Char))
+        .collect()
+}
+
+fn split_byte_spans_by<F: Fn(char) -> bool>(text: &str, is_delim: F) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut seg_start: Option<usize> = None;
+    for (idx, ch) in text.char_indices() {
+        if is_delim(ch) {
+            if let Some(s) = seg_start.take() {
+                if !text[s..idx].trim().is_empty() {
+                    out.push((s, idx));
+                }
+            }
+        } else if seg_start.is_none() {
+            seg_start = Some(idx);
+        }
+    }
+    if let Some(s) = seg_start {
+        if !text[s..].trim().is_empty() {
+            out.push((s, text.len()));
+        }
+    }
+    out
+}
+
+fn split_script_and_camel_byte_spans(text: &str) -> Vec<(usize, usize)> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Cls {
+        Cjk,
+        Upper,
+        Lower,
+        Digit,
+        Sym,
+    }
+    let classify = |ch: char| -> Cls {
+        if is_cjk_char(ch) {
+            Cls::Cjk
+        } else if ch.is_ascii_uppercase() {
+            Cls::Upper
+        } else if ch.is_ascii_lowercase() {
+            Cls::Lower
+        } else if ch.is_ascii_digit() {
+            Cls::Digit
+        } else {
+            Cls::Sym
+        }
+    };
+
+    let items: Vec<(usize, char, Cls)> = text
+        .char_indices()
+        .map(|(i, c)| (i, c, classify(c)))
+        .collect();
+    if items.len() < 2 {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut start_idx = 0usize;
+    for i in 1..items.len() {
+        let prev = items[i - 1].2;
+        let cur = items[i].2;
+        let next = items.get(i + 1).map(|x| x.2);
+        let mut split = false;
+        if prev != cur && !(prev == Cls::Upper && cur == Cls::Lower) {
+            split = true;
+        }
+        if prev == Cls::Upper && cur == Cls::Upper && next == Some(Cls::Lower) {
+            split = true;
+        }
+        if split {
+            let b0 = items[start_idx].0;
+            let b1 = items[i].0;
+            if !text[b0..b1].trim().is_empty() {
+                out.push((b0, b1));
+            }
+            start_idx = i;
+        }
+    }
+    let b0 = items[start_idx].0;
+    if !text[b0..].trim().is_empty() {
+        out.push((b0, text.len()));
+    }
+    out
+}
+
+fn segment_cjk_run_words(cjk: &str) -> Vec<(usize, usize)> {
+    let chars: Vec<(usize, char)> = cjk.char_indices().collect();
+    if chars.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let n = chars.len();
+    let byte_at = |ci: usize| -> usize {
+        if ci >= n {
+            cjk.len()
+        } else {
+            chars[ci].0
+        }
+    };
+
+    let mut i = 0usize;
+    while i < n {
+        let ch = chars[i].1;
+        if is_cjk_stop_particle_char(ch) {
+            out.push((byte_at(i), byte_at(i + 1)));
+            i += 1;
+            continue;
+        }
+        let mut run_end = i + 1;
+        while run_end < n && !is_cjk_stop_particle_char(chars[run_end].1) {
+            run_end += 1;
+        }
+        let is_num_char = |c: char| -> bool {
+            matches!(
+                c,
+                '一' | '二' | '三' | '四' | '五' | '六' | '七' | '八' | '九' | '十'
+                    | '百' | '千' | '万' | '亿' | '两' | '零' | '半' | '几' | '多'
+            )
+        };
+        let is_noun_compound_3_suffix = |c: char| -> bool {
+            matches!(
+                c,
+                '区' | '框' | '栏' | '板' | '页' | '窗' | '器' | '库' | '表' | '端' | '机'
+            )
+        };
+        let mut k = i;
+        while k < run_end {
+            let rem = run_end - k;
+            let step = if rem == 1 {
+                1
+            } else if rem == 2 {
+                2
+            } else if rem >= 3
+                && is_cjk_demonstrative_or_num_char(chars[k].1)
+                && is_num_char(chars[k + 1].1)
+                && is_cjk_suffix_char(chars[k + 2].1)
+            {
+                // 指代/方位 + 数词 + 量词三字词组（如：前两天、上一版、这几天、第一次）
+                3
+            } else if rem >= 3
+                && !is_cjk_demonstrative_or_num_char(chars[k].1)
+                && !is_cjk_prefix_char(chars[k].1)
+                && !is_num_char(chars[k + 1].1)
+                && is_noun_compound_3_suffix(chars[k + 2].1)
+            {
+                // 双字词根 + 界面/场所单字后缀（如：评论区、搜索框、工具栏、剪贴板）
+                3
+            } else if rem == 3 {
+                if is_cjk_demonstrative_or_num_char(chars[k].1) || is_cjk_prefix_char(chars[k].1) {
+                    1
+                } else {
+                    2
+                }
+            } else {
+                2
+            };
+            out.push((byte_at(k), byte_at(k + step)));
+            k += step;
+        }
+        i = run_end;
+    }
+    out
+}
+
+fn segment_cjk_run_smart_phrases(cjk: &str) -> Vec<(usize, usize)> {
+    let base = segment_cjk_run_words(cjk);
+    if base.len() < 2 {
+        return base;
+    }
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(base.len());
+    let mut i = 0usize;
+    while i < base.len() {
+        let (s, mut e) = base[i];
+        while i + 1 < base.len() {
+            let (ns, ne) = base[i + 1];
+            let left = &cjk[s..e];
+            let right = &cjk[ns..ne];
+            let l_chars: Vec<char> = left.chars().collect();
+            let r_chars: Vec<char> = right.chars().collect();
+            let total_len = l_chars.len() + r_chars.len();
+
+            let left_stop = l_chars.len() == 1 && is_cjk_stop_particle_char(l_chars[0]);
+            let right_stop = r_chars.len() == 1 && is_cjk_stop_particle_char(r_chars[0]);
+
+            let can_merge = if left == "有" && matches!(right, "一些" | "一点" | "很多" | "部分") {
+                true
+            } else if left_stop || right_stop || total_len > 4 {
+                false
+            } else if l_chars.iter().all(|&c| is_cjk_demonstrative_or_num_char(c)) && r_chars.len() <= 2 {
+                true
+            } else if l_chars.len() == 1 && is_cjk_prefix_char(l_chars[0]) && r_chars.len() <= 2 {
+                true
+            } else if r_chars.len() == 1 && is_cjk_suffix_char(r_chars[0]) && l_chars.len() <= 3 {
+                true
+            } else {
+                l_chars.len() == 2
+                    && r_chars.len() == 2
+                    && !matches!(
+                        left,
+                        "而且" | "但是" | "虽然" | "因为" | "所以" | "如果" | "或者" | "以及" | "应该" | "可以"
+                    )
+                    && !matches!(
+                        right,
+                        "而且" | "但是" | "虽然" | "因为" | "所以" | "如果" | "或者" | "以及" | "应该" | "可以"
+                    )
+            };
+
+            if can_merge {
+                e = ne;
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        merged.push((s, e));
+        i += 1;
+    }
+    merged
+}
+
+fn big_bang_protected_spans(line: &str, smart_mode: bool) -> Vec<(usize, usize)> {
+    static ENTITY_RE: std::sync::OnceLock<regex_lite::Regex> = std::sync::OnceLock::new();
+    static SMART_ENTITY_RE: std::sync::OnceLock<regex_lite::Regex> = std::sync::OnceLock::new();
+    let re = if smart_mode {
+        SMART_ENTITY_RE.get_or_init(|| {
+            regex_lite::Regex::new(
+                r#"https?://[^\s\x{4E00}-\x{9FFF}\x{3000}-\x{303F}\x{FF00}-\x{FFEF}<>"'`()\[\]{}（）【】]+|[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}|(?:~|/[A-Za-z0-9._\-]+)(?:/[A-Za-z0-9._\-\x{4E00}-\x{9FFF}]+)+|[A-Za-z]:\\(?:[^\s\\/:*?"<>|\r\n]+\\)*[^\s\\/:*?"<>|\r\n]+|\b[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\b|\b(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?\b|\b\d{4}[-/.]\d{1,2}[-/.]\d{1,2}(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?|[¥￥$€£]\s*\d[\d,]*(?:\.\d+)?|\b\d[\d,]*(?:\.\d+)?\s*[×xX*]\s*\d[\d,]*(?:\.\d+)?\b|\b\d+(?:/\d+)+\b|\d[\d,]*(?:\.\d+)?\s*(?:小时前|分钟前|秒前|天前|周前|小时|分钟|毫秒|ms|KB|MB|GB|TB|Hz|fps|px|pt|%|折|万元|亿元|元|万|亿|字|条|项|处|个|次|版|轮)|1[3-9]\d(?:[- ]?\d{4}){2}|@[A-Za-z0-9_\x{4E00}-\x{9FFF}]+|\b[A-Za-z0-9]+(?:[_\-./][A-Za-z0-9]+)+\b"#,
+            )
+            .unwrap()
+        })
+    } else {
+        ENTITY_RE.get_or_init(|| {
+            regex_lite::Regex::new(
+                r#"https?://[^\s\x{4E00}-\x{9FFF}\x{3000}-\x{303F}\x{FF00}-\x{FFEF}<>"'`()\[\]{}（）【】]+|[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}|\b[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\b|\b(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?\b|1[3-9]\d(?:[- ]?\d{4}){2}|\b[A-Za-z0-9]+(?:[_\-.][A-Za-z0-9]+)+\b"#,
+            )
+            .unwrap()
+        })
+    };
     let bytes = line.as_bytes();
     let mut out = Vec::new();
     let mut last_end = 0usize;
@@ -2915,7 +3472,6 @@ fn big_bang_protected_spans(line: &str) -> Vec<(usize, usize)> {
             continue;
         }
         let raw_slice = &line[m.start()..m.end()];
-        // 手机号子支（regex_lite 不支持零宽断言，手动检验前后数字边界防 13+ 位长整数被误裁）
         if raw_slice.starts_with('1')
             && !raw_slice.starts_with("http")
             && !raw_slice.contains('@')
@@ -2956,6 +3512,8 @@ fn push_word_segment_tokens(
     seg: &str,
     seg_offset: usize,
     line_index: usize,
+    smart_mode: bool,
+    gran: BigBangGranularity,
     next_id: &mut usize,
     out: &mut Vec<BigBangToken>,
 ) {
@@ -2966,27 +3524,35 @@ fn push_word_segment_tokens(
             continue;
         }
         if is_cjk_char(ch) {
+            let start = idx;
             let mut end = idx + ch.len_utf8();
             chars.next();
-            // 双字常见词平滑聚合或按单字可点击：单汉字保证 Windows 无外置词典下任意中文词组都能精确切选
-            while let Some(&(_, next_ch)) = chars.peek() {
-                if next_ch == 'ー' {
-                    end += next_ch.len_utf8();
+            while let Some(&(nidx, nch)) = chars.peek() {
+                if is_cjk_char(nch) || nch == '\u{30FC}' {
+                    end = nidx + nch.len_utf8();
                     chars.next();
                 } else {
                     break;
                 }
             }
-            out.push(BigBangToken {
-                id: *next_id,
-                text: seg[idx..end].to_string(),
-                line_index,
-                is_line_break: false,
-                byte_start: seg_offset + idx,
-                byte_end: seg_offset + end,
-                granularity: BigBangGranularity::Word,
-            });
-            *next_id += 1;
+            let cjk_run = &seg[start..end];
+            let sub_spans = if smart_mode {
+                segment_cjk_run_smart_phrases(cjk_run)
+            } else {
+                segment_cjk_run_words(cjk_run)
+            };
+            for (rs, re) in sub_spans {
+                out.push(BigBangToken {
+                    id: *next_id,
+                    text: cjk_run[rs..re].to_string(),
+                    line_index,
+                    is_line_break: false,
+                    byte_start: seg_offset + start + rs,
+                    byte_end: seg_offset + start + re,
+                    granularity: gran,
+                });
+                *next_id += 1;
+            }
             continue;
         }
         if is_big_bang_ascii_word_char(ch) || ch.is_alphanumeric() {
@@ -3011,7 +3577,7 @@ fn push_word_segment_tokens(
                 is_line_break: false,
                 byte_start: seg_offset + start,
                 byte_end: seg_offset + end,
-                granularity: BigBangGranularity::Word,
+                granularity: gran,
             });
             *next_id += 1;
             continue;
@@ -3076,8 +3642,9 @@ pub fn tokenize_big_bang(text: &str, granularity: BigBangGranularity) -> Vec<Big
                     }
                 }
             }
-            BigBangGranularity::Word => {
-                let spans = big_bang_protected_spans(raw_line);
+            BigBangGranularity::Word | BigBangGranularity::Smart => {
+                let smart_mode = granularity == BigBangGranularity::Smart;
+                let spans = big_bang_protected_spans(raw_line, smart_mode);
                 let mut cursor = 0usize;
                 for (s, e) in spans {
                     if cursor < s {
@@ -3085,13 +3652,15 @@ pub fn tokenize_big_bang(text: &str, granularity: BigBangGranularity) -> Vec<Big
                             &raw_line[cursor..s],
                             cursor,
                             line_idx,
+                            smart_mode,
+                            granularity,
                             &mut next_id,
                             &mut result,
                         );
                     }
                     result.push(BigBangToken {
                         id: next_id,
-                        text: raw_line[s..e].to_string(),
+                        text: raw_line[s..e].trim().to_string(),
                         line_index: line_idx,
                         is_line_break: false,
                         byte_start: s,
@@ -3106,6 +3675,8 @@ pub fn tokenize_big_bang(text: &str, granularity: BigBangGranularity) -> Vec<Big
                         &raw_line[cursor..],
                         cursor,
                         line_idx,
+                        smart_mode,
+                        granularity,
                         &mut next_id,
                         &mut result,
                     );
@@ -3135,10 +3706,10 @@ pub fn assemble_big_bang_selection(
         if cur.line_index > prev.line_index {
             out.push('\n');
         } else {
-            let adj_char = cur.granularity == BigBangGranularity::Char
-                && prev.granularity == BigBangGranularity::Char
+            let contiguous_in_source = cur.line_index == prev.line_index
+                && prev.byte_end > prev.byte_start
                 && cur.byte_start == prev.byte_end;
-            if !adj_char {
+            if !contiguous_in_source {
                 if let (Some(&lb), Some(&fb)) = (prev.text.as_bytes().last(), cur.text.as_bytes().first())
                 {
                     if is_big_bang_ascii_boundary_byte(lb) && is_big_bang_ascii_boundary_byte(fb) {

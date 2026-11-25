@@ -3501,4 +3501,88 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_big_bang_smart_phrases_and_hierarchical_subdivision() {
+        use crate::hotkey::{classify_non_active_panel_key_ext, NonActiveKeyRoute, MOD_CONTROL_BITS};
+        use crate::intelligence::{
+            assemble_big_bang_selection, can_subdivide_big_bang_token, subdivide_big_bang_token,
+            tokenize_big_bang, BigBangGranularity,
+        };
+        use std::collections::HashSet;
+
+        // 1. 智能组合避免全单字，同时完整保护分辨率、字数、相对时间、路径与蛇形标识符
+        let sample = "前两天发完上一版，评论区好多朋友吐槽两个真实痛点：984×1,264 · 3034 字 · 22 小时前 SSH/Tailscale /Applications/iClip.app implicit_key_capture_armed";
+        let smart = tokenize_big_bang(sample, BigBangGranularity::Smart);
+        let chars = tokenize_big_bang(sample, BigBangGranularity::Char);
+        let smart_texts: Vec<&str> = smart
+            .iter()
+            .filter(|t| !t.is_line_break)
+            .map(|t| t.text.as_str())
+            .collect();
+        assert!(smart_texts.len() < chars.len() / 2);
+        assert!(smart_texts.contains(&"984×1,264"));
+        assert!(smart_texts.contains(&"3034 字"));
+        assert!(smart_texts.contains(&"22 小时前"));
+        assert!(smart_texts.contains(&"SSH/Tailscale"));
+        assert!(smart_texts.contains(&"/Applications/iClip.app"));
+        assert!(smart_texts.contains(&"implicit_key_capture_armed"));
+        assert!(smart_texts.contains(&"前两天"));
+        assert!(smart_texts.contains(&"评论区"));
+        assert!(smart_texts.contains(&"好多朋友"));
+
+        // 2. 分层原位二次拆分：URL -> 主机/路径 -> 域名段 -> 单字符；驼峰与中文复合短语逐级细化且无损拼回
+        let mut next_id = 100usize;
+        let url_tok = tokenize_big_bang("https://app.webfooo.com/iClip", BigBangGranularity::Smart)
+            .into_iter()
+            .next()
+            .unwrap();
+        assert!(can_subdivide_big_bang_token(&url_tok.text));
+        let tier1 = subdivide_big_bang_token(&url_tok, &mut next_id).unwrap();
+        let tier1_texts: Vec<&str> = tier1.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(tier1_texts, vec!["https", "app.webfooo.com", "iClip"]);
+
+        let tier2 = subdivide_big_bang_token(&tier1[1], &mut next_id).unwrap();
+        let tier2_texts: Vec<&str> = tier2.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(tier2_texts, vec!["app", "webfooo", "com"]);
+
+        let tier3 = subdivide_big_bang_token(&tier2[0], &mut next_id).unwrap();
+        let tier3_texts: Vec<&str> = tier3.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(tier3_texts, vec!["a", "p", "p"]);
+        assert!(!can_subdivide_big_bang_token(&tier3[0].text));
+
+        let camel_tok = tokenize_big_bang("WindowServer", BigBangGranularity::Smart)
+            .into_iter()
+            .next()
+            .unwrap();
+        let camel_sub = subdivide_big_bang_token(&camel_tok, &mut next_id).unwrap();
+        let camel_ids: HashSet<usize> = camel_sub.iter().map(|t| t.id).collect();
+        assert_eq!(
+            camel_sub.iter().map(|t| t.text.as_str()).collect::<Vec<_>>(),
+            vec!["Window", "Server"]
+        );
+        assert_eq!(assemble_big_bang_selection(&camel_sub, &camel_ids), "WindowServer");
+
+        let cjk_phrase = smart
+            .iter()
+            .find(|t| t.text == "好多朋友")
+            .cloned()
+            .unwrap();
+        let cjk_tier1 = subdivide_big_bang_token(&cjk_phrase, &mut next_id).unwrap();
+        assert_eq!(
+            cjk_tier1.iter().map(|t| t.text.as_str()).collect::<Vec<_>>(),
+            vec!["好多", "朋友"]
+        );
+        let cjk_tier2 = subdivide_big_bang_token(&cjk_tier1[1], &mut next_id).unwrap();
+        assert_eq!(
+            cjk_tier2.iter().map(|t| t.text.as_str()).collect::<Vec<_>>(),
+            vec!["朋", "友"]
+        );
+
+        // 3. 非激活预览面板下 Ctrl+Z (0x5A) 路由到面板撤销大爆炸拆分
+        assert_eq!(
+            classify_non_active_panel_key_ext(0x5A, MOD_CONTROL_BITS, true, true, false, false),
+            NonActiveKeyRoute::DispatchPanelCommand
+        );
+    }
 }
