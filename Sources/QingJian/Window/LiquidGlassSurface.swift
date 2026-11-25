@@ -1244,3 +1244,174 @@ struct CardSkinStylePickerCard: View {
         .frame(height: 52)
     }
 }
+
+/// 悬浮精灵小球设置卡片：控制显隐、4 套视觉皮肤选择及靠边/自由停靠习惯
+struct SpriteOrbSettingsCard: View {
+    @Binding var enabled: Bool
+    @Binding var style: SpriteOrbStyle
+    @Binding var dockMode: SpriteOrbDockMode
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var hoveredStyle: SpriteOrbStyle? = nil
+
+    private let columns = [
+        GridItem(.flexible(), spacing: 8),
+        GridItem(.flexible(), spacing: 8)
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Toggle(isOn: $enabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("悬浮精灵小球（实验）")
+                        .font(.system(size: 13.5, weight: .medium))
+                    Text("单击启动/收起剪贴板 · 复制内容就近弹出待办等智能提醒")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            if enabled {
+                LazyVGrid(columns: columns, spacing: 8) {
+                    ForEach(SpriteOrbStyle.allCases) { item in
+                        let isSelected = (style == item)
+                        let isHovered = (hoveredStyle == item)
+                        Button {
+                            guard style != item else { return }
+                            withAnimation(.spring(response: 0.32, dampingFraction: 0.85)) {
+                                style = item
+                            }
+                            TactileFeedbackEngine.shared.performNavigationStepHaptic()
+                        } label: {
+                            styleOptionCard(item: item, isSelected: isSelected, isHovered: isHovered)
+                        }
+                        .buttonStyle(.plain)
+                        .onHover { hovering in
+                            withAnimation(.easeOut(duration: 0.14)) {
+                                hoveredStyle = hovering ? item : (hoveredStyle == item ? nil : hoveredStyle)
+                            }
+                        }
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("闲置停靠方式")
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Picker("", selection: $dockMode) {
+                        ForEach(SpriteOrbDockMode.allCases) { mode in
+                            Text(mode.shortLabel).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    Text(dockMode.subtitle)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: enabled)
+    }
+
+    private func styleOptionCard(item: SpriteOrbStyle, isSelected: Bool, isHovered: Bool) -> some View {
+        let fillColor = colorScheme == .dark
+            ? Color.white.opacity(isSelected ? 0.11 : (isHovered ? 0.08 : 0.045))
+            : Color.white.opacity(isSelected ? 0.90 : (isHovered ? 0.76 : 0.58))
+        let borderColor = isSelected
+            ? Color.accentColor
+            : (colorScheme == .dark ? Color.white.opacity(isHovered ? 0.22 : 0.11) : Color.black.opacity(isHovered ? 0.13 : 0.07))
+
+        return HStack(spacing: 8) {
+            miniStyleGlyph(for: item)
+                .frame(width: 24, height: 24)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(item.shortLabel)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                Text(item.subtitle)
+                    .font(.system(size: 9.8))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(fillColor)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(borderColor, lineWidth: isSelected ? 1.45 : 0.7)
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    @ViewBuilder
+    private func miniStyleGlyph(for item: SpriteOrbStyle) -> some View {
+        switch item {
+        case .prismDew:
+            ZStack {
+                Circle()
+                    .fill(
+                        RadialGradient(
+                            colors: [Color(red: 0.118, green: 0.369, blue: 1.0).opacity(0.65), Color.cyan.opacity(0.25)],
+                            center: .center,
+                            startRadius: 1,
+                            endRadius: 12
+                        )
+                    )
+                Circle()
+                    .strokeBorder(Color.white.opacity(0.75), lineWidth: 1.1)
+                Circle()
+                    .fill(Color.white.opacity(0.88))
+                    .frame(width: 4.5, height: 4.5)
+                    .offset(x: -3.5, y: -3.5)
+            }
+        case .matrixCrown:
+            ZStack {
+                Circle()
+                    .fill(colorScheme == .dark ? Color.white.opacity(0.09) : Color.black.opacity(0.06))
+                Circle()
+                    .strokeBorder(Color.primary.opacity(0.28), lineWidth: 1.0)
+                Image(systemName: "circle.grid.3x3.fill")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+            }
+        case .organicJade:
+            ZStack {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [Color(red: 0.063, green: 0.725, blue: 0.506), Color(red: 0.118, green: 0.369, blue: 1.0)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .rotationEffect(.degrees(18))
+                Circle()
+                    .fill(Color.white.opacity(0.55))
+                    .frame(width: 6, height: 6)
+                    .offset(x: -2.5, y: -2.5)
+            }
+        case .auroraRibbon:
+            ZStack {
+                Circle()
+                    .stroke(Color(red: 0.118, green: 0.369, blue: 1.0).opacity(0.78), lineWidth: 1.4)
+                    .scaleEffect(x: 1.0, y: 0.6)
+                    .rotationEffect(.degrees(25))
+                Circle()
+                    .stroke(Color(red: 0.063, green: 0.725, blue: 0.506).opacity(0.78), lineWidth: 1.3)
+                    .scaleEffect(x: 1.0, y: 0.58)
+                    .rotationEffect(.degrees(-35))
+                Circle()
+                    .fill(Color.white.opacity(0.9))
+                    .frame(width: 4.5, height: 4.5)
+            }
+        }
+    }
+}

@@ -5034,4 +5034,143 @@ final class CoreFeatureTests: XCTestCase {
             showQuickLook: false
         ))
     }
+
+    @MainActor
+    func testSpriteOrbPreferencesResolutionAndCodable() throws {
+        XCTAssertEqual(SpriteOrbStyle.allCases.count, 4)
+        XCTAssertEqual(SpriteOrbDockMode.allCases.count, 2)
+
+        XCTAssertEqual(ClipboardStore.resolveSpriteOrbStyle(from: nil), .prismDew)
+        XCTAssertEqual(ClipboardStore.resolveSpriteOrbStyle(from: "unknown_style"), .prismDew)
+        XCTAssertEqual(ClipboardStore.resolveSpriteOrbDockMode(from: nil), .edgeSnap)
+        XCTAssertEqual(ClipboardStore.resolveSpriteOrbDockMode(from: "unknown_mode"), .edgeSnap)
+
+        for style in SpriteOrbStyle.allCases {
+            XCTAssertEqual(ClipboardStore.resolveSpriteOrbStyle(from: style.rawValue), style)
+            let data = try JSONEncoder().encode(style)
+            let decoded = try JSONDecoder().decode(SpriteOrbStyle.self, from: data)
+            XCTAssertEqual(decoded, style)
+        }
+
+        for mode in SpriteOrbDockMode.allCases {
+            XCTAssertEqual(ClipboardStore.resolveSpriteOrbDockMode(from: mode.rawValue), mode)
+            let data = try JSONEncoder().encode(mode)
+            let decoded = try JSONDecoder().decode(SpriteOrbDockMode.self, from: data)
+            XCTAssertEqual(decoded, mode)
+        }
+    }
+
+    func testSpriteOrbPhysicsGeometryClickDragDockingAndAnchoring() {
+        // 1. 单击 vs 拖拽位移阈值（<= 5pt 为点击，> 5pt 为拖拽）
+        XCTAssertTrue(SpriteOrbPhysicsGeometry.isClickGesture(dragDistance: 0))
+        XCTAssertTrue(SpriteOrbPhysicsGeometry.isClickGesture(dragDistance: 5.0))
+        XCTAssertFalse(SpriteOrbPhysicsGeometry.isClickGesture(dragDistance: 5.1))
+
+        let visible = NSRect(x: 0, y: 25, width: 1440, height: 875)
+        let orbPanelSize = NSSize(
+            width: SpriteOrbPhysicsGeometry.panelDimension,
+            height: SpriteOrbPhysicsGeometry.panelDimension
+        )
+
+        // 2. 靠边吸附：右半区吸右边、左半区吸左边，纵向不越界
+        let rightSnap = SpriteOrbPhysicsGeometry.resolvedRestingOrigin(
+            currentOrigin: NSPoint(x: 1100, y: 950),
+            panelSize: orbPanelSize,
+            visibleFrame: visible,
+            dockMode: .edgeSnap
+        )
+        XCTAssertEqual(rightSnap.origin.x, visible.maxX - orbPanelSize.width, accuracy: 0.1)
+        XCTAssertEqual(rightSnap.origin.y, visible.maxY - orbPanelSize.height - 10, accuracy: 0.1)
+        XCTAssertEqual(rightSnap.dockedSide, .right)
+
+        let leftSnap = SpriteOrbPhysicsGeometry.resolvedRestingOrigin(
+            currentOrigin: NSPoint(x: 180, y: -20),
+            panelSize: orbPanelSize,
+            visibleFrame: visible,
+            dockMode: .edgeSnap
+        )
+        XCTAssertEqual(leftSnap.origin.x, visible.minX, accuracy: 0.1)
+        XCTAssertEqual(leftSnap.origin.y, visible.minY + 10, accuracy: 0.1)
+        XCTAssertEqual(leftSnap.dockedSide, .left)
+
+        // 3. 自由悬浮保留 X 坐标并钳制安全边距
+        let freeRes = SpriteOrbPhysicsGeometry.resolvedRestingOrigin(
+            currentOrigin: NSPoint(x: 520, y: 400),
+            panelSize: orbPanelSize,
+            visibleFrame: visible,
+            dockMode: .freeFloat
+        )
+        XCTAssertEqual(freeRes.origin.x, 520, accuracy: 0.1)
+        XCTAssertEqual(freeRes.origin.y, 400, accuracy: 0.1)
+        XCTAssertNil(freeRes.dockedSide)
+
+        // 4. 精灵点击展开主剪贴板面板：居右精灵向左侧弹出，居左精灵向右侧弹出且完整停留在屏幕内
+        let mainSize = NSSize(width: 420, height: 560)
+        let bleed: CGFloat = 36
+
+        let rightOrbCore = SpriteOrbPhysicsGeometry.orbCoreFrame(
+            fromPanelFrame: NSRect(origin: rightSnap.origin, size: orbPanelSize)
+        )
+        let panelWhenOrbRight = SpriteOrbPhysicsGeometry.panelAnchorOrigin(
+            forOrbCoreFrame: rightOrbCore,
+            panelSize: mainSize,
+            visibleFrame: visible,
+            shadowBleed: bleed
+        )
+        let cardLeftWhenOrbRight = panelWhenOrbRight.origin.x + bleed
+        XCTAssertLessThan(cardLeftWhenOrbRight + mainSize.width, rightOrbCore.minX)
+        XCTAssertGreaterThanOrEqual(cardLeftWhenOrbRight, visible.minX + 10)
+
+        let leftOrbCore = SpriteOrbPhysicsGeometry.orbCoreFrame(
+            fromPanelFrame: NSRect(origin: leftSnap.origin, size: orbPanelSize)
+        )
+        let panelWhenOrbLeft = SpriteOrbPhysicsGeometry.panelAnchorOrigin(
+            forOrbCoreFrame: leftOrbCore,
+            panelSize: mainSize,
+            visibleFrame: visible,
+            shadowBleed: bleed
+        )
+        let cardLeftWhenOrbLeft = panelWhenOrbLeft.origin.x + bleed
+        XCTAssertGreaterThan(cardLeftWhenOrbLeft, leftOrbCore.maxX)
+        XCTAssertLessThanOrEqual(cardLeftWhenOrbLeft + mainSize.width, visible.maxX - 10)
+
+        // 5. 智能提醒气泡紧贴精灵旁侧且不越出屏幕
+        let sparkSize = NSSize(width: 318, height: 40)
+        let sparkRight = SpriteOrbPhysicsGeometry.sparkAnchorOrigin(
+            forOrbCoreFrame: rightOrbCore,
+            sparkSize: sparkSize,
+            visibleFrame: visible
+        )
+        XCTAssertLessThan(sparkRight.x + sparkSize.width, rightOrbCore.minX)
+        XCTAssertGreaterThanOrEqual(sparkRight.y, visible.minY + 10)
+
+        let sparkLeft = SpriteOrbPhysicsGeometry.sparkAnchorOrigin(
+            forOrbCoreFrame: leftOrbCore,
+            sparkSize: sparkSize,
+            visibleFrame: visible
+        )
+        XCTAssertGreaterThan(sparkLeft.x, leftOrbCore.maxX)
+        XCTAssertLessThanOrEqual(sparkLeft.x + sparkSize.width, visible.maxX - 10)
+    }
+
+    func testTodoIntentAndCompactPromptFormatting() {
+        XCTAssertTrue(TodoChecklistExtractor.hasActionableSingleTodoIntent("周五下午3点前提交Q3复盘PPT"))
+        XCTAssertTrue(TodoChecklistExtractor.hasActionableSingleTodoIntent("明天前发个邮件确认报价"))
+        XCTAssertTrue(TodoChecklistExtractor.hasActionableSingleTodoIntent("记得下班前把报销单发给财务"))
+        XCTAssertFalse(TodoChecklistExtractor.hasActionableSingleTodoIntent("https://app.webfooo.com/iClip"))
+        XCTAssertFalse(TodoChecklistExtractor.hasActionableSingleTodoIntent("{\"deadline\": \"周五前\"}"))
+
+        XCTAssertEqual(
+            TodoChecklistExtractor.compactTodoPromptTitle(for: "- [ ] 明天上午评审设计稿"),
+            "将「明天上午评审设计稿」设为待办"
+        )
+        XCTAssertEqual(
+            TodoChecklistExtractor.compactTodoPromptTitle(for: "周五下午3点前提交Q3复盘PPT报告", maxSnippetChars: 10),
+            "将「周五下午3点前提交Q…」设为待办"
+        )
+        XCTAssertEqual(
+            TodoChecklistExtractor.compactTodoPromptTitle(for: "   \n  "),
+            "设为待办"
+        )
+    }
 }

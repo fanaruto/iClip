@@ -22,6 +22,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupGlobalHotKey()
         CursorDropPodController.shared.startMonitoring()
 
+        let orb = FloatingSpriteOrbController.shared
+        orb.onToggleClipboardPanel = { [weak self] orbRect in
+            self?.panelController.toggle(anchorRect: orbRect, anchorPlacement: .sideOfOrb)
+        }
+        orb.onOpenTodoList = { [weak self] in
+            self?.menuOpenTodoList()
+        }
+        orb.onOpenSettings = { [weak self] in
+            self?.menuOpenRoleSettings()
+        }
+        ActionSparkController.shared.spriteOrbAnchorFrameProvider = {
+            FloatingSpriteOrbController.shared.visibleOrbCoreScreenFrame
+        }
+        ActionSparkController.shared.onSuggestionVisibilityChanged = { active, categoryKey in
+            FloatingSpriteOrbController.shared.setSmartSuggestionState(active: active, categoryKey: categoryKey)
+        }
+        ActionSparkController.shared.onSuggestionAccepted = { _ in
+            FloatingSpriteOrbController.shared.triggerSuggestionAcceptedPulse()
+        }
+        orb.start(store: ClipboardStore.shared)
+
         if !ProcessInfo.processInfo.arguments.contains("--demo") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
                 self?.showFromStatusItem()
@@ -38,6 +59,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         HotKeyManager.shared.unregister()
+        FloatingSpriteOrbController.shared.stop()
         CursorDropPodController.shared.stopMonitoring()
         BigBangStageController.shared.dismissImmediatelyAndPurge()
         SystemQuickLookController.shared.dismissAndPurge(appSupportURL: ClipboardStore.shared.appSupportURL)
@@ -152,6 +174,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         minimalItem.target = self
         menu.addItem(minimalItem)
 
+        let spriteOrbItem = NSMenuItem(
+            title: "显示悬浮精灵小球",
+            action: #selector(menuToggleSpriteOrb),
+            keyEquivalent: ""
+        )
+        spriteOrbItem.state = store.spriteOrbEnabled ? .on : .off
+        spriteOrbItem.target = self
+        menu.addItem(spriteOrbItem)
+
         if store.isPaused {
             let resumeItem = NSMenuItem(title: "立即恢复剪贴板记录", action: #selector(menuResumeCapture), keyEquivalent: "")
             resumeItem.target = self
@@ -231,6 +262,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func menuToggleMinimalMode() {
         ClipboardStore.shared.toggleMinimalMode()
+    }
+
+    @objc private func menuToggleSpriteOrb() {
+        ClipboardStore.shared.spriteOrbEnabled.toggle()
     }
 
     @objc private func menuResumeCapture() {

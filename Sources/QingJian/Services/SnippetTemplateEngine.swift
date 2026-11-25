@@ -218,10 +218,32 @@ enum TodoChecklistExtractor {
             return true
         }
         let actionPhrases = [
-            "记得", "别忘了", "下班前", "中午前", "今晚前", "发给", "提交给",
-            "麻烦把", "请把", "核对一下", "跟进一下", "回复一下", "待处理"
+            "记得", "别忘了", "下班前", "中午前", "今晚前", "明天前", "后天前",
+            "周五前", "周一前", "月底前", "上午前", "下午前", "点前",
+            "发给", "提交给", "要提交", "需要确认", "要核对", "待确认",
+            "麻烦把", "请把", "核对一下", "跟进一下", "回复一下", "安排一下",
+            "回个电话", "发个邮件", "开会讨论", "同步一下", "整理一下", "待处理"
         ]
         return actionPhrases.contains(where: { trimmed.contains($0) })
+    }
+
+    /// 为悬浮精灵与微星标生成紧凑的语境化待办提示标题（例如：「将『周五前交报告…』设为待办」）
+    static func compactTodoPromptTitle(for rawText: String, maxSnippetChars: Int = 10) -> String {
+        let cleaned = cleanLeadingCheckboxIfPresent(rawText)
+        let collapsed = cleaned
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !collapsed.isEmpty else { return "设为待办" }
+        let limit = max(1, maxSnippetChars)
+        let snippet: String
+        if collapsed.count > limit {
+            snippet = String(collapsed.prefix(limit)) + "…"
+        } else {
+            snippet = collapsed
+        }
+        return "将「\(snippet)」设为待办"
     }
 
     /// 清洗单条转待办时的前导复选符号（如复制了 `- [ ] 交周报` 按 ⌘T 时展示干净正文）

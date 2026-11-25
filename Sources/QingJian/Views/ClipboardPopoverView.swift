@@ -1675,6 +1675,12 @@ struct ClipboardPopoverView: View {
                     LiquidGlassBlurStyleCard(blurConcentration: $store.liquidGlassMaskOpacity)
                     Divider().opacity(0.35)
                     CardSkinStylePickerCard(cardSkin: $store.cardSkin)
+                    Divider().opacity(0.35)
+                    SpriteOrbSettingsCard(
+                        enabled: $store.spriteOrbEnabled,
+                        style: $store.spriteOrbStyle,
+                        dockMode: $store.spriteOrbDockMode
+                    )
                 }
 
                 // 模式与软件更新

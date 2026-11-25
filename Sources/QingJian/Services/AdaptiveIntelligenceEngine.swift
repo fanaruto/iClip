@@ -894,7 +894,7 @@ final class AdaptiveIntelligenceEngine: ObservableObject {
                 categoryKey: "todo_capture",
                 sourceApp: item.sourceAppName,
                 symbolName: "checkmark.circle",
-                shortTitle: "设为待办",
+                shortTitle: TodoChecklistExtractor.compactTodoPromptTitle(for: raw),
                 badgeHint: nil,
                 promotableRule: nil,
                 payload: .markAsTodo(itemID: item.id)

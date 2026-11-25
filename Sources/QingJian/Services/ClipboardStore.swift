@@ -87,6 +87,72 @@ enum CardSkinStyle: String, CaseIterable, Identifiable, Codable {
     }
 }
 
+/// 悬浮精灵小球视觉风格（4 套内置交互样式，可于设置页或右键菜单无损切换）
+enum SpriteOrbStyle: String, CaseIterable, Identifiable, Codable {
+    case prismDew
+    case matrixCrown
+    case organicJade
+    case auroraRibbon
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .prismDew: return "光学色散露珠"
+        case .matrixCrown: return "精密点阵表冠"
+        case .organicJade: return "活体有机软玉"
+        case .auroraRibbon: return "无框极光丝灵"
+        }
+    }
+
+    var shortLabel: String {
+        switch self {
+        case .prismDew: return "色散露珠"
+        case .matrixCrown: return "点阵表冠"
+        case .organicJade: return "有机软玉"
+        case .auroraRibbon: return "极光丝灵"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .prismDew: return "液态清透色散 · 默认"
+        case .matrixCrown: return "工业微点阵 · 目光跟随"
+        case .organicJade: return "拟态流体 · 果冻形变"
+        case .auroraRibbon: return "无边界光丝 · 极低打扰"
+        }
+    }
+}
+
+/// 悬浮精灵小球闲置停靠习惯
+enum SpriteOrbDockMode: String, CaseIterable, Identifiable, Codable {
+    case edgeSnap
+    case freeFloat
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .edgeSnap: return "靠屏边轻吸停靠"
+        case .freeFloat: return "桌面自由悬浮"
+        }
+    }
+
+    var shortLabel: String {
+        switch self {
+        case .edgeSnap: return "靠边轻吸"
+        case .freeFloat: return "自由悬浮"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .edgeSnap: return "松手轻吸最近屏边，静息柔隐不挡正文"
+        case .freeFloat: return "停留在屏幕任意位置，随手点击呼出"
+        }
+    }
+}
+
 /// NSCache 包装盒：缓存单条记录的语义识别快照
 private final class SemanticSnapshotBox {
     let snapshot: SemanticSnapshot
@@ -396,6 +462,35 @@ final class ClipboardStore: ObservableObject {
         }
         return parsed
     }
+
+    /// 是否常驻桌面悬浮精灵小球（实验特性：默认开启，单击直接启动剪贴板）
+    @Published var spriteOrbEnabled: Bool {
+        didSet { UserDefaults.standard.set(spriteOrbEnabled, forKey: "spriteOrbEnabled") }
+    }
+
+    /// 悬浮精灵视觉外观
+    @Published var spriteOrbStyle: SpriteOrbStyle {
+        didSet { UserDefaults.standard.set(spriteOrbStyle.rawValue, forKey: "spriteOrbStyle") }
+    }
+
+    /// 悬浮精灵闲置停靠模式
+    @Published var spriteOrbDockMode: SpriteOrbDockMode {
+        didSet { UserDefaults.standard.set(spriteOrbDockMode.rawValue, forKey: "spriteOrbDockMode") }
+    }
+
+    static func resolveSpriteOrbStyle(from rawValue: String?) -> SpriteOrbStyle {
+        guard let rawValue, let parsed = SpriteOrbStyle(rawValue: rawValue) else {
+            return .prismDew
+        }
+        return parsed
+    }
+
+    static func resolveSpriteOrbDockMode(from rawValue: String?) -> SpriteOrbDockMode {
+        guard let rawValue, let parsed = SpriteOrbDockMode(rawValue: rawValue) else {
+            return .edgeSnap
+        }
+        return parsed
+    }
     @Published var autoPasteEnabled: Bool {
         didSet { UserDefaults.standard.set(autoPasteEnabled, forKey: "autoPasteEnabled") }
     }
@@ -572,6 +667,9 @@ final class ClipboardStore: ObservableObject {
         self.liquidGlassAppearance = (clampedBlur < 0.35) ? .clear : .tinted
         self.borderlessPanel = true
         self.cardSkin = Self.resolveCardSkin(from: UserDefaults.standard.string(forKey: "cardSkinStyle"))
+        self.spriteOrbEnabled = UserDefaults.standard.object(forKey: "spriteOrbEnabled") as? Bool ?? true
+        self.spriteOrbStyle = Self.resolveSpriteOrbStyle(from: UserDefaults.standard.string(forKey: "spriteOrbStyle"))
+        self.spriteOrbDockMode = Self.resolveSpriteOrbDockMode(from: UserDefaults.standard.string(forKey: "spriteOrbDockMode"))
 
         if let shortcutData = UserDefaults.standard.data(forKey: "hotKeyShortcut"),
            let decodedShortcut = try? JSONDecoder().decode(HotKeyShortcut.self, from: shortcutData) {
@@ -1277,6 +1375,7 @@ final class ClipboardStore: ObservableObject {
                             self.items.insert(existing, at: 0)
                             self.items = self.sortItems(self.items)
                             self.saveHistory()
+                            FloatingSpriteOrbController.shared.notifyClipboardCaptured(itemType: existing.type, previewText: existing.text)
                             if copyOutcome == .restoreOriginal || copyOutcome == .suppressReoffer {
                                 return true
                             }
@@ -2114,6 +2213,7 @@ final class ClipboardStore: ObservableObject {
                     self.items.insert(existing, at: 0)
                     self.items = self.sortItems(self.items)
                     self.saveHistory()
+                    FloatingSpriteOrbController.shared.notifyClipboardCaptured(itemType: existing.type, previewText: existing.text)
                     if copyOutcome == .restoreOriginal || copyOutcome == .suppressReoffer { return true }
                     let reuseCount = AdaptiveIntelligenceEngine.shared.recordContentActivity(contentHash: contentHash)
                     ActionSparkController.shared.presentIfAppropriate(for: existing, reuseCount: reuseCount, in: self)
@@ -2758,6 +2858,7 @@ final class ClipboardStore: ObservableObject {
         items = sortItems(items)
         trimHistoryIfNeeded()
         saveHistory()
+        FloatingSpriteOrbController.shared.notifyClipboardCaptured(itemType: newItem.type, previewText: newItem.text)
     }
 
     private func trimHistoryIfNeeded() {

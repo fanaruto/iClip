@@ -154,8 +154,15 @@ final class ActionSparkController {
 
     /// 供外部查询当前主面板是否可见，避免主面板打开时重复弹出微星标
     var isMainPanelVisibleProvider: (() -> Bool)?
+    /// 悬浮精灵核心屏框提供器：存在且可见时微星标自动贴靠在精灵侧方而非光标下
+    var spriteOrbAnchorFrameProvider: (() -> NSRect?)?
+    /// 智能建议胶囊显示/隐藏状态变化回调（驱动精灵呼应光环）
+    var onSuggestionVisibilityChanged: ((Bool, String?) -> Void)?
+    /// 智能建议被采纳时的完成反馈回调
+    var onSuggestionAccepted: ((String) -> Void)?
 
     private let compactSize = NSSize(width: 274, height: 38)
+    private let contextualSize = NSSize(width: 318, height: 40)
     private let promotableSize = NSSize(width: 328, height: 38)
 
     private init() {
@@ -185,6 +192,15 @@ final class ActionSparkController {
     }
 
     private func computeCursorAnchorOrigin(for size: NSSize) -> NSPoint {
+        if let orbFrame = spriteOrbAnchorFrameProvider?() {
+            let orbCenter = NSPoint(x: orbFrame.midX, y: orbFrame.midY)
+            let screen = NSScreen.screens.first(where: { $0.frame.contains(orbCenter) }) ?? NSScreen.main ?? NSScreen.screens[0]
+            return SpriteOrbPhysicsGeometry.sparkAnchorOrigin(
+                forOrbCoreFrame: orbFrame,
+                sparkSize: size,
+                visibleFrame: screen.visibleFrame
+            )
+        }
         let mouse = NSEvent.mouseLocation
         let screen = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) ?? NSScreen.main ?? NSScreen.screens[0]
         let visible = screen.visibleFrame
@@ -209,6 +225,7 @@ final class ActionSparkController {
         activeCandidate = nil
         doubleCopyMachine.clearActiveOffer()
         panel?.orderOut(nil)
+        onSuggestionVisibilityChanged?(false, nil)
     }
 
     /// 在剪贴板捕获到相同哈希时优先判定是否命中「⌘C×2 原位智变」或「⌘C×3 无损还原」
@@ -319,10 +336,18 @@ final class ActionSparkController {
         activeCandidate = nil
         doubleCopyMachine.clearAll()
         panel?.orderOut(nil)
+        onSuggestionVisibilityChanged?(false, nil)
     }
 
     private func present(candidate: AdaptiveSparkCandidate, contentHash: String, in store: ClipboardStore) {
-        let targetSize = (candidate.promotableRule != nil) ? promotableSize : compactSize
+        let targetSize: NSSize
+        if candidate.promotableRule != nil {
+            targetSize = promotableSize
+        } else if candidate.shortTitle.count > 9 {
+            targetSize = contextualSize
+        } else {
+            targetSize = compactSize
+        }
         ensurePanel(size: targetSize, store: store)
         guard let panel else { return }
 
@@ -339,6 +364,7 @@ final class ActionSparkController {
         )
         viewModel.isHovered = false
         viewModel.phase = .offering(candidate, showDoubleCopyHint: doubleCopyOn)
+        onSuggestionVisibilityChanged?(true, candidate.categoryKey)
 
         resizePanelIfNeeded(to: targetSize)
 
@@ -524,6 +550,7 @@ final class ActionSparkController {
         withAnimation(.easeOut(duration: 0.14)) {
             viewModel.phase = .completed(message: doneMsg)
         }
+        onSuggestionAccepted?(candidate.categoryKey)
         scheduleFadeOut(after: triggeredByDoubleCopy ? 1.25 : 0.72, recordPassiveTimeout: false)
     }
 
@@ -543,6 +570,7 @@ final class ActionSparkController {
             AdaptiveIntelligenceEngine.shared.declineAutoRulePromotion(rule)
         }
         TactileFeedbackEngine.shared.performNavigationStepHaptic()
+        onSuggestionVisibilityChanged?(false, nil)
         scheduleFadeOut(after: 0.02, recordPassiveTimeout: false)
     }
 
@@ -583,6 +611,7 @@ final class ActionSparkController {
                         self.dismissWorkItem = nil
                         self.fadeCoordinator.invalidatePendingFade()
                         self.panel?.orderOut(nil)
+                        self.onSuggestionVisibilityChanged?(false, nil)
                     }
                 }
                 self.fadeCompletionWorkItem = completion

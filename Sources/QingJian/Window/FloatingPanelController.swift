@@ -7,6 +7,12 @@ import Quartz
 /// iClip 合成键盘事件专属标记魔数（"ICLP"），确保面板悬停时合成 ⌘V / ⌘C / Tab 零阻断穿透至宿主输入框
 let iClipSyntheticEventMagic: Int64 = 0x4943_4C50
 
+/// 主剪贴板面板弹出时的锚点停靠策略
+enum PanelAnchorPlacement {
+    case menuBar
+    case sideOfOrb
+}
+
 /// 支持按需获取键盘焦点且唤醒时绝不抢夺宿主窗口 Key Window / 输入框焦点的原生非激活悬浮面板
 final class KeyableFloatingPanel: UnifiedActiveFloatingPanel {
     override var canBecomeKey: Bool { true }
@@ -661,14 +667,14 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     }
 
     /// 切换显隐状态（仅当真正按下全局快捷键时才触发新手引导试按推进，点击菜单栏图标不误触发）
-    func toggle(anchorRect: NSRect? = nil, isFromGlobalHotKey: Bool = false) {
+    func toggle(anchorRect: NSRect? = nil, isFromGlobalHotKey: Bool = false, anchorPlacement: PanelAnchorPlacement = .menuBar) {
         if isVisible {
             if isFromGlobalHotKey && InteractivePlaygroundController.shared.consumeHotKeyTrialIfNeeded() {
                 return
             }
             hide(restoreFocus: true)
         } else {
-            show(anchorRect: anchorRect)
+            show(anchorRect: anchorRect, anchorPlacement: anchorPlacement)
             if isFromGlobalHotKey {
                 _ = InteractivePlaygroundController.shared.consumeHotKeyTrialIfNeeded()
             }
@@ -725,7 +731,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     }
 
     /// 弹出面板（零失焦非激活悬浮：不抢夺外部应用 Active / Key Window 与已 focus 输入框焦点）
-    func show(anchorRect: NSRect? = nil) {
+    func show(anchorRect: NSRect? = nil, anchorPlacement: PanelAnchorPlacement = .menuBar) {
         ActionSparkController.shared.dismissImmediately()
         CursorDropPodController.shared.dismissImmediately()
         hideWorkItem?.cancel()
@@ -742,9 +748,10 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
 
         nav.isPresented = false
         nav.resetOnOpen()
+        FloatingSpriteOrbController.shared.setClipboardPanelVisible(true)
         store.onPanelShown(visibleItems: nav.cachedFilteredItems)
 
-        let (finalOrigin, entryDelta) = computePanelOrigin(anchorRect: anchorRect)
+        let (finalOrigin, entryDelta) = computePanelOrigin(anchorRect: anchorRect, anchorPlacement: anchorPlacement)
         let startOrigin = NSPoint(x: finalOrigin.x + entryDelta.x, y: finalOrigin.y + entryDelta.y)
 
         panel.makeFirstResponder(nil)
@@ -792,6 +799,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         hideWorkItem = nil
 
         nav.isPresented = false
+        FloatingSpriteOrbController.shared.setClipboardPanelVisible(false)
         BigBangStageController.shared.dismissImmediatelyAndPurge()
         SystemQuickLookController.shared.dismiss()
         NotificationCenter.default.post(name: .iClipPanelDidHide, object: nil)
@@ -835,13 +843,22 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
 
     // MARK: - 智能定位（菜单栏下方 / 鼠标光标旁直觉出现）
 
-    private func computePanelOrigin(anchorRect: NSRect?) -> (origin: NSPoint, entryDelta: NSPoint) {
+    private func computePanelOrigin(anchorRect: NSRect?, anchorPlacement: PanelAnchorPlacement = .menuBar) -> (origin: NSPoint, entryDelta: NSPoint) {
         let cardWidth = panelSize.width
         let cardHeight = panelSize.height
 
         if let anchor = anchorRect {
-            let screen = NSScreen.screens.first(where: { $0.frame.contains(anchor.origin) }) ?? NSScreen.main ?? NSScreen.screens[0]
+            let anchorCenter = NSPoint(x: anchor.midX, y: anchor.midY)
+            let screen = NSScreen.screens.first(where: { $0.frame.contains(anchorCenter) }) ?? NSScreen.main ?? NSScreen.screens[0]
             let visible = screen.visibleFrame
+            if anchorPlacement == .sideOfOrb {
+                return SpriteOrbPhysicsGeometry.panelAnchorOrigin(
+                    forOrbCoreFrame: anchor,
+                    panelSize: panelSize,
+                    visibleFrame: visible,
+                    shadowBleed: shadowBleed
+                )
+            }
             var cardLeft = anchor.midX - cardWidth / 2
             var cardBottom = anchor.minY - cardHeight - 6
 
@@ -947,6 +964,10 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         }
         if let statusRect = statusItemScreenRectProvider?(),
            statusRect.insetBy(dx: -4, dy: -4).contains(mouseLoc) {
+            return
+        }
+        if let orbRect = FloatingSpriteOrbController.shared.visibleHitScreenFrame,
+           orbRect.insetBy(dx: -6, dy: -6).contains(mouseLoc) {
             return
         }
         let cardFrame = panel.frame.insetBy(dx: shadowBleed - 2, dy: shadowBleed - 2)
