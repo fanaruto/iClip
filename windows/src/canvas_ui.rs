@@ -411,6 +411,15 @@ pub fn estimate_text_px(text: &str, font_px: f32) -> i32 {
     w.ceil() as i32
 }
 
+/// 等宽字体（KeyCap / Mono）单行像素宽度精确估算（避免空格与窄符号按比例字体低估导致键帽截断）
+pub fn estimate_mono_text_px(text: &str, font_px: f32) -> i32 {
+    let w: f32 = text
+        .chars()
+        .map(|ch| if ch.is_ascii() { 0.62 } else { 1.05 } * font_px)
+        .sum();
+    w.ceil().max(0.0) as i32
+}
+
 // ============================================================================
 // 连续曲率 Squircle SDF 抗锯齿 + Porter-Duff 预乘 Alpha 32-bit BGRA 画布
 // ============================================================================
@@ -2313,4 +2322,113 @@ pub fn clamp_image_pan_offset(
     let max_x = ((image_w * zoom_scale - viewport_w) * 0.5).max(0.0);
     let max_y = ((image_h * zoom_scale - viewport_h) * 0.5).max(0.0);
     (offset_x.clamp(-max_x, max_x), offset_y.clamp(-max_y, max_y))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BigBangChipRowItem {
+    pub token_idx: usize,
+    pub x_offset: i32,
+    pub width: i32,
+}
+
+/// 将大爆炸分词（索引、自然像素宽、是否显式换行）预先编排成逐行布局，便于按滚动窗口精准渲染与满宽“按行”展示
+pub fn pack_big_bang_chip_rows(
+    tokens: &[(usize, i32, bool)],
+    max_width: i32,
+    gap_x: i32,
+    full_width_rows: bool,
+    max_chips: usize,
+) -> Vec<Vec<BigBangChipRowItem>> {
+    let eff_max_w = max_width.max(1);
+    let eff_gap = gap_x.max(0);
+    let mut rows: Vec<Vec<BigBangChipRowItem>> = Vec::new();
+    let mut cur_row: Vec<BigBangChipRowItem> = Vec::new();
+    let mut cur_x: i32 = 0;
+    let mut count: usize = 0;
+
+    for &(tok_idx, nat_w, is_break) in tokens {
+        if is_break {
+            if !cur_row.is_empty() {
+                rows.push(cur_row);
+                cur_row = Vec::new();
+                cur_x = 0;
+            }
+            continue;
+        }
+        if count >= max_chips {
+            break;
+        }
+        if full_width_rows {
+            if !cur_row.is_empty() {
+                rows.push(cur_row);
+                cur_row = Vec::new();
+            }
+            rows.push(vec![BigBangChipRowItem {
+                token_idx: tok_idx,
+                x_offset: 0,
+                width: eff_max_w,
+            }]);
+            cur_x = 0;
+            count += 1;
+            continue;
+        }
+        let cw = nat_w.clamp(1, eff_max_w);
+        if !cur_row.is_empty() && cur_x + cw > eff_max_w {
+            rows.push(cur_row);
+            cur_row = Vec::new();
+            cur_x = 0;
+        }
+        cur_row.push(BigBangChipRowItem {
+            token_idx: tok_idx,
+            x_offset: cur_x,
+            width: cw,
+        });
+        cur_x += cw + eff_gap;
+        count += 1;
+    }
+    if !cur_row.is_empty() {
+        rows.push(cur_row);
+    }
+    rows
+}
+
+/// 计算并钳制速览面板当前滚动行偏移与最大可滚行数
+pub fn clamp_quick_look_scroll(
+    scroll: usize,
+    total_rows: usize,
+    visible_rows: usize,
+) -> (usize, usize) {
+    let max_scroll = total_rows.saturating_sub(visible_rows.max(1));
+    (scroll.min(max_scroll), max_scroll)
+}
+
+/// 计算经过 DT_WORDBREAK 自动折行后的最大可滚动逻辑行偏移与总视觉行数，保证长段落文本也可滚至最末尾
+pub fn compute_wrapped_text_scroll_bounds(
+    line_widths: &[i32],
+    content_width: i32,
+    visible_visual_lines: usize,
+) -> (usize, usize) {
+    let eff_w = content_width.max(1);
+    let vis = visible_visual_lines.max(1);
+    let line_vis_counts: Vec<usize> = line_widths
+        .iter()
+        .map(|&w| ((w.max(1) + eff_w - 1) / eff_w).max(1) as usize)
+        .collect();
+    let total_visual: usize = line_vis_counts.iter().sum();
+    if total_visual <= vis || line_vis_counts.len() <= 1 {
+        return (0, total_visual);
+    }
+    let mut tail_visual = 0usize;
+    let mut max_scroll = line_vis_counts.len().saturating_sub(1);
+    for (idx, &v) in line_vis_counts.iter().enumerate().rev() {
+        if tail_visual > 0 && tail_visual + v > vis {
+            break;
+        }
+        tail_visual += v;
+        max_scroll = idx;
+        if tail_visual >= vis {
+            break;
+        }
+    }
+    (max_scroll, total_visual)
 }

@@ -177,6 +177,11 @@ final class BigBangStageController: ObservableObject {
     @Published var granularity: BigBangGranularity = .word {
         didSet {
             guard oldValue != granularity else { return }
+            if activeModeIsImage,
+               Self.resolveEffectiveGranularity(oldValue, isImageMode: true)
+                == Self.resolveEffectiveGranularity(granularity, isImageMode: true) {
+                return
+            }
             rebuildActiveTokensForGranularity()
         }
     }
@@ -200,12 +205,15 @@ final class BigBangStageController: ObservableObject {
             panel?.allowBecomeKeyForEditing = isEditingText
             if isEditingText {
                 panel?.makeKey()
+                panel?.enforceUnifiedActiveAppearance()
+                surfaceHost.refreshInPlace()
             } else {
                 panel?.makeFirstResponder(nil)
                 if panel?.isKeyWindow == true {
                     panel?.resignKey()
                 }
                 panel?.enforceUnifiedActiveAppearance()
+                surfaceHost.refreshInPlace()
             }
         }
     }
@@ -269,6 +277,37 @@ final class BigBangStageController: ObservableObject {
     var visiblePanelScreenFrame: NSRect? {
         guard isVisible, let frame = panel?.frame else { return nil }
         return frame.insetBy(dx: stageShadowBleed, dy: stageShadowBleed)
+    }
+
+    var effectiveGranularityForActiveMode: BigBangGranularity {
+        Self.resolveEffectiveGranularity(granularity, isImageMode: activeModeIsImage)
+    }
+
+    static func resolveEffectiveGranularity(_ granularity: BigBangGranularity, isImageMode: Bool) -> BigBangGranularity {
+        (isImageMode && granularity == .line) ? .word : granularity
+    }
+
+    static func nextCycledGranularity(from granularity: BigBangGranularity, isImageMode: Bool) -> BigBangGranularity {
+        let options: [BigBangGranularity] = isImageMode ? [.word, .character] : BigBangGranularity.allCases
+        let normalized = resolveEffectiveGranularity(granularity, isImageMode: isImageMode)
+        guard let idx = options.firstIndex(of: normalized) else { return .word }
+        return options[(idx + 1) % options.count]
+    }
+
+    /// 计算进出场过渡卡片尺寸与重心偏移：保持 >= 85% 原画幅宽度避免顶底栏胶囊与 600 词块逐帧重排抖动
+    static func transitionCardRect(anchorRect: NSRect?, targetCardRect: NSRect, scale: CGFloat = 0.92) -> NSRect {
+        let clampedScale = min(max(scale, 0.85), 1.0)
+        let w = targetCardRect.width * clampedScale
+        let h = targetCardRect.height * clampedScale
+        var dx: CGFloat = 0
+        var dy: CGFloat = 0
+        if let anchor = anchorRect, anchor.width > 12, anchor.height > 12 {
+            dx = min(max((anchor.midX - targetCardRect.midX) * 0.18, -72), 72)
+            dy = min(max((anchor.midY - targetCardRect.midY) * 0.18, -56), 56)
+        }
+        let cx = targetCardRect.midX + dx
+        let cy = targetCardRect.midY + dy
+        return NSRect(x: cx - w * 0.5, y: cy - h * 0.5, width: w, height: h)
     }
 
     func syncSharingType(_ sharingType: NSWindow.SharingType) {
@@ -353,19 +392,11 @@ final class BigBangStageController: ObservableObject {
         let targetWindowFrame = windowFrame(forCardRect: targetCardFrame)
         if !wasVisible {
             let sourceRect = SystemQuickLookController.shared.liveVisibleScreenRect(for: item.id)
-            let startCardFrame: NSRect
-            if let sr = sourceRect, sr.width > 12, sr.height > 12 {
-                startCardFrame = sr
-            } else {
-                let shrinkW = targetCardFrame.width * 0.94
-                let shrinkH = targetCardFrame.height * 0.94
-                startCardFrame = NSRect(
-                    x: targetCardFrame.midX - shrinkW * 0.5,
-                    y: targetCardFrame.midY - shrinkH * 0.5,
-                    width: shrinkW,
-                    height: shrinkH
-                )
-            }
+            let startCardFrame = Self.transitionCardRect(
+                anchorRect: sourceRect,
+                targetCardRect: targetCardFrame,
+                scale: 0.92
+            )
             stagePanel.setFrame(windowFrame(forCardRect: startCardFrame), display: false)
             stagePanel.alphaValue = 0.08
             stagePanel.orderFrontRegardless()
@@ -396,17 +427,13 @@ final class BigBangStageController: ObservableObject {
             return
         }
         isEditingText = false
-        let endCardRect: NSRect
-        if let id = currentItem?.id,
-           let sr = SystemQuickLookController.shared.liveVisibleScreenRect(for: id),
-           sr.width > 12, sr.height > 12 {
-            endCardRect = sr
-        } else {
-            let f = stagePanel.frame.insetBy(dx: stageShadowBleed, dy: stageShadowBleed)
-            let w = f.width * 0.95
-            let h = f.height * 0.95
-            endCardRect = NSRect(x: f.midX - w * 0.5, y: f.midY - h * 0.5, width: w, height: h)
-        }
+        let sourceRect = currentItem.flatMap { SystemQuickLookController.shared.liveVisibleScreenRect(for: $0.id) }
+        let currentCardRect = stagePanel.frame.insetBy(dx: stageShadowBleed, dy: stageShadowBleed)
+        let endCardRect = Self.transitionCardRect(
+            anchorRect: sourceRect,
+            targetCardRect: currentCardRect,
+            scale: 0.94
+        )
         let endWindowRect = windowFrame(forCardRect: endCardRect)
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.14
@@ -696,12 +723,7 @@ final class BigBangStageController: ObservableObject {
     }
 
     func cycleGranularity() {
-        let options: [BigBangGranularity] = activeModeIsImage ? [.word, .character] : BigBangGranularity.allCases
-        guard let idx = options.firstIndex(of: granularity) else {
-            granularity = .word
-            return
-        }
-        granularity = options[(idx + 1) % options.count]
+        granularity = Self.nextCycledGranularity(from: granularity, isImageMode: activeModeIsImage)
         TactileFeedbackEngine.shared.performNavigationStepHaptic()
     }
 
@@ -978,6 +1000,18 @@ final class BigBangStageController: ObservableObject {
                 self.surfaceHost.updateLiquidGlass(appearance: appearance, maskOpacity: opacity)
             }
             .store(in: &surfaceCancellables)
+
+        Publishers.Merge(
+            NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification),
+            NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
+        )
+        .receive(on: RunLoop.main)
+        .sink { [weak self] _ in
+            guard let self, self.isVisible else { return }
+            self.panel?.enforceUnifiedActiveAppearance()
+            self.surfaceHost.refreshInPlace()
+        }
+        .store(in: &surfaceCancellables)
     }
 
     private func computeTargetScreenFrame(for item: ClipItem, image: NSImage?) -> NSRect {
@@ -1265,10 +1299,12 @@ struct BigBangStageRootView: View {
     }
 
     private func granularityBar(options: [BigBangGranularity]) -> some View {
-        HStack(spacing: 4) {
+        let activeGranularity = controller.effectiveGranularityForActiveMode
+        return HStack(spacing: 4) {
             ForEach(options, id: \.self) { mode in
-                let selected = (controller.granularity == mode)
+                let selected = (activeGranularity == mode)
                 Button {
+                    guard controller.effectiveGranularityForActiveMode != mode else { return }
                     controller.granularity = mode
                     TactileFeedbackEngine.shared.performNavigationStepHaptic()
                 } label: {

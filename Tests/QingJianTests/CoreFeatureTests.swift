@@ -4347,4 +4347,30 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertEqual(rawPasteCount, 2)
         XCTAssertEqual(normalPasteCount, 1)
     }
+
+    @MainActor
+    func testBigBangImageGranularitySyncAndSmoothTransitionRect() {
+        // 1. 文本“按行”态切入图片大爆炸时应等效归约为“按词”，首次按 G 直接步进到“按字”不空转
+        XCTAssertEqual(BigBangStageController.resolveEffectiveGranularity(.line, isImageMode: true), .word)
+        XCTAssertEqual(BigBangStageController.resolveEffectiveGranularity(.line, isImageMode: false), .line)
+        XCTAssertEqual(BigBangStageController.nextCycledGranularity(from: .line, isImageMode: true), .character)
+        XCTAssertEqual(BigBangStageController.nextCycledGranularity(from: .character, isImageMode: true), .word)
+        XCTAssertEqual(BigBangStageController.nextCycledGranularity(from: .line, isImageMode: false), .word)
+
+        // 2. 即使源卡片是极窄网格图块，进出场过渡矩形仍保持 >= 85% 画幅并柔和偏向源中心，杜绝顶底栏坍缩溢出
+        let target = NSRect(x: 400, y: 200, width: 640, height: 500)
+        let tinyTile = NSRect(x: 40, y: 1200, width: 92, height: 84)
+        let trans = BigBangStageController.transitionCardRect(anchorRect: tinyTile, targetCardRect: target, scale: 0.92)
+        XCTAssertGreaterThanOrEqual(trans.width, target.width * 0.85)
+        XCTAssertEqual(trans.width, target.width * 0.92, accuracy: 0.1)
+        XCTAssertEqual(trans.height, target.height * 0.92, accuracy: 0.1)
+        XCTAssertEqual(trans.midX, target.midX - 72.0, accuracy: 0.1)
+        XCTAssertEqual(trans.midY, target.midY + 56.0, accuracy: 0.1)
+
+        // 3. 无源锚点时保持原中心对称缩放
+        let centered = BigBangStageController.transitionCardRect(anchorRect: nil, targetCardRect: target, scale: 0.94)
+        XCTAssertEqual(centered.midX, target.midX, accuracy: 0.1)
+        XCTAssertEqual(centered.midY, target.midY, accuracy: 0.1)
+        XCTAssertEqual(centered.width, target.width * 0.94, accuracy: 0.1)
+    }
 }

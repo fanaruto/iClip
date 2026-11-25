@@ -1,9 +1,10 @@
 #![cfg(target_os = "windows")]
 
 use iclip_core::canvas_ui::{
-    build_display_rows_ext, clamp_image_pan_offset, estimate_text_px, fit_image_in_viewport,
-    grid_move_selection, image_grid_row_height, standard_card_height, Color4, DisplayRow,
-    GlassPalette, GridMoveDir, PixelCanvas,
+    build_display_rows_ext, clamp_image_pan_offset, clamp_quick_look_scroll,
+    compute_wrapped_text_scroll_bounds, estimate_mono_text_px, estimate_text_px,
+    fit_image_in_viewport, grid_move_selection, image_grid_row_height, pack_big_bang_chip_rows,
+    standard_card_height, Color4, DisplayRow, GlassPalette, GridMoveDir, PixelCanvas,
 };
 use iclip_core::engines::{
     analyze_file_actions, analyze_text_actions, clean_tracking_url, compress_png_to_white_bg_jpeg,
@@ -354,6 +355,7 @@ struct WinAppState {
     quick_look_diff_mode: bool,
     quick_look_tab: u8,
     quick_look_scroll: usize,
+    quick_look_max_scroll: usize,
     big_bang_granularity: BigBangGranularity,
     big_bang_selected_ids: HashSet<usize>,
     big_bang_sweep_target: Option<bool>,
@@ -604,6 +606,7 @@ pub fn run_windows_app() -> i32 {
                 quick_look_diff_mode: false,
                 quick_look_tab: 0,
                 quick_look_scroll: 0,
+                quick_look_max_scroll: 0,
                 big_bang_granularity: BigBangGranularity::Word,
                 big_bang_selected_ids: HashSet::new(),
                 big_bang_sweep_target: None,
@@ -796,6 +799,7 @@ pub fn run_windows_self_test() -> Result<(), String> {
             quick_look_diff_mode: false,
             quick_look_tab: 0,
             quick_look_scroll: 0,
+            quick_look_max_scroll: 0,
             big_bang_granularity: BigBangGranularity::Word,
             big_bang_selected_ids: HashSet::new(),
             big_bang_sweep_target: None,
@@ -1815,6 +1819,8 @@ unsafe fn hide_panel(hwnd: HWND, restore_focus: bool) {
             st.hovered_link_badge_store_idx = None;
             st.dragging_slider_track = None;
             st.show_quick_look = false;
+            st.quick_look_scroll = 0;
+            st.quick_look_max_scroll = 0;
             st.ql_stage_visible = false;
             st.ql_stage_rgba = None;
             st.ql_stage_hi_rgba = None;
@@ -2474,10 +2480,14 @@ unsafe extern "system" fn wnd_proc(
                         return true;
                     }
                     if st.show_quick_look {
+                        let step = if st.quick_look_tab == 0 { 1 } else { 3 };
                         if delta < 0 {
-                            st.quick_look_scroll = st.quick_look_scroll.saturating_add(3);
+                            st.quick_look_scroll = st
+                                .quick_look_scroll
+                                .saturating_add(step)
+                                .min(st.quick_look_max_scroll);
                         } else if delta > 0 {
-                            st.quick_look_scroll = st.quick_look_scroll.saturating_sub(3);
+                            st.quick_look_scroll = st.quick_look_scroll.saturating_sub(step);
                         }
                     } else if st.view_mode == ActiveViewMode::Settings {
                         let step = 48;
@@ -8681,8 +8691,45 @@ fn layout_and_draw_settings_view(
     y += s(22);
 
     let row_h = s(48);
-    let g2_rows = 6;
-    let g2_h = s(8) + row_h * g2_rows;
+    let common_toggles = [
+        (
+            "窗口始终在前（Ctrl+P）",
+            "固定面板置顶，切换窗口与连续粘贴时不自动收起",
+            st.store.config.always_on_top,
+            palette.cobalt,
+            HitAction::ToggleAlwaysOnTop,
+        ),
+        (
+            "开机自动启动",
+            "登录 Windows 后自动在系统托盘常驻（0.00% 待机 CPU）",
+            st.autostart_cached,
+            palette.cobalt,
+            HitAction::ToggleAutostart,
+        ),
+        (
+            "选中后自动键入粘贴",
+            "按回车或触发键入动作时自动向目标窗口发送 Ctrl+V",
+            st.store.config.auto_paste_enabled,
+            palette.cobalt,
+            HitAction::ToggleAutoPaste,
+        ),
+        (
+            "单击卡片直接粘贴",
+            "开启：单击直贴（Alt+单击仅复制）；关闭：双击粘贴",
+            st.store.config.single_click_paste,
+            palette.cobalt,
+            HitAction::ToggleSingleClickPaste,
+        ),
+        (
+            "极简纯净模式（Ctrl+E）",
+            "仅保留基础复制检索与收藏，隐藏进阶胶囊与待办",
+            st.store.config.minimal_mode_enabled,
+            palette.emerald,
+            HitAction::ToggleMinimalMode,
+        ),
+    ];
+    let g2_rows = (common_toggles.len() + 2) as i32;
+    let g2_h = s(10) + row_h * g2_rows;
     if visible_block(y, g2_h) {
         canvas.fill_round_rect(pad, y, content_w, g2_h, sf(14.0), palette.group_fill);
         canvas.stroke_glass_bevel_round_rect(
@@ -8695,44 +8742,6 @@ fn layout_and_draw_settings_view(
             palette.glass_top_highlight,
             palette.group_stroke,
         );
-
-        let common_toggles = [
-            (
-                "窗口始终在前（Ctrl+P）",
-                "固定面板置顶，切换窗口与连续粘贴时不自动收起",
-                st.store.config.always_on_top,
-                palette.cobalt,
-                HitAction::ToggleAlwaysOnTop,
-            ),
-            (
-                "开机自动启动",
-                "登录 Windows 后自动在系统托盘常驻（0.00% 待机 CPU）",
-                st.autostart_cached,
-                palette.cobalt,
-                HitAction::ToggleAutostart,
-            ),
-            (
-                "选中后自动键入粘贴",
-                "按回车或触发键入动作时自动向目标窗口发送 Ctrl+V",
-                st.store.config.auto_paste_enabled,
-                palette.cobalt,
-                HitAction::ToggleAutoPaste,
-            ),
-            (
-                "单击卡片直接粘贴",
-                "开启：单击直贴（Alt+单击仅复制）；关闭：双击粘贴",
-                st.store.config.single_click_paste,
-                palette.cobalt,
-                HitAction::ToggleSingleClickPaste,
-            ),
-            (
-                "极简纯净模式（Ctrl+E）",
-                "仅保留基础复制检索与收藏，隐藏进阶胶囊与待办",
-                st.store.config.minimal_mode_enabled,
-                palette.emerald,
-                HitAction::ToggleMinimalMode,
-            ),
-        ];
 
         let mut ry = y + s(5);
         for (idx, (t, sub, on, acc, act)) in common_toggles.into_iter().enumerate() {
@@ -9429,32 +9438,32 @@ fn layout_and_draw_settings_view(
                     sf(0.7),
                     palette.divider,
                 );
+                let kw = (estimate_mono_text_px(&key_str, sf(10.5)) + s(18)).clamp(s(48), s(184));
+                let kx = w - pad - s(12) - kw;
                 texts.push(TextDrawCmd {
                     text: desc.to_string(),
                     rect: RECT {
                         left: pad + s(12),
                         top: sy,
-                        right: w - pad - s(130),
+                        right: (kx - s(8)).max(pad + s(80)),
                         bottom: sy + s(28),
                     },
                     color: palette.text_primary,
                     font_kind: FontKind::Body,
-                    flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+                    flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                 });
-                let kw = (key_str.chars().count() as i32) * s(7) + s(16);
-                let kx = w - pad - s(12) - kw;
                 canvas.fill_round_rect(kx, sy + s(5), kw, s(18), sf(9.0), palette.chip_bg);
                 texts.push(TextDrawCmd {
                     text: key_str,
                     rect: RECT {
-                        left: kx,
+                        left: kx + s(4),
                         top: sy + s(5),
-                        right: kx + kw,
+                        right: kx + kw - s(4),
                         bottom: sy + s(23),
                     },
                     color: palette.text_secondary,
                     font_kind: FontKind::KeyCap,
-                    flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                    flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                 });
                 sy += s(28);
             }
@@ -9547,9 +9556,12 @@ fn layout_and_draw_settings_view(
     // 若设置页下方尚有可滚动内容，绘制原生极细悬浮滚动条与底部轻柔渐隐过渡，彻底告别硬切感
     if st.settings_max_scroll_px > 0 {
         let track_h_sb = (view_bottom - view_top - s(8)).max(s(40));
+        let max_t = (track_h_sb - s(16)).max(s(8)) as f32;
+        let min_t = sf(34.0).min(max_t);
         let thumb_h = ((visible_h as f32 / total_content_h.max(1) as f32) * track_h_sb as f32)
             .round()
-            .clamp(sf(34.0), (track_h_sb - s(16)) as f32) as i32;
+            .max(min_t)
+            .min(max_t) as i32;
         let scroll_ratio =
             (st.settings_scroll_px as f32 / st.settings_max_scroll_px as f32).clamp(0.0, 1.0);
         let thumb_y =
@@ -9857,6 +9869,46 @@ fn layout_and_draw_toast_pill(
     }
 }
 
+fn draw_quick_look_scrollbar(
+    canvas: &mut PixelCanvas,
+    track_x: i32,
+    track_top: i32,
+    track_bottom: i32,
+    scale: f32,
+    is_dark: bool,
+    palette: &GlassPalette,
+    scroll: usize,
+    total_rows: usize,
+    visible_rows: usize,
+    max_scroll: usize,
+) {
+    if max_scroll == 0 || track_bottom <= track_top + 8 {
+        return;
+    }
+    let s = |v: i32| ((v as f32) * scale).round() as i32;
+    let sf = |v: f32| v * scale;
+    let track_h = (track_bottom - track_top - s(4)).max(s(24));
+    let ratio_vis = (visible_rows.max(1) as f32 / total_rows.max(1) as f32).min(1.0);
+    let max_thumb = track_h as f32;
+    let min_thumb = sf(24.0).min(max_thumb);
+    let thumb_h = (max_thumb * ratio_vis)
+        .round()
+        .max(min_thumb)
+        .min(max_thumb) as i32;
+    let pos_ratio = (scroll.min(max_scroll) as f32 / max_scroll.max(1) as f32).clamp(0.0, 1.0);
+    let thumb_y = track_top + s(2) + ((track_h - thumb_h) as f32 * pos_ratio).round() as i32;
+    canvas.fill_round_rect(
+        track_x,
+        thumb_y,
+        s(3),
+        thumb_h,
+        sf(1.5),
+        palette
+            .text_muted
+            .with_alpha(if is_dark { 125 } else { 105 }),
+    );
+}
+
 fn layout_and_draw_quick_look_overlay(
     canvas: &mut PixelCanvas,
     texts: &mut Vec<TextDrawCmd>,
@@ -10058,9 +10110,15 @@ fn layout_and_draw_quick_look_overlay(
             flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE,
         });
 
-        let mut ly = body_top + s(26);
+        let diff_top = body_top + s(26);
         let lh = s(20);
-        for dline in diff.lines.iter().skip(st.quick_look_scroll) {
+        let visible_rows = ((body_bottom - diff_top) / lh).max(1) as usize;
+        let (clamped_scroll, max_scroll) =
+            clamp_quick_look_scroll(st.quick_look_scroll, diff.lines.len(), visible_rows);
+        st.quick_look_scroll = clamped_scroll;
+        st.quick_look_max_scroll = max_scroll;
+        let mut ly = diff_top;
+        for dline in diff.lines.iter().skip(clamped_scroll).take(visible_rows) {
             if ly + lh > body_bottom {
                 break;
             }
@@ -10101,6 +10159,19 @@ fn layout_and_draw_quick_look_overlay(
             });
             ly += lh;
         }
+        draw_quick_look_scrollbar(
+            canvas,
+            mx + mw - s(8),
+            diff_top,
+            body_bottom,
+            scale,
+            st.is_dark_mode,
+            palette,
+            clamped_scroll,
+            diff.lines.len(),
+            visible_rows,
+            max_scroll,
+        );
     } else if st.quick_look_tab == 0 && item.kind != ClipContentType::Image {
         // 大爆炸默认展开：粒度胶囊 + 流式可点扫选词块 + 底部实时组装动作条
         let mut gx = mx + s(14);
@@ -10208,80 +10279,123 @@ fn layout_and_draw_quick_look_overlay(
         let chip_h = s(24);
         let chip_gap_x = s(6);
         let chip_gap_y = s(6);
+        let is_line_mode = st.big_bang_granularity == BigBangGranularity::Line;
+        let max_row_w = (chips_right - chips_left).max(s(22));
+        let token_specs: Vec<(usize, i32, bool)> = tokens
+            .iter()
+            .enumerate()
+            .map(|(i, tok)| {
+                let nat_w = (estimate_text_px(&tok.text, sf(12.2)) + s(16)).clamp(s(22), max_row_w);
+                (i, nat_w, tok.is_line_break)
+            })
+            .collect();
+        let max_interactive_chips = 600usize;
+        let total_non_break_tokens = tokens.iter().filter(|t| !t.is_line_break).count();
+        let packed_rows = pack_big_bang_chip_rows(
+            &token_specs,
+            max_row_w,
+            chip_gap_x,
+            is_line_mode,
+            max_interactive_chips,
+        );
+        let row_pitch = chip_h + chip_gap_y;
+        let visible_rows = (((chips_bottom - chips_top + chip_gap_y) / row_pitch.max(1)).max(1)) as usize;
+        let (clamped_scroll, max_scroll) =
+            clamp_quick_look_scroll(st.quick_look_scroll, packed_rows.len(), visible_rows);
+        st.quick_look_scroll = clamped_scroll;
+        st.quick_look_max_scroll = max_scroll;
 
-        let mut tx = chips_left;
-        let mut ty = chips_top;
-        let mut rendered_chips = 0usize;
-        for tok in &tokens {
-            if tok.is_line_break {
-                if tx > chips_left {
-                    tx = chips_left;
-                    ty += chip_h + chip_gap_y;
-                }
-                if ty + chip_h > chips_bottom {
-                    break;
-                }
-                continue;
-            }
-            if rendered_chips >= 260 {
-                break;
-            }
-            let cw = (estimate_text_px(&tok.text, sf(12.2)) + s(16))
-                .clamp(s(22), chips_right - chips_left);
-            if tx > chips_left && tx + cw > chips_right {
-                tx = chips_left;
-                ty += chip_h + chip_gap_y;
-            }
-            if ty + chip_h > chips_bottom {
-                break;
-            }
-            let is_sel = st.big_bang_selected_ids.contains(&tok.id);
-            canvas.fill_round_rect(
-                tx,
-                ty,
-                cw,
-                chip_h,
-                sf(7.0),
-                if is_sel { palette.cobalt } else { palette.chip_bg },
-            );
-            canvas.stroke_round_rect(
-                tx,
-                ty,
-                cw,
-                chip_h,
-                sf(7.0),
-                sf(0.75),
-                if is_sel {
-                    Color4::rgba(255, 255, 255, 92)
+        for (vis_idx, row_items) in packed_rows
+            .iter()
+            .skip(clamped_scroll)
+            .take(visible_rows)
+            .enumerate()
+        {
+            let ty = chips_top + (vis_idx as i32) * row_pitch;
+            for cell in row_items {
+                let tok = &tokens[cell.token_idx];
+                let tx = chips_left + cell.x_offset;
+                let cw = cell.width;
+                let is_sel = st.big_bang_selected_ids.contains(&tok.id);
+                canvas.fill_round_rect(
+                    tx,
+                    ty,
+                    cw,
+                    chip_h,
+                    sf(7.0),
+                    if is_sel { palette.cobalt } else { palette.chip_bg },
+                );
+                canvas.stroke_round_rect(
+                    tx,
+                    ty,
+                    cw,
+                    chip_h,
+                    sf(7.0),
+                    sf(0.75),
+                    if is_sel {
+                        Color4::rgba(255, 255, 255, 92)
+                    } else {
+                        palette.group_stroke
+                    },
+                );
+                let trc = RECT {
+                    left: tx,
+                    top: ty,
+                    right: tx + cw,
+                    bottom: ty + chip_h,
+                };
+                let (txt_rc, align_flags) = if is_line_mode {
+                    (
+                        RECT {
+                            left: tx + s(8),
+                            top: ty,
+                            right: (tx + cw - s(8)).max(tx + s(12)),
+                            bottom: ty + chip_h,
+                        },
+                        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                    )
                 } else {
-                    palette.group_stroke
-                },
-            );
-            let trc = RECT {
-                left: tx,
-                top: ty,
-                right: tx + cw,
-                bottom: ty + chip_h,
-            };
-            texts.push(TextDrawCmd {
-                text: tok.text.clone(),
-                rect: trc,
-                color: if is_sel {
-                    Color4::rgb(255, 255, 255)
-                } else {
-                    palette.text_primary
-                },
-                font_kind: FontKind::Body,
-                flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
-            });
-            st.hit_regions.push(HitRegion {
-                rect: trc,
-                interactive_cursor: true,
-                action: HitAction::ToggleBigBangToken(tok.id),
-            });
-            tx += cw + chip_gap_x;
-            rendered_chips += 1;
+                    (
+                        RECT {
+                            left: tx + s(4),
+                            top: ty,
+                            right: (tx + cw - s(4)).max(tx + s(8)),
+                            bottom: ty + chip_h,
+                        },
+                        DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                    )
+                };
+                texts.push(TextDrawCmd {
+                    text: tok.text.clone(),
+                    rect: txt_rc,
+                    color: if is_sel {
+                        Color4::rgb(255, 255, 255)
+                    } else {
+                        palette.text_primary
+                    },
+                    font_kind: FontKind::Body,
+                    flags: align_flags,
+                });
+                st.hit_regions.push(HitRegion {
+                    rect: trc,
+                    interactive_cursor: true,
+                    action: HitAction::ToggleBigBangToken(tok.id),
+                });
+            }
         }
+        draw_quick_look_scrollbar(
+            canvas,
+            mx + mw - s(8),
+            chips_top,
+            chips_bottom,
+            scale,
+            st.is_dark_mode,
+            palette,
+            clamped_scroll,
+            packed_rows.len(),
+            visible_rows,
+            max_scroll,
+        );
 
         // 底部实时组装预览与操作按钮
         let act_y = body_bottom - s(28);
@@ -10293,7 +10407,11 @@ fn layout_and_draw_quick_look_overlay(
 
         let assembled = assemble_big_bang_selection(&tokens, &st.big_bang_selected_ids);
         let preview_line = if assembled.is_empty() {
-            "点击或按住鼠标横扫词块精确取词".to_string()
+            if total_non_break_tokens > max_interactive_chips {
+                "已展开前 600 词块 · 点按/横扫取词，或切「全文速览」".to_string()
+            } else {
+                "点击或按住鼠标横扫词块精确取词".to_string()
+            }
         } else {
             format!("已选：{}", assembled.replace('\n', " "))
         };
@@ -10359,6 +10477,8 @@ fn layout_and_draw_quick_look_overlay(
             action: HitAction::PasteBigBangSelection,
         });
     } else if item.kind == ClipContentType::Image {
+        st.quick_look_scroll = 0;
+        st.quick_look_max_scroll = 0;
         if let Some(fname) = &item.image_file_name {
             let images_dir = st.store.images_dir.clone();
             if let Some((iw, ih, rgba)) =
@@ -10382,7 +10502,24 @@ fn layout_and_draw_quick_look_overlay(
             .clone()
             .or_else(|| item.file_paths.as_ref().map(|p| p.join("\n")))
             .unwrap_or_default();
-        let lines: Vec<&str> = full.lines().skip(st.quick_look_scroll).take(22).collect();
+        let all_lines: Vec<&str> = full.lines().collect();
+        let text_area_w = (mw - s(28)).max(1);
+        let visible_visual_lines = ((body_bottom - body_top) / s(18)).clamp(4, 24) as usize;
+        let line_widths: Vec<i32> = all_lines
+            .iter()
+            .map(|l| ((estimate_text_px(l, sf(13.0)) as f32) * 1.12).ceil() as i32)
+            .collect();
+        let (max_scroll, total_visual_lines) =
+            compute_wrapped_text_scroll_bounds(&line_widths, text_area_w, visible_visual_lines);
+        let clamped_scroll = st.quick_look_scroll.min(max_scroll);
+        st.quick_look_scroll = clamped_scroll;
+        st.quick_look_max_scroll = max_scroll;
+        let lines: Vec<&str> = all_lines
+            .iter()
+            .skip(clamped_scroll)
+            .take(visible_visual_lines)
+            .copied()
+            .collect();
         texts.push(TextDrawCmd {
             text: lines.join("\r\n"),
             rect: RECT {
@@ -10395,6 +10532,19 @@ fn layout_and_draw_quick_look_overlay(
             font_kind: FontKind::Body,
             flags: DT_LEFT | DT_WORDBREAK,
         });
+        draw_quick_look_scrollbar(
+            canvas,
+            mx + mw - s(8),
+            body_top,
+            body_bottom,
+            scale,
+            st.is_dark_mode,
+            palette,
+            clamped_scroll,
+            total_visual_lines,
+            visible_visual_lines,
+            max_scroll,
+        );
     }
 
     texts.push(TextDrawCmd {
@@ -11827,6 +11977,8 @@ unsafe fn handle_left_click(hwnd: HWND, x: i32, y: i32, is_double: bool) {
             APP_STATE.with(|c| {
                 if let Some(st) = c.borrow_mut().as_mut() {
                     st.show_quick_look = false;
+                    st.quick_look_scroll = 0;
+                    st.quick_look_max_scroll = 0;
                     st.editing_alias_item_id = None;
                 }
             });
@@ -11838,6 +11990,7 @@ unsafe fn handle_left_click(hwnd: HWND, x: i32, y: i32, is_double: bool) {
                     st.quick_look_tab = tab;
                     st.quick_look_diff_mode = tab == 2;
                     st.quick_look_scroll = 0;
+                    st.quick_look_max_scroll = 0;
                 }
             });
             let _ = InvalidateRect(hwnd, null(), FALSE);
@@ -11903,7 +12056,7 @@ unsafe fn handle_left_click(hwnd: HWND, x: i32, y: i32, is_double: bool) {
                         st.big_bang_selected_ids = tokens
                             .into_iter()
                             .filter(|t| !t.is_line_break)
-                            .take(260)
+                            .take(600)
                             .map(|t| t.id)
                             .collect();
                     }
@@ -12879,12 +13032,15 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
             if alt_down {
                 if st.show_quick_look && st.quick_look_diff_mode {
                     st.show_quick_look = false;
+                    st.quick_look_scroll = 0;
+                    st.quick_look_max_scroll = 0;
                     st.big_bang_selected_ids.clear();
                 } else {
                     st.show_quick_look = true;
                     st.quick_look_diff_mode = true;
                     st.quick_look_tab = 2;
                     st.quick_look_scroll = 0;
+                    st.quick_look_max_scroll = 0;
                     st.big_bang_selected_ids.clear();
                 }
                 return true;
@@ -12917,6 +13073,7 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
                 st.quick_look_diff_mode = false;
                 st.quick_look_tab = 0;
                 st.quick_look_scroll = 0;
+                st.quick_look_max_scroll = 0;
                 st.big_bang_selected_ids.clear();
                 st.big_bang_sweep_target = None;
                 return true;
@@ -13025,7 +13182,7 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
                     st.big_bang_selected_ids = tokens
                         .into_iter()
                         .filter(|t| !t.is_line_break)
-                        .take(260)
+                        .take(600)
                         .map(|t| t.id)
                         .collect();
                     return 1;
@@ -13201,6 +13358,7 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
                     st.quick_look_tab = (st.quick_look_tab + delta) % 3;
                     st.quick_look_diff_mode = st.quick_look_tab == 2;
                     st.quick_look_scroll = 0;
+                    st.quick_look_max_scroll = 0;
                     return true;
                 }
                 false
@@ -13241,6 +13399,8 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
                     st.big_bang_sweep_target = None;
                     st.ql_stage_ocr_selected.clear();
                     st.ql_stage_sweep_target = None;
+                    st.quick_look_scroll = 0;
+                    st.quick_look_max_scroll = 0;
                 }
                 if let Some((r_idx, _)) =
                     iclip_core::canvas_ui::find_row_and_col(&rows, st.selected_visible_pos)
@@ -13278,6 +13438,7 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
                                     st.show_quick_look = true;
                                     st.quick_look_tab = 0;
                                     st.quick_look_scroll = 0;
+                                    st.quick_look_max_scroll = 0;
                                 }
                             }
                             PreviewStepTarget::SwitchToInlineQuickLook => {
@@ -13294,6 +13455,7 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
                                 st.quick_look_diff_mode = false;
                                 st.quick_look_tab = 0;
                                 st.quick_look_scroll = 0;
+                                st.quick_look_max_scroll = 0;
                                 st.big_bang_selected_ids.clear();
                                 st.big_bang_sweep_target = None;
                             }
@@ -14548,6 +14710,8 @@ unsafe fn cancel_ota_download(hwnd: HWND) {
 
 fn set_shared_big_bang_granularity(st: &mut WinAppState, granularity: BigBangGranularity) {
     st.big_bang_granularity = granularity;
+    st.quick_look_scroll = 0;
+    st.quick_look_max_scroll = 0;
     st.big_bang_selected_ids.clear();
     st.big_bang_sweep_target = None;
     st.ql_stage_ocr_selected.clear();

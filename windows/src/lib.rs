@@ -3057,4 +3057,77 @@ mod tests {
             "expected anti-aliased intermediate gray pixels under 1.25x downscale, got {mid_gray_hits}"
         );
     }
+
+    #[test]
+    fn test_big_bang_chip_row_packing_and_scroll_clamping() {
+        use crate::canvas_ui::{clamp_quick_look_scroll, pack_big_bang_chip_rows};
+
+        // 1. 常规流式折行与显式换行、以及 max_chips 截断上限
+        let specs = [
+            (0, 60, false),
+            (1, 50, false),
+            (2, 10, true), // 显式换行
+            (3, 80, false),
+            (4, 90, false),
+            (5, 40, false),
+        ];
+        let rows = pack_big_bang_chip_rows(&specs, 120, 6, false, 4);
+        assert_eq!(rows.iter().map(|r| r.len()).sum::<usize>(), 4);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].len(), 2);
+        assert_eq!(rows[0][0].token_idx, 0);
+        assert_eq!(rows[0][1].token_idx, 1);
+        assert_eq!(rows[0][1].x_offset, 66);
+        assert_eq!(rows[1].len(), 1);
+        assert_eq!(rows[1][0].token_idx, 3);
+        assert_eq!(rows[2].len(), 1);
+        assert_eq!(rows[2][0].token_idx, 4);
+
+        // 2. full_width_rows = true（按行模式）每行独占 max_width
+        let line_rows = pack_big_bang_chip_rows(&specs, 280, 6, true, 10);
+        assert_eq!(line_rows.len(), 5);
+        for row in &line_rows {
+            assert_eq!(row.len(), 1);
+            assert_eq!(row[0].x_offset, 0);
+            assert_eq!(row[0].width, 280);
+        }
+
+        // 3. 滚动边界钳制与 visible_rows = 0 保护
+        assert_eq!(clamp_quick_look_scroll(5, 3, 4), (0, 0));
+        assert_eq!(clamp_quick_look_scroll(99, 12, 5), (7, 7));
+        assert_eq!(clamp_quick_look_scroll(4, 12, 5), (4, 7));
+        assert_eq!(clamp_quick_look_scroll(10, 4, 0), (3, 3));
+    }
+
+    #[test]
+    fn test_wrapped_quick_look_scroll_and_mono_keycap_metrics() {
+        use crate::canvas_ui::{compute_wrapped_text_scroll_bounds, estimate_mono_text_px};
+
+        // 1. 30 个长段落、每段软折为 3 视觉行（共 90 视觉行），视口容纳 16 视觉行：
+        // 末尾 5 段占 15 视觉行 <= 16，故 max_scroll 必须允许滚到索引 25，确保第 29 段完整可见
+        let wrapped_30 = vec![750; 30];
+        let (max_s, tot_v) = compute_wrapped_text_scroll_bounds(&wrapped_30, 300, 16);
+        assert_eq!(tot_v, 90);
+        assert_eq!(max_s, 25);
+
+        // 短文本 3 行未超出视口时 max_scroll 保持 0
+        assert_eq!(compute_wrapped_text_scroll_bounds(&[80, 120, 40], 300, 16), (0, 3));
+
+        // 2. 等宽键帽像素估算必须充分包住 Cascadia / JetBrains Mono 中的空格与斜杠
+        let ctrl_1_9_w = estimate_mono_text_px("Ctrl + 1 ~ 9", 10.5);
+        assert!(
+            ctrl_1_9_w >= 78,
+            "Ctrl + 1 ~ 9 mono width must be >= 78px, got {ctrl_1_9_w}"
+        );
+        let custom_w = estimate_mono_text_px("Ctrl + Shift + V", 10.5);
+        assert!(
+            custom_w >= 104,
+            "Ctrl + Shift + V mono width must be >= 104px, got {custom_w}"
+        );
+        let cjk_mix_w = estimate_mono_text_px("Alt+单击 / Ctrl+C", 10.5);
+        assert!(
+            cjk_mix_w >= 98,
+            "Alt+单击 / Ctrl+C mono width must be >= 98px, got {cjk_mix_w}"
+        );
+    }
 }
