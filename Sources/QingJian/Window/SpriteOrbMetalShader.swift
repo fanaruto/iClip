@@ -183,11 +183,11 @@ enum SpriteOrbMetalShader {
         // 0. 剪贴板展开态 / 智能建议 / 拟态待办推进 / 语音声波外圈（底层氛围光晕与环）
         float distOrbRaw = length(dPos);
         if (voiceBlend > 0.02f) {
-            float vBase = (27.5f + audioLevel * 10.5f) * breathScale;
+            float vBase = (26.5f + audioLevel * 5.0f) * breathScale;
             float ring1 = abs(distOrbRaw - vBase);
-            float ring2 = abs(distOrbRaw - (vBase + 6.5f + sin(time * 9.0f) * 2.0f));
+            float ring2 = abs(distOrbRaw - (vBase + 4.5f + sin(time * 9.0f) * 1.2f));
             float a1 = (1.0f - smoothstep(0.0f, 2.2f, ring1)) * 0.78f * voiceBlend;
-            float a2 = (1.0f - smoothstep(0.0f, 2.6f, ring2)) * (0.28f + audioLevel * 0.35f) * voiceBlend;
+            float a2 = (1.0f - smoothstep(0.0f, 2.4f, ring2)) * (0.28f + audioLevel * 0.35f) * voiceBlend;
             float3 vColor = mix(accent, coralRed, cancelBlend);
             dst = blendOver(dst, vColor, max(a1, a2));
         } else if (nudgeActive || nudgeGlowAlpha > 0.02f) {
@@ -224,7 +224,7 @@ enum SpriteOrbMetalShader {
 
         // 外部内容拖入磁吸旋转虚线环
         if (dragTarget) {
-            float dMag = abs(distOrbRaw - 41.0f);
+            float dMag = abs(distOrbRaw - 33.5f);
             if (dMag < 3.0f) {
                 float theta = atan2(dPos.y, dPos.x) * 14.0f - time * 6.5f;
                 float dashMask = smoothstep(-0.15f, 0.2f, sin(theta));
@@ -541,8 +541,10 @@ enum SpriteOrbMetalShader {
             float4 rp = u.ripples[i];
             float rawA = rp.w;
             if (abs(rawA) > 0.01f) {
+                float safeR = min(min(rp.x, panelSize - rp.x), min(rp.y, panelSize - rp.y)) - 3.0f;
+                float radialFade = 1.0f - smoothstep(max(24.0f, safeR - 10.0f), max(26.0f, safeR), rp.z);
                 float rDist = abs(length(p - rp.xy) - rp.z);
-                float aRing = (1.0f - smoothstep(0.0f, 1.55f, rDist)) * clamp(abs(rawA) * 0.60f, 0.0f, 1.0f);
+                float aRing = (1.0f - smoothstep(0.0f, 1.55f, rDist)) * clamp(abs(rawA) * 0.56f, 0.0f, 1.0f) * radialFade;
                 float3 rCol = (rawA < 0.0f) ? emerald : accent;
                 dst = blendOver(dst, rCol, aRing);
             }
@@ -567,7 +569,7 @@ enum SpriteOrbMetalShader {
         }
 
         float edgeDist = min(min(p.x, panelSize - p.x), min(p.y, panelSize - p.y));
-        float edgeFeather = smoothstep(0.0f, 6.0f, edgeDist);
+        float edgeFeather = smoothstep(0.0f, 3.0f, edgeDist);
         float4 outColor = dst * (overallOpacity * edgeFeather);
         if (outColor.a < 0.0045f) {
             return float4(0.0f);

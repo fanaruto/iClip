@@ -349,7 +349,7 @@ struct SpriteOrbGestureArbiter: Equatable {
 // MARK: - 悬浮精灵纯几何定位、手势阈值与非对称零溢出停靠算法
 
 enum SpriteOrbPhysicsGeometry {
-    static let panelDimension: CGFloat = 140
+    static let panelDimension: CGFloat = 176
     static let orbVisualRadius: CGFloat = 25
     static let hitTestRadius: CGFloat = 31
     static let dragThreshold: CGFloat = SpriteOrbGestureArbiter.dragThreshold
@@ -360,7 +360,7 @@ enum SpriteOrbPhysicsGeometry {
         dragDistance <= dragThreshold
     }
 
-    /// 根据当前停靠模式计算球体静息中心在 140×140 舞台（左上原点，Y 向下）内的锚点
+    /// 根据当前停靠模式计算球体静息中心在 176×176 舞台（左上原点，Y 向下）内的锚点
     static func anchorInPanel(for dockedSide: SpriteOrbEdgeSide?) -> CGPoint {
         let midY = panelDimension * 0.5
         let edgeCenterOffset = orbVisualRadius + edgeVisualMargin // 38pt
@@ -374,7 +374,7 @@ enum SpriteOrbPhysicsGeometry {
         }
     }
 
-    /// 由 140×140 舞台外框推导出核心 50×50 实球体的屏幕坐标
+    /// 由 176×176 舞台外框推导出核心 50×50 实球体的屏幕坐标
     static func orbCoreFrame(fromPanelFrame panelFrame: NSRect, dockedSide: SpriteOrbEdgeSide? = nil) -> NSRect {
         let anchor = anchorInPanel(for: dockedSide)
         let centerX = panelFrame.minX + anchor.x
@@ -388,7 +388,7 @@ enum SpriteOrbPhysicsGeometry {
         )
     }
 
-    /// 反推使球心精确位于目标屏幕点时，140×140 面板对应的窗口原点
+    /// 反推使球心精确位于目标屏幕点时，176×176 面板对应的窗口原点
     static func panelOrigin(forOrbCenter orbCenter: NSPoint, dockedSide: SpriteOrbEdgeSide?) -> NSPoint {
         let anchor = anchorInPanel(for: dockedSide)
         return NSPoint(
@@ -756,7 +756,7 @@ struct SpriteOrbPhysicsState: Equatable {
                         offsetX: offsetX,
                         offsetY: offsetY,
                         radius: 22.0,
-                        maxRadius: impact.isNudgeBeat ? 76.0 : 84.0,
+                        maxRadius: impact.isNudgeBeat ? 44.0 : 46.0,
                         alpha: impact.isNudgeBeat ? 0.72 : 0.92,
                         accent: impact.accent
                     )
@@ -786,9 +786,9 @@ struct SpriteOrbPhysicsState: Equatable {
         // 8. 扩散波纹更新
         for idx in ripples.indices.reversed() {
             let targetR = ripples[idx].maxRadius
-            ripples[idx].radius += (targetR - ripples[idx].radius) * (1.0 - exp(-5.5 * dt))
-            ripples[idx].alpha -= dt * 1.15
-            if ripples[idx].alpha <= 0.02 {
+            ripples[idx].radius += (targetR - ripples[idx].radius) * (1.0 - exp(-5.8 * dt))
+            ripples[idx].alpha -= dt * 1.45
+            if ripples[idx].alpha <= 0.02 || (targetR - ripples[idx].radius) < 0.35 && ripples[idx].alpha < 0.08 {
                 ripples.remove(at: idx)
             }
         }
@@ -804,7 +804,7 @@ struct SpriteOrbPhysicsState: Equatable {
                 offsetX: offsetX,
                 offsetY: offsetY,
                 radius: 22.0,
-                maxRadius: 72.0,
+                maxRadius: 42.0,
                 alpha: 0.68,
                 accent: accent
             )
@@ -835,7 +835,7 @@ struct SpriteOrbPhysicsState: Equatable {
                 offsetX: offsetX,
                 offsetY: offsetY,
                 radius: 23.0,
-                maxRadius: 78.0,
+                maxRadius: 44.0,
                 alpha: 0.78,
                 accent: .emerald
             )
@@ -853,7 +853,7 @@ struct SpriteOrbPhysicsState: Equatable {
                 offsetX: offsetX,
                 offsetY: offsetY,
                 radius: 22.0,
-                maxRadius: 70.0,
+                maxRadius: 40.0,
                 alpha: 0.70,
                 accent: accent
             )
@@ -867,7 +867,7 @@ struct SpriteOrbPhysicsState: Equatable {
         for i in 0..<12 {
             let spread = (Double(i) / 11.0 - 0.5) * 0.95
             let ang = incomingAngle + spread
-            let dist = 54.0 + Double((i * 7) % 13)
+            let dist = 36.0 + Double((i * 7) % 10)
             let sx = offsetX + cos(ang) * dist
             let sy = offsetY + sin(ang) * dist
             let arcSide = (i % 2 == 0 ? 1.0 : -1.0)
@@ -899,14 +899,14 @@ struct SpriteOrbPhysicsState: Equatable {
                 offsetX: offsetX,
                 offsetY: offsetY,
                 radius: 22.0,
-                maxRadius: 88.0,
+                maxRadius: 48.0,
                 alpha: 0.85,
                 accent: .emerald
             )
         )
         for i in 0..<12 {
             let ang = (Double(i) / 12.0) * .pi * 2.0 + Double((i % 3)) * 0.14
-            let spd = 24.0 + Double((i * 11) % 34)
+            let spd = 16.0 + Double((i * 9) % 20)
             sparks.append(
                 SpriteSparkParticle(
                     offsetX: offsetX + cos(ang) * 14.0,

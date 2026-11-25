@@ -5581,7 +5581,33 @@ final class CoreFeatureTests: XCTestCase {
     func testSpriteOrbMetalShaderBorderlessGradientAndEdgeFeather() throws {
         XCTAssertTrue(SpriteOrbMetalShader.source.contains("/ lenNr"))
         XCTAssertTrue(SpriteOrbMetalShader.source.contains("edgeFeather"))
+        XCTAssertTrue(SpriteOrbMetalShader.source.contains("radialFade"))
         XCTAssertTrue(SpriteOrbMetalShader.source.contains("0.0045f"))
+
+        let safeLimit = Double(SpriteOrbPhysicsGeometry.panelDimension) * 0.5 - 30.0
+        var state = SpriteOrbPhysicsState()
+        let neutralInput = SpriteOrbPhysicsInput(
+            isHoveredOnCore: false,
+            isPressed: false,
+            isDragging: false,
+            isDragTargeted: false,
+            isClipboardPanelOpen: false,
+            smartSuggestionActive: false,
+            pointerOffsetFromAnchor: nil,
+            dragStepVelocity: .zero
+        )
+        state.triggerClick(panelOpening: true)
+        state.triggerVoiceWakePulse()
+        state.triggerProactiveNudgePeek()
+        state.triggerAcceptedCelebration()
+        state.triggerCopyInflow(incomingAngle: 0, accent: .cobalt)
+        for _ in 0..<30 {
+            state.step(dt: 1.0 / 120.0, input: neutralInput)
+            for rp in state.ripples {
+                XCTAssertLessThanOrEqual(rp.maxRadius, safeLimit)
+            }
+        }
+
         guard let device = MTLCreateSystemDefaultDevice() else {
             return
         }
