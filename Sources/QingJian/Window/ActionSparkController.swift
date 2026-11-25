@@ -1,5 +1,41 @@
 import AppKit
+import Combine
 import SwiftUI
+
+/// 确定性淡出代际守卫：防止早期气泡淡出计时器误杀后续紧接出现的 ⌘C×3 还原或 ⌃⌥C 续接复制提示胶囊
+struct ActionSparkFadeCoordinator: Equatable {
+    private(set) var epoch: Int = 0
+    private(set) var isFadingOut: Bool = false
+
+    @discardableResult
+    mutating func beginPresentation() -> Int {
+        epoch &+= 1
+        isFadingOut = false
+        return epoch
+    }
+
+    @discardableResult
+    mutating func beginFadeSchedule() -> Int {
+        epoch &+= 1
+        isFadingOut = false
+        return epoch
+    }
+
+    mutating func markFadeStarted(for scheduledEpoch: Int) -> Bool {
+        guard scheduledEpoch == epoch else { return false }
+        isFadingOut = true
+        return true
+    }
+
+    mutating func invalidatePendingFade() {
+        epoch &+= 1
+        isFadingOut = false
+    }
+
+    func shouldCompleteFadeOut(scheduledEpoch: Int) -> Bool {
+        scheduledEpoch == epoch
+    }
+}
 
 /// 连按 ⌘C 触发微星标与第 3 次 ⌘C 无损还原的状态机判果
 enum DoubleCopySparkOutcome: Equatable {
@@ -109,9 +145,12 @@ final class ActionSparkController {
     private var hostingView: NSHostingView<ActionSparkPillView>?
     private let viewModel = ViewModel()
     private var dismissWorkItem: DispatchWorkItem?
+    private var fadeCompletionWorkItem: DispatchWorkItem?
     private var activeCandidate: AdaptiveSparkCandidate?
     private var didInteractInCurrentSession: Bool = false
     private var doubleCopyMachine = DoubleCopySparkStateMachine()
+    private var fadeCoordinator = ActionSparkFadeCoordinator()
+    private var appActivityCancellables = Set<AnyCancellable>()
 
     /// 供外部查询当前主面板是否可见，避免主面板打开时重复弹出微星标
     var isMainPanelVisibleProvider: (() -> Bool)?
@@ -119,12 +158,54 @@ final class ActionSparkController {
     private let compactSize = NSSize(width: 274, height: 38)
     private let promotableSize = NSSize(width: 328, height: 38)
 
-    private init() {}
+    private init() {
+        Publishers.Merge(
+            NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification),
+            NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)
+        )
+        .receive(on: RunLoop.main)
+        .sink { [weak self] _ in
+            guard let self, let p = self.panel, p.isVisible else { return }
+            (p as? UnifiedActiveFloatingPanel)?.enforceUnifiedActiveAppearance()
+        }
+        .store(in: &appActivityCancellables)
+    }
+
+    private func cancelFadeTimersAndRestoreOpacity(of panel: NSPanel) {
+        dismissWorkItem?.cancel()
+        dismissWorkItem = nil
+        fadeCompletionWorkItem?.cancel()
+        fadeCompletionWorkItem = nil
+        if panel.alphaValue < 0.99 {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0
+                panel.animator().alphaValue = 1.0
+            }
+        }
+    }
+
+    private func computeCursorAnchorOrigin(for size: NSSize) -> NSPoint {
+        let mouse = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) ?? NSScreen.main ?? NSScreen.screens[0]
+        let visible = screen.visibleFrame
+        var originX = mouse.x + 14
+        if originX + size.width > visible.maxX - 10 {
+            originX = max(visible.minX + 10, mouse.x - size.width - 14)
+        }
+        var originY = mouse.y - size.height - 12
+        if originY < visible.minY + 10 {
+            originY = min(visible.maxY - size.height - 10, mouse.y + 18)
+        }
+        return NSPoint(x: originX, y: originY)
+    }
 
     /// 锁屏、休眠或主面板收起时立即静默关闭光标微星标并清空内存候选
     func dismiss() {
+        fadeCoordinator.invalidatePendingFade()
         dismissWorkItem?.cancel()
         dismissWorkItem = nil
+        fadeCompletionWorkItem?.cancel()
+        fadeCompletionWorkItem = nil
         activeCandidate = nil
         doubleCopyMachine.clearActiveOffer()
         panel?.orderOut(nil)
@@ -147,15 +228,21 @@ final class ActionSparkController {
             return .normalCopy
 
         case .restoreOriginal:
-            dismissWorkItem?.cancel()
+            fadeCoordinator.beginPresentation()
             activeCandidate = nil
             didInteractInCurrentSession = true
             TactileFeedbackEngine.shared.performNavigationStepHaptic()
             ensurePanel(size: compactSize, store: store)
             resizePanelIfNeeded(to: compactSize)
-            if let panel, !panel.isVisible {
-                panel.alphaValue = 1
-                panel.orderFrontRegardless()
+            if let panel {
+                cancelFadeTimersAndRestoreOpacity(of: panel)
+                if !panel.isVisible {
+                    let targetOrigin = computeCursorAnchorOrigin(for: compactSize)
+                    panel.setFrameOrigin(targetOrigin)
+                    panel.alphaValue = 1
+                    panel.orderFrontRegardless()
+                }
+                (panel as? UnifiedActiveFloatingPanel)?.enforceUnifiedActiveAppearance()
             }
             withAnimation(.easeOut(duration: 0.14)) {
                 viewModel.phase = .restored(message: "已还原原文 · 直接 ⌘V")
@@ -193,7 +280,7 @@ final class ActionSparkController {
     /// 在光标右下角轻浮一条非抢焦液态玻璃状态胶囊（用于 ⌃⌥C 跨处续接复制等瞬时反馈）
     func presentTransientNotice(symbolName: String, message: String, duration: Double = 1.15, in store: ClipboardStore) {
         if ProcessInfo.processInfo.arguments.contains("--demo") { return }
-        dismissWorkItem?.cancel()
+        fadeCoordinator.beginPresentation()
         activeCandidate = nil
         didInteractInCurrentSession = true
         doubleCopyMachine.clearActiveOffer()
@@ -201,37 +288,34 @@ final class ActionSparkController {
         ensurePanel(size: compactSize, store: store)
         guard let panel else { return }
         resizePanelIfNeeded(to: compactSize)
+        cancelFadeTimersAndRestoreOpacity(of: panel)
 
-        let mouse = NSEvent.mouseLocation
-        let screen = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) ?? NSScreen.main ?? NSScreen.screens[0]
-        let visible = screen.visibleFrame
-        var originX = mouse.x + 14
-        if originX + compactSize.width > visible.maxX - 10 {
-            originX = max(visible.minX + 10, mouse.x - compactSize.width - 14)
-        }
-        var originY = mouse.y - compactSize.height - 12
-        if originY < visible.minY + 10 {
-            originY = min(visible.maxY - compactSize.height - 10, mouse.y + 18)
-        }
-
+        let targetOrigin = computeCursorAnchorOrigin(for: compactSize)
         viewModel.phase = .notice(symbolName: symbolName, message: message)
         if !panel.isVisible {
-            panel.setFrameOrigin(NSPoint(x: originX, y: originY - 4))
+            panel.setFrameOrigin(NSPoint(x: targetOrigin.x, y: targetOrigin.y - 4))
             panel.alphaValue = 0
             panel.orderFrontRegardless()
+            (panel as? UnifiedActiveFloatingPanel)?.enforceUnifiedActiveAppearance()
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = 0.14
                 ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
                 panel.animator().alphaValue = 1
-                panel.animator().setFrameOrigin(NSPoint(x: originX, y: originY))
+                panel.animator().setFrameOrigin(targetOrigin)
             }
+        } else {
+            panel.setFrameOrigin(targetOrigin)
+            (panel as? UnifiedActiveFloatingPanel)?.enforceUnifiedActiveAppearance()
         }
         scheduleFadeOut(after: duration, recordPassiveTimeout: false)
     }
 
     func dismissImmediately() {
+        fadeCoordinator.invalidatePendingFade()
         dismissWorkItem?.cancel()
         dismissWorkItem = nil
+        fadeCompletionWorkItem?.cancel()
+        fadeCompletionWorkItem = nil
         activeCandidate = nil
         doubleCopyMachine.clearAll()
         panel?.orderOut(nil)
@@ -242,7 +326,8 @@ final class ActionSparkController {
         ensurePanel(size: targetSize, store: store)
         guard let panel else { return }
 
-        dismissWorkItem?.cancel()
+        fadeCoordinator.beginPresentation()
+        cancelFadeTimersAndRestoreOpacity(of: panel)
         activeCandidate = candidate
         didInteractInCurrentSession = false
         let duration = AdaptiveIntelligenceEngine.shared.sparkDurationSeconds
@@ -257,29 +342,17 @@ final class ActionSparkController {
 
         resizePanelIfNeeded(to: targetSize)
 
-        let mouse = NSEvent.mouseLocation
-        let screen = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) ?? NSScreen.main ?? NSScreen.screens[0]
-        let visible = screen.visibleFrame
-
-        // 默认紧贴光标右下角 14pt 处，不遮挡光标正前方输入行；靠近屏幕边缘自动镜像避让
-        var originX = mouse.x + 14
-        if originX + targetSize.width > visible.maxX - 10 {
-            originX = max(visible.minX + 10, mouse.x - targetSize.width - 14)
-        }
-        var originY = mouse.y - targetSize.height - 12
-        if originY < visible.minY + 10 {
-            originY = min(visible.maxY - targetSize.height - 10, mouse.y + 18)
-        }
-
-        panel.setFrameOrigin(NSPoint(x: originX, y: originY - 5))
+        let targetOrigin = computeCursorAnchorOrigin(for: targetSize)
+        panel.setFrameOrigin(NSPoint(x: targetOrigin.x, y: targetOrigin.y - 5))
         panel.alphaValue = 0
         panel.orderFrontRegardless()
+        (panel as? UnifiedActiveFloatingPanel)?.enforceUnifiedActiveAppearance()
 
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.16
             ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
             panel.animator().alphaValue = 1
-            panel.animator().setFrameOrigin(NSPoint(x: originX, y: originY))
+            panel.animator().setFrameOrigin(targetOrigin)
         }
 
         scheduleAutoDismiss(after: duration)
@@ -382,12 +455,35 @@ final class ActionSparkController {
     }
 
     private func handleHoverChanged(_ hovering: Bool) {
-        viewModel.isHovered = hovering
+        let isOfferingPhase: Bool = {
+            if case .offering = viewModel.phase { return true }
+            return false
+        }()
         if hovering {
+            // 正在最后的 alpha 淡出期间（或候选已被注销但视图仍停留在 .offering），绝不复活已失效按键的胶囊
+            if fadeCoordinator.isFadingOut || (activeCandidate == nil && isOfferingPhase) {
+                viewModel.isHovered = false
+                return
+            }
+            viewModel.isHovered = true
+            fadeCoordinator.invalidatePendingFade()
             dismissWorkItem?.cancel()
             dismissWorkItem = nil
-        } else if activeCandidate != nil && !didInteractInCurrentSession {
-            scheduleAutoDismiss(after: 0.95)
+            fadeCompletionWorkItem?.cancel()
+            fadeCompletionWorkItem = nil
+            if let panel, panel.alphaValue < 0.99 {
+                NSAnimationContext.runAnimationGroup { ctx in
+                    ctx.duration = 0.08
+                    panel.animator().alphaValue = 1.0
+                }
+            }
+        } else {
+            viewModel.isHovered = false
+            if activeCandidate != nil && !didInteractInCurrentSession {
+                scheduleAutoDismiss(after: 0.95)
+            } else if panel?.isVisible == true && !fadeCoordinator.isFadingOut && dismissWorkItem == nil {
+                scheduleFadeOut(after: 0.6, recordPassiveTimeout: false)
+            }
         }
     }
 
@@ -456,9 +552,17 @@ final class ActionSparkController {
 
     private func scheduleFadeOut(after seconds: Double, recordPassiveTimeout: Bool) {
         dismissWorkItem?.cancel()
+        fadeCompletionWorkItem?.cancel()
+        fadeCompletionWorkItem = nil
+        let scheduledEpoch = fadeCoordinator.beginFadeSchedule()
         let work = DispatchWorkItem { [weak self] in
             Task { @MainActor [weak self] in
-                guard let self, let panel = self.panel else { return }
+                guard let self,
+                      self.fadeCoordinator.markFadeStarted(for: scheduledEpoch),
+                      let panel = self.panel else {
+                    return
+                }
+                self.dismissWorkItem = nil
                 if recordPassiveTimeout, !self.didInteractInCurrentSession, let candidate = self.activeCandidate {
                     AdaptiveIntelligenceEngine.shared.recordSparkPassiveTimeout(categoryKey: candidate.categoryKey)
                 }
@@ -469,10 +573,20 @@ final class ActionSparkController {
                     ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
                     panel.animator().alphaValue = 0
                 }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.17) { [weak self] in
-                    guard let self, self.activeCandidate == nil else { return }
-                    self.panel?.orderOut(nil)
+                let completion = DispatchWorkItem { [weak self] in
+                    Task { @MainActor [weak self] in
+                        guard let self,
+                              self.fadeCoordinator.shouldCompleteFadeOut(scheduledEpoch: scheduledEpoch) else {
+                            return
+                        }
+                        self.fadeCompletionWorkItem = nil
+                        self.dismissWorkItem = nil
+                        self.fadeCoordinator.invalidatePendingFade()
+                        self.panel?.orderOut(nil)
+                    }
                 }
+                self.fadeCompletionWorkItem = completion
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.17, execute: completion)
             }
         }
         dismissWorkItem = work

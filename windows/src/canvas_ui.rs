@@ -2432,3 +2432,164 @@ pub fn compute_wrapped_text_scroll_bounds(
     }
     (max_scroll, total_visual)
 }
+
+#[inline]
+fn extract_bitmask_u8(word: u32, mask: u32) -> u8 {
+    if mask == 0 {
+        return 0;
+    }
+    let shift = mask.trailing_zeros();
+    let max_val = mask >> shift;
+    let raw_v = (word & mask) >> shift;
+    if max_val == 0xFF {
+        raw_v as u8
+    } else if max_val == 0 {
+        0
+    } else {
+        (((raw_v as u64) * 255 + (max_val as u64) / 2) / (max_val as u64)).min(255) as u8
+    }
+}
+
+/// 将 Win32 CF_DIB / CF_DIBV4 / CF_DIBV5 原始字节流安全解码为标准 RGBA8（完整支持 BI_RGB 与 BI_BITFIELDS 掩码并无黑边保留真透明通道）
+pub fn decode_cf_dib_bytes_to_rgba(raw: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
+    if raw.len() < 40 {
+        return None;
+    }
+    let bi_size = u32::from_le_bytes(raw[0..4].try_into().ok()?) as usize;
+    let bi_width = i32::from_le_bytes(raw[4..8].try_into().ok()?);
+    let bi_height = i32::from_le_bytes(raw[8..12].try_into().ok()?);
+    let bpp = u16::from_le_bytes(raw[14..16].try_into().ok()?);
+    let bi_compression = u32::from_le_bytes(raw[16..20].try_into().ok()?);
+
+    if bi_size < 40 || bi_size > raw.len() {
+        return None;
+    }
+    if bi_width == i32::MIN || bi_height == i32::MIN {
+        return None;
+    }
+    let w = bi_width.unsigned_abs();
+    let top_down = bi_height < 0;
+    let h = bi_height.unsigned_abs();
+    if w == 0 || h == 0 || w > 8192 || h > 8192 || (w as u64) * (h as u64) > 67_108_864 {
+        return None;
+    }
+    if (bpp != 32 && bpp != 24) || (bi_compression != 0 && bi_compression != 3) {
+        return None;
+    }
+
+    let (r_mask, g_mask, b_mask, a_mask, base_pixel_offset) = if bi_compression == 3 {
+        if bpp != 32 {
+            return None;
+        }
+        if bi_size == 40 {
+            if raw.len() < 52 {
+                return None;
+            }
+            (
+                u32::from_le_bytes(raw[40..44].try_into().ok()?),
+                u32::from_le_bytes(raw[44..48].try_into().ok()?),
+                u32::from_le_bytes(raw[48..52].try_into().ok()?),
+                0u32,
+                52usize,
+            )
+        } else if bi_size >= 56 {
+            (
+                u32::from_le_bytes(raw[40..44].try_into().ok()?),
+                u32::from_le_bytes(raw[44..48].try_into().ok()?),
+                u32::from_le_bytes(raw[48..52].try_into().ok()?),
+                u32::from_le_bytes(raw[52..56].try_into().ok()?),
+                bi_size,
+            )
+        } else if bi_size >= 52 {
+            (
+                u32::from_le_bytes(raw[40..44].try_into().ok()?),
+                u32::from_le_bytes(raw[44..48].try_into().ok()?),
+                u32::from_le_bytes(raw[48..52].try_into().ok()?),
+                0u32,
+                bi_size,
+            )
+        } else {
+            return None;
+        }
+    } else {
+        (0x00FF_0000u32, 0x0000_FF00u32, 0x0000_00FFu32, 0xFF00_0000u32, bi_size)
+    };
+
+    let stride = (((w as usize) * (bpp as usize) + 31) & !31) / 8;
+    let span = stride.checked_mul(h as usize)?;
+    let out_len = (w as usize).checked_mul(h as usize)?.checked_mul(4)?;
+    // 部分 Windows 系统合成或 Chromium 风格的 CF_DIBV5 + BI_BITFIELDS 会在 V5 头后仍附带 3 个 DWORD 掩码；按“总长度充足且紧随 3 个 u32 精确等于 R/G/B 掩码”自动跳过该 12 字节避免图像左移 3 像素
+    let pixel_offset = if bi_compression == 3
+        && bi_size >= 56
+        && base_pixel_offset == bi_size
+        && bi_size
+            .checked_add(12)
+            .and_then(|off| off.checked_add(span))
+            .map_or(false, |end| end <= raw.len())
+        && u32::from_le_bytes(raw[bi_size..bi_size + 4].try_into().ok()?) == r_mask
+        && u32::from_le_bytes(raw[bi_size + 4..bi_size + 8].try_into().ok()?) == g_mask
+        && u32::from_le_bytes(raw[bi_size + 8..bi_size + 12].try_into().ok()?) == b_mask
+    {
+        bi_size + 12
+    } else {
+        base_pixel_offset
+    };
+    if pixel_offset.checked_add(span).map_or(true, |end| end > raw.len()) {
+        return None;
+    }
+
+    let pixels = &raw[pixel_offset..pixel_offset + span];
+    let mut rgba = vec![0u8; out_len];
+    let mut any_non_zero_alpha = false;
+    let use_default_bgr = bi_compression == 0 || (r_mask == 0 && g_mask == 0 && b_mask == 0);
+
+    for y in 0..h as usize {
+        let src_row = if top_down { y } else { (h as usize) - 1 - y };
+        let row_slice = &pixels[src_row * stride..];
+        for x in 0..w as usize {
+            let dst_idx = (y * (w as usize) + x) * 4;
+            if bpp == 32 {
+                let s = x * 4;
+                if use_default_bgr {
+                    rgba[dst_idx] = row_slice[s + 2];
+                    rgba[dst_idx + 1] = row_slice[s + 1];
+                    rgba[dst_idx + 2] = row_slice[s];
+                    let a = row_slice[s + 3];
+                    if a != 0 {
+                        any_non_zero_alpha = true;
+                    }
+                    rgba[dst_idx + 3] = a;
+                } else {
+                    let word = u32::from_le_bytes(row_slice[s..s + 4].try_into().ok()?);
+                    rgba[dst_idx] = extract_bitmask_u8(word, r_mask);
+                    rgba[dst_idx + 1] = extract_bitmask_u8(word, g_mask);
+                    rgba[dst_idx + 2] = extract_bitmask_u8(word, b_mask);
+                    if a_mask == 0 {
+                        any_non_zero_alpha = true;
+                        rgba[dst_idx + 3] = 255;
+                    } else {
+                        let a = extract_bitmask_u8(word, a_mask);
+                        if a != 0 {
+                            any_non_zero_alpha = true;
+                        }
+                        rgba[dst_idx + 3] = a;
+                    }
+                }
+            } else {
+                let s = x * 3;
+                rgba[dst_idx] = row_slice[s + 2];
+                rgba[dst_idx + 1] = row_slice[s + 1];
+                rgba[dst_idx + 2] = row_slice[s];
+                rgba[dst_idx + 3] = 255;
+            }
+        }
+    }
+
+    if bpp == 32 && !any_non_zero_alpha {
+        for px in rgba.chunks_exact_mut(4) {
+            px[3] = 255;
+        }
+    }
+
+    Some((rgba, w, h))
+}

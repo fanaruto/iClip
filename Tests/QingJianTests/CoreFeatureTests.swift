@@ -4373,4 +4373,34 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertEqual(centered.midY, target.midY, accuracy: 0.1)
         XCTAssertEqual(centered.width, target.width * 0.94, accuracy: 0.1)
     }
+
+    func testActionSparkFadeCoordinatorEpochPreventsStaleDismissal() {
+        var coord = ActionSparkFadeCoordinator()
+        let firstEpoch = coord.beginPresentation()
+        XCTAssertFalse(coord.isFadingOut)
+        XCTAssertTrue(coord.shouldCompleteFadeOut(scheduledEpoch: firstEpoch))
+
+        // 安排淡出必须递增代际，立刻作废旧 DispatchWorkItem 中已入队的过期 Task
+        let fadeEpoch = coord.beginFadeSchedule()
+        XCTAssertNotEqual(fadeEpoch, firstEpoch)
+        XCTAssertFalse(coord.markFadeStarted(for: firstEpoch))
+        XCTAssertFalse(coord.isFadingOut)
+        XCTAssertTrue(coord.markFadeStarted(for: fadeEpoch))
+        XCTAssertTrue(coord.isFadingOut)
+
+        // 早期气泡淡出窗口期内紧接着触发 ⌃⌥C 瞬时通知或 ⌘C×3 还原：旧淡出代际必须立即失效且复位 isFadingOut
+        let noticeEpoch = coord.beginPresentation()
+        XCTAssertNotEqual(fadeEpoch, noticeEpoch)
+        XCTAssertFalse(coord.isFadingOut)
+        XCTAssertFalse(coord.shouldCompleteFadeOut(scheduledEpoch: firstEpoch))
+        XCTAssertFalse(coord.shouldCompleteFadeOut(scheduledEpoch: fadeEpoch))
+        XCTAssertTrue(coord.shouldCompleteFadeOut(scheduledEpoch: noticeEpoch))
+
+        // 悬停接管取消淡出计时
+        let pendingEpoch = coord.beginFadeSchedule()
+        coord.invalidatePendingFade()
+        XCTAssertFalse(coord.shouldCompleteFadeOut(scheduledEpoch: pendingEpoch))
+        XCTAssertFalse(coord.markFadeStarted(for: pendingEpoch))
+        XCTAssertFalse(coord.isFadingOut)
+    }
 }

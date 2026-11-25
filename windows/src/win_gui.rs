@@ -2,9 +2,10 @@
 
 use iclip_core::canvas_ui::{
     build_display_rows_ext, clamp_image_pan_offset, clamp_quick_look_scroll,
-    compute_wrapped_text_scroll_bounds, estimate_mono_text_px, estimate_text_px,
-    fit_image_in_viewport, grid_move_selection, image_grid_row_height, pack_big_bang_chip_rows,
-    standard_card_height, Color4, DisplayRow, GlassPalette, GridMoveDir, PixelCanvas,
+    compute_wrapped_text_scroll_bounds, decode_cf_dib_bytes_to_rgba, estimate_mono_text_px,
+    estimate_text_px, fit_image_in_viewport, grid_move_selection, image_grid_row_height,
+    pack_big_bang_chip_rows, standard_card_height, Color4, DisplayRow, GlassPalette, GridMoveDir,
+    PixelCanvas,
 };
 use iclip_core::engines::{
     analyze_file_actions, analyze_text_actions, clean_tracking_url, compress_png_to_white_bg_jpeg,
@@ -36,12 +37,12 @@ use std::mem::{size_of, zeroed};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, FALSE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
+    CloseHandle, GlobalFree, FALSE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
 };
 use windows_sys::Win32::Graphics::Dwm::{DwmExtendFrameIntoClientArea, DwmSetWindowAttribute};
 use windows_sys::Win32::Graphics::Gdi::{
@@ -159,7 +160,10 @@ const CMD_CHECK_UPDATES: usize = 3018;
 
 const CF_UNICODETEXT_ID: u32 = 13;
 const CF_DIB_ID: u32 = 8;
+const CF_DIBV5_ID: u32 = 17;
 const CF_HDROP_ID: u32 = 15;
+const MAX_CLIPBOARD_PNG_BYTES: usize = 32 * 1024 * 1024;
+const MAX_CLIPBOARD_DIB_BYTES: usize = 1024 + 8192 * 8192 * 4;
 
 // DWM 属性常量（Windows 11 原生连续圆角与 Acrylic/Mica 分档材质）
 const DWMWA_USE_IMMERSIVE_DARK_MODE_ATTR: u32 = 20;
@@ -177,6 +181,7 @@ enum AsyncChatClipResult {
 
 static MAIN_HWND_RAW: AtomicIsize = AtomicIsize::new(0);
 static QL_STAGE_HWND_RAW: AtomicIsize = AtomicIsize::new(0);
+static CF_PNG_FORMAT_ID: AtomicU32 = AtomicU32::new(0);
 static PENDING_ASYNC_CHAT_IMAGES: Mutex<Vec<AsyncChatClipResult>> = Mutex::new(Vec::new());
 static PENDING_QL_HI_RGBA: Mutex<Vec<(String, Option<(u32, u32, Vec<u8>)>)>> = Mutex::new(Vec::new());
 
@@ -337,6 +342,7 @@ struct WinAppState {
     ql_stage_big_bang: bool,
     ql_stage_ocr_text: Option<String>,
     ql_stage_ocr_selected: HashSet<usize>,
+    ql_stage_rendered_big_bang_ids: Vec<usize>,
     ql_stage_sweep_target: Option<bool>,
     ql_stage_tracking_mouse_leave: bool,
     ql_stage_hit_regions: Vec<HitRegion>,
@@ -365,6 +371,7 @@ struct WinAppState {
     hit_regions: Vec<HitRegion>,
     thumb_cache: Vec<DecodedThumb>,
     cf_html_format: u32,
+    cf_png_format: u32,
     cf_exclude_monitor: u32,
     cf_viewer_ignore: u32,
     cf_can_include_history: u32,
@@ -538,6 +545,8 @@ pub fn run_windows_app() -> i32 {
         }
 
         let cf_html = RegisterClipboardFormatW(to_wide("HTML Format").as_ptr());
+        let cf_png = RegisterClipboardFormatW(to_wide("PNG").as_ptr());
+        CF_PNG_FORMAT_ID.store(cf_png, Ordering::SeqCst);
         let cf_excl = RegisterClipboardFormatW(
             to_wide("ExcludeClipboardContentFromMonitorProcessing").as_ptr(),
         );
@@ -588,6 +597,7 @@ pub fn run_windows_app() -> i32 {
                 ql_stage_big_bang: false,
                 ql_stage_ocr_text: None,
                 ql_stage_ocr_selected: HashSet::new(),
+                ql_stage_rendered_big_bang_ids: Vec::new(),
                 ql_stage_sweep_target: None,
                 ql_stage_tracking_mouse_leave: false,
                 ql_stage_hit_regions: Vec::new(),
@@ -616,6 +626,7 @@ pub fn run_windows_app() -> i32 {
                 hit_regions: Vec::new(),
                 thumb_cache: Vec::new(),
                 cf_html_format: cf_html,
+                cf_png_format: cf_png,
                 cf_exclude_monitor: cf_excl,
                 cf_viewer_ignore: cf_ignore,
                 cf_can_include_history: cf_can_hist,
@@ -741,6 +752,8 @@ pub fn run_windows_self_test() -> Result<(), String> {
         ));
 
         let cf_html = RegisterClipboardFormatW(to_wide("HTML Format").as_ptr());
+        let cf_png = RegisterClipboardFormatW(to_wide("PNG").as_ptr());
+        CF_PNG_FORMAT_ID.store(cf_png, Ordering::SeqCst);
         let mut state = WinAppState {
             store,
             visible: true,
@@ -781,6 +794,7 @@ pub fn run_windows_self_test() -> Result<(), String> {
             ql_stage_big_bang: false,
             ql_stage_ocr_text: None,
             ql_stage_ocr_selected: HashSet::new(),
+            ql_stage_rendered_big_bang_ids: Vec::new(),
             ql_stage_sweep_target: None,
             ql_stage_tracking_mouse_leave: false,
             ql_stage_hit_regions: Vec::new(),
@@ -809,6 +823,7 @@ pub fn run_windows_self_test() -> Result<(), String> {
             hit_regions: Vec::new(),
             thumb_cache: Vec::new(),
             cf_html_format: cf_html,
+            cf_png_format: cf_png,
             cf_exclude_monitor: 0,
             cf_viewer_ignore: 0,
             cf_can_include_history: 0,
@@ -1830,6 +1845,7 @@ unsafe fn hide_panel(hwnd: HWND, restore_focus: bool) {
             st.ql_stage_big_bang = false;
             st.ql_stage_ocr_text = None;
             st.ql_stage_ocr_selected.clear();
+            st.ql_stage_rendered_big_bang_ids.clear();
             st.ql_stage_hit_regions.clear();
             reset_ql_stage_zoom_and_pan(st);
             st.big_bang_selected_ids.clear();
@@ -1901,6 +1917,7 @@ unsafe extern "system" fn wnd_proc(
                         st.ql_stage_big_bang = false;
                         st.ql_stage_ocr_text = None;
                         st.ql_stage_ocr_selected.clear();
+                        st.ql_stage_rendered_big_bang_ids.clear();
                         st.ql_stage_hit_regions.clear();
                         st.big_bang_selected_ids.clear();
                         st.big_bang_sweep_target = None;
@@ -2706,7 +2723,16 @@ unsafe fn handle_clipboard_update(hwnd: HWND) {
     // 用户正常复制了非密码新内容，立即取消此前挂起的残留清擦定时器，防止误清正常剪贴板
     KillTimer(hwnd, TIMER_ID_CONCEALED_SCRUB);
 
+    let cf_png_fmt = APP_STATE.with(|c| {
+        c.borrow()
+            .as_ref()
+            .map(|st| st.cf_png_format)
+            .unwrap_or(0)
+    });
+    let has_png = cf_png_fmt != 0 && IsClipboardFormatAvailable(cf_png_fmt) != FALSE;
+    let has_dibv5 = IsClipboardFormatAvailable(CF_DIBV5_ID) != FALSE;
     let has_dib = IsClipboardFormatAvailable(CF_DIB_ID) != FALSE;
+    let has_in_memory_image = has_dib || has_dibv5 || has_png;
     if IsClipboardFormatAvailable(CF_HDROP_ID) != FALSE {
         if let Some(paths) = read_files_from_clipboard(hwnd) {
             if !paths.is_empty() {
@@ -2715,15 +2741,23 @@ unsafe fn handle_clipboard_update(hwnd: HWND) {
                     && iclip_core::security::should_promote_single_clipboard_file_to_image(
                         &paths[0],
                         source_app.as_deref(),
-                        has_dib,
+                        has_in_memory_image,
                     )
                 {
                     let single_path = paths[0].clone();
-                    let dib_fallback = if has_dib {
-                        read_dib_as_png_from_clipboard(hwnd)
+                    let mem_image_fallback = if has_png {
+                        read_clipboard_format_bytes(hwnd, cf_png_fmt, MAX_CLIPBOARD_PNG_BYTES)
+                            .and_then(|bytes| try_decode_chat_image_to_png(&bytes))
                     } else {
                         None
-                    };
+                    }
+                    .or_else(|| {
+                        if has_dib || has_dibv5 {
+                            read_dib_as_png_from_clipboard(hwnd)
+                        } else {
+                            None
+                        }
+                    });
                     let target_hwnd = hwnd as isize;
                     let src_clone = source_app.clone();
                     std::thread::spawn(move || {
@@ -2756,7 +2790,7 @@ unsafe fn handle_clipboard_update(hwnd: HWND) {
                                 }
                             }
                         }
-                        let out_result = if let Some((png_bytes, w, h)) = decoded_ok.or(dib_fallback) {
+                        let out_result = if let Some((png_bytes, w, h)) = decoded_ok.or(mem_image_fallback) {
                             AsyncChatClipResult::Image(png_bytes, w, h, src_clone)
                         } else {
                             AsyncChatClipResult::FallbackFile(single_path, src_clone)
@@ -2794,7 +2828,7 @@ unsafe fn handle_clipboard_update(hwnd: HWND) {
     if IsClipboardFormatAvailable(CF_UNICODETEXT_ID) != FALSE {
         if let Some(mut raw_text) = read_unicode_text_from_clipboard(hwnd) {
             let is_placeholder = iclip_core::security::is_chat_image_placeholder_text(&raw_text);
-            if is_placeholder && !has_dib && cf_html_fmt != 0 && IsClipboardFormatAvailable(cf_html_fmt) != FALSE {
+            if is_placeholder && !has_in_memory_image && cf_html_fmt != 0 && IsClipboardFormatAvailable(cf_html_fmt) != FALSE {
                 if let Some(cf_html) = read_cf_html_from_clipboard(hwnd, cf_html_fmt) {
                     if iclip_core::security::may_contain_single_html_image_src(&cf_html) {
                         dispatch_html_image_from_cf_html(hwnd, cf_html, source_app);
@@ -2978,27 +3012,38 @@ unsafe fn handle_clipboard_update(hwnd: HWND) {
         }
     }
 
-    if IsClipboardFormatAvailable(CF_DIB_ID) != FALSE {
-        if let Some((png_bytes, w, h)) = read_dib_as_png_from_clipboard(hwnd) {
-            APP_STATE.with(|cell| {
-                if let Some(st) = cell.borrow_mut().as_mut() {
-                    st.pending_append_capture = false;
-                    let hash = iclip_core::model::sha256_hex(&png_bytes);
-                    let file_name = format!("{}.png", &hash[0..24]);
-                    if st.store.write_image_bytes(&file_name, &png_bytes).is_ok() {
-                        st.store.insert_or_promote(ClipItem::new_image(
-                            file_name,
-                            w,
-                            h,
-                            &png_bytes,
-                            source_app.or_else(|| Some("截图".to_string())),
-                        ));
-                    }
-                }
-            });
-            let _ = InvalidateRect(hwnd, null(), FALSE);
-            return;
+    let captured_img = if has_png {
+        read_clipboard_format_bytes(hwnd, cf_png_fmt, MAX_CLIPBOARD_PNG_BYTES)
+            .and_then(|bytes| try_decode_chat_image_to_png(&bytes))
+    } else {
+        None
+    }
+    .or_else(|| {
+        if has_dib || has_dibv5 {
+            read_dib_as_png_from_clipboard(hwnd)
+        } else {
+            None
         }
+    });
+    if let Some((png_bytes, w, h)) = captured_img {
+        APP_STATE.with(|cell| {
+            if let Some(st) = cell.borrow_mut().as_mut() {
+                st.pending_append_capture = false;
+                let hash = iclip_core::model::sha256_hex(&png_bytes);
+                let file_name = format!("{}.png", &hash[0..24]);
+                if st.store.write_image_bytes(&file_name, &png_bytes).is_ok() {
+                    st.store.insert_or_promote(ClipItem::new_image(
+                        file_name,
+                        w,
+                        h,
+                        &png_bytes,
+                        source_app.or_else(|| Some("截图".to_string())),
+                    ));
+                }
+            }
+        });
+        let _ = InvalidateRect(hwnd, null(), FALSE);
+        return;
     }
 
     if cf_html_fmt != 0 && IsClipboardFormatAvailable(cf_html_fmt) != FALSE {
@@ -3347,86 +3392,65 @@ unsafe fn dispatch_html_image_from_cf_html(
     });
 }
 
+unsafe fn read_clipboard_format_bytes(
+    hwnd: HWND,
+    fmt: u32,
+    max_bytes: usize,
+) -> Option<Vec<u8>> {
+    if fmt == 0 || OpenClipboard(hwnd) == FALSE {
+        return None;
+    }
+    let h = GetClipboardData(fmt);
+    if h.is_null() {
+        let _ = CloseClipboard();
+        return None;
+    }
+    let ptr = GlobalLock(h) as *const u8;
+    let total_size = GlobalSize(h);
+    let out = if !ptr.is_null() && total_size > 0 && total_size <= max_bytes {
+        Some(std::slice::from_raw_parts(ptr, total_size).to_vec())
+    } else {
+        None
+    };
+    if !ptr.is_null() {
+        let _ = GlobalUnlock(h);
+    }
+    let _ = CloseClipboard();
+    out
+}
+
 unsafe fn read_dib_as_png_from_clipboard(hwnd: HWND) -> Option<(Vec<u8>, u32, u32)> {
     if OpenClipboard(hwnd) == FALSE {
         return None;
     }
-    let hdib = GetClipboardData(CF_DIB_ID);
-    if hdib.is_null() {
-        let _ = CloseClipboard();
-        return None;
-    }
-    let ptr = GlobalLock(hdib) as *const u8;
-    let total_size = GlobalSize(hdib);
-    if ptr.is_null() || total_size < size_of::<BITMAPINFOHEADER>() {
-        let _ = GlobalUnlock(hdib);
-        let _ = CloseClipboard();
-        return None;
-    }
-    let hdr = &*(ptr as *const BITMAPINFOHEADER);
-    let w = hdr.biWidth.unsigned_abs();
-    let top_down = hdr.biHeight < 0;
-    let h = hdr.biHeight.unsigned_abs();
-    let bpp = hdr.biBitCount;
-
-    let mut result = None;
-    let is_uncompressed = hdr.biCompression == BI_RGB || hdr.biCompression == 3;
-    if is_uncompressed && (bpp == 32 || bpp == 24) && w > 0 && h > 0 && w <= 8192 && h <= 8192 {
-        let mask_extra =
-            if hdr.biCompression == 3 && hdr.biSize == size_of::<BITMAPINFOHEADER>() as u32 {
-                12usize
-            } else {
-                0usize
-            };
-        let header_bytes = (hdr.biSize as usize).saturating_add(mask_extra);
-        let stride = (((w as usize * bpp as usize) + 31) & !31) / 8;
-        let pixel_span = stride.checked_mul(h as usize);
-        let rgba_len = (w as usize)
-            .checked_mul(h as usize)
-            .and_then(|px| px.checked_mul(4));
-        if let (Some(span), Some(out_len)) = (pixel_span, rgba_len) {
-            if header_bytes >= size_of::<BITMAPINFOHEADER>()
-                && header_bytes
-                    .checked_add(span)
-                    .is_some_and(|end| end <= total_size)
-            {
-                let pixels = std::slice::from_raw_parts(ptr.add(header_bytes), span);
-                let mut rgba = vec![0u8; out_len];
-                for y in 0..h as usize {
-                    let src_row = if top_down { y } else { (h as usize) - 1 - y };
-                    let row_slice = &pixels[src_row * stride..];
-                    for x in 0..w as usize {
-                        let dst_idx = (y * w as usize + x) * 4;
-                        if bpp == 32 {
-                            let s = x * 4;
-                            rgba[dst_idx] = row_slice[s + 2];
-                            rgba[dst_idx + 1] = row_slice[s + 1];
-                            rgba[dst_idx + 2] = row_slice[s];
-                            let a = row_slice[s + 3];
-                            rgba[dst_idx + 3] = if a == 0 { 255 } else { a };
-                        } else {
-                            let s = x * 3;
-                            rgba[dst_idx] = row_slice[s + 2];
-                            rgba[dst_idx + 1] = row_slice[s + 1];
-                            rgba[dst_idx + 2] = row_slice[s];
-                            rgba[dst_idx + 3] = 255;
-                        }
-                    }
-                }
-                let mut png_out = Vec::new();
-                if PngEncoder::new(&mut png_out)
-                    .write_image(&rgba, w, h, ColorType::Rgba8.into())
-                    .is_ok()
-                {
-                    result = Some((png_out, w, h));
-                }
+    // 优先读取保留完整 V4/V5 Alpha 掩码的 CF_DIBV5(17)，再回退传统 CF_DIB(8)；锁定期间零拷贝直接解码并在关锁后编码 PNG
+    let mut decoded: Option<(Vec<u8>, u32, u32)> = None;
+    for fmt in [CF_DIBV5_ID, CF_DIB_ID] {
+        let h = GetClipboardData(fmt);
+        if h.is_null() {
+            continue;
+        }
+        let ptr = GlobalLock(h) as *const u8;
+        let total_size = GlobalSize(h);
+        if !ptr.is_null() {
+            if total_size > 0 && total_size <= MAX_CLIPBOARD_DIB_BYTES {
+                let raw_slice = std::slice::from_raw_parts(ptr, total_size);
+                decoded = decode_cf_dib_bytes_to_rgba(raw_slice);
             }
+            let _ = GlobalUnlock(h);
+        }
+        if decoded.is_some() {
+            break;
         }
     }
-
-    let _ = GlobalUnlock(hdib);
     let _ = CloseClipboard();
-    result
+
+    let (rgba, w, h) = decoded?;
+    let mut png_out = Vec::new();
+    PngEncoder::new(&mut png_out)
+        .write_image(&rgba, w, h, ColorType::Rgba8.into())
+        .ok()?;
+    Some((png_out, w, h))
 }
 
 #[derive(Clone, Copy, Default)]
@@ -3553,6 +3577,31 @@ unsafe fn write_image_bytes_to_clipboard_ext(
         return false;
     }
 
+    let cf_png = CF_PNG_FORMAT_ID.load(Ordering::SeqCst);
+    // 绝不在 OpenClipboard 全局剪贴板锁内做图像编码：PNG 源零拷贝透传，带 Alpha 的 WebP/GIF 在锁外预编码，不透明 JPEG 不必伴写 PNG
+    let png_payload: Option<std::borrow::Cow<'_, [u8]>> = if cf_png != 0 {
+        if encoded_img.starts_with(b"\x89PNG\r\n\x1a\n")
+            && encoded_img.len() <= MAX_CLIPBOARD_PNG_BYTES
+        {
+            Some(std::borrow::Cow::Borrowed(encoded_img))
+        } else if dyn_img.color().has_alpha() {
+            let mut buf = Vec::new();
+            if PngEncoder::new(&mut buf)
+                .write_image(&rgba, w, h, ColorType::Rgba8.into())
+                .is_ok()
+                && buf.len() <= MAX_CLIPBOARD_PNG_BYTES
+            {
+                Some(std::borrow::Cow::Owned(buf))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     if OpenClipboard(hwnd) == FALSE {
         return false;
     };
@@ -3583,7 +3632,26 @@ unsafe fn write_image_bytes_to_clipboard_ext(
                 }
             }
             let _ = GlobalUnlock(hdib);
-            let _ = SetClipboardData(CF_DIB_ID, hdib);
+            if SetClipboardData(CF_DIB_ID, hdib).is_null() {
+                let _ = GlobalFree(hdib);
+            }
+        } else {
+            let _ = GlobalFree(hdib);
+        }
+    }
+    if let Some(png_bytes) = png_payload.as_deref() {
+        let h_png = GlobalAlloc(GMEM_MOVEABLE, png_bytes.len());
+        if !h_png.is_null() {
+            let dst = GlobalLock(h_png) as *mut u8;
+            if !dst.is_null() {
+                std::ptr::copy_nonoverlapping(png_bytes.as_ptr(), dst, png_bytes.len());
+                let _ = GlobalUnlock(h_png);
+                if SetClipboardData(cf_png, h_png).is_null() {
+                    let _ = GlobalFree(h_png);
+                }
+            } else {
+                let _ = GlobalFree(h_png);
+            }
         }
     }
     apply_win32_local_only_privacy_formats(privacy_guard);
@@ -13050,6 +13118,7 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
                     st.ql_stage_visible = false;
                     st.ql_stage_big_bang = false;
                     st.ql_stage_ocr_selected.clear();
+                    st.ql_stage_rendered_big_bang_ids.clear();
                     st.ql_stage_hit_regions.clear();
                     need_dismiss_ql_stage = true;
                     return false;
@@ -13097,6 +13166,7 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
             if st.ql_stage_visible {
                 st.ql_stage_big_bang = !st.ql_stage_big_bang;
                 st.ql_stage_ocr_selected.clear();
+                st.ql_stage_rendered_big_bang_ids.clear();
                 reset_ql_stage_zoom_and_pan(st);
                 return true;
             }
@@ -13152,13 +13222,7 @@ unsafe fn handle_key_down(hwnd: HWND, vk: u32, mod_override: Option<u32>) {
             let mut b = c.borrow_mut();
             let Some(st) = b.as_mut() else { return 0u8 };
             if st.ql_stage_visible && st.ql_stage_big_bang {
-                if let Some(ocr) = st.ql_stage_ocr_text.as_ref() {
-                    let tokens = tokenize_big_bang(ocr, st.big_bang_granularity);
-                    st.ql_stage_ocr_selected = tokens
-                        .into_iter()
-                        .filter(|t| !t.is_line_break)
-                        .map(|t| t.id)
-                        .collect();
+                if select_all_ql_stage_big_bang_tokens(st) {
                     return 2;
                 }
                 return 0;
@@ -14715,7 +14779,26 @@ fn set_shared_big_bang_granularity(st: &mut WinAppState, granularity: BigBangGra
     st.big_bang_selected_ids.clear();
     st.big_bang_sweep_target = None;
     st.ql_stage_ocr_selected.clear();
+    st.ql_stage_rendered_big_bang_ids.clear();
     st.ql_stage_sweep_target = None;
+}
+
+fn select_all_ql_stage_big_bang_tokens(st: &mut WinAppState) -> bool {
+    if !st.ql_stage_rendered_big_bang_ids.is_empty() {
+        st.ql_stage_ocr_selected = st.ql_stage_rendered_big_bang_ids.iter().copied().collect();
+        return true;
+    }
+    if let Some(ocr) = st.ql_stage_ocr_text.as_ref() {
+        let tokens = tokenize_big_bang(ocr, st.big_bang_granularity);
+        st.ql_stage_ocr_selected = tokens
+            .into_iter()
+            .filter(|t| !t.is_line_break)
+            .take(600)
+            .map(|t| t.id)
+            .collect();
+        return true;
+    }
+    false
 }
 
 fn reset_ql_stage_zoom_and_pan(st: &mut WinAppState) {
@@ -14948,6 +15031,7 @@ unsafe fn present_or_update_large_ql_stage(
     let (item_w, item_h) = (item.image_width, item.image_height);
     st.ql_stage_ocr_text = item.ocr_text.clone();
     st.ql_stage_ocr_selected.clear();
+    st.ql_stage_rendered_big_bang_ids.clear();
     st.ql_stage_sweep_target = None;
     st.ql_stage_big_bang = false;
     reset_ql_stage_zoom_and_pan(st);
@@ -15088,6 +15172,7 @@ unsafe fn handle_ql_stage_wnd_proc(
                             st.ql_stage_visible = false;
                             st.ql_stage_big_bang = false;
                             st.ql_stage_ocr_selected.clear();
+                            st.ql_stage_rendered_big_bang_ids.clear();
                             st.ql_stage_sweep_target = None;
                         }
                     });
@@ -15098,6 +15183,7 @@ unsafe fn handle_ql_stage_wnd_proc(
                         if let Some(st) = c.borrow_mut().as_mut() {
                             st.ql_stage_big_bang = !st.ql_stage_big_bang;
                             st.ql_stage_ocr_selected.clear();
+                            st.ql_stage_rendered_big_bang_ids.clear();
                             st.ql_stage_sweep_target = None;
                             reset_ql_stage_zoom_and_pan(st);
                         }
@@ -15123,14 +15209,7 @@ unsafe fn handle_ql_stage_wnd_proc(
                 Some(HitAction::SelectAllBigBang) => {
                     APP_STATE.with(|c| {
                         if let Some(st) = c.borrow_mut().as_mut() {
-                            if let Some(ocr) = st.ql_stage_ocr_text.as_ref() {
-                                let tokens = tokenize_big_bang(ocr, st.big_bang_granularity);
-                                st.ql_stage_ocr_selected = tokens
-                                    .into_iter()
-                                    .filter(|t| !t.is_line_break)
-                                    .map(|t| t.id)
-                                    .collect();
-                            }
+                            let _ = select_all_ql_stage_big_bang_tokens(st);
                         }
                     });
                     let _ = InvalidateRect(hwnd, null(), FALSE);
@@ -15171,6 +15250,7 @@ unsafe fn handle_ql_stage_wnd_proc(
                         st.ql_stage_visible = false;
                         st.ql_stage_big_bang = false;
                         st.ql_stage_ocr_selected.clear();
+                        st.ql_stage_rendered_big_bang_ids.clear();
                         st.ql_stage_sweep_target = None;
                         Some(payload)
                     });
@@ -15720,10 +15800,13 @@ unsafe fn handle_ql_stage_wnd_proc(
                                     sf(12.0),
                                     Color4::rgba(10, 14, 24, 184),
                                 );
+                                st.ql_stage_rendered_big_bang_ids.clear();
                                 if let Some(ref ocr) =
                                     st.ql_stage_ocr_text.as_ref().filter(|t| !t.trim().is_empty())
                                 {
                                     let tokens = tokenize_big_bang(ocr, st.big_bang_granularity);
+                                    let total_non_break =
+                                        tokens.iter().filter(|t| !t.is_line_break).count();
                                     let mut tx = stage_x + s(14);
                                     let mut ty = stage_y + s(14);
                                     let ch = s(24);
@@ -15732,13 +15815,20 @@ unsafe fn handle_ql_stage_wnd_proc(
                                     let is_line_mode =
                                         st.big_bang_granularity == BigBangGranularity::Line;
                                     let full_line_w = (stage_w - s(28)).max(s(24));
+                                    let mut rendered_chips = 0usize;
                                     for tok in tokens.iter() {
                                         if tok.is_line_break {
                                             if tx > stage_x + s(14) {
                                                 tx = stage_x + s(14);
                                                 ty += ch + s(6);
                                             }
+                                            if ty + ch > max_cy {
+                                                break;
+                                            }
                                             continue;
+                                        }
+                                        if rendered_chips >= 600 {
+                                            break;
                                         }
                                         let cw = if is_line_mode {
                                             full_line_w
@@ -15777,11 +15867,16 @@ unsafe fn handle_ql_stage_wnd_proc(
                                             RECT {
                                                 left: tx + s(10),
                                                 top: ty,
-                                                right: tx + cw - s(10),
+                                                right: (tx + cw - s(10)).max(tx + s(14)),
                                                 bottom: ty + ch,
                                             }
                                         } else {
-                                            trc
+                                            RECT {
+                                                left: tx + s(4),
+                                                top: ty,
+                                                right: (tx + cw - s(4)).max(tx + s(8)),
+                                                bottom: ty + ch,
+                                            }
                                         };
                                         texts.push(TextDrawCmd {
                                             text: tok.text.clone(),
@@ -15794,7 +15889,10 @@ unsafe fn handle_ql_stage_wnd_proc(
                                                     | DT_SINGLELINE
                                                     | DT_END_ELLIPSIS
                                             } else {
-                                                DT_CENTER | DT_VCENTER | DT_SINGLELINE
+                                                DT_CENTER
+                                                    | DT_VCENTER
+                                                    | DT_SINGLELINE
+                                                    | DT_END_ELLIPSIS
                                             },
                                         });
                                         st.ql_stage_hit_regions.push(HitRegion {
@@ -15802,6 +15900,8 @@ unsafe fn handle_ql_stage_wnd_proc(
                                             interactive_cursor: true,
                                             action: HitAction::ToggleBigBangToken(tok.id),
                                         });
+                                        st.ql_stage_rendered_big_bang_ids.push(tok.id);
+                                        rendered_chips += 1;
                                         if is_line_mode {
                                             tx = stage_x + s(14);
                                             ty += ch + s(6);
@@ -15828,7 +15928,7 @@ unsafe fn handle_ql_stage_wnd_proc(
                                         HitAction::SelectAllBigBang
                                     };
 
-                                    let pb_w = s(98);
+                                    let pb_w = if sel_cnt >= 100 { s(108) } else { s(98) };
                                     let cb_w = s(76);
                                     let tb_w = s(64);
                                     let by = stage_y + stage_h - s(34);
@@ -15836,6 +15936,35 @@ unsafe fn handle_ql_stage_wnd_proc(
                                     let px = stage_x + stage_w - s(12) - pb_w;
                                     let cx_ocr = px - s(6) - cb_w;
                                     let tx_all = cx_ocr - s(6) - tb_w;
+
+                                    if total_non_break > rendered_chips
+                                        && tx_all - s(10) > stage_x + s(80)
+                                    {
+                                        let notice = if is_line_mode {
+                                            format!(
+                                                "已显示 {rendered_chips}/{total_non_break} 行（超出画幅已截断）"
+                                            )
+                                        } else {
+                                            format!(
+                                                "已显示 {rendered_chips}/{total_non_break} 词块 · 切「按行」可看更多"
+                                            )
+                                        };
+                                        texts.push(TextDrawCmd {
+                                            text: notice,
+                                            rect: RECT {
+                                                left: stage_x + s(14),
+                                                top: by,
+                                                right: tx_all - s(10),
+                                                bottom: by + bh,
+                                            },
+                                            color: Color4::rgba(255, 255, 255, 168),
+                                            font_kind: FontKind::Meta,
+                                            flags: DT_LEFT
+                                                | DT_VCENTER
+                                                | DT_SINGLELINE
+                                                | DT_END_ELLIPSIS,
+                                        });
+                                    }
 
                                     canvas.fill_round_rect(
                                         tx_all,

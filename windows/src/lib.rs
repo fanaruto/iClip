@@ -3130,4 +3130,68 @@ mod tests {
             "Alt+单击 / Ctrl+C mono width must be >= 98px, got {cjk_mix_w}"
         );
     }
+
+    #[test]
+    fn test_cf_dib_decoder_preserves_real_alpha_and_promotes_opaque_bgrx() {
+        use crate::canvas_ui::decode_cf_dib_bytes_to_rgba;
+
+        // 1. 经典 Win32 不透明 32bpp BGRX（所有像素 alpha == 0）-> 统一提升为 255 不透明，且 bottom-up 行序翻转正确
+        let mut dib_opaque = vec![0u8; 40 + 8];
+        dib_opaque[0..4].copy_from_slice(&40u32.to_le_bytes());
+        dib_opaque[4..8].copy_from_slice(&2i32.to_le_bytes());
+        dib_opaque[8..12].copy_from_slice(&1i32.to_le_bytes());
+        dib_opaque[12..14].copy_from_slice(&1u16.to_le_bytes());
+        dib_opaque[14..16].copy_from_slice(&32u16.to_le_bytes());
+        // Pixel (0): B=10, G=20, R=30, A=0 ; Pixel (1): B=40, G=50, R=60, A=0
+        dib_opaque[40..44].copy_from_slice(&[10, 20, 30, 0]);
+        dib_opaque[44..48].copy_from_slice(&[40, 50, 60, 0]);
+        let (rgba1, w1, h1) = decode_cf_dib_bytes_to_rgba(&dib_opaque).expect("opaque BGRX DIB");
+        assert_eq!((w1, h1), (2, 1));
+        assert_eq!(&rgba1[0..4], &[30, 20, 10, 255]);
+        assert_eq!(&rgba1[4..8], &[60, 50, 40, 255]);
+
+        // 2. 含真实半透明通道（部分透明 a=0 + 部分不透明 a=180）的 top-down DIBV5：绝不可把 a=0 污损成黑底 a=255
+        let mut dib_alpha = vec![0u8; 124 + 8];
+        dib_alpha[0..4].copy_from_slice(&124u32.to_le_bytes());
+        dib_alpha[4..8].copy_from_slice(&2i32.to_le_bytes());
+        dib_alpha[8..12].copy_from_slice(&(-1i32).to_le_bytes());
+        dib_alpha[12..14].copy_from_slice(&1u16.to_le_bytes());
+        dib_alpha[14..16].copy_from_slice(&32u16.to_le_bytes());
+        dib_alpha[16..20].copy_from_slice(&3u32.to_le_bytes()); // BI_BITFIELDS
+        // RGBA masks (non-BGRA order!)
+        dib_alpha[40..44].copy_from_slice(&0x0000_00FFu32.to_le_bytes());
+        dib_alpha[44..48].copy_from_slice(&0x0000_FF00u32.to_le_bytes());
+        dib_alpha[48..52].copy_from_slice(&0x00FF_0000u32.to_le_bytes());
+        dib_alpha[52..56].copy_from_slice(&0xFF00_0000u32.to_le_bytes());
+        // Pixel 0: transparent edge (0, 0, 0, 0), Pixel 1: translucent color (200, 100, 50, 180)
+        dib_alpha[124..128].copy_from_slice(&[0, 0, 0, 0]);
+        dib_alpha[128..132].copy_from_slice(&[200, 100, 50, 180]);
+        let (rgba2, w2, h2) = decode_cf_dib_bytes_to_rgba(&dib_alpha).expect("alpha DIBV5");
+        assert_eq!((w2, h2), (2, 1));
+        assert_eq!(&rgba2[0..4], &[0, 0, 0, 0]);
+        assert_eq!(&rgba2[4..8], &[200, 100, 50, 180]);
+
+        // 3. BITMAPV4+ 含 BI_BITFIELDS 但 alpha mask == 0 时应按全不透明解码，截断像素缓冲区则返回 None
+        let mut dib_no_amask = dib_alpha.clone();
+        dib_no_amask[52..56].copy_from_slice(&0u32.to_le_bytes());
+        let (rgba3, w3, h3) = decode_cf_dib_bytes_to_rgba(&dib_no_amask).expect("zero amask DIBV5");
+        assert_eq!((w3, h3), (2, 1));
+        assert_eq!(rgba3[3], 255);
+        assert_eq!(rgba3[7], 255);
+        assert!(decode_cf_dib_bytes_to_rgba(&dib_alpha[..dib_alpha.len() - 1]).is_none());
+
+        // 4. V5 + BI_BITFIELDS 头部后额外附带 12 字节冗余 RGB 掩码时，必须自动跳过该 12 字节而不错位 3 像素
+        let mut dib_v5_trailing_masks = Vec::with_capacity(124 + 12 + 8);
+        dib_v5_trailing_masks.extend_from_slice(&dib_alpha[0..124]);
+        dib_v5_trailing_masks.extend_from_slice(&0x0000_00FFu32.to_le_bytes());
+        dib_v5_trailing_masks.extend_from_slice(&0x0000_FF00u32.to_le_bytes());
+        dib_v5_trailing_masks.extend_from_slice(&0x00FF_0000u32.to_le_bytes());
+        dib_v5_trailing_masks.extend_from_slice(&[11, 22, 33, 44]);
+        dib_v5_trailing_masks.extend_from_slice(&[55, 66, 77, 88]);
+        let (rgba4, w4, h4) =
+            decode_cf_dib_bytes_to_rgba(&dib_v5_trailing_masks).expect("V5 trailing BITFIELDS");
+        assert_eq!((w4, h4), (2, 1));
+        assert_eq!(&rgba4[0..4], &[11, 22, 33, 44]);
+        assert_eq!(&rgba4[4..8], &[55, 66, 77, 88]);
+    }
 }

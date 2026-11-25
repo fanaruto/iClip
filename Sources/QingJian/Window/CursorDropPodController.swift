@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 /// 拖拽途中轻按 `⌥`（Option）原地召唤的「光标旁磁吸微落点（Cursor Drop Pod）」：
@@ -41,7 +42,10 @@ final class CursorDropPodController {
     private var dragChangeCountAtMouseDown: Int = 0
     private var wasOptionPressed: Bool = false
     private var hideWorkItem: DispatchWorkItem?
+    private var fadeCompletionWorkItem: DispatchWorkItem?
+    private var fadeCoordinator = ActionSparkFadeCoordinator()
     private var didCompleteDropInCurrentDrag: Bool = false
+    private var appActivityCancellables = Set<AnyCancellable>()
 
     var isMainPanelVisibleProvider: (() -> Bool)?
 
@@ -54,6 +58,16 @@ final class CursorDropPodController {
 
     private init() {
         self.dragChangeCountAtMouseDown = dragPasteboard.changeCount
+        Publishers.Merge(
+            NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification),
+            NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)
+        )
+        .receive(on: RunLoop.main)
+        .sink { [weak self] _ in
+            guard let self, let p = self.panel, p.isVisible else { return }
+            (p as? UnifiedActiveFloatingPanel)?.enforceUnifiedActiveAppearance()
+        }
+        .store(in: &appActivityCancellables)
     }
 
     func startMonitoring() {
@@ -89,8 +103,11 @@ final class CursorDropPodController {
     }
 
     func dismissImmediately() {
+        fadeCoordinator.invalidatePendingFade()
         hideWorkItem?.cancel()
         hideWorkItem = nil
+        fadeCompletionWorkItem?.cancel()
+        fadeCompletionWorkItem = nil
         panel?.orderOut(nil)
     }
 
@@ -102,7 +119,7 @@ final class CursorDropPodController {
             didCompleteDropInCurrentDrag = false
         } else if event.type == .leftMouseUp {
             wasOptionPressed = false
-            if panel?.isVisible == true {
+            if panel?.isVisible == true && !fadeCoordinator.isFadingOut {
                 // 预留 140ms 让 AppKit 先完成 performDragOperation 回调再收起窗口
                 scheduleFadeOut(after: didCompleteDropInCurrentDrag ? 0.58 : 0.14)
             }
@@ -129,7 +146,8 @@ final class CursorDropPodController {
             return
         }
 
-        if panel?.isVisible == true {
+        let isActivelyVisible = (panel?.isVisible == true) && !fadeCoordinator.isFadingOut && fadeCompletionWorkItem == nil && hideWorkItem == nil
+        if isActivelyVisible {
             scheduleFadeOut(after: 0.02)
         } else {
             let isImageDrag = Self.containsImageDragPayload(in: dragPasteboard)
@@ -167,7 +185,11 @@ final class CursorDropPodController {
         guard let panel, let dropReceiver else { return }
         panel.sharingType = (ClipboardStore.shared.screenSharePrivacyEnabled && !ProcessInfo.processInfo.arguments.contains("--demo")) ? .none : .readOnly
 
+        fadeCoordinator.beginPresentation()
         hideWorkItem?.cancel()
+        hideWorkItem = nil
+        fadeCompletionWorkItem?.cancel()
+        fadeCompletionWorkItem = nil
         didCompleteDropInCurrentDrag = false
         dropReceiver.dualImageMode = dualImageMode
         viewModel.state = .ready(dualImageMode: dualImageMode, activeSlot: .none)
@@ -188,6 +210,7 @@ final class CursorDropPodController {
         panel.setFrameOrigin(NSPoint(x: originX, y: originY - 4))
         panel.alphaValue = 0
         panel.orderFrontRegardless()
+        (panel as? UnifiedActiveFloatingPanel)?.enforceUnifiedActiveAppearance()
         TactileFeedbackEngine.shared.performNavigationStepHaptic()
 
         NSAnimationContext.runAnimationGroup { ctx in
@@ -324,17 +347,35 @@ final class CursorDropPodController {
 
     private func scheduleFadeOut(after seconds: Double) {
         hideWorkItem?.cancel()
+        fadeCompletionWorkItem?.cancel()
+        fadeCompletionWorkItem = nil
+        let scheduledEpoch = fadeCoordinator.beginFadeSchedule()
         let work = DispatchWorkItem { [weak self] in
             Task { @MainActor [weak self] in
-                guard let self, let panel = self.panel, panel.isVisible else { return }
+                guard let self,
+                      self.fadeCoordinator.markFadeStarted(for: scheduledEpoch),
+                      let panel = self.panel,
+                      panel.isVisible else { return }
+                self.hideWorkItem = nil
                 NSAnimationContext.runAnimationGroup { ctx in
                     ctx.duration = 0.14
                     ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
                     panel.animator().alphaValue = 0
                 }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-                    self?.panel?.orderOut(nil)
+                let completion = DispatchWorkItem { [weak self] in
+                    Task { @MainActor [weak self] in
+                        guard let self,
+                              self.fadeCoordinator.shouldCompleteFadeOut(scheduledEpoch: scheduledEpoch) else {
+                            return
+                        }
+                        self.fadeCompletionWorkItem = nil
+                        self.hideWorkItem = nil
+                        self.fadeCoordinator.invalidatePendingFade()
+                        self.panel?.orderOut(nil)
+                    }
                 }
+                self.fadeCompletionWorkItem = completion
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: completion)
             }
         }
         hideWorkItem = work
@@ -343,8 +384,11 @@ final class CursorDropPodController {
 
     /// 锁屏、休眠或清扫时立即无动画收起光标微落点悬浮窗
     func dismiss() {
+        fadeCoordinator.invalidatePendingFade()
         hideWorkItem?.cancel()
         hideWorkItem = nil
+        fadeCompletionWorkItem?.cancel()
+        fadeCompletionWorkItem = nil
         wasOptionPressed = false
         didCompleteDropInCurrentDrag = false
         panel?.alphaValue = 0
