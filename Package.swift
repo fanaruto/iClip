@@ -22,7 +22,8 @@ let package = Package(
                 .linkedFramework("Metal"),
                 .linkedFramework("QuartzCore"),
                 .linkedFramework("Speech"),
-                .linkedFramework("AVFoundation")
+                .linkedFramework("AVFoundation"),
+                .linkedFramework("ScreenCaptureKit")
             ]
         ),
         .testTarget(

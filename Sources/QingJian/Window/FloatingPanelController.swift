@@ -1075,9 +1075,10 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     }
 
     private func commitRecordedShortcut(_ newShortcut: HotKeyShortcut) -> NSEvent? {
+        let role = nav.recordingHotKeySlot ?? .mainToggle
         if let conflictReason = HotKeyManager.shared.validateAndProbeShortcut(
             newShortcut,
-            for: .mainToggle,
+            for: role,
             copyAppendEnabled: AdaptiveIntelligenceEngine.shared.copyAppendEnabled && !store.minimalModeEnabled
         ) {
             NSSound.beep()
@@ -1090,9 +1091,15 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         nav.hotKeyConflictWarning = nil
         nav.hotKeyRecordingHint = nil
         nav.isRecordingHotKey = false
-        store.hotKeyShortcut = newShortcut
+        nav.recordingHotKeySlot = nil
+        if role == .screenshot {
+            store.screenshotHotKeyShortcut = newShortcut
+            store.showToast("截图快捷键已更新为 \(newShortcut.displayString)")
+        } else {
+            store.hotKeyShortcut = newShortcut
+            store.showToast("全局快捷键已更新为 \(newShortcut.displayString)")
+        }
         HotKeyManager.shared.resumeAfterRecording()
-        store.showToast("全局快捷键已更新为 \(newShortcut.displayString)")
         return nil
     }
 

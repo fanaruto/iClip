@@ -62,6 +62,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         HotKeyManager.shared.unregister()
+        ScreenshotOverlayController.shared.dismissImmediately()
         FloatingSpriteOrbController.shared.stop()
         CursorDropPodController.shared.stopMonitoring()
         BigBangStageController.shared.dismissImmediatelyAndPurge()
@@ -136,6 +137,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let openItem = NSMenuItem(title: "打开 iClip（\(shortcutText)）", action: #selector(menuOpenPanel), keyEquivalent: "")
         openItem.target = self
         menu.addItem(openItem)
+
+        let shotText = ClipboardStore.shared.screenshotHotKeyShortcut.compactDisplayString
+        let screenshotItem = NSMenuItem(title: "区域 / 窗口截图（\(shotText)）", action: #selector(menuTriggerScreenshot), keyEquivalent: "")
+        screenshotItem.target = self
+        menu.addItem(screenshotItem)
 
         let checkUpdateItem = NSMenuItem(title: "偏好设置与检查更新...", action: #selector(menuOpenRoleSettings), keyEquivalent: ",")
         checkUpdateItem.target = self
@@ -225,6 +231,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         showFromStatusItem()
     }
 
+    @objc private func menuTriggerScreenshot() {
+        ScreenshotOverlayController.shared.startCapture(store: ClipboardStore.shared)
+    }
+
     @objc private func menuOpenTodoList() {
         let store = ClipboardStore.shared
         if store.minimalModeEnabled {
@@ -303,6 +313,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         HotKeyManager.shared.registerToggleHotKey(shortcut: ClipboardStore.shared.hotKeyShortcut) { [weak self] in
             Task { @MainActor [weak self] in
                 self?.panelController.toggle(anchorRect: nil, isFromGlobalHotKey: true)
+            }
+        }
+        HotKeyManager.shared.registerScreenshotHotKey(shortcut: ClipboardStore.shared.screenshotHotKeyShortcut) {
+            Task { @MainActor in
+                ScreenshotOverlayController.shared.startCapture(store: ClipboardStore.shared)
             }
         }
         HotKeyManager.shared.registerCopyAppendHotKey { [weak self] in

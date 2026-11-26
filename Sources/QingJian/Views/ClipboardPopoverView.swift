@@ -39,7 +39,14 @@ final class PanelNavigationModel: ObservableObject {
     @Published var isPresented: Bool = false
     @Published var presentationEpoch: Int = 0
     @Published var scrollRequestEpoch: Int = 0
-    @Published var isRecordingHotKey: Bool = false
+    @Published var isRecordingHotKey: Bool = false {
+        didSet {
+            if !isRecordingHotKey {
+                recordingHotKeySlot = nil
+            }
+        }
+    }
+    @Published var recordingHotKeySlot: HotKeySlotRole? = nil
     @Published var hotKeyConflictWarning: String? = nil
     @Published var hotKeyRecordingHint: String? = nil
     @Published var isEditingAlias: Bool = false
@@ -473,6 +480,7 @@ struct ClipboardPopoverView: View {
                     onStartHotKeyRecording: {
                         nav.hotKeyConflictWarning = nil
                         HotKeyManager.shared.suspendForRecording()
+                        nav.recordingHotKeySlot = .mainToggle
                         nav.isRecordingHotKey = true
                     },
                     onStopHotKeyRecording: {
@@ -2078,51 +2086,56 @@ struct ClipboardPopoverView: View {
 
                     Divider().opacity(0.35)
 
+                    let isRecordingMain = nav.isRecordingHotKey && (nav.recordingHotKeySlot == nil || nav.recordingHotKeySlot == .mainToggle)
+                    let isRecordingShot = nav.isRecordingHotKey && nav.recordingHotKeySlot == .screenshot
+
                     HStack(spacing: 8) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("全局呼出快捷键")
                                 .font(.system(size: 13.5, weight: .medium))
-                            if nav.isRecordingHotKey, let conflict = nav.hotKeyConflictWarning {
+                            if isRecordingMain, let conflict = nav.hotKeyConflictWarning {
                                 Text(conflict)
                                     .font(.system(size: 11, weight: .medium))
                                     .foregroundStyle(.red)
-                            } else if nav.isRecordingHotKey, let hint = nav.hotKeyRecordingHint {
+                            } else if isRecordingMain, let hint = nav.hotKeyRecordingHint {
                                 Text(hint)
                                     .font(.system(size: 11, weight: .medium))
                                     .foregroundStyle(Color.accentColor)
                             } else {
-                                Text(nav.isRecordingHotKey ? "按下组合键，或双击 ⌘/⌥/⌃/⇧ 单键（ESC 取消）" : "点击录制组合键或双击 ⌘/⌥/⌃/⇧ 单键")
+                                Text(isRecordingMain ? "按下组合键，或双击 ⌘/⌥/⌃/⇧ 单键（ESC 取消）" : "点击录制组合键或双击 ⌘/⌥/⌃/⇧ 单键")
                                     .font(.system(size: 11.5))
-                                    .foregroundStyle(nav.isRecordingHotKey ? Color.accentColor : .secondary)
+                                    .foregroundStyle(isRecordingMain ? Color.accentColor : .secondary)
                             }
                         }
                         Spacer()
 
                         Button {
-                            if nav.isRecordingHotKey {
+                            if isRecordingMain {
                                 nav.isRecordingHotKey = false
                                 nav.hotKeyConflictWarning = nil
                                 HotKeyManager.shared.resumeAfterRecording()
                             } else {
                                 nav.hotKeyConflictWarning = nil
+                                nav.hotKeyRecordingHint = nil
                                 HotKeyManager.shared.suspendForRecording()
+                                nav.recordingHotKeySlot = .mainToggle
                                 nav.isRecordingHotKey = true
                             }
                         } label: {
-                            let hasConflict = nav.isRecordingHotKey && nav.hotKeyConflictWarning != nil
-                            Text(hasConflict ? "冲突 · 请重按" : (nav.isRecordingHotKey ? "等待按键..." : store.hotKeyShortcut.displayString))
+                            let hasConflict = isRecordingMain && nav.hotKeyConflictWarning != nil
+                            Text(hasConflict ? "冲突 · 请重按" : (isRecordingMain ? "等待按键..." : store.hotKeyShortcut.displayString))
                                 .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(nav.isRecordingHotKey ? .white : .primary)
+                                .foregroundStyle(isRecordingMain ? .white : .primary)
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 5)
                                 .background(
                                     Capsule()
-                                        .fill(hasConflict ? Color.red : (nav.isRecordingHotKey ? Color.accentColor : Color.primary.opacity(0.08)))
+                                        .fill(hasConflict ? Color.red : (isRecordingMain ? Color.accentColor : Color.primary.opacity(0.08)))
                                 )
                         }
                         .buttonStyle(PhysicalSpringButtonStyle())
 
-                        if store.hotKeyShortcut != .defaultShortcut && !nav.isRecordingHotKey {
+                        if store.hotKeyShortcut != .defaultShortcut && !isRecordingMain {
                             Button {
                                 nav.hotKeyConflictWarning = nil
                                 store.hotKeyShortcut = .defaultShortcut
@@ -2136,6 +2149,71 @@ struct ClipboardPopoverView: View {
                             }
                             .buttonStyle(PhysicalSpringButtonStyle())
                             .help("恢复默认 ⌥ V")
+                        }
+                    }
+
+                    Divider().opacity(0.35)
+
+                    HStack(spacing: 8) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("截图快捷键")
+                                .font(.system(size: 13.5, weight: .medium))
+                            if isRecordingShot, let conflict = nav.hotKeyConflictWarning {
+                                Text(conflict)
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundStyle(.red)
+                            } else if isRecordingShot, let hint = nav.hotKeyRecordingHint {
+                                Text(hint)
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundStyle(Color.accentColor)
+                            } else {
+                                Text(isRecordingShot ? "按下组合键，或双击修饰键（ESC 取消）" : "自动吸附窗口与自由框选（默认 ⌥ A）")
+                                    .font(.system(size: 11.5))
+                                    .foregroundStyle(isRecordingShot ? Color.accentColor : .secondary)
+                            }
+                        }
+                        Spacer()
+
+                        Button {
+                            if isRecordingShot {
+                                nav.isRecordingHotKey = false
+                                nav.hotKeyConflictWarning = nil
+                                HotKeyManager.shared.resumeAfterRecording()
+                            } else {
+                                nav.hotKeyConflictWarning = nil
+                                nav.hotKeyRecordingHint = nil
+                                HotKeyManager.shared.suspendForRecording()
+                                nav.recordingHotKeySlot = .screenshot
+                                nav.isRecordingHotKey = true
+                            }
+                        } label: {
+                            let hasConflict = isRecordingShot && nav.hotKeyConflictWarning != nil
+                            Text(hasConflict ? "冲突 · 请重按" : (isRecordingShot ? "等待按键..." : store.screenshotHotKeyShortcut.displayString))
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(isRecordingShot ? .white : .primary)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(
+                                    Capsule()
+                                        .fill(hasConflict ? Color.red : (isRecordingShot ? Color.accentColor : Color.primary.opacity(0.08)))
+                                )
+                        }
+                        .buttonStyle(PhysicalSpringButtonStyle())
+
+                        if store.screenshotHotKeyShortcut != .defaultScreenshotShortcut && !isRecordingShot {
+                            Button {
+                                nav.hotKeyConflictWarning = nil
+                                store.screenshotHotKeyShortcut = .defaultScreenshotShortcut
+                                store.showToast("已恢复默认截图快捷键 ⌥ A")
+                            } label: {
+                                Image(systemName: "arrow.uturn.backward")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 22, height: 22)
+                                    .background(Circle().fill(Color.primary.opacity(0.07)))
+                            }
+                            .buttonStyle(PhysicalSpringButtonStyle())
+                            .help("恢复默认 ⌥ A")
                         }
                     }
 
@@ -2230,6 +2308,8 @@ struct ClipboardPopoverView: View {
                     if showShortcutReference {
                         Divider().opacity(0.35)
                         shortcutRow("鼠标旁呼出 / 隐藏", store.hotKeyShortcut.displayString)
+                        Divider().opacity(0.35)
+                        shortcutRow("区域 / 窗口截图（按住 ⌘ 松手秒复制）", store.screenshotHotKeyShortcut.displayString)
                         Divider().opacity(0.35)
                         shortcutRow(
                             "直接键入光标所在区域",

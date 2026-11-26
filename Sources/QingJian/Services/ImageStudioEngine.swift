@@ -308,65 +308,7 @@ enum ImageStudioEngine {
                 return nil
             }
 
-            let width = srcCG.width
-            let height = srcCG.height
-            guard width > 0, height > 0 else { return nil }
-
-            let barcodeReq = VNDetectBarcodesRequest()
-            barcodeReq.symbologies = [.qr, .aztec, .dataMatrix, .pdf417]
-            let textReq = VNRecognizeTextRequest()
-            textReq.recognitionLevel = .accurate
-            textReq.usesLanguageCorrection = true
-            textReq.recognitionLanguages = ["zh-Hans", "zh-Hant", "en-US"]
-
-            let handler = VNImageRequestHandler(cgImage: srcCG, options: [:])
-            try? handler.perform([barcodeReq, textReq])
-
-            var normBoxes: [CGRect] = []
-            if let barcodes = barcodeReq.results {
-                for b in barcodes {
-                    normBoxes.append(b.boundingBox)
-                }
-            }
-
-            if let textObsList = textReq.results {
-                for obs in textObsList {
-                    guard let top = obs.topCandidates(1).first else { continue }
-                    let str = top.string
-                    let fullNSRange = NSRange(str.startIndex..<str.endIndex, in: str)
-                    var matchedSubBox = false
-
-                    for (rx, grp) in imageInlineSecretRegexes {
-                        for m in rx.matches(in: str, range: fullNSRange) {
-                            let targetNS = (grp < m.numberOfRanges && m.range(at: grp).location != NSNotFound)
-                                ? m.range(at: grp)
-                                : m.range
-                            if let swiftRange = Range(targetNS, in: str) {
-                                let tokenStr = String(str[swiftRange])
-                                // 对 18 位身份证与银行卡做校验位过滤，杜绝误打码普通单号
-                                if tokenStr.count == 18, tokenStr.first?.isNumber == true,
-                                   !SensitiveCredentialVeil.isValidChineseIDCard18(tokenStr) {
-                                    continue
-                                }
-                                if (15...19).contains(tokenStr.count), tokenStr.allSatisfy(\.isNumber),
-                                   !SensitiveCredentialVeil.isValidBankCardLuhn(tokenStr) {
-                                    continue
-                                }
-                                if let subBox = try? top.boundingBox(for: swiftRange)?.boundingBox {
-                                    normBoxes.append(subBox)
-                                } else {
-                                    normBoxes.append(obs.boundingBox)
-                                }
-                                matchedSubBox = true
-                            }
-                        }
-                    }
-
-                    if !matchedSubBox && SensitiveCredentialVeil.classify(str) != nil {
-                        normBoxes.append(obs.boundingBox)
-                    }
-                }
-            }
+            let normBoxes = detectSensitiveNormalizedBoxes(in: srcCG)
 
             guard !normBoxes.isEmpty else {
                 return (ProcessedImageResult(data: imageData, utType: .png, byteCount: imageData.count), 0)
@@ -374,6 +316,71 @@ enum ImageStudioEngine {
 
             return renderMosaicBoxes(normBoxes, onto: srcCG)
         }
+    }
+
+    /// 离线检测 CGImage 中包含的二维码与敏感文字（手机号、身份证、银行卡、邮箱、密钥）归一化包围盒（左下角原点 `[0, 1]`）
+    static func detectSensitiveNormalizedBoxes(in srcCG: CGImage) -> [CGRect] {
+        let width = srcCG.width
+        let height = srcCG.height
+        guard width > 0, height > 0 else { return [] }
+
+        let barcodeReq = VNDetectBarcodesRequest()
+        barcodeReq.symbologies = [.qr, .aztec, .dataMatrix, .pdf417]
+        let textReq = VNRecognizeTextRequest()
+        textReq.recognitionLevel = .accurate
+        textReq.usesLanguageCorrection = true
+        textReq.recognitionLanguages = ["zh-Hans", "zh-Hant", "en-US"]
+
+        let handler = VNImageRequestHandler(cgImage: srcCG, options: [:])
+        try? handler.perform([barcodeReq, textReq])
+
+        var normBoxes: [CGRect] = []
+        if let barcodes = barcodeReq.results {
+            for b in barcodes {
+                normBoxes.append(b.boundingBox)
+            }
+        }
+
+        if let textObsList = textReq.results {
+            for obs in textObsList {
+                guard let top = obs.topCandidates(1).first else { continue }
+                let str = top.string
+                let fullNSRange = NSRange(str.startIndex..<str.endIndex, in: str)
+                var matchedSubBox = false
+
+                for (rx, grp) in imageInlineSecretRegexes {
+                    for m in rx.matches(in: str, range: fullNSRange) {
+                        let targetNS = (grp < m.numberOfRanges && m.range(at: grp).location != NSNotFound)
+                            ? m.range(at: grp)
+                            : m.range
+                        if let swiftRange = Range(targetNS, in: str) {
+                            let tokenStr = String(str[swiftRange])
+                            // 对 18 位身份证与银行卡做校验位过滤，杜绝误打码普通单号
+                            if tokenStr.count == 18, tokenStr.first?.isNumber == true,
+                               !SensitiveCredentialVeil.isValidChineseIDCard18(tokenStr) {
+                                continue
+                            }
+                            if (15...19).contains(tokenStr.count), tokenStr.allSatisfy(\.isNumber),
+                               !SensitiveCredentialVeil.isValidBankCardLuhn(tokenStr) {
+                                continue
+                            }
+                            if let subBox = try? top.boundingBox(for: swiftRange)?.boundingBox {
+                                normBoxes.append(subBox)
+                            } else {
+                                normBoxes.append(obs.boundingBox)
+                            }
+                            matchedSubBox = true
+                        }
+                    }
+                }
+
+                if !matchedSubBox && SensitiveCredentialVeil.classify(str) != nil {
+                    normBoxes.append(obs.boundingBox)
+                }
+            }
+        }
+
+        return normBoxes
     }
 
     /// 在给定 CGImage 的指定归一化矩形列表（左下角原点）上合成物理不可逆圆角晶格马赛克（公开供单测验证像素擦除）

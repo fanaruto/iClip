@@ -5617,4 +5617,155 @@ final class CoreFeatureTests: XCTestCase {
         XCTAssertNotNil(lib.makeFunction(name: "spriteOrbVertex"))
         XCTAssertNotNil(lib.makeFunction(name: "spriteOrbFragment"))
     }
+
+    func testScreenshotHotKeyDefaultConflictAndValidation() {
+        let shotDefault = HotKeyShortcut.defaultScreenshotShortcut
+        XCTAssertEqual(shotDefault.displayString, "⌥ A")
+        XCTAssertEqual(shotDefault.compactDisplayString, "⌥A")
+
+        let conflictingSystemShot = HotKeyShortcut(keyCode: UInt32(kVK_ANSI_4), carbonModifiers: UInt32(cmdKey | shiftKey))
+        XCTAssertNotNil(
+            HotKeyConflictValidator.staticConflictReason(
+                for: conflictingSystemShot,
+                role: .screenshot,
+                existingOwnShortcut: shotDefault,
+                otherBindings: [(HotKeyShortcut.defaultShortcut, "全局呼出快捷键")]
+            )
+        )
+
+        XCTAssertNotNil(
+            HotKeyConflictValidator.staticConflictReason(
+                for: .defaultShortcut,
+                role: .screenshot,
+                existingOwnShortcut: shotDefault,
+                otherBindings: [(HotKeyShortcut.defaultShortcut, "全局呼出快捷键")]
+            )
+        )
+
+        XCTAssertNil(
+            HotKeyConflictValidator.staticConflictReason(
+                for: shotDefault,
+                role: .screenshot,
+                existingOwnShortcut: shotDefault,
+                otherBindings: [(HotKeyShortcut.defaultShortcut, "全局呼出快捷键")]
+            )
+        )
+    }
+
+    func testScreenshotGeometryWindowSnapSquareLockMoveAndToolbarPlacement() {
+        let bounds = CGRect(x: 0, y: 0, width: 1440, height: 900)
+
+        // 1. 反向拖拽矩形规范化与 ⇧ 正方锁定
+        let rev = ScreenshotGeometryEngine.normalizedRect(
+            from: CGPoint(x: 300, y: 300),
+            to: CGPoint(x: 120, y: 180),
+            lockSquare: false,
+            bounds: bounds
+        )
+        XCTAssertEqual(rev, CGRect(x: 120, y: 180, width: 180, height: 120))
+
+        let locked = ScreenshotGeometryEngine.normalizedRect(
+            from: CGPoint(x: 100, y: 100),
+            to: CGPoint(x: 260, y: 180),
+            lockSquare: true,
+            bounds: bounds
+        )
+        XCTAssertEqual(locked.width, locked.height, accuracy: 0.1)
+        XCTAssertEqual(locked.width, 160, accuracy: 0.1)
+
+        // 2. 空格平移选区边界钳制
+        let moved = ScreenshotGeometryEngine.translateRect(
+            CGRect(x: 1300, y: 800, width: 100, height: 80),
+            delta: CGVector(dx: 200, dy: 200),
+            within: bounds
+        )
+        XCTAssertEqual(moved.maxX, 1440, accuracy: 0.1)
+        XCTAssertEqual(moved.maxY, 900, accuracy: 0.1)
+
+        // 3. 窗口 Z 序自动吸附（跳过过小窗口、优先命中顶层窗口）
+        let windows = [
+            SnappableWindowRect(windowID: 1, ownerName: "Tiny", rect: CGRect(x: 50, y: 50, width: 10, height: 10)),
+            SnappableWindowRect(windowID: 2, ownerName: "FrontApp", rect: CGRect(x: 100, y: 100, width: 500, height: 400)),
+            SnappableWindowRect(windowID: 3, ownerName: "BackApp", rect: CGRect(x: 0, y: 0, width: 1200, height: 800))
+        ]
+        XCTAssertEqual(ScreenshotGeometryEngine.snappedWindowRect(at: CGPoint(x: 200, y: 200), windows: windows)?.ownerName, "FrontApp")
+        XCTAssertEqual(ScreenshotGeometryEngine.snappedWindowRect(at: CGPoint(x: 55, y: 55), windows: windows)?.ownerName, "BackApp")
+
+        // 4. 操作岛防溢出定位（常规下方 / 近底翻转上方 / 满屏内嵌）
+        let toolSize = CGSize(width: 472, height: 46)
+        let normalSelection = CGRect(x: 400, y: 300, width: 320, height: 220)
+        let belowToolbar = ScreenshotGeometryEngine.toolbarOrigin(for: normalSelection, toolbarSize: toolSize, bounds: bounds)
+        XCTAssertLessThan(belowToolbar.y + toolSize.height, normalSelection.minY)
+        XCTAssertGreaterThanOrEqual(belowToolbar.y, bounds.minY)
+
+        let bottomSelection = CGRect(x: 400, y: 12, width: 320, height: 180)
+        let flippedAbove = ScreenshotGeometryEngine.toolbarOrigin(for: bottomSelection, toolbarSize: toolSize, bounds: bounds)
+        XCTAssertGreaterThanOrEqual(flippedAbove.y, bottomSelection.maxY)
+        XCTAssertLessThanOrEqual(flippedAbove.y + toolSize.height, bounds.maxY)
+
+        let fullSelection = CGRect(x: 0, y: 0, width: 1440, height: 900)
+        let insetFull = ScreenshotGeometryEngine.toolbarOrigin(for: fullSelection, toolbarSize: toolSize, bounds: bounds)
+        XCTAssertGreaterThanOrEqual(insetFull.x, bounds.minX)
+        XCTAssertGreaterThanOrEqual(insetFull.y, bounds.minY)
+        XCTAssertLessThanOrEqual(insetFull.x + toolSize.width, bounds.maxX)
+        XCTAssertLessThanOrEqual(insetFull.y + toolSize.height, bounds.maxY)
+
+        // 5. 8 向句柄缩放
+        let handle = ScreenshotGeometryEngine.hitTestHandle(at: CGPoint(x: normalSelection.maxX, y: normalSelection.minY), in: normalSelection)
+        XCTAssertEqual(handle, .bottomRight)
+        let resized = ScreenshotGeometryEngine.resizedRect(from: normalSelection, handle: .bottomRight, to: CGPoint(x: 800, y: 250), bounds: bounds)
+        XCTAssertEqual(resized.maxX, 800, accuracy: 0.1)
+        XCTAssertEqual(resized.minY, 250, accuracy: 0.1)
+    }
+
+    func testScreenshotAnnotationEngineCompositeRenderAndUndoStepCounter() throws {
+        // 1. 生成纯色 240×160 测试底图
+        let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
+        guard let bgCtx = CGContext(
+            data: nil,
+            width: 240,
+            height: 160,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            XCTFail("Unable to create bitmap context")
+            return
+        }
+        bgCtx.setFillColor(CGColor(srgbRed: 0.12, green: 0.24, blue: 0.48, alpha: 1.0))
+        bgCtx.fill(CGRect(x: 0, y: 0, width: 240, height: 160))
+        let baseCG = try XCTUnwrap(bgCtx.makeImage())
+
+        // 2. 验证序号徽章自动递增与撤销回退
+        var anns: [ScreenshotAnnotation] = [
+            ScreenshotAnnotation(kind: .rectangle(rect: CGRect(x: 20, y: 20, width: 80, height: 50), colorHex: "#FF3B30", lineWidth: 3.0)),
+            ScreenshotAnnotation(kind: .arrow(start: CGPoint(x: 30, y: 30), end: CGPoint(x: 110, y: 90), colorHex: "#1E5EFF", lineWidth: 4.0)),
+            ScreenshotAnnotation(kind: .mosaic(points: [CGPoint(x: 50, y: 50), CGPoint(x: 75, y: 60)], brushWidth: 20)),
+            ScreenshotAnnotation(kind: .brush(points: [CGPoint(x: 40, y: 80), CGPoint(x: 85, y: 95)], colorHex: "#10B981", lineWidth: 3.5)),
+            ScreenshotAnnotation(kind: .text(origin: CGPoint(x: 60, y: 70), text: "测试批注", colorHex: "#FFFFFF", fontSize: 16)),
+            ScreenshotAnnotation(kind: .privacyMosaic(rects: [CGRect(x: 40, y: 25, width: 50, height: 16)])),
+            ScreenshotAnnotation(kind: .stepBadge(center: CGPoint(x: 90, y: 60), number: 1, colorHex: "#F59E0B")),
+            ScreenshotAnnotation(kind: .stepBadge(center: CGPoint(x: 120, y: 80), number: 2, colorHex: "#F59E0B"))
+        ]
+        XCTAssertEqual(ScreenshotAnnotation.nextStepNumber(in: anns), 3)
+        _ = anns.popLast()
+        XCTAssertEqual(ScreenshotAnnotation.nextStepNumber(in: anns), 2)
+
+        // 3. 合成导出裁切与 PNG 验证（120×80pt 在 120×80 viewBounds=240×160 Retina2x 下对应 160×100px）
+        let viewBounds = CGRect(x: 0, y: 0, width: 120, height: 80)
+        let cropRect = CGRect(x: 10, y: 15, width: 80, height: 50)
+        let rendered = try XCTUnwrap(
+            ScreenshotAnnotationRenderer.renderCompositeImage(
+                baseImage: baseCG,
+                cropRectInViewPoints: cropRect,
+                viewBounds: viewBounds,
+                annotations: anns
+            )
+        )
+        XCTAssertEqual(rendered.cgImage.width, 160)
+        XCTAssertEqual(rendered.cgImage.height, 100)
+        let bytes = [UInt8](rendered.pngData.prefix(4))
+        XCTAssertEqual(bytes, [0x89, 0x50, 0x4E, 0x47])
+    }
 }

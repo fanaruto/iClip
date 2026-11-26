@@ -2354,6 +2354,11 @@ final class FloatingSpriteOrbController {
         toggleItem.target = self
         menu.addItem(toggleItem)
 
+        let shotShortcut = boundStore?.screenshotHotKeyShortcut.compactDisplayString ?? HotKeyShortcut.defaultScreenshotShortcut.compactDisplayString
+        let screenshotItem = NSMenuItem(title: "区域 / 窗口截图（\(shotShortcut)）", action: #selector(contextStartScreenshot), keyEquivalent: "")
+        screenshotItem.target = self
+        menu.addItem(screenshotItem)
+
         let todoItem = NSMenuItem(title: "打开待办清单", action: #selector(contextOpenTodos), keyEquivalent: "")
         todoItem.target = self
         menu.addItem(todoItem)
@@ -2409,6 +2414,11 @@ final class FloatingSpriteOrbController {
         if let orbCore = visibleOrbCoreScreenFrame {
             onToggleClipboardPanel?(orbCore)
         }
+    }
+
+    @objc private func contextStartScreenshot() {
+        guard let store = boundStore else { return }
+        ScreenshotOverlayController.shared.startCapture(store: store)
     }
 
     @objc private func contextOpenTodos() {

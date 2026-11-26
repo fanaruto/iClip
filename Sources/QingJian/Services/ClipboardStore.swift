@@ -547,6 +547,14 @@ final class ClipboardStore: ObservableObject {
             _ = HotKeyManager.shared.updateShortcut(hotKeyShortcut)
         }
     }
+    @Published var screenshotHotKeyShortcut: HotKeyShortcut {
+        didSet {
+            if let data = try? JSONEncoder().encode(screenshotHotKeyShortcut) {
+                UserDefaults.standard.set(data, forKey: "screenshotHotKeyShortcut")
+            }
+            _ = HotKeyManager.shared.updateScreenshotShortcut(screenshotHotKeyShortcut)
+        }
+    }
 
     /// [极客开发版] 复制含营销追踪尾巴的链接时自动净链
     @Published var autoCleanTrackingURL: Bool {
@@ -682,6 +690,13 @@ final class ClipboardStore: ObservableObject {
             self.hotKeyShortcut = decodedShortcut
         } else {
             self.hotKeyShortcut = .defaultShortcut
+        }
+
+        if let screenshotData = UserDefaults.standard.data(forKey: "screenshotHotKeyShortcut"),
+           let decodedScreenshot = try? JSONDecoder().decode(HotKeyShortcut.self, from: screenshotData) {
+            self.screenshotHotKeyShortcut = decodedScreenshot
+        } else {
+            self.screenshotHotKeyShortcut = .defaultScreenshotShortcut
         }
 
         self.autoCleanTrackingURL = UserDefaults.standard.object(forKey: "autoCleanTrackingURL") as? Bool ?? false
@@ -2709,6 +2724,67 @@ final class ClipboardStore: ObservableObject {
             sourceApp: sourceApp
         )
         showToast(toastTitle)
+    }
+
+    /// 同步写入原生截图 PNG（生成 PNG + TIFF 双格式剪贴板、加密归档并即时返回顶部 ClipItem 供 OCR / 大爆炸直接联动）
+    @discardableResult
+    func commitCapturedScreenshotPNG(
+        _ pngData: Data,
+        sourceApp: String = "iClip 截图",
+        toastTitle: String = "截图已复制到剪贴板"
+    ) -> ClipItem? {
+        guard let normalized = Self.normalizeImageForClipboard(from: pngData) else { return nil }
+        let finalPNG = normalized.pngData
+
+        pasteboard.clearContents()
+        pasteboard.setData(finalPNG, forType: .png)
+        pasteboard.setData(normalized.tiffData, forType: .tiff)
+        ignoreNextChangeCount = pasteboard.changeCount
+        lastChangeCount = pasteboard.changeCount
+
+        let hash = Self.sha256(finalPNG)
+        let contentHash = "img:\(hash)"
+        let dims = Self.pixelDimensions(from: finalPNG)
+
+        if let existingIndex = items.firstIndex(where: { $0.contentHash == contentHash }) {
+            var existing = items.remove(at: existingIndex)
+            existing.createdAt = Date()
+            existing.sourceAppName = sourceApp
+            items.insert(existing, at: 0)
+            items = sortItems(items)
+            saveHistory()
+            FloatingSpriteOrbController.shared.notifyClipboardCaptured(itemType: .image, previewText: nil)
+            showToast(toastTitle)
+            return existing
+        }
+
+        try? FileManager.default.createDirectory(at: imagesDirectoryURL, withIntermediateDirectories: true)
+        let fileName = "\(UUID().uuidString).png"
+        let fileURL = imagesDirectoryURL.appendingPathComponent(fileName)
+        do {
+            try LocalVaultCrypto.writeEncryptedImage(finalPNG, to: fileURL)
+        } catch {
+            return nil
+        }
+
+        let item = ClipItem(
+            type: .image,
+            imageFileName: fileName,
+            imageWidth: dims.width,
+            imageHeight: dims.height,
+            contentHash: contentHash,
+            sourceAppName: sourceApp
+        )
+        if let thumb = Self.decodeImage(at: fileURL, maxPixelSize: 360) {
+            thumbnailCache.setObject(thumb, forKey: fileName as NSString, cost: Self.estimatedCost(of: thumb))
+        }
+        insertOrPromote(item)
+
+        if !minimalModeEnabled {
+            scheduleBackgroundOCR(forItemID: item.id, fileURL: fileURL)
+        }
+        showToast(toastTitle)
+        return items.first(where: { $0.id == item.id }) ?? item
     }
 
     /// 将刚通过拖放导入的内存图像字节零竞态渲染为苹果风圆角柔和阴影样机图，并写入系统剪贴板

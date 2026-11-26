@@ -215,6 +215,12 @@ struct HotKeyShortcut: Codable, Equatable {
         carbonModifiers: UInt32(controlKey | optionKey)
     )
 
+    /// 默认原生区域/窗口截图快捷键：Option + A
+    static let defaultScreenshotShortcut = HotKeyShortcut(
+        keyCode: UInt32(kVK_ANSI_A),
+        carbonModifiers: UInt32(optionKey)
+    )
+
     /// 供界面显示的苹果标准符号串（例如 "⌥ V"、"⌃ ⌥ V"、"双击 ⌘"）
     var displayString: String {
         if let kind = doubleTapModifier {
@@ -328,6 +334,7 @@ enum HotKeySlotRole: Equatable {
     case mainToggle
     case queuePop
     case copyAppend
+    case screenshot
 }
 
 /// 快捷键全链路冲突检测器（一旦命中冲突即返回明确拦截原因，禁止设定保存）
@@ -555,15 +562,18 @@ final class HotKeyManager {
     private var toggleHotKeyRef: EventHotKeyRef?
     private var queueHotKeyRef: EventHotKeyRef?
     private var copyAppendHotKeyRef: EventHotKeyRef?
+    private var screenshotHotKeyRef: EventHotKeyRef?
     private var eventHandlerRef: EventHandlerRef?
 
     private var onToggleTrigger: (() -> Void)?
     private var onQueueTrigger: (() -> Void)?
     private var onCopyAppendTrigger: (() -> Void)?
+    private var onScreenshotTrigger: (() -> Void)?
 
     private var currentShortcut: HotKeyShortcut = .defaultShortcut
     private var currentQueueShortcut: HotKeyShortcut = .defaultQueueShortcut
     private var currentCopyAppendShortcut: HotKeyShortcut = .defaultCopyAppendShortcut
+    private var currentScreenshotShortcut: HotKeyShortcut = .defaultScreenshotShortcut
 
     private var globalFlagsMonitor: Any?
     private var localFlagsMonitor: Any?
@@ -608,6 +618,8 @@ final class HotKeyManager {
                         manager.onQueueTrigger?()
                     } else if id == 3 {
                         manager.onCopyAppendTrigger?()
+                    } else if id == 4 {
+                        manager.onScreenshotTrigger?()
                     }
                 }
                 return noErr
@@ -733,6 +745,46 @@ final class HotKeyManager {
         return regStatus == noErr
     }
 
+    @discardableResult
+    func registerScreenshotHotKey(shortcut: HotKeyShortcut = .defaultScreenshotShortcut, action: @escaping () -> Void) -> Bool {
+        self.onScreenshotTrigger = action
+        self.currentScreenshotShortcut = shortcut
+
+        if let ref = screenshotHotKeyRef {
+            UnregisterEventHotKey(ref)
+            screenshotHotKeyRef = nil
+        }
+
+        if shortcut.isDoubleTap {
+            refreshDoubleTapMonitors()
+            return true
+        }
+
+        refreshDoubleTapMonitors()
+        guard ensureEventHandlerInstalled() else { return false }
+
+        let hotKeyID = EventHotKeyID(signature: OSType(0x514A434C), id: 4)
+        var regStatus = RegisterEventHotKey(
+            shortcut.keyCode,
+            shortcut.carbonModifiers,
+            hotKeyID,
+            GetApplicationEventTarget(),
+            OptionBits(kEventHotKeyExclusive),
+            &screenshotHotKeyRef
+        )
+        if regStatus == eventHotKeyExistsErr {
+            regStatus = RegisterEventHotKey(
+                shortcut.keyCode,
+                shortcut.carbonModifiers,
+                hotKeyID,
+                GetApplicationEventTarget(),
+                0,
+                &screenshotHotKeyRef
+            )
+        }
+        return regStatus == noErr
+    }
+
     /// 录制设定新快捷键时的硬性冲突检测：一旦与系统核心键、系统启用热键、本应用其他热键或其他运行中应用冲突，返回原因并拒绝保存
     func validateAndProbeShortcut(
         _ candidate: HotKeyShortcut,
@@ -751,17 +803,35 @@ final class HotKeyManager {
             if copyAppendEnabled && onCopyAppendTrigger != nil {
                 others.append((currentCopyAppendShortcut, "跨处续接复制"))
             }
+            if onScreenshotTrigger != nil {
+                others.append((currentScreenshotShortcut, "区域/窗口截图"))
+            }
         case .queuePop:
             existingOwn = currentQueueShortcut
             others.append((currentShortcut, "全局呼出快捷键"))
             if copyAppendEnabled && onCopyAppendTrigger != nil {
                 others.append((currentCopyAppendShortcut, "跨处续接复制"))
             }
+            if onScreenshotTrigger != nil {
+                others.append((currentScreenshotShortcut, "区域/窗口截图"))
+            }
         case .copyAppend:
             existingOwn = currentCopyAppendShortcut
             others.append((currentShortcut, "全局呼出快捷键"))
             if onQueueTrigger != nil {
                 others.append((currentQueueShortcut, "顺序出队热键"))
+            }
+            if onScreenshotTrigger != nil {
+                others.append((currentScreenshotShortcut, "区域/窗口截图"))
+            }
+        case .screenshot:
+            existingOwn = currentScreenshotShortcut
+            others.append((currentShortcut, "全局呼出快捷键"))
+            if onQueueTrigger != nil {
+                others.append((currentQueueShortcut, "顺序出队热键"))
+            }
+            if copyAppendEnabled && onCopyAppendTrigger != nil {
+                others.append((currentCopyAppendShortcut, "跨处续接复制"))
             }
         }
 
@@ -829,6 +899,15 @@ final class HotKeyManager {
     }
 
     @discardableResult
+    func updateScreenshotShortcut(_ shortcut: HotKeyShortcut) -> Bool {
+        guard let action = onScreenshotTrigger else {
+            currentScreenshotShortcut = shortcut
+            return true
+        }
+        return registerScreenshotHotKey(shortcut: shortcut, action: action)
+    }
+
+    @discardableResult
     func updateQueueShortcut(_ shortcut: HotKeyShortcut) -> Bool {
         guard let action = onQueueTrigger else {
             currentQueueShortcut = shortcut
@@ -852,6 +931,10 @@ final class HotKeyManager {
             UnregisterEventHotKey(ref)
             copyAppendHotKeyRef = nil
         }
+        if let ref = screenshotHotKeyRef {
+            UnregisterEventHotKey(ref)
+            screenshotHotKeyRef = nil
+        }
         removeDoubleTapMonitors()
     }
 
@@ -863,6 +946,9 @@ final class HotKeyManager {
         if onCopyAppendTrigger != nil {
             _ = updateCopyAppendShortcut(currentCopyAppendShortcut)
         }
+        if onScreenshotTrigger != nil {
+            _ = updateScreenshotShortcut(currentScreenshotShortcut)
+        }
         refreshDoubleTapMonitors()
     }
 
@@ -873,7 +959,8 @@ final class HotKeyManager {
         }
         let needsToggle = (onToggleTrigger != nil && currentShortcut.isDoubleTap)
         let needsQueue = (onQueueTrigger != nil && currentQueueShortcut.isDoubleTap)
-        guard needsToggle || needsQueue else {
+        let needsScreenshot = (onScreenshotTrigger != nil && currentScreenshotShortcut.isDoubleTap)
+        guard needsToggle || needsQueue || needsScreenshot else {
             removeDoubleTapMonitors()
             return
         }
@@ -922,6 +1009,9 @@ final class HotKeyManager {
         } else if currentQueueShortcut.doubleTapModifier == kind, let queue = onQueueTrigger {
             lastDoubleTapFireUptime = now
             DispatchQueue.main.async { queue() }
+        } else if currentScreenshotShortcut.doubleTapModifier == kind, let shot = onScreenshotTrigger {
+            lastDoubleTapFireUptime = now
+            DispatchQueue.main.async { shot() }
         }
     }
 
@@ -938,6 +1028,10 @@ final class HotKeyManager {
         if let ref = copyAppendHotKeyRef {
             UnregisterEventHotKey(ref)
             copyAppendHotKeyRef = nil
+        }
+        if let ref = screenshotHotKeyRef {
+            UnregisterEventHotKey(ref)
+            screenshotHotKeyRef = nil
         }
         if let handler = eventHandlerRef {
             RemoveEventHandler(handler)
