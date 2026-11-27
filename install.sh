@@ -40,13 +40,13 @@ fi
 
 ditto -x -k "$ZIP_PATH" "$STAGE_DIR/unpacked"
 APP_SRC="$STAGE_DIR/unpacked/iClip.app"
-if [ ! -x "$APP_SRC/Contents/MacOS/QingJian" ]; then
+if [ ! -x "$APP_SRC/Contents/MacOS/iClip" ] && [ ! -x "$APP_SRC/Contents/MacOS/QingJian" ]; then
   printf "\033[31m✖ 安装包校验异常：未找到可执行文件 iClip.app\033[0m\n"
   exit 1
 fi
 
 xattr -cr "$APP_SRC" 2>/dev/null || true
-codesign --force --deep --identifier com.qingjian.clipboard --sign - "$APP_SRC" >/dev/null 2>&1 || true
+codesign --force --deep --identifier com.iclip.clipboard --sign - "$APP_SRC" >/dev/null 2>&1 || true
 
 if [ -w "/Applications" ] && [ ! -L "/Applications" ]; then
   DEST_DIR="/Applications"
@@ -60,8 +60,9 @@ else
 fi
 TARGET_APP="$DEST_DIR/iClip.app"
 
-if pgrep -x "QingJian" >/dev/null 2>&1; then
+if pgrep -x "iClip" >/dev/null 2>&1 || pgrep -x "QingJian" >/dev/null 2>&1; then
   printf "  \033[36m•\033[0m 正在平滑更新运行中的 iClip（历史记录完整保留）...\n"
+  killall "iClip" 2>/dev/null || true
   killall "QingJian" 2>/dev/null || true
   sleep 0.6
 fi

@@ -3,7 +3,27 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_NAME="iClip"
-VERSION="${1:-$(cat "$PROJECT_DIR/VERSION" 2>/dev/null | tr -d '[:space:]' || echo "3.0.0")}"
+VERSION=""
+INSTALL_AFTER_BUILD="0"
+for arg in "$@"; do
+  case "$arg" in
+    --install)
+      INSTALL_AFTER_BUILD="1"
+      ;;
+    --*)
+      echo "未知参数: $arg" >&2
+      exit 1
+      ;;
+    *)
+      if [ -z "$VERSION" ]; then
+        VERSION="$arg"
+      fi
+      ;;
+  esac
+done
+if [ -z "$VERSION" ]; then
+  VERSION="$(cat "$PROJECT_DIR/VERSION" 2>/dev/null | tr -d '[:space:]' || echo "3.0.0")"
+fi
 BUILD_NUMBER="$(date +%Y%m%d%H%M)"
 DIST_DIR="$PROJECT_DIR/dist"
 BRAND_DIR="$PROJECT_DIR/assets/brand"
@@ -49,12 +69,12 @@ echo "正在编译 iClip 统一主线版本 (v${VERSION})..."
 cd "$PROJECT_DIR"
 swift build -c release --scratch-path "$SCRATCH_DIR" -Xswiftc -Osize -Xlinker -dead_strip
 
-BIN_PATH="$SCRATCH_DIR/release/QingJian"
+BIN_PATH="$SCRATCH_DIR/release/iClip"
 rm -rf "$STAGE_DIR" "$FINAL_APP" "$ZIP_OUT" "$DMG_STAGE" "$DMG_OUT"
 mkdir -p "$STAGED_APP/Contents/MacOS" "$STAGED_APP/Contents/Resources"
-cp "$BIN_PATH" "$STAGED_APP/Contents/MacOS/QingJian"
-chmod +x "$STAGED_APP/Contents/MacOS/QingJian"
-strip -x "$STAGED_APP/Contents/MacOS/QingJian" 2>/dev/null || true
+cp "$BIN_PATH" "$STAGED_APP/Contents/MacOS/iClip"
+chmod +x "$STAGED_APP/Contents/MacOS/iClip"
+strip -x "$STAGED_APP/Contents/MacOS/iClip" 2>/dev/null || true
 
 cp "$BRAND_DIR/AppIcon.icns" "$STAGED_APP/Contents/Resources/AppIcon.icns"
 cp "$BRAND_DIR/MenuBarIcon.png" "$STAGED_APP/Contents/Resources/MenuBarIcon.png"
@@ -70,7 +90,7 @@ cat > "$STAGED_APP/Contents/Info.plist" << EOF
     <key>CFBundleDisplayName</key>
     <string>iClip</string>
     <key>CFBundleIdentifier</key>
-    <string>com.qingjian.clipboard</string>
+    <string>com.iclip.clipboard</string>
     <key>CFBundleVersion</key>
     <string>${BUILD_NUMBER}</string>
     <key>CFBundleShortVersionString</key>
@@ -80,7 +100,7 @@ cat > "$STAGED_APP/Contents/Info.plist" << EOF
     <key>CFBundleIconName</key>
     <string>AppIcon</string>
     <key>CFBundleExecutable</key>
-    <string>QingJian</string>
+    <string>iClip</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>LSMinimumSystemVersion</key>
@@ -99,7 +119,7 @@ cat > "$STAGED_APP/Contents/Info.plist" << EOF
     <array>
         <dict>
             <key>UTTypeIdentifier</key>
-            <string>com.qingjian.iclip.archive</string>
+            <string>com.iclip.archive</string>
             <key>UTTypeDescription</key>
             <string>iClip 收藏资产归档包</string>
             <key>UTTypeIconFile</key>
@@ -126,13 +146,13 @@ xattr -cr "$STAGED_APP" 2>/dev/null || true
 if [ -n "$SIGN_IDENTITY" ]; then
   echo "使用证书签名：$SIGN_IDENTITY（Hardened Runtime=${SIGN_USE_HARDENED_RUNTIME}）"
   if [ "$SIGN_USE_HARDENED_RUNTIME" = "1" ]; then
-    codesign --force --deep --options runtime --identifier com.qingjian.clipboard --sign "$SIGN_IDENTITY" "$STAGED_APP"
+    codesign --force --deep --options runtime --identifier com.iclip.clipboard --sign "$SIGN_IDENTITY" "$STAGED_APP"
   else
-    codesign --force --deep --identifier com.qingjian.clipboard --sign "$SIGN_IDENTITY" "$STAGED_APP"
+    codesign --force --deep --identifier com.iclip.clipboard --sign "$SIGN_IDENTITY" "$STAGED_APP"
   fi
 else
   echo "未发现开发者签名证书，回退跨机通用 Ad-hoc 签名..."
-  codesign --force --deep --identifier com.qingjian.clipboard --sign - "$STAGED_APP"
+  codesign --force --deep --identifier com.iclip.clipboard --sign - "$STAGED_APP"
 fi
 
 codesign --verify --deep --strict "$STAGED_APP"
@@ -159,3 +179,37 @@ echo "=========================================="
 echo "iClip 统一主线构建、可视化 DMG 与签名自检完成 (v${VERSION})："
 ls -lh "$ZIP_OUT" "$DMG_OUT"
 shasum -a 256 "$ZIP_OUT" "$DMG_OUT"
+
+if [ "$INSTALL_AFTER_BUILD" = "1" ]; then
+  TARGET_APP="/Applications/${APP_NAME}.app"
+  NEW_SIG_DESC="$(codesign -dv "$FINAL_APP" 2>&1 | grep -E '^(Authority=|Signature=|TeamIdentifier=)' | sort | tr '\n' '|')"
+  OLD_SIG_DESC=""
+  if [ -d "$TARGET_APP" ]; then
+    OLD_SIG_DESC="$(codesign -dv "$TARGET_APP" 2>&1 | grep -E '^(Authority=|Signature=|TeamIdentifier=)' | sort | tr '\n' '|')"
+  fi
+
+  echo "------------------------------------------"
+  echo "正在安装更新至 ${TARGET_APP}..."
+  osascript -e 'tell application "iClip" to quit' 2>/dev/null || true
+  pkill -x iClip 2>/dev/null || true
+  pkill -x QingJian 2>/dev/null || true
+  sleep 1
+
+  if [ -n "$OLD_SIG_DESC" ] && [ "$OLD_SIG_DESC" != "$NEW_SIG_DESC" ]; then
+    echo "检测到应用签名变化，清理旧 TCC 同名授权残留避免假勾选..."
+    tccutil reset Accessibility com.iclip.clipboard >/dev/null 2>&1 || true
+    tccutil reset ScreenCapture com.iclip.clipboard >/dev/null 2>&1 || true
+    tccutil reset SystemPolicyAllFiles com.iclip.clipboard >/dev/null 2>&1 || true
+  fi
+
+  rm -rf "$TARGET_APP"
+  ditto "$FINAL_APP" "$TARGET_APP"
+  # 清理构建目录中的解压 .app 副本（保留 .dmg/.zip），避免同名多副本导致 TCC/LaunchServices 串位
+  rm -rf "$FINAL_APP"
+  LSREG="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+  if [ -x "$LSREG" ]; then
+    "$LSREG" -f "$TARGET_APP" >/dev/null 2>&1 || true
+  fi
+  open "$TARGET_APP"
+  echo "✓ 已唯一安装并启动 ${TARGET_APP}"
+fi

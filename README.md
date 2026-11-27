@@ -90,7 +90,7 @@ open dist/iClip.app
 ## 数据与隐私
 
 - **完全离线（仅更新检查访问 GitHub）**：剪贴内容零上传、无统计埋点、无账号体系；内置基于 GitHub Releases 的一键 OTA 更新，仅在检查或下载新版本时访问 `api.github.com`。
-- **本地存储**：所有历史记录与压缩图片均保存在本机 `~/Library/Application Support/QingJian/`，支持自定义保留上限（50 / 100 / 200 / 500 条），收藏置顶项不受清理影响。
+- **本地存储**：所有历史记录与压缩图片均保存在本机 `~/Library/Application Support/iClip/`，支持自定义保留上限（50 / 100 / 200 / 500 条），收藏置顶项不受清理影响。
 
 ---
 
@@ -98,7 +98,7 @@ open dist/iClip.app
 
 ```text
 iClip/
-├── Sources/QingJian/
+├── Sources/iClip/
 │   ├── Models/ClipItem.swift              # 剪贴记录数据模型与分类
 │   ├── Services/ClipboardStore.swift      # 监听、去重、缓存、持久化与自动粘贴
 │   ├── Services/HotKeyManager.swift       # 全局快捷键注册（⌥V）

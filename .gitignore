@@ -2,8 +2,10 @@
 .build/
 .build-dev/
 .build-flow/
+.build-unified/
 .swiftpm/
 .worktrees/
+.impeccable/
 dist/
 dist-win/
 windows/target/
@@ -11,3 +13,11 @@ windows/target/
 *.xcworkspace
 xcuserdata/
 DerivedData/
+PROMOTION.md
+DESIGN.md
+PRODUCT.md
+assets/release-*/
+scripts/render_promo_video.py
+scripts/render_v27_promo_video.py
+scripts/render_xhs_clean.py
+scripts/sync_to_app_webfooo.sh

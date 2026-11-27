@@ -8,7 +8,8 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::Path;
 
-pub const ARCHIVE_FORMAT_ID: &str = "com.qingjian.iclip.archive";
+pub const ARCHIVE_FORMAT_ID: &str = "com.iclip.archive";
+pub const LEGACY_ARCHIVE_FORMAT_ID: &str = "com.qingjian.iclip.archive";
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 const MAX_EMBEDDED_IMAGE_BYTES: usize = 12 * 1024 * 1024;
 pub const MAX_ARCHIVE_INPUT_BYTES: usize = 64 * 1024 * 1024;
@@ -198,7 +199,7 @@ pub fn merge_archive_data_full(
 
     let bundle: PinnedArchiveBundle =
         match serde_json::from_slice::<PinnedArchiveBundle>(effective_data) {
-            Ok(b) if b.format == ARCHIVE_FORMAT_ID => b,
+            Ok(b) if b.format == ARCHIVE_FORMAT_ID || b.format == LEGACY_ARCHIVE_FORMAT_ID => b,
             Ok(_) => return Err(ArchiveBackupError::InvalidArchiveFormat),
             Err(_) => {
                 if let Some((cands, fmt_label)) =

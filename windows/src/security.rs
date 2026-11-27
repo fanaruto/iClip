@@ -2020,9 +2020,12 @@ fn parse_json_competitor_payload(root: &Value) -> Option<(Vec<ExternalImportCand
             }
         }
         Value::Object(map) => {
-            if map.get("format").and_then(|v| v.as_str()) == Some(crate::archive::ARCHIVE_FORMAT_ID)
-            {
-                return None;
+            if let Some(fmt) = map.get("format").and_then(|v| v.as_str()) {
+                if fmt == crate::archive::ARCHIVE_FORMAT_ID
+                    || fmt == crate::archive::LEGACY_ARCHIVE_FORMAT_ID
+                {
+                    return None;
+                }
             }
             if let Some(single_alfred) = map.get("alfredsnippet") {
                 format_name = "Alfred 常用语".to_string();

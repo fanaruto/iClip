@@ -2,17 +2,17 @@
 import PackageDescription
 
 let package = Package(
-    name: "QingJian",
+    name: "iClip",
     platforms: [
         .macOS(.v14)
     ],
     products: [
-        .executable(name: "QingJian", targets: ["QingJian"])
+        .executable(name: "iClip", targets: ["iClip"])
     ],
     targets: [
         .executableTarget(
-            name: "QingJian",
-            path: "Sources/QingJian",
+            name: "iClip",
+            path: "Sources/iClip",
             linkerSettings: [
                 .linkedFramework("Carbon"),
                 .linkedFramework("AppKit"),
@@ -23,13 +23,14 @@ let package = Package(
                 .linkedFramework("QuartzCore"),
                 .linkedFramework("Speech"),
                 .linkedFramework("AVFoundation"),
+                .linkedFramework("QuickLookThumbnailing"),
                 .linkedFramework("ScreenCaptureKit")
             ]
         ),
         .testTarget(
-            name: "QingJianTests",
-            dependencies: ["QingJian"],
-            path: "Tests/QingJianTests"
+            name: "iClipTests",
+            dependencies: ["iClip"],
+            path: "Tests/iClipTests"
         )
     ]
 )

@@ -201,13 +201,13 @@ mod tests {
                     "customAlias": "Mac端同步过来的开票抬头",
                     "pinCategory": "invoice",
                     "sourceAppName": "备忘录",
-                    "text": "公司名称：轻剪科技\n税号：91440300192203821K",
+                    "text": "公司名称：iClip科技\n税号：91440300192203821K",
                     "type": "text"
                 }
             ],
             "exportedAt": "2026-11-22T02:31:00Z",
             "exportedEdition": "flow",
-            "format": "com.qingjian.iclip.archive",
+            "format": "com.iclip.archive",
             "schemaVersion": 1
         }"#;
 
@@ -2120,7 +2120,7 @@ mod tests {
         let local_it = ClipItem::new_text("生产跳板机守则".to_string(), None);
         let spoof_json = format!(
             r#"{{
-              "format": "com.qingjian.iclip.archive",
+              "format": "com.iclip.archive",
               "schemaVersion": 1,
               "appVersion": "2.7.0",
               "exportedEdition": "dev",
@@ -2428,7 +2428,7 @@ mod tests {
         ];
         use base64::engine::general_purpose::STANDARD as B64_STD;
         let bomb_json = serde_json::json!({
-            "format": "com.qingjian.iclip.archive",
+            "format": "com.iclip.archive",
             "schemaVersion": 1,
             "appVersion": "2.8.0",
             "exportedEdition": "dev",
