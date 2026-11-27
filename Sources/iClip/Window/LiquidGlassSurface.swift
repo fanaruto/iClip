@@ -20,6 +20,7 @@ final class LiquidGlassSurfaceHost {
     private var currentStyle: PanelSurfaceStyle = .liquidGlass
     private var currentAppearance: LiquidGlassAppearance = .tinted
     private var currentMaskOpacity: Double = 0.38
+    private var currentInteractiveGlass: Bool = true
     private var cornerRadius: CGFloat = 26
 
     var onDragTargetedChanged: ((Bool) -> Void)?
@@ -53,12 +54,14 @@ final class LiquidGlassSurfaceHost {
         style: PanelSurfaceStyle,
         appearance: LiquidGlassAppearance,
         maskOpacity: Double,
-        autoResizeWithWindow: Bool = false
+        autoResizeWithWindow: Bool = false,
+        interactiveGlass: Bool = true
     ) {
         self.cornerRadius = cornerRadius
         self.currentStyle = style
         self.currentAppearance = appearance
         self.currentMaskOpacity = maskOpacity
+        self.currentInteractiveGlass = interactiveGlass
 
         let cardBounds = NSRect(origin: .zero, size: bounds.size)
         hostingView.removeFromSuperview()
@@ -76,7 +79,8 @@ final class LiquidGlassSurfaceHost {
                     cornerRadius: cornerRadius,
                     appearance: appearance,
                     maskOpacity: maskOpacity,
-                    autoResizeWithWindow: autoResizeWithWindow
+                    autoResizeWithWindow: autoResizeWithWindow,
+                    interactiveGlass: interactiveGlass
                 )
                 return
             }
@@ -182,7 +186,8 @@ final class LiquidGlassSurfaceHost {
         cornerRadius: CGFloat,
         appearance: LiquidGlassAppearance,
         maskOpacity: Double,
-        autoResizeWithWindow: Bool
+        autoResizeWithWindow: Bool,
+        interactiveGlass: Bool
     ) {
         let cardFrame = NSRect(x: bleed, y: bleed, width: cardBounds.width, height: cardBounds.height)
 
@@ -198,10 +203,13 @@ final class LiquidGlassSurfaceHost {
         blurBackdrop.layer?.cornerRadius = cornerRadius
         blurBackdrop.layer?.masksToBounds = true
 
-        // 顶层：macOS 26 原生 NSGlassEffectView 光学透镜外壳，保留边缘折射与高光
+        // 顶层：macOS 26/27 原生 NSGlassEffectView 光学透镜外壳，保留边缘折射与交互高光反馈
         let glassView = NSGlassEffectView(frame: cardFrame)
         glassView.autoresizingMask = (bleed > 0 && !autoResizeWithWindow) ? [] : [.width, .height]
         glassView.cornerRadius = cornerRadius
+        if #available(macOS 27.0, *) {
+            glassView.effectIsInteractive = interactiveGlass && !NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
+        }
 
         // 内部内容容器：严格同心连续圆角裁切，承接外观监听与拖拽复制
         let contentContainer = LiquidGlassContentContainerView(frame: cardBounds)
@@ -336,6 +344,9 @@ final class LiquidGlassSurfaceHost {
             blurView?.isHidden = true
             blurView?.alphaValue = 0
             glassView.style = .regular
+            if #available(macOS 27.0, *) {
+                glassView.effectIsInteractive = false
+            }
             glassView.tintColor = isDark
                 ? NSColor(srgbRed: 0.12, green: 0.13, blue: 0.15, alpha: 0.96)
                 : NSColor(srgbRed: 0.97, green: 0.97, blue: 0.98, alpha: 0.96)
@@ -344,6 +355,9 @@ final class LiquidGlassSurfaceHost {
 
         // 驱动底层 CABackdropLayer 真实高斯模糊半径（0pt ~ 38pt），零文字重影、零档位跳变
         glassView.style = .clear
+        if #available(macOS 27.0, *) {
+            glassView.effectIsInteractive = currentInteractiveGlass
+        }
 
         if clamped <= 0.01 {
             (blurView as? ConfigurableBlurVisualEffectView)?.applyBlurConcentration(0)

@@ -294,6 +294,9 @@ final class CursorDropPodController {
             glass.cornerRadius = size.height / 2
             glass.style = .regular
             glass.tintColor = nil
+            if #available(macOS 27.0, *) {
+                glass.effectIsInteractive = !NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
+            }
             glass.contentView = receiver
             bleedRoot.addSubview(glass)
             p.contentView = bleedRoot

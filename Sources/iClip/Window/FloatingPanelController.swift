@@ -259,8 +259,9 @@ private func nonActivatingPanelEventTapCallback(
         return Unmanaged.passUnretained(cgEvent)
     }
     if type == .leftMouseDown || type == .rightMouseDown || type == .otherMouseDown {
+        let isLeft = (type == .leftMouseDown)
         MainActor.assumeIsolated {
-            tapController.dispatchObservedPointerDown(NSEvent.mouseLocation)
+            tapController.dispatchObservedPointerDown(NSEvent.mouseLocation, isLeftClick: isLeft)
         }
         return Unmanaged.passUnretained(cgEvent)
     }
@@ -278,11 +279,11 @@ final class PanelNonActivatingTapController {
     private var outsideMouseMonitor: Any?
     private var localMouseMonitor: Any?
     private var onInterceptEvent: ((NSEvent) -> Bool)?
-    private var onPointerDownAtScreenPoint: ((NSPoint) -> Void)?
+    private var onPointerDownAtScreenPoint: ((NSPoint, Bool) -> Void)?
 
     func start(
         onInterceptEvent: @escaping (NSEvent) -> Bool,
-        onPointerDownAtScreenPoint: @escaping (NSPoint) -> Void
+        onPointerDownAtScreenPoint: @escaping (NSPoint, Bool) -> Void
     ) -> Bool {
         stop()
         self.onInterceptEvent = onInterceptEvent
@@ -314,16 +315,17 @@ final class PanelNonActivatingTapController {
         // 未授予辅助功能权限时的零权限降级监听：依然准确识别面板内/外部点击以释放或重获焦点
         outsideMouseMonitor = NSEvent.addGlobalMonitorForEvents(
             matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
-        ) { _ in
+        ) { event in
             let mouseLoc = NSEvent.mouseLocation
+            let isLeft = (event.type == .leftMouseDown)
             Task { @MainActor in
-                onPointerDownAtScreenPoint(mouseLoc)
+                onPointerDownAtScreenPoint(mouseLoc, isLeft)
             }
         }
         localMouseMonitor = NSEvent.addLocalMonitorForEvents(
             matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
         ) { event in
-            onPointerDownAtScreenPoint(NSEvent.mouseLocation)
+            onPointerDownAtScreenPoint(NSEvent.mouseLocation, event.type == .leftMouseDown)
             return event
         }
         return false
@@ -356,8 +358,8 @@ final class PanelNonActivatingTapController {
         }
     }
 
-    fileprivate func dispatchObservedPointerDown(_ screenPoint: NSPoint) {
-        onPointerDownAtScreenPoint?(screenPoint)
+    fileprivate func dispatchObservedPointerDown(_ screenPoint: NSPoint, isLeftClick: Bool) {
+        onPointerDownAtScreenPoint?(screenPoint, isLeftClick)
     }
 
     fileprivate func dispatchInterceptedCGEvent(type: CGEventType, cgEvent: CGEvent) -> Bool {
@@ -385,6 +387,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     private let nonActivatingTap = PanelNonActivatingTapController()
     private var keyboardCaptureState = PanelFocusPreservationPolicy.KeyboardCaptureState()
     var statusItemScreenRectProvider: (() -> NSRect?)?
+    var onStatusItemLeftClickWhileVisible: (() -> Void)?
     private var recordingTapMachine = ModifierDoubleTapStateMachine(maxHoldDuration: 0.35, maxTapGap: 0.48)
     private var spacePreviewMachine = PanelFocusPreservationPolicy.SpacePreviewGestureMachine()
     private var previousApp: NSRunningApplication?
@@ -1352,13 +1355,13 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
                 guard let self, self.isVisible else { return false }
                 return self.handleNonKeyPanelInterceptedEvent(event)
             },
-            onPointerDownAtScreenPoint: { [weak self] mouseLoc in
-                self?.handlePointerDownAtScreenPoint(mouseLoc)
+            onPointerDownAtScreenPoint: { [weak self] mouseLoc, isLeftClick in
+                self?.handlePointerDownAtScreenPoint(mouseLoc, isLeftClick: isLeftClick)
             }
         )
     }
 
-    private func handlePointerDownAtScreenPoint(_ mouseLoc: NSPoint) {
+    private func handlePointerDownAtScreenPoint(_ mouseLoc: NSPoint, isLeftClick: Bool) {
         guard isVisible else { return }
         if AppWindowCoordinator.shared.standaloneWindowContains(screenPoint: mouseLoc) {
             relinquishPanelKeyboardFocus(surrenderWindowServerKey: false, allowAppDeactivate: false)
@@ -1374,6 +1377,9 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         }
         if let statusRect = statusItemScreenRectProvider?(),
            statusRect.insetBy(dx: -4, dy: -4).contains(mouseLoc) {
+            if isLeftClick {
+                onStatusItemLeftClickWhileVisible?()
+            }
             return
         }
         if let orbRect = FloatingSpriteOrbController.shared.visibleHitScreenFrame,

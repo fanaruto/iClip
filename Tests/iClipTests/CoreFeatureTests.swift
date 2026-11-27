@@ -6475,4 +6475,89 @@ final class CoreFeatureTests: XCTestCase {
         // 验证官网 Bug 反馈地址准确指向官网反馈区
         XCTAssertEqual(DiagnosticLogService.officialBugFeedbackURL.absoluteString, "https://app.webfooo.com/iClip#community")
     }
+
+    @MainActor
+    func testMacOS27CapabilitiesSnapshotAndDisplayIDResolution() {
+        let snapshot = MacOS27Capabilities.currentSnapshot()
+        XCTAssertFalse(snapshot.osVersionText.isEmpty)
+        XCTAssertTrue(snapshot.osVersionText.hasPrefix("macOS "))
+        XCTAssertFalse(snapshot.onDeviceIntelligenceState.localizedDescription.isEmpty)
+
+        if #available(macOS 27.0, *) {
+            XCTAssertTrue(snapshot.isMacOS27OrNewer)
+            XCTAssertTrue(snapshot.isMacOS26OrNewer)
+            XCTAssertTrue(snapshot.interactiveLiquidGlassEnabled)
+            XCTAssertTrue(snapshot.expandedStatusItemSessionEnabled)
+            XCTAssertTrue(snapshot.concentricGeometryEnabled)
+            XCTAssertTrue(snapshot.screenshotKitPipelineEnabled)
+            XCTAssertTrue(snapshot.speechAnalyzerSupported)
+            XCTAssertTrue(snapshot.activeFeatureLabels.contains("交互式液态玻璃"))
+            XCTAssertTrue(snapshot.activeFeatureLabels.contains("原生菜单栏会话"))
+            XCTAssertTrue(snapshot.activeFeatureLabels.contains("SCScreenshotKit 抓帧"))
+            XCTAssertTrue(snapshot.activeFeatureLabels.contains("SpeechAnalyzer 语音"))
+        }
+
+        if let mainScreen = NSScreen.main {
+            let resolvedID = MacOS27Capabilities.displayID(for: mainScreen)
+            XCTAssertNotNil(resolvedID)
+            XCTAssertNotEqual(resolvedID, 0)
+        }
+
+        let padding = MacOS27Capabilities.adaptiveTouchHitPadding()
+        XCTAssertGreaterThanOrEqual(padding, 0)
+    }
+
+    func testOnDeviceIntelligenceTodoLineParserNormalizesAndDeduplicates() {
+        let raw = """
+        - 1. 下午三点给客户发报价单。
+        * [ ] 晚上八点提交 macOS 27 发布包！
+        2、下午三点给客户发报价单
+        •   
+        3) 整理周报并同步团队；
+        a
+        """
+        let parsed = OnDeviceIntelligenceService.parseModelTodoLines(raw, maxItems: 6)
+        XCTAssertEqual(parsed, [
+            "下午三点给客户发报价单",
+            "晚上八点提交 macOS 27 发布包",
+            "整理周报并同步团队"
+        ])
+
+        let capped = OnDeviceIntelligenceService.parseModelTodoLines(
+            "1. 第一条事项\n2. 第二条事项\n3. 第三条事项",
+            maxItems: 2
+        )
+        XCTAssertEqual(capped.count, 2)
+    }
+
+    @MainActor
+    func testLiquidGlassSurfaceHostSupportsMacOS27InteractiveGlass() {
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 220),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        let dummyHost = NSView(frame: NSRect(x: 0, y: 0, width: 280, height: 180))
+        let surface = LiquidGlassSurfaceHost()
+        surface.install(
+            on: panel,
+            hostingView: dummyHost,
+            bounds: NSRect(x: 0, y: 0, width: 280, height: 180),
+            bleed: 20,
+            cornerRadius: 24,
+            style: .liquidGlass,
+            appearance: .tinted,
+            maskOpacity: 0.35,
+            autoResizeWithWindow: false,
+            interactiveGlass: true
+        )
+
+        if #available(macOS 27.0, *) {
+            let glassViews = (panel.contentView?.subviews ?? []).compactMap { $0 as? NSGlassEffectView }
+            XCTAssertEqual(glassViews.count, 1)
+            let expectedInteractive = !NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
+            XCTAssertEqual(glassViews.first?.effectIsInteractive, expectedInteractive)
+        }
+    }
 }

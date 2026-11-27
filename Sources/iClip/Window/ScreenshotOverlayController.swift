@@ -168,25 +168,48 @@ final class ScreenshotOverlayController: NSObject {
         var capturedSessions: [CapturedDisplaySession] = []
 
         for screen in screens {
-            guard let screenNum = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+            guard let displayID = MacOS27Capabilities.displayID(for: screen) else {
                 continue
             }
-            let displayID = CGDirectDisplayID(screenNum.uint32Value)
             guard let scDisplay = shareable.displays.first(where: { $0.displayID == displayID }) else {
                 continue
             }
 
             let scale = max(1.0, screen.backingScaleFactor)
-            let config = SCStreamConfiguration()
-            config.width = Int(round(screen.frame.width * scale))
-            config.height = Int(round(screen.frame.height * scale))
-            config.showsCursor = false
-            config.scalesToFit = true
-            config.pixelFormat = kCVPixelFormatType_32BGRA
-            config.colorSpaceName = CGColorSpace.displayP3
-
+            let pixelWidth = Int(round(screen.frame.width * scale))
+            let pixelHeight = Int(round(screen.frame.height * scale))
             let filter = SCContentFilter(display: scDisplay, excludingWindows: ownSCWindows)
-            guard let snapshot = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config) else {
+
+            var capturedSnapshot: CGImage?
+            if #available(macOS 26.0, *) {
+                let shotConfig = SCScreenshotConfiguration()
+                shotConfig.width = pixelWidth
+                shotConfig.height = pixelHeight
+                shotConfig.showsCursor = false
+                shotConfig.includeChildWindows = true
+                shotConfig.displayIntent = .local
+                shotConfig.dynamicRange = .sdr
+                if let output = try? await SCScreenshotManager.captureScreenshot(
+                    contentFilter: filter,
+                    configuration: shotConfig
+                ) {
+                    capturedSnapshot = output.sdrImage
+                }
+            }
+            if capturedSnapshot == nil {
+                let config = SCStreamConfiguration()
+                config.width = pixelWidth
+                config.height = pixelHeight
+                config.showsCursor = false
+                config.scalesToFit = true
+                config.pixelFormat = kCVPixelFormatType_32BGRA
+                config.colorSpaceName = CGColorSpace.displayP3
+                capturedSnapshot = try? await SCScreenshotManager.captureImage(
+                    contentFilter: filter,
+                    configuration: config
+                )
+            }
+            guard let snapshot = capturedSnapshot else {
                 continue
             }
 
@@ -448,7 +471,10 @@ final class ScreenshotOverlayController: NSObject {
             .receive(on: RunLoop.main)
             .sink { [weak self, weak store] opacity in
                 guard let self, let store else { return }
-                self.toolbarSurfaceHost.updateLiquidGlass(appearance: store.liquidGlassAppearance, maskOpacity: opacity)
+                self.toolbarSurfaceHost.updateLiquidGlass(
+                    appearance: store.liquidGlassAppearance,
+                    maskOpacity: max(opacity, 0.44)
+                )
             }
             .store(in: &surfaceCancellables)
 
@@ -466,7 +492,7 @@ final class ScreenshotOverlayController: NSObject {
                     cornerRadius: 16.0,
                     style: newStyle,
                     appearance: store.liquidGlassAppearance,
-                    maskOpacity: store.liquidGlassMaskOpacity,
+                    maskOpacity: max(store.liquidGlassMaskOpacity, 0.44),
                     autoResizeWithWindow: false
                 )
             }
@@ -540,7 +566,7 @@ final class ScreenshotOverlayController: NSObject {
                 cornerRadius: cornerRadius,
                 style: store.surfaceStyle,
                 appearance: store.liquidGlassAppearance,
-                maskOpacity: store.liquidGlassMaskOpacity,
+                maskOpacity: max(store.liquidGlassMaskOpacity, 0.44),
                 autoResizeWithWindow: false
             )
 
@@ -1650,35 +1676,37 @@ private struct ScreenshotToolbarView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 4) {
-                ForEach(ScreenshotAnnotationTool.allCases) { tool in
-                    let active = (viewModel.activeTool == tool)
-                    Button {
-                        onSelectTool(tool)
-                    } label: {
-                        Group {
-                            if tool == .text {
-                                Text("T")
-                                    .font(.system(size: 13.5, weight: .bold, design: .serif))
-                            } else {
-                                Image(systemName: tool.symbolName)
-                                    .font(.system(size: 12.5, weight: active ? .bold : .medium))
+            TahoeGlassContainer(spacing: 4) {
+                HStack(spacing: 4) {
+                    ForEach(ScreenshotAnnotationTool.allCases) { tool in
+                        let active = (viewModel.activeTool == tool)
+                        Button {
+                            onSelectTool(tool)
+                        } label: {
+                            Group {
+                                if tool == .text {
+                                    Text("T")
+                                        .font(.system(size: 13.5, weight: .bold, design: .serif))
+                                } else {
+                                    Image(systemName: tool.symbolName)
+                                        .font(.system(size: 12.5, weight: active ? .bold : .medium))
+                                }
                             }
-                        }
-                        .foregroundStyle(active ? Color.white : Color.primary.opacity(0.88))
-                        .frame(width: 28, height: 28)
-                        .background {
-                            if active {
-                                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                    .fill(Color.accentColor)
-                                    .matchedGeometryEffect(id: "screenshotActiveToolPill", in: toolNS)
+                            .foregroundStyle(active ? Color.white : Color.primary.opacity(0.88))
+                            .frame(width: 28, height: 28)
+                            .background {
+                                if active {
+                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                        .fill(Color.accentColor)
+                                        .matchedGeometryEffect(id: "screenshotActiveToolPill", in: toolNS)
+                                        .macOS27GlassMorph(id: "screenshotActiveToolGlass", in: toolNS)
+                                }
                             }
+                            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                         }
-                        .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .buttonStyle(PhysicalSpringButtonStyle())
+                        .help(tool.title)
                     }
-                    .buttonStyle(PhysicalSpringButtonStyle())
-                    .help(tool.title)
-                }
 
                 Divider()
                     .frame(height: 16)
@@ -1688,7 +1716,7 @@ private struct ScreenshotToolbarView: View {
                 Button(action: onUndo) {
                     Image(systemName: "arrow.uturn.backward")
                         .font(.system(size: 12.5, weight: .medium))
-                        .foregroundStyle(viewModel.canUndo ? Color.primary.opacity(0.88) : Color.secondary.opacity(0.4))
+                        .foregroundStyle(viewModel.canUndo ? Color.primary.opacity(0.90) : Color.primary.opacity(0.32))
                         .frame(width: 26, height: 28)
                         .contentShape(Rectangle())
                 }
@@ -1762,9 +1790,11 @@ private struct ScreenshotToolbarView: View {
                     .padding(.horizontal, 11)
                     .padding(.vertical, 5.5)
                     .background(Capsule().fill(Color.accentColor))
+                    .macOS27GlassCapsule(tint: Color.accentColor.opacity(0.35), interactive: true)
                 }
                 .buttonStyle(PhysicalSpringButtonStyle())
                 .help("复制截图到剪贴板（↵ / 双击选区）")
+            }
             }
 
             if let tool = viewModel.activeTool {

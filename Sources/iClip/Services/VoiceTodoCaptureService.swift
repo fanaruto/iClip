@@ -136,12 +136,14 @@ final class VoiceTodoCaptureService {
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
     private var speechRecognizer: SFSpeechRecognizer?
+    /// macOS 26/27 原生 SpeechAnalyzer + SpeechTranscriber 流式端侧转写会话（类型擦除保持 macOS 14 兼容）
+    private var modernAnalyzerSession: AnyObject?
 
     private var latestTranscript: String = ""
     private var isListening: Bool = false
     private var sessionToken: UUID = UUID()
     private var lastLevelNotifyUptime: TimeInterval = 0
-    private var pendingCommitContinuation: CheckedContinuation<CommitResult, Never>?
+    private var pendingCommitContinuation: CheckedContinuation<String, Never>?
     private var pendingCommitWorkItem: DispatchWorkItem?
 
     private init() {}
@@ -200,18 +202,74 @@ final class VoiceTodoCaptureService {
             return false
         }
 
-        // 3. 初始化中文识别器与音频引擎（优先端侧识别降低延迟）
-        let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "zh-CN")) ?? SFSpeechRecognizer()
-        guard let recognizer, recognizer.isAvailable else {
-            onPermissionDenied?("当前系统语音识别服务暂不可用，请稍后重试")
-            return false
-        }
-
+        // 3. 启动音频引擎（macOS 26/27 优先原生 SpeechAnalyzer + SpeechTranscriber，本地模型未预装时零延迟回退 SFSpeechRecognizer）
         let engine = AVAudioEngine()
         let inputNode = engine.inputNode
         let format = inputNode.outputFormat(forBus: 0)
         guard format.channelCount > 0, format.sampleRate > 0 else {
             onPermissionDenied?("未检测到可用麦克风输入设备")
+            return false
+        }
+
+        // 注意：installTap 闭包在实时 CoreAudio 线程触发，保持 nonisolated 仅向主线程异步派发 UI 电平
+        let levelHandler: @Sendable (Double) -> Void = { [weak self] level in
+            Task { @MainActor [weak self] in
+                guard let self, self.isListening, self.sessionToken == currentSession else { return }
+                let now = ProcessInfo.processInfo.systemUptime
+                guard now - self.lastLevelNotifyUptime >= 0.016 else { return }
+                self.lastLevelNotifyUptime = now
+                self.onAudioLevelChanged?(level)
+            }
+        }
+
+        if #available(macOS 26.0, *) {
+            if let modernSession = await ModernSpeechAnalyzerSession.startIfInstalled(
+                preferredLocale: Locale(identifier: "zh-CN"),
+                inputFormat: format,
+                onPartialTranscript: { [weak self] text in
+                    Task { @MainActor [weak self] in
+                        guard let self, self.sessionToken == currentSession else { return }
+                        guard !text.isEmpty else { return }
+                        self.latestTranscript = text
+                        if self.isListening {
+                            self.onPartialTranscriptChanged?(text)
+                        }
+                    }
+                }
+            ) {
+                guard sessionToken == currentSession else {
+                    await modernSession.cancel()
+                    return false
+                }
+                isListening = true
+                self.audioEngine = engine
+                self.modernAnalyzerSession = modernSession
+
+                inputNode.removeTap(onBus: 0)
+                inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
+                    modernSession.appendAudioBuffer(buffer)
+                    let rms = VoiceTodoParser.computeRMS(from: buffer)
+                    let level = VoiceTodoParser.computeNormalizedAudioLevel(rms: rms)
+                    levelHandler(level)
+                }
+
+                do {
+                    engine.prepare()
+                    try engine.start()
+                    return true
+                } catch {
+                    await modernSession.cancel()
+                    tearDownSession()
+                    onPermissionDenied?("无法启动麦克风采集：\(error.localizedDescription)")
+                    return false
+                }
+            }
+        }
+
+        // 回退经典端侧 SFSpeechRecognizer 引擎
+        let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "zh-CN")) ?? SFSpeechRecognizer()
+        guard let recognizer, recognizer.isAvailable else {
+            onPermissionDenied?("当前系统语音识别服务暂不可用，请稍后重试")
             return false
         }
 
@@ -225,17 +283,6 @@ final class VoiceTodoCaptureService {
         self.speechRecognizer = recognizer
         self.audioEngine = engine
         self.recognitionRequest = request
-
-        // 注意：installTap 闭包在实时 CoreAudio 线程触发，保持 nonisolated 仅向主线程异步派发 UI 电平
-        let levelHandler: @Sendable (Double) -> Void = { [weak self] level in
-            Task { @MainActor [weak self] in
-                guard let self, self.isListening, self.sessionToken == currentSession else { return }
-                let now = ProcessInfo.processInfo.systemUptime
-                guard now - self.lastLevelNotifyUptime >= 0.016 else { return }
-                self.lastLevelNotifyUptime = now
-                self.onAudioLevelChanged?(level)
-            }
-        }
 
         inputNode.removeTap(onBus: 0)
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [request] buffer, _ in
@@ -279,13 +326,24 @@ final class VoiceTodoCaptureService {
         return true
     }
 
-    /// 结束录制并等待最多 0.45s 的末帧收尾识别，然后拆解返回待办列表
+    /// 结束录制并等待最多 0.45s 的末帧收尾识别，然后拆解返回待办列表（支持 macOS 26/27 端侧模型辅助提炼）
     func finishListeningAndCommit() async -> CommitResult {
+        if #available(macOS 26.0, *), let modernSession = modernAnalyzerSession as? ModernSpeechAnalyzerSession {
+            isListening = false
+            audioEngine?.stop()
+            audioEngine?.inputNode.removeTap(onBus: 0)
+            let finalized = await modernSession.finishAndCollect(timeoutSeconds: 0.45)
+            if !finalized.isEmpty {
+                latestTranscript = finalized
+            }
+            let raw = latestTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+            tearDownSession()
+            return await buildCommitResult(from: raw)
+        }
+
         guard isListening else {
             let trimmed = latestTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.isEmpty { return .empty }
-            let items = VoiceTodoParser.extractTodoItems(from: trimmed)
-            return items.isEmpty ? .empty : .committed(items: items, rawTranscript: trimmed)
+            return await buildCommitResult(from: trimmed)
         }
 
         isListening = false
@@ -293,7 +351,7 @@ final class VoiceTodoCaptureService {
         audioEngine?.inputNode.removeTap(onBus: 0)
         recognitionRequest?.endAudio()
 
-        return await withCheckedContinuation { cont in
+        let rawTranscript: String = await withCheckedContinuation { cont in
             self.pendingCommitContinuation = cont
             let timeout = DispatchWorkItem { [weak self] in
                 Task { @MainActor [weak self] in
@@ -304,6 +362,19 @@ final class VoiceTodoCaptureService {
             self.pendingCommitWorkItem = timeout
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.45, execute: timeout)
         }
+
+        return await buildCommitResult(from: rawTranscript)
+    }
+
+    private func buildCommitResult(from raw: String) async -> CommitResult {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return .empty }
+        if let aiRefined = await OnDeviceIntelligenceService.refineVoiceTodoItems(from: trimmed),
+           !aiRefined.isEmpty {
+            return .committed(items: aiRefined, rawTranscript: trimmed)
+        }
+        let items = VoiceTodoParser.extractTodoItems(from: trimmed)
+        return items.isEmpty ? .empty : .committed(items: items, rawTranscript: trimmed)
     }
 
     func cancelListening() {
@@ -312,29 +383,25 @@ final class VoiceTodoCaptureService {
             pendingCommitContinuation = nil
             pendingCommitWorkItem?.cancel()
             pendingCommitWorkItem = nil
-            pending.resume(returning: .empty)
+            pending.resume(returning: "")
+        }
+        if #available(macOS 26.0, *), let modernSession = modernAnalyzerSession as? ModernSpeechAnalyzerSession {
+            modernAnalyzerSession = nil
+            Task {
+                await modernSession.cancel()
+            }
         }
         tearDownSession()
     }
 
-    private func completePendingCommit(continuation: CheckedContinuation<CommitResult, Never>) {
+    private func completePendingCommit(continuation: CheckedContinuation<String, Never>) {
         pendingCommitContinuation = nil
         pendingCommitWorkItem?.cancel()
         pendingCommitWorkItem = nil
 
         let raw = latestTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
         tearDownSession()
-
-        guard !raw.isEmpty else {
-            continuation.resume(returning: .empty)
-            return
-        }
-        let items = VoiceTodoParser.extractTodoItems(from: raw)
-        if items.isEmpty {
-            continuation.resume(returning: .empty)
-        } else {
-            continuation.resume(returning: .committed(items: items, rawTranscript: raw))
-        }
+        continuation.resume(returning: raw)
     }
 
     private func tearDownSession() {
@@ -347,6 +414,178 @@ final class VoiceTodoCaptureService {
         recognitionTask?.cancel()
         recognitionTask = nil
         speechRecognizer = nil
+        modernAnalyzerSession = nil
         onAudioLevelChanged?(0)
+    }
+}
+
+/// macOS 26/27 原生 SpeechAnalyzer + SpeechTranscriber 端侧实时流式转写会话
+/// 仅在目标语言离线语音资产已就绪时启用，零下载阻塞；音频采样率通过 AVAudioConverter 自动对齐最佳分析格式。
+@available(macOS 26.0, *)
+private final class ModernSpeechAnalyzerSession: @unchecked Sendable {
+    private let analyzer: SpeechAnalyzer
+    private let transcriber: SpeechTranscriber
+    private let inputContinuation: AsyncStream<AnalyzerInput>.Continuation
+    private let targetFormat: AVAudioFormat
+    private let converterLock = NSLock()
+    private var converter: AVAudioConverter?
+    private let transcriptLock = NSLock()
+    private var latestText: String = ""
+    private var resultsTask: Task<Void, Never>?
+
+    private init(
+        analyzer: SpeechAnalyzer,
+        transcriber: SpeechTranscriber,
+        inputContinuation: AsyncStream<AnalyzerInput>.Continuation,
+        inputFormat: AVAudioFormat,
+        targetFormat: AVAudioFormat
+    ) {
+        self.analyzer = analyzer
+        self.transcriber = transcriber
+        self.inputContinuation = inputContinuation
+        self.targetFormat = targetFormat
+        if inputFormat != targetFormat {
+            self.converter = AVAudioConverter(from: inputFormat, to: targetFormat)
+        }
+    }
+
+    static func startIfInstalled(
+        preferredLocale: Locale,
+        inputFormat: AVAudioFormat,
+        onPartialTranscript: @escaping @Sendable (String) -> Void
+    ) async -> ModernSpeechAnalyzerSession? {
+        guard let supported = await SpeechTranscriber.supportedLocale(equivalentTo: preferredLocale) else {
+            return nil
+        }
+        let installed = await SpeechTranscriber.installedLocales
+        let supportedLang = supported.language.languageCode?.identifier.lowercased()
+        let isLocallyInstalled = installed.contains { loc in
+            loc.identifier.caseInsensitiveCompare(supported.identifier) == .orderedSame
+                || (supportedLang != nil && loc.language.languageCode?.identifier.lowercased() == supportedLang)
+        }
+        guard isLocallyInstalled else { return nil }
+
+        let transcriber = SpeechTranscriber(locale: supported, preset: .progressiveTranscription)
+        let targetFormat = await SpeechAnalyzer.bestAvailableAudioFormat(
+            compatibleWith: [transcriber],
+            considering: inputFormat
+        ) ?? inputFormat
+
+        let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream()
+        let analyzer = SpeechAnalyzer(modules: [transcriber])
+
+        let session = ModernSpeechAnalyzerSession(
+            analyzer: analyzer,
+            transcriber: transcriber,
+            inputContinuation: continuation,
+            inputFormat: inputFormat,
+            targetFormat: targetFormat
+        )
+
+        session.resultsTask = Task { [weak session] in
+            do {
+                for try await result in transcriber.results {
+                    let fragment = String(result.text.characters)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !fragment.isEmpty else { continue }
+                    session?.updateLatestTranscript(fragment)
+                    onPartialTranscript(fragment)
+                }
+            } catch {
+                // 正常取消或流关闭时静默收尾
+            }
+        }
+
+        do {
+            try await analyzer.start(inputSequence: stream)
+            return session
+        } catch {
+            continuation.finish()
+            session.resultsTask?.cancel()
+            await analyzer.cancelAndFinishNow()
+            return nil
+        }
+    }
+
+    func appendAudioBuffer(_ sourceBuffer: AVAudioPCMBuffer) {
+        guard let prepared = prepareBufferForAnalyzer(sourceBuffer) else { return }
+        inputContinuation.yield(AnalyzerInput(buffer: prepared))
+    }
+
+    func finishAndCollect(timeoutSeconds: Double) async -> String {
+        inputContinuation.finish()
+        let clamped = max(0.15, timeoutSeconds)
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask {
+                try? await self.analyzer.finalizeAndFinishThroughEndOfInput()
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(clamped * 1_000_000_000))
+            }
+            _ = await group.next()
+            group.cancelAll()
+        }
+        resultsTask?.cancel()
+        return readLatestTranscript()
+    }
+
+    func cancel() async {
+        inputContinuation.finish()
+        resultsTask?.cancel()
+        await analyzer.cancelAndFinishNow()
+    }
+
+    private func updateLatestTranscript(_ text: String) {
+        transcriptLock.lock()
+        latestText = text
+        transcriptLock.unlock()
+    }
+
+    private func readLatestTranscript() -> String {
+        transcriptLock.lock()
+        defer { transcriptLock.unlock() }
+        return latestText
+    }
+
+    private func prepareBufferForAnalyzer(_ source: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        converterLock.lock()
+        defer { converterLock.unlock() }
+
+        guard let converter else {
+            // 格式完全一致时做独立深拷贝，避免 CoreAudio 复写底层环形缓冲区
+            guard let copy = AVAudioPCMBuffer(pcmFormat: source.format, frameCapacity: source.frameLength) else {
+                return nil
+            }
+            copy.frameLength = source.frameLength
+            if let srcChannels = source.floatChannelData, let dstChannels = copy.floatChannelData {
+                let channelCount = Int(source.format.channelCount)
+                let byteCount = Int(source.frameLength) * MemoryLayout<Float>.size
+                for ch in 0..<channelCount {
+                    memcpy(dstChannels[ch], srcChannels[ch], byteCount)
+                }
+                return copy
+            }
+            return nil
+        }
+
+        let ratio = targetFormat.sampleRate / max(1.0, source.format.sampleRate)
+        let capacity = AVAudioFrameCount(ceil(Double(source.frameLength) * ratio)) + 32
+        guard let output = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: capacity) else {
+            return nil
+        }
+
+        var didSupply = false
+        var error: NSError?
+        converter.convert(to: output, error: &error) { _, outStatus in
+            if didSupply {
+                outStatus.pointee = .noDataNow
+                return nil
+            }
+            didSupply = true
+            outStatus.pointee = .haveData
+            return source
+        }
+        guard error == nil, output.frameLength > 0 else { return nil }
+        return output
     }
 }

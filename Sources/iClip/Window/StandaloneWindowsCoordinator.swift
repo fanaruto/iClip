@@ -32,7 +32,7 @@ struct TahoeGlassContainer<Content: View>: View {
 }
 
 extension View {
-    /// macOS 26 Tahoe 原生 Liquid Glass 卡片材质（macOS 14-15 自动回退为同心连续圆角毛玻璃）
+    /// macOS 26/27 原生同心圆角 Liquid Glass 卡片材质（macOS 14-15 自动回退为连续圆角毛玻璃）
     @ViewBuilder
     func tahoeGlassCard(
         cornerRadius: CGFloat = 16,
@@ -40,7 +40,10 @@ extension View {
         interactive: Bool = false
     ) -> some View {
         if #available(macOS 26.0, *) {
-            let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            let shape = ConcentricRectangle(
+                corners: .concentric(minimum: .fixed(cornerRadius)),
+                isUniform: true
+            )
             if let tint {
                 let subtleTint = tint.opacity(0.16)
                 if interactive {
@@ -73,7 +76,53 @@ extension View {
         }
     }
 
-    /// macOS 26 Tahoe 原生胶囊按钮（`.glassProminent` / `.glass`），macOS 14-15 优雅回退
+    /// macOS 26/27 原生同心圆角裁切（外框曲率自动传导至内层组件，macOS 14-15 回退连续圆角）
+    @ViewBuilder
+    func macOS27ConcentricClip(minimumRadius: CGFloat) -> some View {
+        if #available(macOS 26.0, *) {
+            self.clipShape(
+                ConcentricRectangle(
+                    corners: .concentric(minimum: .fixed(minimumRadius)),
+                    isUniform: true
+                )
+            )
+        } else {
+            self.clipShape(RoundedRectangle(cornerRadius: minimumRadius, style: .continuous))
+        }
+    }
+
+    /// macOS 26/27 原生交互液态玻璃胶囊（适合滑块、胶囊按钮与浮岛指示器）
+    @ViewBuilder
+    func macOS27GlassCapsule(
+        tint: Color? = nil,
+        interactive: Bool = true
+    ) -> some View {
+        if #available(macOS 26.0, *) {
+            if let tint {
+                let glass = interactive ? Glass.regular.tint(tint).interactive() : Glass.regular.tint(tint)
+                self.glassEffect(glass, in: Capsule())
+            } else {
+                let glass = interactive ? Glass.regular.interactive() : Glass.regular
+                self.glassEffect(glass, in: Capsule())
+            }
+        } else {
+            self
+        }
+    }
+
+    /// macOS 26/27 液态玻璃同源形变标识（同一 GlassEffectContainer 内自动平滑融汇过渡）
+    @ViewBuilder
+    func macOS27GlassMorph<ID: Hashable & Sendable>(id: ID, in namespace: Namespace.ID) -> some View {
+        if #available(macOS 26.0, *) {
+            self
+                .glassEffectID(id, in: namespace)
+                .glassEffectTransition(.matchedGeometry)
+        } else {
+            self
+        }
+    }
+
+    /// macOS 26/27 原生胶囊按钮（`.glassProminent` / `.glass`），macOS 14-15 优雅回退
     @ViewBuilder
     func tahoeActionButtonStyle(prominent: Bool) -> some View {
         if #available(macOS 26.0, *) {
@@ -91,7 +140,17 @@ extension View {
         }
     }
 
-    /// macOS 26 Tahoe 原生柔边滚动渐变（消除硬切线）
+    /// macOS 27 原生 Tabs 风格选择器（macOS 14-26 自动回退 `.segmented`）
+    @ViewBuilder
+    func macOS27TabsPickerStyle() -> some View {
+        if #available(macOS 27.0, *) {
+            self.pickerStyle(.tabs)
+        } else {
+            self.pickerStyle(.segmented)
+        }
+    }
+
+    /// macOS 26/27 原生柔边滚动渐变（消除硬切线）
     @ViewBuilder
     func tahoeSoftScrollEdges() -> some View {
         if #available(macOS 26.0, *) {

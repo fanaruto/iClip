@@ -929,7 +929,8 @@ struct ClipboardPopoverView: View {
     // MARK: - 顶部胶囊搜索栏
 
     private var headerBar: some View {
-        HStack(spacing: 8) {
+        TahoeGlassContainer(spacing: 8) {
+            HStack(spacing: 8) {
             if nav.showSettings {
                 Button {
                     nav.showSettings = false
@@ -1093,6 +1094,7 @@ struct ClipboardPopoverView: View {
                     }
                 }
             }
+        }
         }
         .animation(.spring(response: 0.24, dampingFraction: 0.86), value: store.alwaysOnTop)
         .animation(.spring(response: 0.24, dampingFraction: 0.86), value: store.isPaused)
@@ -1917,6 +1919,7 @@ struct ClipboardPopoverView: View {
                         .padding(.horizontal, 14)
                         .padding(.vertical, 12)
                     }
+                    .tahoeSoftScrollEdges()
                     .coordinateSpace(name: "clipListScrollSpace")
                     .onChange(of: nav.scrollRequestEpoch) { _, _ in
                         let idx = nav.selectedIndex
@@ -4107,17 +4110,25 @@ private struct FilterTabBarView: View {
                 .padding(.horizontal, inset)
                 .animation(.easeOut(duration: 0.12), value: hoveredTab)
 
-                // 常驻单一选中胶囊滑块：仅做 GPU 水平位移，永不销毁重建、永不被列表 diff 打断
-                Capsule()
-                    .fill(glassPalette.activeSegmentFill)
-                    .overlay(
+                // 常驻单一选中胶囊滑块：仅做 GPU 水平位移，在 macOS 26/27 叠加原生交互式液态玻璃光学折射，永不销毁重建
+                Group {
+                    if #available(macOS 26.0, *) {
                         Capsule()
-                            .strokeBorder(glassPalette.controlCapsuleStroke, lineWidth: 0.6)
-                    )
-                    .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.24 : 0.08), radius: 2.5, y: 1)
-                    .frame(width: pillWidth, height: 28)
-                    .offset(x: inset + CGFloat(selectedIdx) * pillWidth)
-                    .animation(.spring(response: 0.22, dampingFraction: 0.84), value: selectedTab)
+                            .fill(glassPalette.activeSegmentFill.opacity(0.65))
+                            .glassEffect(.regular.interactive(), in: Capsule())
+                    } else {
+                        Capsule()
+                            .fill(glassPalette.activeSegmentFill)
+                            .overlay(
+                                Capsule()
+                                    .strokeBorder(glassPalette.controlCapsuleStroke, lineWidth: 0.6)
+                            )
+                            .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.24 : 0.08), radius: 2.5, y: 1)
+                    }
+                }
+                .frame(width: pillWidth, height: 28)
+                .offset(x: inset + CGFloat(selectedIdx) * pillWidth)
+                .animation(.spring(response: 0.22, dampingFraction: 0.84), value: selectedTab)
 
                 HStack(spacing: 0) {
                     ForEach(tabs) { tab in
@@ -4189,7 +4200,8 @@ private struct PinCategoryBarView: View {
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 5) {
+            TahoeGlassContainer(spacing: 5) {
+                HStack(spacing: 5) {
                 let allActive = (selectedCategory == nil)
                 Button {
                     onSelectCategory(nil)
@@ -4276,7 +4288,9 @@ private struct PinCategoryBarView: View {
                     .animation(.easeOut(duration: 0.12), value: hoveredCategory)
                 }
             }
+            }
         }
+        .tahoeSoftScrollEdges()
         .onDisappear {
             isHoveringAll = false
             hoveredCategory = nil

@@ -293,7 +293,7 @@ struct StandaloneSettingsRootView: View {
                 Button {
                     AppWindowCoordinator.shared.presentPermissionSetup(store: store)
                 } label: {
-                    let statusColor: Color = pendingPermissionCount > 0 ? .orange : .green
+                    let statusColor: Color = pendingPermissionCount > 0 ? .orange : TahoeUI.brandMint
                     HStack(spacing: 4) {
                         Image(systemName: pendingPermissionCount > 0 ? "exclamationmark.shield.fill" : "checkmark.shield.fill")
                             .font(.system(size: 11, weight: .semibold))
@@ -453,7 +453,7 @@ struct StandaloneSettingsRootView: View {
                         Text("单击直接粘贴").tag(CardClickPasteMode.singleClick)
                         Text("双击直接粘贴").tag(CardClickPasteMode.doubleClick)
                     }
-                    .pickerStyle(.segmented)
+                    .macOS27TabsPickerStyle()
                     .onChange(of: store.cardClickPasteMode) { _, _ in
                         TactileFeedbackEngine.shared.performNavigationStepHaptic()
                     }
@@ -962,7 +962,7 @@ struct StandaloneSettingsRootView: View {
                         Text("200 条").tag(200)
                         Text("500 条").tag(500)
                     }
-                    .pickerStyle(.segmented)
+                    .macOS27TabsPickerStyle()
                     Text("已收藏与待办记录永久安全保存，不受历史上限清理影响。")
                         .font(.system(size: 11.5))
                         .foregroundStyle(.secondary)
@@ -1115,6 +1115,27 @@ struct StandaloneSettingsRootView: View {
             Section("软件更新与运行环境") {
                 RoleAndOTASettingsSection(store: store, updater: updater)
                     .padding(.vertical, 2)
+
+                let capSnapshot = MacOS27Capabilities.currentSnapshot()
+                LabeledContent("系统原生特性") {
+                    VStack(alignment: .trailing, spacing: 3) {
+                        Text("\(capSnapshot.osVersionText) · 已启用 \(capSnapshot.activeFeatureLabels.count) 项原生能力")
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundStyle(capSnapshot.isMacOS27OrNewer ? Color.green : .secondary)
+                        if !capSnapshot.activeFeatureLabels.isEmpty {
+                            Text(capSnapshot.activeFeatureLabels.joined(separator: " · "))
+                                .font(.system(size: 10.5))
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.trailing)
+                        }
+                    }
+                }
+                LabeledContent("Apple 端侧模型") {
+                    Text(capSnapshot.onDeviceIntelligenceState.localizedDescription)
+                        .font(.system(size: 11))
+                        .foregroundStyle(capSnapshot.onDeviceIntelligenceState == .available ? Color.green : .secondary)
+                        .multilineTextAlignment(.trailing)
+                }
 
                 LabeledContent("签名身份") {
                     Text(store.signingIdentityInfo.displayLabel)

@@ -7,6 +7,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var panelController: FloatingPanelController!
     private var cancellables = Set<AnyCancellable>()
+    private var isEndingExpandedInterfaceSession: Bool = false
+    private var lastExpandedSessionEndUptime: TimeInterval = 0
+    private var lastContextMenuShownUptime: TimeInterval = 0
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -18,6 +21,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panelController = FloatingPanelController()
         panelController.statusItemScreenRectProvider = { [weak self] in
             self?.statusItemScreenRect()
+        }
+        panelController.onStatusItemLeftClickWhileVisible = { [weak self] in
+            guard let self else { return }
+            if #available(macOS 27.0, *) {
+                self.lastExpandedSessionEndUptime = ProcessInfo.processInfo.systemUptime
+                self.cancelExpandedInterfaceSessionIfNeeded()
+                self.panelController.hide(restoreFocus: false)
+            }
         }
 
         wireWindowCoordinator()
@@ -182,7 +193,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateStatusTooltip()
         button.action = #selector(statusItemClicked(_:))
         button.target = self
-        button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        if #available(macOS 27.0, *) {
+            // macOS 27 原生菜单栏扩展会话：左键与 ^F8 键盘导航交由 expandedInterfaceDelegate 托管，右键保留原生快捷菜单
+            statusItem.expandedInterfaceDelegate = self
+            button.sendAction(on: [.rightMouseUp])
+            NotificationCenter.default.publisher(for: .iClipPanelDidHide)
+                .receive(on: RunLoop.main)
+                .sink { [weak self] _ in
+                    self?.cancelExpandedInterfaceSessionIfNeeded()
+                }
+                .store(in: &cancellables)
+        } else {
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        }
 
         ClipboardStore.shared.$hotKeyShortcut
             .dropFirst()
@@ -193,9 +216,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .store(in: &cancellables)
     }
 
+    private func cancelExpandedInterfaceSessionIfNeeded() {
+        guard !isEndingExpandedInterfaceSession else { return }
+        if #available(macOS 27.0, *), let session = statusItem?.expandedInterfaceSession {
+            isEndingExpandedInterfaceSession = true
+            session.cancel()
+            isEndingExpandedInterfaceSession = false
+        }
+    }
+
     private func updateStatusTooltip() {
         let hk = ClipboardStore.shared.hotKeyShortcut.compactDisplayString
-        statusItem.button?.toolTip = "iClip（左键设置 · 右键简约菜单 · \(hk) 呼出面板）"
+        if #available(macOS 27.0, *) {
+            statusItem.button?.toolTip = "iClip（左键展开面板 · 右键简约菜单 · \(hk) 随时呼出）"
+        } else {
+            statusItem.button?.toolTip = "iClip（左键设置 · 右键简约菜单 · \(hk) 呼出面板）"
+        }
     }
 
     @objc private func statusItemClicked(_ sender: NSStatusBarButton) {
@@ -205,9 +241,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         if event.type == .rightMouseUp {
+            let now = ProcessInfo.processInfo.systemUptime
+            guard now - lastContextMenuShownUptime >= 0.30 else { return }
+            lastContextMenuShownUptime = now
+            cancelExpandedInterfaceSessionIfNeeded()
             showContextMenu(for: sender)
         } else {
-            // 左键单击状态栏直接打开独立苹果风偏好设置（已在前台时轻点收起）
+            // macOS 14-26 回退：左键单击状态栏直接打开独立苹果风偏好设置（已在前台时轻点收起）
             if SettingsWindowController.shared.isVisibleAndKey {
                 SettingsWindowController.shared.close()
             } else {
@@ -292,9 +332,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         quitItem.target = self
         menu.addItem(quitItem)
 
-        statusItem.menu = menu
-        button.performClick(nil)
-        statusItem.menu = nil
+        if #available(macOS 27.0, *) {
+            // macOS 27 下绝不触碰 statusItem.menu（避免与 expandedInterfaceDelegate 冲突），在下一轮主循环直接弹出原生液态菜单
+            DispatchQueue.main.async {
+                menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 6), in: button)
+            }
+        } else {
+            statusItem.menu = menu
+            button.performClick(nil)
+            statusItem.menu = nil
+        }
     }
 
     @objc private func menuOpenPanel() {
@@ -419,6 +466,70 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 } else {
                     ClipboardStore.shared.triggerGlobalCopyAppend()
                 }
+            }
+        }
+    }
+}
+
+@available(macOS 27.0, *)
+extension AppDelegate: NSStatusItemExpandedInterfaceDelegate {
+    nonisolated func statusItem(
+        _ statusItem: NSStatusItem,
+        didBegin expandedInterfaceSession: NSStatusItemExpandedInterfaceSession
+    ) {
+        MainActor.assumeIsolated {
+            let isRightOrControlClick: Bool = {
+                if (NSEvent.pressedMouseButtons & (1 << 1)) != 0 { return true }
+                if NSEvent.modifierFlags.contains(.control) { return true }
+                if let type = NSApp.currentEvent?.type,
+                   type == .rightMouseDown || type == .rightMouseUp {
+                    return true
+                }
+                return false
+            }()
+            if isRightOrControlClick {
+                let now = ProcessInfo.processInfo.systemUptime
+                self.lastExpandedSessionEndUptime = now
+                self.lastContextMenuShownUptime = now
+                self.isEndingExpandedInterfaceSession = true
+                expandedInterfaceSession.cancel()
+                self.isEndingExpandedInterfaceSession = false
+                if let button = statusItem.button {
+                    self.showContextMenu(for: button)
+                }
+                return
+            }
+            let now = ProcessInfo.processInfo.systemUptime
+            if now - self.lastExpandedSessionEndUptime < 0.25 {
+                // 防止同一点击周期内刚收起进入淡出时，mouseUp 反弹重开
+                self.isEndingExpandedInterfaceSession = true
+                expandedInterfaceSession.cancel()
+                self.isEndingExpandedInterfaceSession = false
+                return
+            }
+            if self.panelController.isVisible {
+                self.lastExpandedSessionEndUptime = now
+                self.isEndingExpandedInterfaceSession = true
+                expandedInterfaceSession.cancel()
+                self.isEndingExpandedInterfaceSession = false
+                self.panelController.hide(restoreFocus: false)
+                return
+            }
+            self.panelController.show(anchorRect: self.statusItemScreenRect(), anchorPlacement: .menuBar)
+        }
+    }
+
+    nonisolated func statusItemDidEndExpandedInterfaceSession(
+        _ statusItem: NSStatusItem,
+        animated: Bool
+    ) {
+        MainActor.assumeIsolated {
+            guard !self.isEndingExpandedInterfaceSession else { return }
+            self.isEndingExpandedInterfaceSession = true
+            defer { self.isEndingExpandedInterfaceSession = false }
+            self.lastExpandedSessionEndUptime = ProcessInfo.processInfo.systemUptime
+            if !ClipboardStore.shared.alwaysOnTop && self.panelController.isVisible {
+                self.panelController.hide(restoreFocus: false)
             }
         }
     }

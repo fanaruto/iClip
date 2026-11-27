@@ -1420,7 +1420,7 @@ struct BigBangStageRootView: View {
                     lineWidth: 0.85
                 )
         )
-        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .macOS27ConcentricClip(minimumRadius: 20)
         .environment(\.stageHoverResetEpoch, controller.presentationEpoch)
         .onChange(of: controller.currentItem?.id) { _, _ in
             imagePanOffset = .zero
@@ -1892,6 +1892,7 @@ struct BigBangStageRootView: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(16)
                     }
+                    .tahoeSoftScrollEdges()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
@@ -2109,6 +2110,7 @@ struct BigBangStageRootView: View {
                             }
                     )
                 }
+                .tahoeSoftScrollEdges()
             }
             .coordinateSpace(name: "bigBangTextScrollViewport")
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -2206,6 +2208,7 @@ struct BigBangStageRootView: View {
             }
             .padding(14)
         }
+        .tahoeSoftScrollEdges()
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
@@ -2232,7 +2235,8 @@ struct BigBangStageRootView: View {
     // MARK: - 底部液态玻璃浮岛操作栏
 
     private var bottomActionIsland: some View {
-        HStack(spacing: 8) {
+        TahoeGlassContainer(spacing: 8) {
+            HStack(spacing: 8) {
             if controller.activeModeIsImage {
                 if controller.isImageBigBangActive {
                     let selected = controller.currentSelectedAssembledText
@@ -2342,6 +2346,7 @@ struct BigBangStageRootView: View {
                     controller.commitPrimaryPaste()
                 }
             }
+        }
         }
     }
 
