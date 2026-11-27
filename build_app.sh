@@ -69,12 +69,20 @@ echo "正在编译 iClip 统一主线版本 (v${VERSION})..."
 cd "$PROJECT_DIR"
 swift build -c release --scratch-path "$SCRATCH_DIR" -Xswiftc -Osize -Xlinker -dead_strip
 
+SDK_VERSION="$(xcrun --show-sdk-version 2>/dev/null || echo "27.2")"
+SDK_BUILD="$(xcrun --show-sdk-build-version 2>/dev/null || echo "27B52")"
+
 BIN_PATH="$SCRATCH_DIR/release/iClip"
 rm -rf "$STAGE_DIR" "$FINAL_APP" "$ZIP_OUT" "$DMG_STAGE" "$DMG_OUT"
 mkdir -p "$STAGED_APP/Contents/MacOS" "$STAGED_APP/Contents/Resources"
 cp "$BIN_PATH" "$STAGED_APP/Contents/MacOS/iClip"
 chmod +x "$STAGED_APP/Contents/MacOS/iClip"
 strip -x "$STAGED_APP/Contents/MacOS/iClip" 2>/dev/null || true
+if command -v vtool >/dev/null 2>&1; then
+  # 保留 minos=14.0 向下兼容，同时将 Mach-O LC_BUILD_VERSION 的 sdk 升级为当前 macOS SDK（如 27.2），
+  # 激活 macOS 26/27 原生 Liquid Glass 开关动效、液态滑块与浮动玻璃侧边栏
+  vtool -set-build-version macos 14.0 "$SDK_VERSION" -replace -output "$STAGED_APP/Contents/MacOS/iClip" "$STAGED_APP/Contents/MacOS/iClip"
+fi
 
 cp "$BRAND_DIR/AppIcon.icns" "$STAGED_APP/Contents/Resources/AppIcon.icns"
 cp "$BRAND_DIR/MenuBarIcon.png" "$STAGED_APP/Contents/Resources/MenuBarIcon.png"
@@ -105,6 +113,10 @@ cat > "$STAGED_APP/Contents/Info.plist" << EOF
     <string>APPL</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
+    <key>DTSDKName</key>
+    <string>macosx${SDK_VERSION}</string>
+    <key>DTSDKBuild</key>
+    <string>${SDK_BUILD}</string>
     <key>LSUIElement</key>
     <true/>
     <key>NSHighResolutionCapable</key>

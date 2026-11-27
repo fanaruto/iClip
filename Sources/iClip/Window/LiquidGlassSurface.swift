@@ -1040,7 +1040,6 @@ struct LiquidGlassBlurStyleCard: View {
                 VStack(spacing: 4) {
                     Slider(value: $blurConcentration, in: 0.0...1.0)
                         .labelsHidden()
-                        .controlSize(.small)
                         .onChange(of: blurConcentration) { _, newVal in
                             let currentDetent: Int?
                             if abs(newVal - 0.08) < 0.025 {
@@ -1477,7 +1476,7 @@ struct SpriteOrbSettingsCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Toggle(isOn: $enabled.animation(.spring(response: 0.34, dampingFraction: 0.82))) {
+            Toggle(isOn: $enabled) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("悬浮精灵小球")
                         .font(.system(size: 13.5, weight: .medium))
@@ -1487,6 +1486,7 @@ struct SpriteOrbSettingsCard: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
+            .toggleStyle(.switch)
 
             if enabled {
                 VStack(alignment: .leading, spacing: 10) {
@@ -1516,12 +1516,12 @@ struct SpriteOrbSettingsCard: View {
                         Text("闲置停靠方式")
                             .font(.system(size: 11.5, weight: .medium))
                             .foregroundStyle(.secondary)
-                        Picker("", selection: $dockMode.animation(.spring(response: 0.30, dampingFraction: 0.82))) {
+                        Picker("", selection: $dockMode) {
                             ForEach(SpriteOrbDockMode.allCases) { mode in
                                 Text(mode.shortLabel).tag(mode)
                             }
                         }
-                        .pickerStyle(.segmented)
+                        .macOS27TabsPickerStyle()
                         .labelsHidden()
                         Text(dockMode.subtitle)
                             .font(.system(size: 10.5))
@@ -1643,94 +1643,27 @@ struct SpriteOrbSettingsCard: View {
     }
 }
 
-// MARK: - 物理引擎微动效控制中心组件（阻尼弹簧拨片开关 + 液态玻璃功能磁贴）
+// MARK: - macOS 原生 SwiftUI 液态玻璃开关与功能卡片组件
 
-/// 液态玻璃物理阻尼弹簧开关（按压微压缩拉伸 + 过冲回弹 + 柔光轨道 + 触感反馈）
+/// 直接复用系统原生 SwiftUI Switch 开关（macOS 26/27 自动呈现官方液态玻璃弹性折射动效，零手绘模拟）
 struct LiquidPhysicsTogglePill: View {
     @Binding var isOn: Bool
     var tint: Color = .accentColor
     var isCompact: Bool = false
 
-    @Environment(\.colorScheme) private var colorScheme
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var isPressed: Bool = false
-    @State private var isHovered: Bool = false
-
-    private var trackWidth: CGFloat { isCompact ? 34 : 40 }
-    private var trackHeight: CGFloat { isCompact ? 19 : 22 }
-    private var thumbBaseSize: CGFloat { isCompact ? 15 : 18 }
-    private var thumbWidth: CGFloat {
-        (isPressed && !reduceMotion) ? (thumbBaseSize + 4) : thumbBaseSize
-    }
-
     var body: some View {
-        let offTrack = colorScheme == .dark ? Color.white.opacity(0.14) : Color.black.opacity(0.11)
-        let travel = (trackWidth - thumbBaseSize) * 0.5 - 2
-        let pressShift: CGFloat = (isPressed && !reduceMotion) ? (isOn ? -2 : 2) : 0
-
-        ZStack {
-            Capsule(style: .continuous)
-                .fill(
-                    isOn
-                        ? AnyShapeStyle(
-                            LinearGradient(
-                                colors: [tint, tint.opacity(0.80)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                        : AnyShapeStyle(offTrack)
-                )
-                .overlay(
-                    Capsule(style: .continuous)
-                        .strokeBorder(
-                            isOn
-                                ? Color.white.opacity(0.32)
-                                : Color.primary.opacity(isHovered ? 0.16 : 0.08),
-                            lineWidth: 0.7
-                        )
-                )
-                .shadow(
-                    color: isOn ? tint.opacity(isHovered ? 0.34 : 0.22) : .clear,
-                    radius: isHovered ? 6 : 3,
-                    y: 1
-                )
-
-            Capsule(style: .continuous)
-                .fill(Color.white)
-                .frame(width: thumbWidth, height: thumbBaseSize)
-                .shadow(color: Color.black.opacity(0.18), radius: 2.5, y: 1)
-                .offset(x: (isOn ? travel : -travel) + pressShift)
-        }
-        .frame(width: trackWidth, height: trackHeight)
-        .scaleEffect(isPressed && !reduceMotion ? 0.94 : (isHovered && !reduceMotion ? 1.03 : 1.0))
-        .contentShape(Capsule(style: .continuous))
-        .animation(.spring(response: 0.28, dampingFraction: 0.68), value: isOn)
-        .animation(.spring(response: 0.18, dampingFraction: 0.66), value: isPressed)
-        .animation(.easeOut(duration: 0.14), value: isHovered)
-        .onHover { hovering in
-            isHovered = hovering
-        }
-        .gesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { _ in
-                    if !isPressed {
-                        isPressed = true
-                    }
-                }
-                .onEnded { _ in
-                    isPressed = false
-                    withAnimation(.spring(response: 0.28, dampingFraction: 0.68)) {
-                        isOn.toggle()
-                    }
-                    TactileFeedbackEngine.shared.performNavigationStepHaptic()
-                }
-        )
-        .accessibilityAddTraits(.isButton)
+        Toggle("", isOn: $isOn)
+            .labelsHidden()
+            .toggleStyle(.switch)
+            .tint(tint)
+            .controlSize(isCompact ? .small : .regular)
+            .onChange(of: isOn) { _, _ in
+                TactileFeedbackEngine.shared.performNavigationStepHaptic()
+            }
     }
 }
 
-/// 控制中心式液态玻璃交互磁贴（替代静态表单行：激活态柔光底座 + 微弹簧按压 + 状态指示灯）
+/// 搭载系统原生 SwiftUI Switch 开关的功能卡片（直接保留原位按压/拖拽的 macOS 27 原生液态玻璃开关动效）
 struct LiquidFeatureTile: View {
     let title: String
     let subtitle: String
@@ -1744,67 +1677,64 @@ struct LiquidFeatureTile: View {
     @State private var isHovered: Bool = false
 
     var body: some View {
-        Button {
-            withAnimation(.spring(response: 0.30, dampingFraction: 0.72)) {
-                isOn.toggle()
-            }
-            TactileFeedbackEngine.shared.performNavigationStepHaptic()
-        } label: {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 6) {
-                    ZStack {
-                        Circle()
-                            .fill(isOn ? tint : Color.primary.opacity(colorScheme == .dark ? 0.10 : 0.06))
-                            .frame(width: 26, height: 26)
-                        Image(systemName: symbolName)
-                            .font(.system(size: 11.5, weight: .semibold))
-                            .foregroundStyle(isOn ? Color.white : Color.secondary)
-                            .scaleEffect(isOn && !reduceMotion ? 1.05 : 1.0)
-                    }
-                    .animation(.spring(response: 0.28, dampingFraction: 0.66), value: isOn)
-
-                    Spacer(minLength: 4)
-
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                ZStack {
                     Circle()
-                        .fill(isOn ? tint : Color.secondary.opacity(0.28))
-                        .frame(width: 6, height: 6)
-                        .shadow(color: isOn ? tint.opacity(0.6) : .clear, radius: 3)
+                        .fill(isOn ? tint : Color.primary.opacity(colorScheme == .dark ? 0.10 : 0.06))
+                        .frame(width: 26, height: 26)
+                    Image(systemName: symbolName)
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(isOn ? Color.white : Color.secondary)
+                        .scaleEffect(isOn && !reduceMotion ? 1.05 : 1.0)
                 }
+                .animation(.spring(response: 0.28, dampingFraction: 0.66), value: isOn)
 
-                Text(title)
-                    .font(.system(size: 12.2, weight: .semibold))
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
+                Spacer(minLength: 4)
 
-                Text(subtitle)
-                    .font(.system(size: 10.2))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .multilineTextAlignment(.leading)
+                Toggle("", isOn: $isOn)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .tint(tint)
+                    .controlSize(.mini)
+                    .onChange(of: isOn) { _, _ in
+                        TactileFeedbackEngine.shared.performNavigationStepHaptic()
+                    }
             }
-            .padding(10)
-            .frame(maxWidth: .infinity, minHeight: 82, alignment: .topLeading)
-            .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(
-                        isOn
-                            ? tint.opacity(colorScheme == .dark ? 0.17 : 0.11)
-                            : Color.primary.opacity(colorScheme == .dark ? (isHovered ? 0.075 : 0.045) : (isHovered ? 0.055 : 0.035))
-                    )
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .strokeBorder(
-                        isOn
-                            ? tint.opacity(isHovered ? 0.55 : 0.36)
-                            : Color.primary.opacity(isHovered ? 0.14 : 0.07),
-                        lineWidth: isOn ? 1.0 : 0.7
-                    )
-            )
-            .opacity(isDimmed ? 0.52 : 1.0)
+
+            Text(title)
+                .font(.system(size: 12.2, weight: .semibold))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+
+            Text(subtitle)
+                .font(.system(size: 10.2))
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+                .multilineTextAlignment(.leading)
         }
-        .buttonStyle(PhysicalSpringButtonStyle())
+        .padding(10)
+        .frame(maxWidth: .infinity, minHeight: 84, alignment: .topLeading)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(
+                    isOn
+                        ? tint.opacity(colorScheme == .dark ? 0.17 : 0.11)
+                        : Color.primary.opacity(colorScheme == .dark ? (isHovered ? 0.075 : 0.045) : (isHovered ? 0.055 : 0.035))
+                )
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(
+                    isOn
+                        ? tint.opacity(isHovered ? 0.55 : 0.36)
+                        : Color.primary.opacity(isHovered ? 0.14 : 0.07),
+                    lineWidth: isOn ? 1.0 : 0.7
+                )
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .opacity(isDimmed ? 0.52 : 1.0)
         .onHover { hovering in
             withAnimation(.easeOut(duration: 0.14)) {
                 isHovered = hovering

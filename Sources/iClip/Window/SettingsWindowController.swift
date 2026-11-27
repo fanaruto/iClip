@@ -60,7 +60,9 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         win.level = .normal
         win.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
         win.minSize = NSSize(width: 688, height: 500)
-        win.backgroundColor = .windowBackgroundColor
+        if #unavailable(macOS 26.0) {
+            win.backgroundColor = .windowBackgroundColor
+        }
         win.delegate = self
 
         let rootView = StandaloneSettingsRootView(
@@ -401,7 +403,10 @@ struct StandaloneSettingsRootView: View {
             }
             .padding(.horizontal, 24)
             .padding(.top, 14)
-            .padding(.bottom, 8)
+            .padding(.bottom, 10)
+
+            Divider()
+                .opacity(0.35)
 
             Group {
                 switch viewModel.selectedSection {
@@ -527,6 +532,7 @@ struct StandaloneSettingsRootView: View {
             }
         }
         .formStyle(.grouped)
+        .toggleStyle(.switch)
     }
 
     // MARK: - 2. 快捷键与手势
@@ -778,6 +784,7 @@ struct StandaloneSettingsRootView: View {
             }
         }
         .formStyle(.grouped)
+        .toggleStyle(.switch)
     }
 
     private func advisoryBannerRow(_ advisory: FeatureConflictAdvisory) -> some View {
@@ -1006,6 +1013,7 @@ struct StandaloneSettingsRootView: View {
             }
         }
         .formStyle(.grouped)
+        .toggleStyle(.switch)
     }
 
     // MARK: - 5. 权限与关于
