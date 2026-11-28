@@ -1,7 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-labelledby="title">
-  <title id="title">iClip Concept B — Cascade Glass</title>
-  <g id="symbol">
-  <path fill="#111827" d="M 60 24 H 136 A 36 36 0 0 1 172 60 H 120 A 60 60 0 0 0 60 120 V 172 A 36 36 0 0 1 24 136 V 60 A 36 36 0 0 1 60 24 Z"/>
-  <path fill="#111827" fill-rule="evenodd" d="M 120 84 H 196 A 36 36 0 0 1 232 120 V 196 A 36 36 0 0 1 196 232 H 120 A 36 36 0 0 1 84 196 V 120 A 36 36 0 0 1 120 84 Z M 158 105 A 15 15 0 1 0 158 135 A 15 15 0 1 0 158 105 Z M 158 149 A 14 14 0 0 0 144 163 V 188 A 14 14 0 0 0 158 202 H 158 A 14 14 0 0 0 172 188 V 163 A 14 14 0 0 0 158 149 Z"/>
-  </g>
-</svg>
